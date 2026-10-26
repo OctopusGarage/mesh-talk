@@ -1548,23 +1548,7 @@ impl Node {
                 )?);
                 return Ok(());
             }
-            let members = {
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                let state = book
-                    .state(&channel)
-                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-                if !self.channel_identity_is_current(state) {
-                    return Err(NodeError::Channel("not a channel member".into()));
-                }
-                if self.channel_identity_can_manage(state) {
-                    return Err(NodeError::Channel(
-                        "transfer channel ownership before leaving".into(),
-                    ));
-                }
-                state.members().to_vec()
-            };
-            self.append_event(channel, EventKind::ChannelLeave, vec![])?;
-            distribution = Some(members.clone());
+            distribution = Some(self.apply_legacy_member_leave(channel, &own_proof)?);
             Ok(())
         })?;
         let Some(members) = distribution else {

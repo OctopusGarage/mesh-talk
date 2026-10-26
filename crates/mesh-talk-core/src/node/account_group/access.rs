@@ -124,6 +124,69 @@ impl GroupProofSnapshot {
     }
 }
 
+/// A legacy physical member can retire itself while its owner is offline.
+/// Reconstruct only the exact signed leave's original causal membership cut;
+/// no prior private head and no account-wide grant is manufactured.
+fn departed_legacy_source(
+    group: ConversationId,
+    log: &PersistentEventLog,
+    projection: &crate::node::channel::ChannelMembershipProjection,
+    own: &crate::identity::device::PublicIdentity,
+    proof: &crate::discovery::Announce,
+    proofs: &GroupProofSnapshot,
+) -> Option<(AccountGroupSource, EventId)> {
+    let state = projection.state.as_ref()?;
+    if projection.authority.current_event().is_some()
+        || state.members().contains(own)
+        || !proofs.binding_current(proof)
+        || proof.public() != *own
+    {
+        return None;
+    }
+    let departure = projection
+        .departures
+        .iter()
+        .filter(|(device, _)| *device == own.user_id())
+        .filter_map(|(_, id)| log.get(id))
+        .filter(|event| {
+            event.conversation_id == group
+                && event.author.ed25519_pub() == &own.ed25519_pub
+                && event.kind == EventKind::ChannelLeave
+                && event.ciphertext.is_empty()
+                && projection.authorized.contains(&event.id)
+                && event.verify_signature()
+                && event.verify_integrity()
+        })
+        .max_by_key(|event| (event.lamport, event.id))?;
+    let mut pending = departure.parents.clone();
+    let mut ancestors = BTreeMap::new();
+    while let Some(id) = pending.pop() {
+        if ancestors.contains_key(&id) {
+            continue;
+        }
+        let parent = log.get(&id)?;
+        if parent.conversation_id != group || parent.id == departure.id {
+            return None;
+        }
+        pending.extend(parent.parents.iter().copied());
+        ancestors.insert(id, parent);
+    }
+    let original = crate::node::channel::ChannelBook::project_membership(
+        group,
+        &ancestors.values().copied().collect::<Vec<_>>(),
+    );
+    let mut source = Node::public_account_group_source(group, &original, own, proof)?;
+    if source.role != AccountGroupRole::Member
+        || source.authority.authority.is_some()
+        || source.lifetime.member != *own
+    {
+        return None;
+    }
+    source.role = AccountGroupRole::Left;
+    source.authority.epoch = state.epoch();
+    Some((source, departure.id))
+}
+
 /// Recover a terminal modern account observation from validated public grant and
 /// revocation provenance, even when this device never published a private head.
 /// All identity inputs are the already captured pre-log snapshot.
@@ -289,6 +352,99 @@ impl Node {
             owners,
         }
     }
+    /// Freeze only canonical physical legacy members with verified current
+    /// bindings. A linked member with missing proof is unresolved, never absent.
+    pub(in crate::node) fn freeze_legacy_leave_sources(
+        &self,
+        group: ConversationId,
+        pinned: &AccountGroupSource,
+    ) -> Result<Vec<AccountGroupSource>, NodeError> {
+        let proofs = self.account_group_proof_snapshot();
+        let linked = self.linked_devices();
+        let own = self.own_group_proof();
+        let heads = self
+            .group_control_heads(group)
+            .into_iter()
+            .filter(|head| proofs.binding_current(&head.proof))
+            .collect::<Vec<_>>();
+        let mut candidates = proofs.historical.clone();
+        candidates.extend(proofs.current.values().cloned());
+        candidates.push(own);
+        let log = self.log.lock().expect("log mutex");
+        let projection =
+            crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+        let state = projection
+            .state
+            .as_ref()
+            .ok_or_else(|| NodeError::Channel("legacy departure ancestry unavailable".into()))?;
+        if state.is_dissolved() || projection.authority.current_event().is_some() {
+            return Err(NodeError::Authorization(
+                "legacy departure format changed".into(),
+            ));
+        }
+        let (_, stamp) = authorization_view(&log, group);
+        if heads
+            .iter()
+            .any(|head| !view_contains(&log, group, stamp, &head.access))
+        {
+            return Err(NodeError::Channel(
+                "legacy physical member ancestry is reconciling".into(),
+            ));
+        }
+        let mut sources = Vec::new();
+        for member in state.members() {
+            let proof = candidates
+                .iter()
+                .find(|proof| proof.public() == *member && proofs.binding_current(proof));
+            let known_own = *member == self.identity.public()
+                || linked.iter().any(|device| {
+                    device.public == *member
+                        && device.certificate.verify()
+                        && device.certificate.account_ed25519_pub
+                            == self.account.public().ed25519_pub
+                });
+            if proof.is_none() && !known_own {
+                continue;
+            }
+            let proof = proof
+                .ok_or_else(|| NodeError::Channel("legacy member binding is reconciling".into()))?;
+            let source = Self::public_account_group_source(group, &projection, member, proof)
+                .ok_or_else(|| {
+                    NodeError::Channel("legacy member lifetime is reconciling".into())
+                })?;
+            if source.role != AccountGroupRole::Member {
+                return Err(NodeError::Authorization(
+                    "legacy account owner or invitation cannot leave".into(),
+                ));
+            }
+            sources.push(source);
+        }
+        let actual = sources
+            .iter()
+            .find(|source| source.device == pinned.device)
+            .ok_or_else(|| {
+                NodeError::Authorization("legacy coordinator membership retired".into())
+            })?;
+        let mut normalized = actual.clone();
+        if normalized.authority.authority.is_some()
+            || pinned.authority.authority.is_some()
+            || normalized.authority.epoch < pinned.authority.epoch
+        {
+            return Err(NodeError::Authorization(
+                "legacy coordinator authority changed".into(),
+            ));
+        }
+        normalized.authority.epoch = pinned.authority.epoch;
+        normalized.execution = pinned.execution.clone();
+        if normalized != *pinned || sources.is_empty() || sources.len() > 65 {
+            return Err(NodeError::Authorization(
+                "legacy coordinator lifetime changed".into(),
+            ));
+        }
+        sources.sort_by_key(|source| source.device.user_id());
+        Ok(sources)
+    }
+
     pub fn account_group_access(
         &self,
         group: ConversationId,
@@ -598,7 +754,8 @@ impl Node {
         let state = projection.state.as_ref()?;
         let own = self.identity.public();
         let own_proof = self.own_group_proof();
-        let revoked = revoked_account_source(group, log, projection, &own, &own_proof, proofs);
+        let revoked = revoked_account_source(group, log, projection, &own, &own_proof, proofs)
+            .or_else(|| departed_legacy_source(group, log, projection, &own, &own_proof, proofs));
         let source = Self::public_account_group_source(group, projection, &own, &own_proof)
             .or_else(|| revoked.as_ref().map(|(source, _)| source.clone()))
             .or_else(|| {

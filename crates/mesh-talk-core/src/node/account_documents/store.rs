@@ -149,6 +149,20 @@ fn metadata_hash(meta: &AccountDocumentMeta) -> [u8; 32] {
 fn corrupt() -> LogError {
     LogError::CorruptFile("invalid account document storage".into())
 }
+fn scope_contains(
+    key: &AccountDocumentKey,
+    domain: AccountDocumentDomain,
+    operations: bool,
+    legacy: bool,
+) -> bool {
+    key.domain() == domain
+        && match key {
+            AccountDocumentKey::GroupOperation { .. } => operations,
+            AccountDocumentKey::GroupLegacyOperation { .. } => operations && legacy,
+            _ => true,
+        }
+}
+
 impl AccountDocumentStore {
     pub(in crate::node) fn open(
         dir: &Path,
@@ -317,8 +331,9 @@ impl AccountDocumentStore {
         after: Option<&AccountDocumentKey>,
         limit: usize,
     ) -> Vec<AccountDocumentMeta> {
-        self.list_scope(domain, after, limit, true)
+        self.list_operation_scope(domain, after, limit, true, true)
     }
+    #[cfg(test)]
     pub(super) fn list_scope(
         &self,
         domain: AccountDocumentDomain,
@@ -326,13 +341,21 @@ impl AccountDocumentStore {
         limit: usize,
         include_operations: bool,
     ) -> Vec<AccountDocumentMeta> {
+        self.list_operation_scope(domain, after, limit, include_operations, false)
+    }
+    pub(super) fn list_operation_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        after: Option<&AccountDocumentKey>,
+        limit: usize,
+        include_operations: bool,
+        include_legacy: bool,
+    ) -> Vec<AccountDocumentMeta> {
         self.current
             .values()
-            .filter(|m| {
-                m.key.domain() == domain
-                    && (include_operations
-                        || !matches!(m.key, AccountDocumentKey::GroupOperation { .. }))
-                    && after.is_none_or(|a| &m.key > a)
+            .filter(|meta| {
+                scope_contains(&meta.key, domain, include_operations, include_legacy)
+                    && after.is_none_or(|after| &meta.key > after)
             })
             .take(limit.min(64))
             .cloned()
@@ -355,13 +378,21 @@ impl AccountDocumentStore {
         domain: AccountDocumentDomain,
         include_operations: bool,
     ) -> [u8; 32] {
-        if include_operations || domain != AccountDocumentDomain::GroupControl {
+        self.digest_operation_scope(domain, include_operations, false)
+    }
+    pub(super) fn digest_operation_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        include_operations: bool,
+        include_legacy: bool,
+    ) -> [u8; 32] {
+        if domain != AccountDocumentDomain::GroupControl || (include_operations && include_legacy) {
             return self.digest(domain);
         }
         if self
             .incomplete
             .iter()
-            .any(|key| matches!(key, AccountDocumentKey::GroupControl { .. }))
+            .any(|key| scope_contains(key, domain, include_operations, include_legacy))
         {
             return [0; 32];
         }
@@ -370,7 +401,7 @@ impl AccountDocumentStore {
         for meta in self
             .current
             .values()
-            .filter(|meta| matches!(meta.key, AccountDocumentKey::GroupControl { .. }))
+            .filter(|meta| scope_contains(&meta.key, domain, include_operations, include_legacy))
         {
             count += 1;
             for (byte, part) in xor.iter_mut().zip(metadata_hash(meta)) {
@@ -383,6 +414,14 @@ impl AccountDocumentStore {
         hash.update(xor);
         hash.update(count.to_be_bytes());
         hash.finalize().into()
+    }
+    pub(super) fn legacy_operation_rows(&self) -> Vec<AccountDocumentMeta> {
+        self.current
+            .values()
+            .filter(|meta| matches!(meta.key, AccountDocumentKey::GroupLegacyOperation { .. }))
+            .take(MAX_GROUP_OPERATION_KEYS)
+            .cloned()
+            .collect()
     }
     pub(super) fn operation_rows(&self) -> Vec<AccountDocumentMeta> {
         self.current
@@ -473,7 +512,11 @@ impl AccountDocumentStore {
                 },
             );
         }
-        if matches!(meta.key, AccountDocumentKey::GroupOperation { .. }) {
+        if matches!(
+            meta.key,
+            AccountDocumentKey::GroupOperation { .. }
+                | AccountDocumentKey::GroupLegacyOperation { .. }
+        ) {
             if let Some(old) = self.current.get(&meta.key) {
                 if !old.tombstone {
                     self.operation_bytes -= u64::from(old.content_len);
@@ -712,6 +755,11 @@ impl AccountDocumentStore {
                 AccountDocumentKey::GroupActivity { .. } => {
                     super::group_activity::valid_payload(&meta, payload)
                 }
+                AccountDocumentKey::GroupLegacyOperation { .. } => {
+                    crate::node::account_group::operations::legacy_wire::valid_payload(
+                        &meta, payload,
+                    )
+                }
                 AccountDocumentKey::GroupOperation { .. } => {
                     crate::node::account_group::operations::valid_payload(&meta, payload)
                 }
@@ -905,7 +953,11 @@ impl AccountDocumentStore {
         let seen = matches!(meta.key, AccountDocumentKey::ReadReceipt { .. });
         let custody = matches!(meta.key, AccountDocumentKey::ChannelCustody { .. });
         let reference = matches!(meta.key, AccountDocumentKey::GroupInventory { .. });
-        let operation = matches!(meta.key, AccountDocumentKey::GroupOperation { .. });
+        let operation = matches!(
+            meta.key,
+            AccountDocumentKey::GroupOperation { .. }
+                | AccountDocumentKey::GroupLegacyOperation { .. }
+        );
         let group_control = matches!(meta.key, AccountDocumentKey::GroupControl { .. });
         let count = if presentation {
             self.counts[meta.key.domain() as usize]
@@ -987,6 +1039,141 @@ impl AccountDocumentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_child_rows_are_negotiated_before_digest_paging_and_share_operation_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let node = super::super::tests::node(&dir.path().join("node"), &account);
+        let writer = node.user_id();
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        let control = AccountDocumentKey::GroupControl {
+            channel: "a".repeat(64),
+            source_device: writer.clone(),
+        };
+        let ordinary = AccountDocumentKey::GroupOperation {
+            channel: "a".repeat(64),
+            source_device: writer.clone(),
+        };
+        let group = ConversationId::new([0xaa; 32]);
+        let genesis = crate::eventlog::Event::new(
+            &node.identity,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            crate::eventlog::EventKind::MembershipChange,
+            crate::channel::ChannelMeta {
+                name: "Negotiated document fixture".into(),
+                members: vec![node.identity.public()],
+                epoch: 0,
+                owner: writer.clone(),
+            }
+            .encode(),
+        );
+        node.log.lock().unwrap().append(genesis).unwrap();
+        node.process_channel(group);
+        node.publish_account_group_access(&mut None);
+        let document = node.account_document(&control).unwrap().unwrap();
+        store
+            .merge(document.meta.clone(), document.payload())
+            .unwrap();
+        let payload = crate::node::account_group::operations::wire::OperationFrame::new(
+            &node,
+            ConversationId::new([0xaa; 32]),
+            1,
+            crate::node::account_group::operations::wire::OperationProjection::default(),
+        )
+        .encode();
+        store
+            .merge(
+                AccountDocumentMeta::new(
+                    &account,
+                    writer.clone(),
+                    ordinary.clone(),
+                    1,
+                    &payload,
+                    false,
+                ),
+                &payload,
+            )
+            .unwrap();
+        let before = store.digest_scope(AccountDocumentDomain::GroupControl, true);
+        let legacy = AccountDocumentKey::GroupLegacyOperation {
+            channel: "a".repeat(64),
+            source_device: writer.clone(),
+        };
+        store
+            .merge(
+                AccountDocumentMeta::new(&account, writer.clone(), legacy.clone(), 1, &[], true),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store.operation_keys, 2,
+            "ordinary and child projections share their existing key quota"
+        );
+        assert_eq!(
+            store.digest_scope(AccountDocumentDomain::GroupControl, true),
+            before,
+            "an old operation peer must compare only its negotiated scope"
+        );
+        assert_ne!(
+            store.digest_operation_scope(AccountDocumentDomain::GroupControl, true, true),
+            before
+        );
+        assert_eq!(
+            store
+                .list_scope(AccountDocumentDomain::GroupControl, None, 64, true)
+                .len(),
+            2
+        );
+        assert!(
+            store
+                .list_operation_scope(
+                    AccountDocumentDomain::GroupControl,
+                    Some(&ordinary),
+                    1,
+                    true,
+                    false
+                )
+                .is_empty()
+        );
+        let page = store.list_operation_scope(
+            AccountDocumentDomain::GroupControl,
+            Some(&ordinary),
+            1,
+            true,
+            true,
+        );
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].key, legacy);
+        assert!(
+            store
+                .list_operation_scope(
+                    AccountDocumentDomain::GroupControl,
+                    Some(&legacy),
+                    1,
+                    true,
+                    true
+                )
+                .is_empty()
+        );
+        store.operation_keys = MAX_GROUP_OPERATION_KEYS;
+        let blocked = AccountDocumentKey::GroupLegacyOperation {
+            channel: "b".repeat(64),
+            source_device: writer.clone(),
+        };
+        assert!(
+            store
+                .merge(
+                    AccountDocumentMeta::new(&account, writer, blocked, 1, &[], true),
+                    &[]
+                )
+                .is_err()
+        );
+    }
     fn historical_appended_domain_digest(meta: &AccountDocumentMeta) -> [u8; 32] {
         let mut hash = Sha256::new();
         hash.update(b"mesh-talk-account-document-index-v1");

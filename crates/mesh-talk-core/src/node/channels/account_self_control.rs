@@ -1,4 +1,4 @@
-//! Modern account invitation acceptance and nonowner departure preparation.
+//! Account invitation acceptance and exact physical/account departure preparation.
 //! The integration owner retains membership/delivery/log guards and WAL replay.
 
 use crate::{
@@ -228,6 +228,159 @@ impl Node {
             witness,
             recipients,
         })
+    }
+}
+
+/// A legacy departure proves only this exact physical membership lifetime.
+/// Kept separate from the released modern witness's positional WAL layout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LegacyMemberLeaveWitness {
+    pub(in crate::node) own: Announce,
+    pub(in crate::node) lifetime: crate::node::account_group::MembershipLifetime,
+    pub(in crate::node) parents: Vec<EventId>,
+    pub(in crate::node) recipients: Vec<PublicIdentity>,
+}
+
+pub(in crate::node) struct PreparedLegacyMemberLeave {
+    pub event: Event,
+    pub witness: LegacyMemberLeaveWitness,
+    pub recipients: Vec<PublicIdentity>,
+}
+
+pub(in crate::node) fn expected_legacy_member_leave(
+    group: ConversationId,
+    projection: &ChannelMembershipProjection,
+    witness: &LegacyMemberLeaveWitness,
+) -> Result<Vec<PublicIdentity>, NodeError> {
+    let invalid = || NodeError::Authorization("invalid legacy member departure".into());
+    let state = projection.state.as_ref().ok_or_else(invalid)?;
+    if state.id() != group
+        || state.is_dissolved()
+        || projection.authority.current_event().is_some()
+        || !witness.own.valid_presence()
+        || witness.own.post_office
+        || witness.own.account_cert.is_none()
+    {
+        return Err(invalid());
+    }
+    let source =
+        Node::public_account_group_source(group, projection, &witness.own.public(), &witness.own)
+            .ok_or_else(invalid)?;
+    if source.role != AccountGroupRole::Member
+        || source.lifetime != witness.lifetime
+        || source.lifetime.member != witness.own.public()
+        || source.authority.authority.is_some()
+        || state.members() != witness.recipients
+        || state.epoch().checked_add(1).is_none()
+    {
+        return Err(invalid());
+    }
+    Ok(state.members().to_vec())
+}
+
+impl Node {
+    pub(in crate::node) fn prepare_legacy_member_leave_locked(
+        &self,
+        group: ConversationId,
+        log: &PersistentEventLog,
+        projection: &ChannelMembershipProjection,
+        own: &Announce,
+    ) -> Result<PreparedLegacyMemberLeave, NodeError> {
+        if own.public() != self.identity.public()
+            || own.account_cert.as_ref().is_none_or(|certificate| {
+                certificate.account_ed25519_pub != self.account.public().ed25519_pub
+            })
+        {
+            return Err(NodeError::Authorization(
+                "legacy departure source identity changed".into(),
+            ));
+        }
+        let source = Node::public_account_group_source(group, projection, &own.public(), own)
+            .ok_or_else(|| {
+                NodeError::Authorization("legacy departure source unavailable".into())
+            })?;
+        let (parents, lamport) = log.prepare(&group).map_err(NodeError::Log)?;
+        let witness = LegacyMemberLeaveWitness {
+            own: own.clone(),
+            lifetime: source.lifetime,
+            parents: parents.clone(),
+            recipients: projection
+                .state
+                .as_ref()
+                .ok_or_else(|| NodeError::Channel("unknown channel".into()))?
+                .members()
+                .to_vec(),
+        };
+        let recipients = expected_legacy_member_leave(group, projection, &witness)?;
+        let sequence = log
+            .next_sequence(
+                &group,
+                &Author::from_ed25519(self.identity.public().ed25519_pub),
+            )
+            .map_err(NodeError::Log)?;
+        let event = Event::new(
+            &self.identity,
+            group,
+            sequence,
+            parents,
+            lamport,
+            crate::node::node::now_millis(),
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        if !crate::node::session::event_fits_frame(&event) {
+            return Err(NodeError::InvalidInput(
+                "legacy departure exceeds supported frame".into(),
+            ));
+        }
+        Ok(PreparedLegacyMemberLeave {
+            event,
+            witness,
+            recipients,
+        })
+    }
+
+    /// The caller holds membership admission; WAL acceptance precedes the leave.
+    pub(in crate::node) fn apply_legacy_member_leave(
+        &self,
+        group: ConversationId,
+        own: &Announce,
+    ) -> Result<Vec<PublicIdentity>, NodeError> {
+        let mut delivery = self.delivery.lock().expect("delivery mutex");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        let (transaction, recipients, event_id) = {
+            let log = self.log.lock().expect("log mutex");
+            let projection =
+                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+            let prepared =
+                self.prepare_legacy_member_leave_locked(group, &log, &projection, own)?;
+            let event_id = prepared.event.id;
+            let transaction = crate::node::delivery_store::DeliveryTransaction::LegacyMemberLeave {
+                witness: prepared.witness,
+                events: vec![prepared.event],
+            };
+            delivery
+                .preflight_legacy_member_leave_transaction(&transaction, &log)
+                .map_err(NodeError::Log)?;
+            log.sync().map_err(NodeError::Log)?;
+            (transaction, prepared.recipients, event_id)
+        };
+        delivery.begin(transaction).map_err(NodeError::Log)?;
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        drop(delivery);
+        self.process_channel(group);
+        if !self
+            .account_group_projection(group)
+            .authorized
+            .contains(&event_id)
+        {
+            return Err(NodeError::Channel(
+                "legacy departure was not admitted".into(),
+            ));
+        }
+        Ok(recipients)
     }
 }
 
@@ -587,6 +740,108 @@ pub(in crate::node) mod tests {
                 .any(|event| event.kind == EventKind::ChannelLeave)
         );
     }
+    #[tokio::test]
+    async fn legacy_direct_departure_uses_exact_device_wal_with_owner_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let member = crate::identity::device::DeviceIdentity::generate();
+        let offline_owner = crate::identity::device::DeviceIdentity::generate();
+        let node = direct_node(dir.path(), member, account);
+        let group = crate::channel::new_channel_id();
+        let genesis = Event::new(
+            &offline_owner,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::MembershipChange,
+            crate::channel::ChannelMeta {
+                name: "offline legacy owner".into(),
+                members: vec![offline_owner.public(), node.identity.public()],
+                epoch: 0,
+                owner: offline_owner.public().user_id(),
+            }
+            .encode(),
+        );
+        node.log.lock().unwrap().append_durable(genesis).unwrap();
+        node.process_channel(group);
+        let impostor = crate::identity::device::DeviceIdentity::generate();
+        let other_proof = Announce::new_with_account(&impostor, &node.account, "other device", 1);
+        {
+            let log = node.log.lock().unwrap();
+            let projection =
+                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+            assert!(
+                node.prepare_legacy_member_leave_locked(group, &log, &projection, &other_proof)
+                    .is_err()
+            );
+            let prepared = node
+                .prepare_legacy_member_leave_locked(
+                    group,
+                    &log,
+                    &projection,
+                    &node.own_group_proof(),
+                )
+                .unwrap();
+            assert_eq!(prepared.event.kind, EventKind::ChannelLeave);
+            assert!(prepared.event.ciphertext.is_empty());
+            assert_eq!(prepared.witness.lifetime.member, node.identity.public());
+        }
+        assert!(node.group_control_heads(group).is_empty());
+        node.leave_channel(group).await.unwrap();
+        assert_eq!(
+            node.account_group_access(group).unwrap().role,
+            AccountGroupRole::Left,
+            "signed legacy departure proves Left before any private head exists"
+        );
+        node.publish_account_group_access_for(group);
+        assert_eq!(
+            node.account_group_access(group).unwrap().role,
+            AccountGroupRole::Left
+        );
+        let events = node
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .into_iter()
+            .filter(|event| event.kind == EventKind::ChannelLeave)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].ciphertext.is_empty()
+                && events[0].verify_signature()
+                && events[0].verify_integrity()
+        );
+        assert_eq!(
+            events[0].author.ed25519_pub(),
+            &node.identity.public().ed25519_pub
+        );
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        assert!(node.leave_channel(group).await.is_err());
+        let secret = node.identity.secret_bytes();
+        let account = Account::from_secret_bytes(node.account.secret_bytes());
+        drop(node);
+        let reopened = direct_node(
+            dir.path(),
+            crate::identity::device::DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            account,
+        );
+        assert_eq!(
+            reopened.account_group_access(group).unwrap().role,
+            AccountGroupRole::Left,
+            "legacy departure provenance survives reopening the original device"
+        );
+    }
+
     async fn assert_local_account_self_control(pending: bool) {
         let f = fixture(pending);
         let account_id = f.account.account_id();

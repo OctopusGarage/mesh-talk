@@ -463,6 +463,12 @@ Elapsed age uses a monotonic clock, independently of wall-clock corrections.
 An absent observation means no current detail is available, including after
 restart, eviction or invalidation. It does not establish that no attempt occurred.
 
+An individual peer's endpoint changes cancel only control work whose captured
+routes changed. Unrelated direct/relay attempts and their observations retain
+progress. Task identities prevent a cancelled old attempt from retiring a
+replacement with the same logical work key. A whole-network change or runtime
+retirement still cancels the worker's complete bounded task set.
+
 The immutable destination and admission token bind updates to their originating
 attempt. A late completion cannot replace a newer attempt or publish across a
 privacy-generation change. Cancellation, route reset and participant retirement
@@ -718,9 +724,20 @@ A format rejection before journal admission is a definite input rejection, not
 an unconfirmed operation requiring endless status reads. Genuine IPC or journal
 uncertainty retains the original ID and does not imply cancellation or departure.
 Status observation has bounded waits even when a native cancellation remains
-outstanding; the original mutation still owns its result. Legacy physical-device
-departure is not a substitute for account departure: it cannot revoke sibling
-membership or let a new device sign an original member device's event.
+outstanding; the original mutation still owns its result.
+
+Before an owner-authorized format migration, account departure coordinates the
+original physical member devices through the mandatory private document lane.
+One durable parent operation freezes the verified account-bound membership
+lifetimes. Each original member signs its own existing empty departure control;
+a new sibling cannot sign that event, and the owner need not be online. The
+parent completes only when every frozen leg has a verified terminal result.
+Internal child operations are absent from the public operation list and ordinary
+operation documents. A separately negotiated child-document capability keeps
+older clients on the unchanged operation and public-event formats. Offline or
+older original devices keep the parent pending until they return or upgrade.
+Once any departure commits, cancellation cannot undo it; remaining work rolls
+forward against the same frozen lifetimes and never targets a later invitation.
 Mandatory document workers retain interrupted pages in the queue until their
 retry deadline. Other ready peers may proceed, and the exact queued deadline
 wakes the runner; a pending page must not create repeated maintenance turns

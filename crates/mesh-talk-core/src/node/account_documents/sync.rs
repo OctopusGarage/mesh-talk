@@ -390,6 +390,7 @@ impl Node {
             .operation
             .filter(|probe| domain == AccountDocumentDomain::GroupControl && probe.supported());
         let include_operations = operation.is_some();
+        let include_legacy = operation.as_ref().is_some_and(|probe| probe.legacy_leave);
         let after = operation
             .as_ref()
             .and_then(|probe| probe.after.as_ref().map(OperationContinuation::key))
@@ -401,19 +402,26 @@ impl Node {
             version: 1,
             nonce: probe.nonce,
             supported_kinds: Some(local_operation_capabilities()),
+            legacy_leave: probe.legacy_leave,
         });
         let Ok((items, digest)) = self
             .account_blocking(move |node| {
                 let store = node.account_documents.lock().expect("documents mutex");
                 let digest = if enabled {
-                    store.digest_scope(domain, include_operations)
+                    store.digest_operation_scope(domain, include_operations, include_legacy)
                 } else {
                     [0; 32]
                 };
                 let rows = if !enabled || (after.is_none() && known != [0; 32] && known == digest) {
                     Vec::new()
                 } else {
-                    store.list_scope(domain, after.as_ref(), 64, include_operations)
+                    store.list_operation_scope(
+                        domain,
+                        after.as_ref(),
+                        64,
+                        include_operations,
+                        include_legacy,
+                    )
                 };
                 Ok((rows, digest))
             })
@@ -440,7 +448,7 @@ impl Node {
                 .account_documents
                 .lock()
                 .expect("documents mutex")
-                .list_scope(domain, Some(&key), 1, include_operations);
+                .list_operation_scope(domain, Some(&key), 1, include_operations, include_legacy);
             if !more.is_empty() {
                 next = Some(key);
             }
@@ -769,10 +777,20 @@ impl Node {
                     }) => Some(OperationContinuation {
                         channel: channel.clone(),
                         source_device: source_device.clone(),
+                        legacy_leave: false,
+                    }),
+                    Some(AccountDocumentKey::GroupLegacyOperation {
+                        channel,
+                        source_device,
+                    }) => Some(OperationContinuation {
+                        channel: channel.clone(),
+                        source_device: source_device.clone(),
+                        legacy_leave: true,
                     }),
                     _ => None,
                 },
                 known_digest: std::mem::take(&mut cursor.operation_digest),
+                legacy_leave: true,
             })
         } else {
             None
@@ -789,10 +807,13 @@ impl Node {
             },
             account_id: self.account_id(),
             domain,
-            after: cursor
-                .after
-                .clone()
-                .filter(|key| !matches!(key, AccountDocumentKey::GroupOperation { .. })),
+            after: cursor.after.clone().filter(|key| {
+                !matches!(
+                    key,
+                    AccountDocumentKey::GroupOperation { .. }
+                        | AccountDocumentKey::GroupLegacyOperation { .. }
+                )
+            }),
             known_digest: cursor.digests[cursor.domain],
             operation,
         };
@@ -1049,6 +1070,26 @@ impl Node {
                         (_, Some(_)) => return Err(failure()),
                         _ => false,
                     };
+                    let include_legacy = include_operations
+                        && request
+                            .operation
+                            .as_ref()
+                            .is_some_and(|probe| probe.legacy_leave)
+                        && complete
+                            .operation
+                            .as_ref()
+                            .is_some_and(|capability| capability.legacy_leave);
+                    if complete
+                        .operation
+                        .as_ref()
+                        .is_some_and(|capability| capability.legacy_leave)
+                        && !request
+                            .operation
+                            .as_ref()
+                            .is_some_and(|probe| probe.legacy_leave)
+                    {
+                        return Err(failure());
+                    }
                     if domain == AccountDocumentDomain::GroupControl {
                         let effective_after = if include_operations {
                             request
@@ -1074,6 +1115,11 @@ impl Node {
                                         meta.key,
                                         AccountDocumentKey::GroupOperation { .. }
                                     ))
+                                    || (!include_legacy
+                                        && matches!(
+                                            meta.key,
+                                            AccountDocumentKey::GroupLegacyOperation { .. }
+                                        ))
                                     || effective_after
                                         .as_ref()
                                         .is_some_and(|after| after >= &meta.key)
@@ -1097,7 +1143,7 @@ impl Node {
                         .account_documents
                         .lock()
                         .expect("documents mutex")
-                        .digest_scope(domain, include_operations);
+                        .digest_operation_scope(domain, include_operations, include_legacy);
                     cursor.visited |= 1 << cursor.domain;
                     if complete.enabled {
                         cursor.remotely_disabled &= !(1 << cursor.domain);
@@ -2317,6 +2363,114 @@ mod group_control_tests {
                 .unwrap();
         }
     }
+    #[tokio::test]
+    async fn legacy_child_documents_require_the_negotiated_operation_scope_over_noise() {
+        use crate::node::account_group::operations::legacy_wire::{
+            LegacyOperationFrame, LegacyOperationProjection,
+        };
+        let mut fixture = UpgradeFixture::new().await;
+        let group = crate::eventlog::ConversationId::new([74; 32]);
+        let key = AccountDocumentKey::GroupLegacyOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: fixture.source.user_id(),
+        };
+        let payload = LegacyOperationFrame::new(
+            &fixture.source,
+            group,
+            1,
+            LegacyOperationProjection::default(),
+        )
+        .encode();
+        let meta = AccountDocumentMeta::new(
+            &fixture.source.account,
+            fixture.source.user_id(),
+            key.clone(),
+            1,
+            &payload,
+            false,
+        );
+        fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(meta.clone(), &payload)
+            .unwrap();
+        let old_digest = fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .digest_scope(AccountDocumentDomain::GroupControl, true);
+        let mut channel = fixture
+            .target
+            .begin_account_exchange(
+                &fixture.peer,
+                AccountSyncVersion::V2,
+                AccountHistoryFrame::DocumentsRequest {
+                    body: DocumentRequest {
+                        version: 5,
+                        account_id: fixture.target.account_id(),
+                        domain: AccountDocumentDomain::GroupControl,
+                        after: None,
+                        known_digest: [0; 32],
+                        operation: Some(OperationProbe {
+                            version: 1,
+                            nonce: [7; 32],
+                            after: None,
+                            known_digest: [0; 32],
+                            asset: None,
+                            legacy_leave: false,
+                        }),
+                    }
+                    .encode(),
+                },
+            )
+            .await
+            .unwrap();
+        loop {
+            let bytes = channel.recv().await.unwrap();
+            let (_, frame) = AccountHistoryFrame::decode_versioned(&bytes).unwrap();
+            match frame {
+                AccountHistoryFrame::DocumentHeader { body } => {
+                    let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                    assert!(!matches!(
+                        meta.key,
+                        AccountDocumentKey::GroupLegacyOperation { .. }
+                    ));
+                }
+                AccountHistoryFrame::DocumentChunk { .. } => {}
+                AccountHistoryFrame::DocumentsComplete { body } => {
+                    let complete: DocumentComplete = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(complete.digest, old_digest);
+                    assert!(!complete.operation.unwrap().legacy_leave);
+                    break;
+                }
+                _ => panic!("unexpected account document frame"),
+            }
+        }
+        channel.recycle(&fixture.target);
+        assert!(fixture.target.account_document_meta(&key).is_none());
+        let mut cursor = DocumentSyncCursor::mandatory();
+        fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(fixture.target.account_document_meta(&key).unwrap(), meta);
+        assert!(
+            fixture
+                .target
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .get(&fixture.source.user_id())
+                .is_some_and(|support| support.kinds
+                    & crate::node::account_group::operations::legacy_wire::LEGACY_LEAVE_CAPABILITY
+                    != 0)
+        );
+        fixture.servers.shutdown().await;
+    }
     fn cooling_cursor() -> DocumentSyncCursor {
         let mut cursor = DocumentSyncCursor::default();
         cursor.group_unavailable();
@@ -2339,7 +2493,7 @@ mod group_control_tests {
                 .unwrap()
                 .get(&fixture.source.user_id())
                 .is_some_and(|support| support.public == fixture.source.identity.public()
-                    && support.kinds == local_operation_capabilities()),
+                    && support.kinds == (local_operation_capabilities() | crate::node::account_group::operations::legacy_wire::LEGACY_LEAVE_CAPABILITY)),
             "an operation-capable authenticated exchange must establish its own support evidence"
         );
         fixture.servers.shutdown().await;

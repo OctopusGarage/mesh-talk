@@ -40,6 +40,41 @@ struct ControlRoutes {
     publicly_observed: bool,
 }
 
+/// Task IDs distinguish an aborted route owner from its same-key replacement.
+#[derive(Default)]
+struct ControlTaskOwners {
+    current: std::collections::HashMap<ControlWork, tokio::task::AbortHandle>,
+    owners: std::collections::HashMap<tokio::task::Id, ControlWork>,
+}
+impl ControlTaskOwners {
+    fn insert(&mut self, key: ControlWork, task: tokio::task::AbortHandle) {
+        self.owners.insert(task.id(), key.clone());
+        self.current.insert(key, task);
+    }
+    fn finished(&mut self, task: tokio::task::Id) -> Option<ControlWork> {
+        let key = self.owners.remove(&task)?;
+        if self
+            .current
+            .get(&key)
+            .is_some_and(|current| current.id() == task)
+        {
+            self.current.remove(&key);
+            Some(key)
+        } else {
+            None
+        }
+    }
+    fn cancel(&mut self, key: &ControlWork) {
+        if let Some(task) = self.current.remove(key) {
+            task.abort();
+        }
+    }
+    fn clear(&mut self) {
+        self.current.clear();
+        self.owners.clear();
+    }
+}
+
 impl ControlWork {
     fn retry_key(&self, peer: &PublicIdentity) -> (u8, String) {
         (
@@ -994,6 +1029,7 @@ impl Node {
                         | DeliveryTransaction::ChannelOutgoing { .. }
                         | DeliveryTransaction::ChannelControl { .. }
                         | DeliveryTransaction::AccountSelfControl { .. }
+                        | DeliveryTransaction::LegacyMemberLeave { .. }
                         | DeliveryTransaction::AccountOwnerControl { .. }
                         | DeliveryTransaction::ChannelMessageAction { .. } => true,
                         DeliveryTransaction::Incoming { sender, .. }
@@ -1045,6 +1081,7 @@ impl Node {
                     .and_then(|tx| match tx.body() {
                         DeliveryTransaction::ChannelControl { events }
                         | DeliveryTransaction::AccountSelfControl { events, .. }
+                        | DeliveryTransaction::LegacyMemberLeave { events, .. }
                         | DeliveryTransaction::AccountOwnerControl { events, .. } => {
                             events.first().map(|event| event.conversation_id)
                         }
@@ -1871,6 +1908,31 @@ impl Node {
         }
     }
 
+    fn cancel_changed_delivery_routes(
+        &self,
+        active: &mut std::collections::HashMap<ControlWork, ControlRoutes>,
+        owners: &mut ControlTaskOwners,
+    ) {
+        let changed: Vec<_> = active
+            .iter()
+            .filter(|(_, routes)| self.control_routes(&routes.peer).endpoints != routes.endpoints)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in changed {
+            owners.cancel(&key);
+            active.remove(&key);
+            // A completed-but-unjoined old task may have moved its observation
+            // token out of its Drop guard. Remove only that exact destination.
+            if let ControlWork::Destination(event) = key {
+                self.delivery_observations
+                    .lock()
+                    .expect("delivery observations lock not poisoned")
+                    .retain(|_, destination| destination != event);
+                self.delivery_status_notify.notify_waiters();
+            }
+        }
+    }
+
     /// Shared by desktop, CLI and SDK accept-loop hosts. The future owns all
     /// cursors and network work, so dropping it cancels scheduling and dials.
     pub(in crate::node) async fn run_delivery_loop(self: std::sync::Arc<Self>) {
@@ -1886,6 +1948,7 @@ impl Node {
         // JoinSet aborts its tasks on drop: retiring the worker also retires
         // every control dial/exchange. Never detach work from this lifetime.
         let mut controls = tokio::task::JoinSet::new();
+        let mut control_owners = ControlTaskOwners::default();
         let mut active: std::collections::HashMap<ControlWork, ControlRoutes> =
             std::collections::HashMap::new();
         let mut retries = super::delivery_retry::RetrySchedule::default();
@@ -1911,6 +1974,7 @@ impl Node {
                     self.relay_retry_after.lock().expect("relay retry lock not poisoned").clear();
                     controls.shutdown().await;
                     self.clear_delivery_observations();
+                    control_owners.clear();
                     active.clear();
                     retries.clear();
                     self.channel_recovery_notify.notify_one();
@@ -1918,10 +1982,11 @@ impl Node {
                     self.bridge_notify.notify_one();
                     continue;
                 },
-                result = controls.join_next(), if !controls.is_empty() => {
+                result = controls.join_next_with_id(), if !controls.is_empty() => {
                     match result {
-                        Some(Ok((key, persistence_failed, progress, observation))) => {
-                            if let Some(routes) = active.remove(&key) {
+                        Some(Ok((task, (key, persistence_failed, progress, observation)))) => {
+                            if control_owners.finished(task).as_ref() == Some(&key)
+                                && let Some(routes) = active.remove(&key) {
                                 retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
                                 if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
                             }
@@ -1932,8 +1997,11 @@ impl Node {
                         // A panicked child cannot leave a permanently occupied
                         // lane. Retire this worker and cancel its remaining work.
                         Some(Err(error)) => {
-                            log::error!("automatic delivery control task failed: {error}");
-                            return;
+                            if let Some(key) = control_owners.finished(error.id()) { active.remove(&key); }
+                            if !error.is_cancelled() {
+                                log::error!("automatic delivery control task failed: {error}");
+                                return;
+                            }
                         }
                         None => {}
                     }
@@ -1943,15 +2011,7 @@ impl Node {
             // A new route for an active peer/eligible relay must not wait behind
             // an exchange still blocked on its old endpoint. Refresh timestamps
             // and unrelated peers do not invalidate the bounded control batch.
-            if active
-                .values()
-                .any(|routes| self.control_routes(&routes.peer).endpoints != routes.endpoints)
-            {
-                self.clear_delivery_observations();
-                controls.shutdown().await;
-                self.clear_delivery_observations();
-                active.clear();
-            }
+            self.cancel_changed_delivery_routes(&mut active, &mut control_owners);
             self.prune_delivery_observations();
             // Reading next_destination advances its per-message cursor. Only
             // select work when its lane can admit it, so busy lanes preserve
@@ -2048,7 +2108,8 @@ impl Node {
                         token: node.begin_delivery_observation(id, &destination),
                     };
                     active.insert(key.clone(), routes);
-                    controls.spawn(work.track(async move {
+                    let owner = key.clone();
+                    let task = controls.spawn(work.track(async move {
                         // Move the entire Drop owner into the future. Capturing
                         // only its Copy token would drop the guard at admission.
                         let mut attempt = attempt;
@@ -2073,6 +2134,7 @@ impl Node {
                         let observation = attempt.token.take().map(|token| (token, reason));
                         (key, failed, progress, observation)
                     }));
+                    control_owners.insert(owner, task);
                 }
             }
             if let Some(receipt) = receipt {
@@ -2094,7 +2156,8 @@ impl Node {
                     };
                     let node = self.clone();
                     active.insert(key.clone(), routes);
-                    controls.spawn(work.track(async move {
+                    let owner = key.clone();
+                    let task = controls.spawn(work.track(async move {
                         let progress = node.retry_one_destination(&receipt.destination).await;
                         let failed = progress
                             && node
@@ -2105,6 +2168,7 @@ impl Node {
                                 .is_err();
                         (key, failed, progress, None)
                     }));
+                    control_owners.insert(owner, task);
                 }
             }
             file_scheduler.admit(&self, files, cursor);
@@ -2152,10 +2216,12 @@ impl Node {
                     };
                     let node = self.clone();
                     active.insert(key.clone(), routes);
-                    controls.spawn(work.track(async move {
+                    let owner = key.clone();
+                    let task = controls.spawn(work.track(async move {
                         let progress = node.reconcile_delivery_peer(&peer).await;
                         (key, false, progress, None)
                     }));
+                    control_owners.insert(owner, task);
                 }
             }
         }
@@ -3267,6 +3333,171 @@ impl Node {
 
 #[cfg(test)]
 mod diagnostic_tests {
+    #[tokio::test]
+    async fn cancelled_old_control_owner_cannot_remove_its_same_key_replacement() {
+        let key = super::ControlWork::Pull("fixture".into());
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut owners = super::ControlTaskOwners::default();
+        let old = tasks.spawn(std::future::pending::<()>());
+        let old_id = old.id();
+        owners.insert(key.clone(), old);
+        owners.cancel(&key);
+        let replacement = tasks.spawn(std::future::pending::<()>());
+        let replacement_id = replacement.id();
+        owners.insert(key.clone(), replacement);
+        let error = tasks.join_next_with_id().await.unwrap().unwrap_err();
+        assert!(error.is_cancelled());
+        assert_eq!(error.id(), old_id);
+        assert!(owners.finished(error.id()).is_none());
+        assert_eq!(owners.current[&key].id(), replacement_id);
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unrelated_pull_route_changes_preserve_slow_noise_delivery_and_its_observation() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        use std::sync::Arc;
+        use std::time::Duration;
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let ba = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let bp =
+            Announce::new_with_account(&bob, &ba, "Bob", listener.local_addr().unwrap().port());
+        let (sender, _, _) = node_with_files(source_dir.path(), alice, aa, &bp);
+        let (recipient, _, _) = node_with_files(target_dir.path(), bob, ba, &ap);
+        let unrelated_identity = DeviceIdentity::generate();
+        let unrelated_account = Account::generate();
+        let unrelated =
+            Announce::new_with_account(&unrelated_identity, &unrelated_account, "Unrelated", 9);
+        sender.roster.lock().unwrap().update(
+            &unrelated,
+            "127.0.0.1".parse().unwrap(),
+            &sender.user_id(),
+        );
+        let logical = sender
+            .enqueue_to_account(&recipient.account_id(), b"synthetic slow delivery", None)
+            .await
+            .unwrap();
+        let destination = sender
+            .delivery
+            .lock()
+            .unwrap()
+            .message(logical)
+            .unwrap()
+            .destinations[0]
+            .clone();
+        let healthy = super::ControlWork::Destination(destination.event.id);
+        let changing = super::ControlWork::Pull(unrelated.user_id.clone());
+        let (accepted, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let server_node = recipient.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Some((accepted, release_rx));
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    incoming = listener.accept() => {
+                        let (stream, _) = incoming.unwrap();
+                        let node = server_node.clone();
+                        let boundary = held.take();
+                        connections.spawn(async move {
+                            let channel = node.privacy_accept(stream).await.unwrap();
+                            if let Some((accepted, release)) = boundary {
+                                let _ = accepted.send(());
+                                release.await.unwrap();
+                            }
+                            node.serve_connection(channel).await;
+                        });
+                    }
+                    result = connections.join_next(), if !connections.is_empty() => { result.unwrap().unwrap(); }
+                }
+            }
+        });
+        let mut active = std::collections::HashMap::new();
+        let mut owners = super::ControlTaskOwners::default();
+        let mut controls = tokio::task::JoinSet::new();
+        active.insert(healthy.clone(), sender.control_routes(&bp.public()));
+        let attempt = super::ObservationAttempt {
+            node: sender.clone(),
+            token: sender.begin_delivery_observation(logical, &destination),
+        };
+        assert!(attempt.token.is_some());
+        let sending = Arc::clone(&sender);
+        let task = controls.spawn(async move {
+            let _attempt = attempt;
+            sending
+                .retry_one_destination_with_reason(&destination)
+                .await
+                .0
+        });
+        let healthy_task = task.id();
+        owners.insert(healthy.clone(), task);
+        tokio::time::timeout(Duration::from_secs(3), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        for port in 10..13 {
+            active.insert(changing.clone(), sender.control_routes(&unrelated.public()));
+            let pull = controls.spawn(std::future::pending::<bool>());
+            owners.insert(changing.clone(), pull);
+            let relocated = Announce::new_with_account(
+                &unrelated_identity,
+                &unrelated_account,
+                "Unrelated",
+                port,
+            );
+            sender.roster.lock().unwrap().update(
+                &relocated,
+                "127.0.0.1".parse().unwrap(),
+                &sender.user_id(),
+            );
+            sender.cancel_changed_delivery_routes(&mut active, &mut owners);
+            assert!(
+                active.contains_key(&healthy),
+                "an unrelated Pull route must not cancel the healthy destination"
+            );
+            assert_eq!(owners.current[&healthy].id(), healthy_task);
+            assert!(!owners.current[&healthy].is_finished());
+            assert!(
+                sender.account_delivery_observations(&recipient.account_id(), &[logical])[0]
+                    .2
+                    .is_some(),
+                "route churn for another owner cannot erase this exact destination's observation"
+            );
+        }
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match controls.join_next_with_id().await.unwrap() {
+                    Ok((task, progress)) => {
+                        assert_eq!(owners.finished(task), Some(healthy.clone()));
+                        assert!(progress);
+                        break;
+                    }
+                    Err(error) => {
+                        assert!(error.is_cancelled());
+                        assert!(owners.finished(error.id()).is_none());
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sender.delivery_status(logical),
+            Some(super::DeliveryStatus::Delivered),
+            "the original signed recipient receipt, rather than relay custody, must finish the delivery"
+        );
+        server.abort();
+        let _ = server.await;
+    }
     #[tokio::test]
     async fn bounded_relay_batches_eventually_visit_a_healthy_tail_after_four_failures() {
         use crate::discovery::Announce;

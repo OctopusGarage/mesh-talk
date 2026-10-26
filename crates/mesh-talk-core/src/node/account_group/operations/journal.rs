@@ -140,11 +140,25 @@ pub(super) struct Lookup {
     pub cancel: bool,
     pub sequence: u64,
 }
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct LegacyLeavePlan {
+    pub parent: OperationReference,
+    pub legs: Vec<OperationReference>,
+    pub roll_forward: bool,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct LegacyBatch {
+    plan: Option<LegacyLeavePlan>,
+    links: Vec<(AccountGroupOperationId, OperationReference)>,
+    entries: Vec<Entry>,
+}
 #[derive(Serialize, Deserialize)]
 struct Record {
     account: [u8; 32],
     device: PublicIdentity,
     entry: Option<Entry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy: Option<LegacyBatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lookup: Option<Lookup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,6 +170,8 @@ pub(in crate::node) struct OperationJournal {
     file: EncryptedRecordLog<Vec<u8>>,
     pub(super) entries: BTreeMap<AccountGroupOperationId, Entry>,
     pub(super) lookups: BTreeMap<AccountGroupOperationId, Lookup>,
+    pub(super) legacy_plans: BTreeMap<AccountGroupOperationId, LegacyLeavePlan>,
+    pub(super) legacy_children: BTreeMap<AccountGroupOperationId, OperationReference>,
     file_asset_receipts:
         BTreeMap<AccountGroupOperationId, super::file_preparation::GroupFileAssetsReceipt>,
     file_preparations: BTreeMap<AccountGroupOperationId, super::file_preparation::GroupFilePayload>,
@@ -246,6 +262,7 @@ impl OperationJournal {
             account: self.account,
             device: self.device.clone(),
             entry: None,
+            legacy: None,
             lookup: None,
             file_assets: payload
                 .descriptor
@@ -509,6 +526,8 @@ impl OperationJournal {
             file,
             entries: BTreeMap::new(),
             lookups: BTreeMap::new(),
+            legacy_plans: BTreeMap::new(),
+            legacy_children: BTreeMap::new(),
             file_preparations: BTreeMap::new(),
             file_asset_receipts: BTreeMap::new(),
             account,
@@ -529,6 +548,18 @@ impl OperationJournal {
             let row: Record = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
             if row.account != journal.account || row.device != journal.device {
                 return Err(invalid());
+            }
+            if let Some(batch) = row.legacy {
+                if row.entry.is_some()
+                    || row.lookup.is_some()
+                    || row.file_preparation.is_some()
+                    || row.file_assets.is_some()
+                {
+                    return Err(invalid());
+                }
+                journal.validate_legacy_batch(&batch)?;
+                journal.install_legacy_batch(batch)?;
+                continue;
             }
             match (row.entry, row.lookup, row.file_preparation, row.file_assets) {
                 (Some(entry), None, None, None) => {
@@ -568,6 +599,7 @@ impl OperationJournal {
             account: self.account,
             device: self.device.clone(),
             entry: Some(entry),
+            legacy: None,
             lookup: None,
             file_preparation: None,
             file_assets: None,
@@ -813,6 +845,301 @@ impl OperationJournal {
         })
     }
 
+    fn legacy_pair_valid(&self, parent: &OperationReference, child: &OperationReference) -> bool {
+        parent.valid(&self.account)
+            && child.valid(&self.account)
+            && parent.kind == AccountGroupOperationKind::LeaveAccount
+            && child.kind == parent.kind
+            && parent.group == child.group
+            && parent.id != child.id
+            && parent.executor.authority.authority.is_none()
+            && child.executor.authority.authority.is_none()
+            && parent.executor.role == AccountGroupRole::Member
+            && child.executor.role == AccountGroupRole::Member
+            && parent.executor.device == child.origin.public()
+            && parent.executor.lifetime.member == parent.executor.device
+            && child.executor.lifetime.member == child.executor.device
+            && parent.digest == operation_digest(parent.group, &AccountGroupOperation::LeaveAccount)
+            && child.digest == parent.digest
+            && serde_json::to_vec(parent).is_ok_and(|v| v.len() <= 16 * 1024)
+            && serde_json::to_vec(child).is_ok_and(|v| v.len() <= 16 * 1024)
+    }
+    fn legacy_plan_size(plan: &LegacyLeavePlan) -> Result<usize, LogError> {
+        Ok(serde_json::to_vec(plan).map_err(|_| invalid())?.len() + 40)
+    }
+    fn legacy_link_size(
+        id: AccountGroupOperationId,
+        parent: &OperationReference,
+    ) -> Result<usize, LogError> {
+        Ok(serde_json::to_vec(&(id, parent))
+            .map_err(|_| invalid())?
+            .len()
+            + 40)
+    }
+    fn legacy_bytes(&self, batch: &LegacyBatch) -> Result<Vec<u8>, LogError> {
+        serde_json::to_vec(&Record {
+            account: self.account,
+            device: self.device.clone(),
+            entry: None,
+            legacy: Some(batch.clone()),
+            lookup: None,
+            file_preparation: None,
+            file_assets: None,
+        })
+        .map_err(|_| invalid())
+    }
+    fn validate_legacy_batch(&self, batch: &LegacyBatch) -> Result<(), LogError> {
+        if batch.entries.len() > 65
+            || batch.links.len() > 65
+            || (batch.plan.is_none() && (batch.links.len() != 1 || batch.entries.len() > 1))
+        {
+            return Err(invalid());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        let mut next_live = self.live;
+        let mut pending = self.pending_count();
+        let mut entries = self.entries.len() + self.lookups.len() + self.file_preparations.len();
+        for entry in &batch.entries {
+            self.validate(entry)?;
+            if !ids.insert(entry.reference.id) || entry.source {
+                return Err(invalid());
+            }
+            if let Some(lookup) = self.lookups.get(&entry.reference.id)
+                && (lookup.group != entry.reference.group
+                    || lookup.digest != entry.reference.digest)
+            {
+                return Err(invalid());
+            }
+            let old = self.entries.get(&entry.reference.id);
+            let lookup = self.lookups.get(&entry.reference.id);
+            let old_pending = old.map_or(usize::from(lookup.is_some()), |old| {
+                usize::from(!old.terminal())
+            });
+            pending = pending.saturating_sub(old_pending) + usize::from(!entry.terminal());
+            if old.is_none() && lookup.is_none() {
+                entries += 1;
+            }
+            next_live = next_live
+                .saturating_sub(old.map(|old| self.size(old)).transpose()?.unwrap_or(0))
+                .saturating_sub(
+                    lookup
+                        .map(|old| self.lookup_size(old))
+                        .transpose()?
+                        .unwrap_or(0),
+                )
+                .checked_add(self.size(entry)?)
+                .ok_or_else(invalid)?;
+        }
+        let entry_for = |id: &AccountGroupOperationId| {
+            batch
+                .entries
+                .iter()
+                .find(|entry| entry.reference.id == *id)
+                .or_else(|| self.entries.get(id))
+        };
+        let mut links = std::collections::BTreeSet::new();
+        for (id, parent) in &batch.links {
+            let child = entry_for(id).ok_or_else(invalid)?;
+            if !links.insert(*id)
+                || !self.legacy_pair_valid(parent, &child.reference)
+                || (parent.executor.device != self.device
+                    && child.reference.executor.device != self.device)
+                || self
+                    .legacy_children
+                    .get(id)
+                    .is_some_and(|old| !old.same(parent))
+                || self.legacy_plans.contains_key(id)
+            {
+                return Err(invalid());
+            }
+            if !self.legacy_children.contains_key(id) {
+                next_live = next_live
+                    .checked_add(Self::legacy_link_size(*id, parent)?)
+                    .ok_or_else(invalid)?;
+            }
+        }
+        if batch
+            .entries
+            .iter()
+            .any(|entry| !links.contains(&entry.reference.id))
+        {
+            return Err(invalid());
+        }
+        if let Some(plan) = &batch.plan {
+            let parent = self.entries.get(&plan.parent.id).ok_or_else(invalid)?;
+            if !parent.source
+                || (parent.terminal() && !batch.entries.is_empty())
+                || !parent.reference.same(&plan.parent)
+                || plan.parent.executor.device != self.device
+                || plan.legs.is_empty()
+                || plan.legs.len() > 65
+            {
+                return Err(invalid());
+            }
+            let mut leg_ids = std::collections::BTreeSet::new();
+            let mut devices = std::collections::BTreeSet::new();
+            for leg in &plan.legs {
+                if !leg_ids.insert(leg.id)
+                    || !devices.insert(leg.executor.device.user_id())
+                    || !self.legacy_pair_valid(&plan.parent, leg)
+                    || !entry_for(&leg.id).is_some_and(|entry| entry.reference.same(leg))
+                    || !batch
+                        .links
+                        .iter()
+                        .any(|(id, parent)| *id == leg.id && parent.same(&plan.parent))
+                {
+                    return Err(invalid());
+                }
+            }
+            if batch
+                .entries
+                .iter()
+                .any(|entry| !leg_ids.contains(&entry.reference.id))
+            {
+                return Err(invalid());
+            }
+            if let Some(old) = self.legacy_plans.get(&plan.parent.id) {
+                if !old.parent.same(&plan.parent)
+                    || old.legs.len() != plan.legs.len()
+                    || (old.roll_forward && !plan.roll_forward)
+                {
+                    return Err(invalid());
+                }
+                let mut changed = 0;
+                for (previous, next) in old.legs.iter().zip(&plan.legs) {
+                    if previous.same(next) {
+                        continue;
+                    }
+                    changed += 1;
+                    let retired = self.entries.get(&previous.id).ok_or_else(invalid)?;
+                    if previous.id == next.id
+                        || previous.executor.device != next.executor.device
+                        || previous.executor.lifetime != next.executor.lifetime
+                        || previous.executor.authority != next.executor.authority
+                        || previous.executor.role != next.executor.role
+                        || !matches!(
+                            retired.status.phase,
+                            AccountGroupOperationPhase::Cancelled
+                                | AccountGroupOperationPhase::Rejected { .. }
+                        )
+                        || !retired.status.committed_events.is_empty()
+                        || retired.status.primary_event.is_some()
+                        || retired
+                            .status
+                            .executions
+                            .iter()
+                            .any(|execution| !execution.committed_events.is_empty())
+                    {
+                        return Err(invalid());
+                    }
+                }
+                if changed > 1 {
+                    return Err(invalid());
+                }
+                next_live = next_live.saturating_sub(Self::legacy_plan_size(old)?);
+            }
+            next_live = next_live
+                .checked_add(Self::legacy_plan_size(plan)?)
+                .ok_or_else(invalid)?;
+        }
+        if entries > MAX_ENTRIES || pending > MAX_PENDING || next_live > self.live_budget() {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    fn install_legacy_batch(&mut self, batch: LegacyBatch) -> Result<(), LogError> {
+        for entry in batch.entries {
+            self.install(entry)?;
+        }
+        for (id, parent) in batch.links {
+            if !self.legacy_children.contains_key(&id) {
+                self.live += Self::legacy_link_size(id, &parent)?;
+            }
+            self.legacy_children.insert(id, parent);
+        }
+        if let Some(plan) = batch.plan {
+            if let Some(old) = self.legacy_plans.get(&plan.parent.id) {
+                self.live -= Self::legacy_plan_size(old)?;
+            }
+            self.live += Self::legacy_plan_size(&plan)?;
+            self.legacy_plans.insert(plan.parent.id, plan);
+        }
+        Ok(())
+    }
+    fn append_legacy_batch(&mut self, mut batch: LegacyBatch) -> Result<(), LogError> {
+        for (offset, entry) in batch.entries.iter_mut().enumerate() {
+            entry.sequence = self
+                .sequence
+                .checked_add(offset as u64 + 1)
+                .ok_or_else(invalid)?;
+            if entry.terminal() {
+                entry.body = None;
+            }
+        }
+        self.validate_legacy_batch(&batch)?;
+        let bytes = self.legacy_bytes(&batch)?;
+        if bytes.len() > 8 * 1024 * 1024 {
+            return Err(invalid());
+        }
+        if self.records
+            >= self
+                .entries
+                .len()
+                .saturating_add(self.lookups.len())
+                .saturating_add(self.legacy_children.len())
+                .saturating_mul(2)
+                .saturating_add(32)
+            || self.bytes.saturating_add(bytes.len() + 40) > 120 * 1024 * 1024
+        {
+            let rows = self.compacted_rows()?;
+            self.file.rewrite(&rows)?;
+            self.records = rows.len();
+            self.bytes = 22 + rows.iter().map(|row| row.len() + 40).sum::<usize>();
+        }
+        self.file.append_durable(&bytes)?;
+        self.records += 1;
+        self.bytes += bytes.len() + 40;
+        self.install_legacy_batch(batch)
+    }
+    pub(super) fn put_legacy_plan(
+        &mut self,
+        plan: LegacyLeavePlan,
+        children: Vec<Entry>,
+    ) -> Result<(), LogError> {
+        let links = plan
+            .legs
+            .iter()
+            .map(|leg| (leg.id, plan.parent.clone()))
+            .collect();
+        self.append_legacy_batch(LegacyBatch {
+            plan: Some(plan),
+            links,
+            entries: children,
+        })
+    }
+    pub(super) fn put_legacy_child(
+        &mut self,
+        parent: OperationReference,
+        entry: Entry,
+    ) -> Result<(), LogError> {
+        if let Some(old_parent) = self.legacy_children.get(&entry.reference.id) {
+            return if old_parent.same(&parent)
+                && self
+                    .entries
+                    .get(&entry.reference.id)
+                    .is_some_and(|old| old.reference.same(&entry.reference))
+            {
+                Ok(())
+            } else {
+                Err(invalid())
+            };
+        }
+        self.append_legacy_batch(LegacyBatch {
+            plan: None,
+            links: vec![(entry.reference.id, parent)],
+            entries: vec![entry],
+        })
+    }
     pub(super) fn put(&mut self, mut entry: Entry) -> Result<(), LogError> {
         self.validate(&entry)?;
         let old = self.entries.get(&entry.reference.id);
@@ -868,6 +1195,7 @@ impl OperationJournal {
             account: self.account,
             device: self.device.clone(),
             entry: None,
+            legacy: None,
             lookup: Some(lookup),
             file_preparation: None,
             file_assets: None,
@@ -918,7 +1246,8 @@ impl OperationJournal {
         Ok(())
     }
     fn compacted_rows(&self) -> Result<Vec<Vec<u8>>, LogError> {
-        self.entries
+        let mut rows = self
+            .entries
             .values()
             .cloned()
             .map(|entry| serde_json::to_vec(&self.row(entry)))
@@ -935,7 +1264,36 @@ impl OperationJournal {
                     .map(|payload| serde_json::to_vec(&self.preparation_row(payload))),
             )
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| invalid())
+            .map_err(|_| invalid())?;
+        for plan in self.legacy_plans.values() {
+            rows.push(
+                self.legacy_bytes(&LegacyBatch {
+                    plan: Some(plan.clone()),
+                    links: plan
+                        .legs
+                        .iter()
+                        .map(|leg| (leg.id, plan.parent.clone()))
+                        .collect(),
+                    entries: Vec::new(),
+                })?,
+            );
+        }
+        let current_legs: std::collections::BTreeSet<_> = self
+            .legacy_plans
+            .values()
+            .flat_map(|plan| plan.legs.iter().map(|leg| leg.id))
+            .collect();
+        for (id, parent) in &self.legacy_children {
+            if current_legs.contains(id) {
+                continue;
+            }
+            rows.push(self.legacy_bytes(&LegacyBatch {
+                plan: None,
+                links: vec![(*id, parent.clone())],
+                entries: Vec::new(),
+            })?);
+        }
+        Ok(rows)
     }
     pub(super) fn put_lookup(&mut self, mut lookup: Lookup) -> Result<(), LogError> {
         self.validate_lookup(&lookup)?;
@@ -1157,6 +1515,229 @@ mod tests {
             "pw",
         )
         .unwrap()
+    }
+    fn legacy_entry(
+        node: &Node,
+        group: ConversationId,
+        executor: PublicIdentity,
+        source: bool,
+    ) -> Entry {
+        use crate::node::account_group::{
+            AccountGroupExecution, AuthorityExpectation, MembershipLifetime,
+        };
+        let executor = AccountGroupSource {
+            device: executor.clone(),
+            role: AccountGroupRole::Member,
+            lifetime: MembershipLifetime {
+                member: executor.clone(),
+                membership: EventId::new([9; 32]),
+                acceptance: None,
+            },
+            authority: AuthorityExpectation {
+                authority: None,
+                epoch: 1,
+            },
+            execution: AccountGroupExecution::Local,
+        };
+        let reference = OperationReference::new(
+            node,
+            node.new_account_group_operation_id(&node.account_id())
+                .unwrap(),
+            group,
+            &AccountGroupOperation::LeaveAccount,
+            executor,
+        );
+        let phase = if source {
+            AccountGroupOperationPhase::Accepted
+        } else {
+            AccountGroupOperationPhase::AwaitingAcceptance
+        };
+        Entry {
+            status: AccountGroupOperationStatus {
+                id: reference.id,
+                account_id: node.account_id(),
+                group,
+                kind: AccountGroupOperationKind::LeaveAccount,
+                phase: phase.clone(),
+                executions: vec![AccountGroupOperationExecution {
+                    device_id: reference.executor.device.user_id(),
+                    phase,
+                    committed_events: vec![],
+                }],
+                committed_events: vec![],
+                primary_event: None,
+            },
+            reference,
+            body: Some(AccountGroupOperation::LeaveAccount),
+            file_copy: None,
+            source,
+            cancel: false,
+            sequence: 0,
+        }
+    }
+    #[test]
+    fn legacy_plan_batch_is_atomic_under_append_failure_and_reserves_all_future_children() {
+        let (_dir, node, _account, template, _) = fixture();
+        let group = template.reference.group;
+        let parent = legacy_entry(&node, group, node.identity.public(), true);
+        let first = legacy_entry(&node, group, DeviceIdentity::generate().public(), false);
+        let second = legacy_entry(&node, group, DeviceIdentity::generate().public(), false);
+        let plan = LegacyLeavePlan {
+            parent: parent.reference.clone(),
+            legs: vec![first.reference.clone(), second.reference.clone()],
+            roll_forward: false,
+        };
+        let mut journal = node.group_operations.lock().unwrap();
+        journal.put(parent).unwrap();
+        let before = (journal.sequence, journal.records, journal.live);
+        journal.file.fail_appends_for_test(true).unwrap();
+        assert!(
+            journal
+                .put_legacy_plan(plan.clone(), vec![first.clone(), second.clone()])
+                .is_err()
+        );
+        journal.file.fail_appends_for_test(false).unwrap();
+        assert_eq!((journal.sequence, journal.records, journal.live), before);
+        assert!(journal.legacy_plans.is_empty() && journal.legacy_children.is_empty());
+        assert!(!journal.entries.contains_key(&first.reference.id));
+        journal.live_limit = journal.live + journal.size(&first).unwrap();
+        assert!(
+            journal
+                .put_legacy_plan(plan.clone(), vec![first.clone(), second.clone()])
+                .is_err()
+        );
+        assert_eq!((journal.sequence, journal.records, journal.live), before);
+        journal.live_limit = MAX_LIVE;
+        journal
+            .put_legacy_plan(plan, vec![first.clone(), second.clone()])
+            .unwrap();
+        assert!(
+            journal.entries.contains_key(&first.reference.id)
+                && journal.entries.contains_key(&second.reference.id)
+        );
+        assert_eq!(journal.legacy_children.len(), 2);
+    }
+    #[test]
+    fn legacy_plan_retries_only_effect_free_retired_leg_and_compacts_all_original_links() {
+        let (dir, node, account, template, _) = fixture();
+        let group = template.reference.group;
+        let parent = legacy_entry(&node, group, node.identity.public(), true);
+        let child = legacy_entry(&node, group, DeviceIdentity::generate().public(), false);
+        let mut plan = LegacyLeavePlan {
+            parent: parent.reference.clone(),
+            legs: vec![child.reference.clone()],
+            roll_forward: false,
+        };
+        let mut journal = node.group_operations.lock().unwrap();
+        journal.put(parent).unwrap();
+        journal
+            .put_legacy_plan(plan.clone(), vec![child.clone()])
+            .unwrap();
+        let mut retry = legacy_entry(&node, group, child.reference.executor.device.clone(), false);
+        retry.reference = OperationReference::new(
+            &node,
+            retry.reference.id,
+            group,
+            &AccountGroupOperation::LeaveAccount,
+            child.reference.executor.clone(),
+        );
+        let mut next = plan.clone();
+        next.legs[0] = retry.reference.clone();
+        assert!(
+            journal
+                .put_legacy_plan(next.clone(), vec![retry.clone()])
+                .is_err(),
+            "a live original child can still commit"
+        );
+        let mut retired = journal.entries.get(&child.reference.id).unwrap().clone();
+        retired.status.phase = AccountGroupOperationPhase::Cancelled;
+        retired.status.executions[0].phase = AccountGroupOperationPhase::Cancelled;
+        retired.body = None;
+        journal.put(retired).unwrap();
+        journal
+            .put_legacy_plan(next.clone(), vec![retry.clone()])
+            .unwrap();
+        next.roll_forward = true;
+        journal.put_legacy_plan(next.clone(), vec![]).unwrap();
+        plan.legs[0] = retry.reference.clone();
+        assert!(
+            journal.put_legacy_plan(plan, vec![]).is_err(),
+            "roll-forward cannot be undone"
+        );
+        journal
+            .test_file_preparation_pressure(MAX_LIVE, true)
+            .unwrap();
+        let live = journal.live;
+        drop(journal);
+        let reopened = OperationJournal::open(
+            dir.path(),
+            "pw",
+            account.public().ed25519_pub,
+            node.identity.public(),
+        )
+        .unwrap();
+        assert_eq!(reopened.live, live);
+        assert!(reopened.legacy_plans[&next.parent.id].roll_forward);
+        assert!(reopened.legacy_plans[&next.parent.id].legs[0].same(&retry.reference));
+        assert!(reopened.legacy_children[&child.reference.id].same(&next.parent));
+        assert!(reopened.legacy_children[&retry.reference.id].same(&next.parent));
+        assert!(reopened.entries[&child.reference.id].terminal());
+    }
+    #[test]
+    fn legacy_child_link_and_placeholder_survive_reopen_without_downgrading_source_progress() {
+        let (dir, coordinator, account, template, _) = fixture();
+        let source = open(
+            &dir.path().join("child"),
+            &account,
+            DeviceIdentity::generate(),
+        );
+        let parent = legacy_entry(
+            &coordinator,
+            template.reference.group,
+            coordinator.identity.public(),
+            true,
+        )
+        .reference;
+        let child = legacy_entry(
+            &coordinator,
+            template.reference.group,
+            source.identity.public(),
+            false,
+        );
+        let mut journal = source.group_operations.lock().unwrap();
+        journal.file.fail_appends_for_test(true).unwrap();
+        assert!(
+            journal
+                .put_legacy_child(parent.clone(), child.clone())
+                .is_err()
+        );
+        assert!(journal.legacy_children.is_empty() && journal.entries.is_empty());
+        journal.file.fail_appends_for_test(false).unwrap();
+        journal
+            .put_legacy_child(parent.clone(), child.clone())
+            .unwrap();
+        let mut accepted = child.clone();
+        accepted.source = true;
+        accepted.status.phase = AccountGroupOperationPhase::Accepted;
+        accepted.status.executions[0].phase = AccountGroupOperationPhase::Accepted;
+        journal.put(accepted).unwrap();
+        journal
+            .put_legacy_child(parent.clone(), child.clone())
+            .unwrap();
+        assert!(journal.entries[&child.reference.id].source);
+        journal
+            .test_file_preparation_pressure(MAX_LIVE, true)
+            .unwrap();
+        drop(journal);
+        let reopened = OperationJournal::open(
+            &dir.path().join("child"),
+            "pw",
+            account.public().ed25519_pub,
+            source.identity.public(),
+        )
+        .unwrap();
+        assert!(reopened.legacy_children[&child.reference.id].same(&parent));
+        assert!(reopened.entries[&child.reference.id].source);
     }
     #[test]
     fn source_ready_turns_reach_ninth_pending_without_rewriting_status_or_foreign_work() {

@@ -4,6 +4,8 @@ pub(in crate::node) use action_preparation::persist_action_recall_completion;
 mod execution;
 pub(in crate::node) mod file_preparation;
 mod file_work;
+mod legacy_leave;
+pub(in crate::node) mod legacy_wire;
 mod message_copy;
 mod preparation;
 mod source_work;
@@ -526,7 +528,9 @@ impl Node {
                 .into_iter()
                 .filter(|source| operation.kind().admits_role(source.role))
                 .collect();
-            if operation.self_control_input().is_some() {
+            if operation.self_control_input().is_some()
+                && !matches!(operation, AccountGroupOperation::LeaveAccount)
+            {
                 sources.retain(|source| source.authority.authority.is_some());
                 if sources.is_empty() {
                     // Nothing has entered the journal. The host must report a
@@ -647,6 +651,7 @@ impl Node {
             journal
                 .entries
                 .get(&id)
+                .filter(|_| !journal.legacy_children.contains_key(&id))
                 .map(|entry| entry.status.clone())
                 .or_else(|| journal.lookups.get(&id).map(|entry| entry.status.clone()))
         };
@@ -694,6 +699,7 @@ impl Node {
             journal
                 .entries
                 .values()
+                .filter(|entry| !journal.legacy_children.contains_key(&entry.reference.id))
                 .map(|entry| entry.status.clone())
                 .chain(journal.lookups.values().map(|entry| entry.status.clone()))
                 .collect()
@@ -782,7 +788,10 @@ impl Node {
             let mut entries: Vec<_> = journal
                 .entries
                 .values()
-                .filter(|entry| entry.reference.group == group)
+                .filter(|entry| {
+                    entry.reference.group == group
+                        && !journal.legacy_children.contains_key(&entry.reference.id)
+                })
                 .collect();
             entries.sort_by_key(|entry| std::cmp::Reverse(entry.sequence));
             // The journal admits at most 128 pending intents. Do not clone all
@@ -828,7 +837,9 @@ impl Node {
                 let ready = self.account_group_operation_ready_for(
                     &entry.reference.executor.device,
                     entry.reference.kind,
-                );
+                ) && (entry.reference.kind != AccountGroupOperationKind::LeaveAccount
+                    || entry.reference.executor.authority.authority.is_some()
+                    || self.legacy_group_leave_ready(&entry.reference.executor.device));
                 (ready || entry.cancel).then(|| RequestProjection {
                     reference: entry.reference.clone(),
                     body: if ready { entry.body.clone() } else { None },
@@ -935,6 +946,23 @@ impl Node {
             source.execution,
             AccountGroupExecution::Local | AccountGroupExecution::ViaDevice(_)
         ) && self.account_group_operation_ready_for(&source.device, kind)
+            && (kind != AccountGroupOperationKind::LeaveAccount
+                || source.authority.authority.is_some()
+                || self.legacy_group_leave_ready(&source.device))
+    }
+
+    pub(in crate::node) fn legacy_group_leave_ready(&self, device: &PublicIdentity) -> bool {
+        device == &self.identity.public()
+            || self
+                .group_operation_versions
+                .lock()
+                .expect("operation versions mutex")
+                .get(&device.user_id())
+                .is_some_and(|support| {
+                    support.public == *device
+                        && support.kinds & legacy_wire::LEGACY_LEAVE_CAPABILITY != 0
+                        && support.observed_at.elapsed() < std::time::Duration::from_secs(60)
+                })
     }
 
     pub(in crate::node) fn account_group_operation_ready_for(

@@ -109,8 +109,8 @@ fn a_certificate_for_an_owner_device_alone_cannot_claim_its_account_role() {
     );
 }
 
-#[test]
-fn legacy_account_leave_rejects_before_admission_instead_of_waiting_for_a_result() {
+#[tokio::test]
+async fn legacy_account_leave_commits_with_owner_offline() {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let owner = node(&dir.path().join("owner"), &Account::generate());
@@ -121,19 +121,93 @@ fn legacy_account_leave_rejects_before_admission_instead_of_waiting_for_a_result
     let id = member
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
-    assert!(matches!(
-        member.submit_account_group_operation(
-            &account.account_id(), id, group, AccountGroupOperation::LeaveAccount,
-        ),
-        Err(crate::node::NodeError::InvalidInput(reason))
-            if reason.contains("account-membership format update required")
-    ));
-    assert!(
-        member
-            .account_group_operation_status(&account.account_id(), id)
-            .unwrap()
-            .is_none()
+    let accepted = member
+        .submit_account_group_operation(
+            &account.account_id(),
+            id,
+            group,
+            AccountGroupOperation::LeaveAccount,
+        )
+        .expect("legacy leave must enter the actual account operation path");
+    assert_eq!(accepted.id, id);
+    for _ in 0..8 {
+        member.maintain_account_group_operation_effects();
+    }
+    let status = member
+        .account_group_operation_status(&account.account_id(), id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
+    assert_eq!(status.committed_events.len(), 1);
+    assert_eq!(
+        member.account_group_access(group).unwrap().role,
+        AccountGroupRole::Left
     );
+    let events = member
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let leaves: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == EventKind::ChannelLeave)
+        .collect();
+    assert_eq!(leaves.len(), 1);
+    assert!(leaves[0].verify_signature());
+    assert!(leaves[0].ciphertext.is_empty());
+    let operations = member
+        .list_account_group_operations(
+            &account.account_id(),
+            AccountGroupOperationQuery {
+                group: Some(group),
+                pending_only: false,
+                after: None,
+                limit: 64,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        operations.len(),
+        1,
+        "private child work must not appear as extra user operations"
+    );
+}
+
+#[tokio::test]
+async fn legacy_account_leave_cancelled_before_execution_emits_no_departure() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let member = node(&dir.path().join("member"), &account);
+    let genesis = legacy_group(&owner, &member);
+    install(&member, &genesis);
+    let group = genesis.conversation_id;
+    let id = member
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    member
+        .submit_account_group_operation(
+            &account.account_id(),
+            id,
+            group,
+            AccountGroupOperation::LeaveAccount,
+        )
+        .unwrap();
+    member
+        .cancel_account_group_operation(&account.account_id(), id)
+        .unwrap();
+    for _ in 0..4 {
+        member.maintain_account_group_operation_effects();
+    }
+    let status = member
+        .account_group_operation_status(&account.account_id(), id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.phase, AccountGroupOperationPhase::Cancelled);
+    assert!(status.committed_events.is_empty());
     assert_eq!(
         member.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
@@ -147,6 +221,215 @@ fn legacy_account_leave_rejects_before_admission_instead_of_waiting_for_a_result
             .iter()
             .any(|event| event.kind == EventKind::ChannelLeave)
     );
+}
+
+#[test]
+fn legacy_invitation_controls_still_reject_before_admission_without_account_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let member = node(&dir.path().join("member"), &account);
+    let group = new_channel_id();
+    let genesis = Event::new(
+        &owner.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Legacy invitation".into(),
+            members: vec![owner.identity.public()],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    let invitation = Event::new(
+        &owner.identity,
+        group,
+        2,
+        vec![genesis.id],
+        2,
+        2,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Legacy invitation".into(),
+            members: vec![owner.identity.public(), member.identity.public()],
+            epoch: 1,
+            owner: owner.user_id(),
+        }
+        .encode_invitation(),
+    );
+    install(&member, &genesis);
+    install(&member, &invitation);
+    assert_eq!(
+        member.account_group_access(group).unwrap().role,
+        AccountGroupRole::Invited
+    );
+    for operation in [
+        AccountGroupOperation::AcceptInvitation,
+        AccountGroupOperation::DeclineInvitation,
+    ] {
+        let id = member
+            .new_account_group_operation_id(&account.account_id())
+            .unwrap();
+        assert!(
+            matches!(member.submit_account_group_operation(&account.account_id(), id, group, operation),
+            Err(crate::node::NodeError::InvalidInput(reason)) if reason.contains("account-membership format update required"))
+        );
+        assert!(
+            member
+                .account_group_operation_status(&account.account_id(), id)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_account_leave_coordinates_original_devices_over_noise_with_history_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let first = node(&dir.path().join("first"), &account);
+    let second = node(&dir.path().join("second"), &account);
+    let genesis = Event::new(
+        &owner.identity,
+        new_channel_id(),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Legacy account departure".into(),
+            members: vec![
+                owner.identity.public(),
+                first.identity.public(),
+                second.identity.public(),
+            ],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    let group = genesis.conversation_id;
+    install(&first, &genesis);
+    install(&second, &genesis);
+    link(&first, &second);
+    link(&second, &first);
+    let mut servers = Vec::new();
+    let mut addresses = Vec::new();
+    for (name, target) in [("first", &first), ("second", &second)] {
+        target
+            .set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        configure(target, &dir.path().join(name), address.port());
+        addresses.push(address);
+        servers.push(inbound_server(target.clone(), listener));
+    }
+    for (left, right, address) in [
+        (&first, &second, addresses[1]),
+        (&second, &first, addresses[0]),
+    ] {
+        left.roster.lock().unwrap().update(
+            &right.signed_announce("Legacy departure peer", address.port()),
+            address.ip(),
+            &left.user_id(),
+        );
+        left.publish_account_group_access(&mut None);
+    }
+    let id = first
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    first
+        .submit_account_group_operation(
+            &account.account_id(),
+            id,
+            group,
+            AccountGroupOperation::LeaveAccount,
+        )
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            first.maintain_account_group_operation_effects();
+            second.maintain_account_group_operation_effects();
+            for (target, source) in [(&second, &first), (&first, &second)] {
+                let peer = target.routing_peer(&source.user_id()).unwrap();
+                let mut cursor =
+                    crate::node::account_documents::sync::DocumentSyncCursor::mandatory();
+                for _ in 0..4 {
+                    target
+                        .pull_account_documents_page(&peer, &mut cursor)
+                        .await
+                        .unwrap();
+                    if cursor.up_to_date {
+                        break;
+                    }
+                }
+            }
+            if first
+                .account_group_operation_status(&account.account_id(), id)
+                .unwrap()
+                .unwrap()
+                .phase
+                == AccountGroupOperationPhase::Committed
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the owner is offline; certified original members must finish their own departure");
+    let status = first
+        .account_group_operation_status(&account.account_id(), id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.committed_events.len(), 2);
+    for member in [&first, &second] {
+        let events = member
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let leaves: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == EventKind::ChannelLeave)
+            .collect();
+        assert_eq!(
+            leaves.len(),
+            1,
+            "each original device signs exactly its own departure"
+        );
+        assert_eq!(
+            leaves[0].author.ed25519_pub(),
+            &member.identity.public().ed25519_pub
+        );
+        assert!(leaves[0].verify_signature() && leaves[0].ciphertext.is_empty());
+        let operations = member
+            .list_account_group_operations(
+                &account.account_id(),
+                AccountGroupOperationQuery {
+                    group: Some(group),
+                    pending_only: false,
+                    after: None,
+                    limit: 64,
+                },
+            )
+            .unwrap();
+        assert!(operations.iter().all(|operation| operation.id == id));
+    }
+    for server in servers {
+        server.abort();
+    }
 }
 
 #[tokio::test]
@@ -1436,3 +1719,6 @@ mod files;
 
 #[path = "tests/result_lifecycle.rs"]
 mod result_lifecycle;
+
+#[path = "tests/legacy_leave_reference.rs"]
+mod legacy_leave_reference;

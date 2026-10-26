@@ -2,16 +2,28 @@
 use super::*;
 pub(super) const MAX_META: usize = 8192;
 pub(super) const MAX_PAGE_BYTES: usize = 12 * 1024 * 1024;
+fn legacy_disabled(enabled: &bool) -> bool {
+    !enabled
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(in crate::node) struct OperationContinuation {
     pub channel: String,
     pub source_device: String,
+    #[serde(default, skip_serializing_if = "legacy_disabled")]
+    pub legacy_leave: bool,
 }
 impl OperationContinuation {
     pub(super) fn key(&self) -> AccountDocumentKey {
-        AccountDocumentKey::GroupOperation {
-            channel: self.channel.clone(),
-            source_device: self.source_device.clone(),
+        if self.legacy_leave {
+            AccountDocumentKey::GroupLegacyOperation {
+                channel: self.channel.clone(),
+                source_device: self.source_device.clone(),
+            }
+        } else {
+            AccountDocumentKey::GroupOperation {
+                channel: self.channel.clone(),
+                source_device: self.source_device.clone(),
+            }
         }
     }
 }
@@ -45,6 +57,8 @@ pub(in crate::node) struct OperationProbe {
     pub known_digest: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset: Option<GroupFileAssetRequest>,
+    #[serde(default, skip_serializing_if = "legacy_disabled")]
+    pub legacy_leave: bool,
 }
 impl OperationProbe {
     pub(super) fn supported(&self) -> bool {
@@ -53,7 +67,9 @@ impl OperationProbe {
             && self.asset.as_ref().is_none_or(|asset| {
                 asset.valid() && self.after.is_none() && self.known_digest == [0; 32]
             })
-            && self.after.as_ref().is_none_or(|after| after.key().valid())
+            && self.after.as_ref().is_none_or(|after| {
+                after.key().valid() && (!after.legacy_leave || self.legacy_leave)
+            })
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,6 +78,8 @@ pub(in crate::node) struct OperationCapability {
     pub nonce: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_kinds: Option<u16>,
+    #[serde(default, skip_serializing_if = "legacy_disabled")]
+    pub legacy_leave: bool,
 }
 impl OperationCapability {
     fn valid(&self) -> bool {
@@ -72,6 +90,11 @@ impl OperationCapability {
     pub(super) fn capabilities(&self) -> u16 {
         self.supported_kinds
             .unwrap_or_else(crate::node::AccountGroupOperationKind::legacy_capabilities)
+            | if self.legacy_leave {
+                crate::node::account_group::operations::legacy_wire::LEGACY_LEAVE_CAPABILITY
+            } else {
+                0
+            }
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,7 +129,11 @@ impl DocumentRequest {
             && request.after.as_ref().is_none_or(|k| {
                 k.valid()
                     && k.domain() == request.domain
-                    && !matches!(k, AccountDocumentKey::GroupOperation { .. })
+                    && !matches!(
+                        k,
+                        AccountDocumentKey::GroupOperation { .. }
+                            | AccountDocumentKey::GroupLegacyOperation { .. }
+                    )
             })
             && request.operation.as_ref().is_none_or(|operation| {
                 request.domain == AccountDocumentDomain::GroupControl
@@ -115,6 +142,10 @@ impl DocumentRequest {
                             && request.after.is_none()
                             && request.known_digest == [0; 32]
                     })
+                    && operation
+                        .after
+                        .as_ref()
+                        .is_none_or(|after| !after.legacy_leave || operation.legacy_leave)
                     && operation
                         .after
                         .as_ref()
@@ -143,8 +174,14 @@ pub(in crate::node) fn valid_complete(body: &[u8]) -> bool {
             }) && c.next.as_ref().is_none_or(|k| {
                 k.valid()
                     && k.domain() == c.domain
-                    && (!matches!(k, AccountDocumentKey::GroupOperation { .. })
-                        || c.operation.is_some())
+                    && match k {
+                        AccountDocumentKey::GroupOperation { .. } => c.operation.is_some(),
+                        AccountDocumentKey::GroupLegacyOperation { .. } => c
+                            .operation
+                            .as_ref()
+                            .is_some_and(|capability| capability.legacy_leave),
+                        _ => true,
+                    }
             })
         })
 }
@@ -157,6 +194,70 @@ pub(in crate::node) fn valid_header(body: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_child_capability_is_additive_and_never_sets_reserved_wire_mask_bits() {
+        #[derive(Deserialize)]
+        struct OldCapability {
+            version: u8,
+            nonce: [u8; 32],
+            supported_kinds: Option<u16>,
+        }
+        let capability = OperationCapability {
+            version: 1,
+            nonce: [7; 32],
+            supported_kinds: Some(1 << 13),
+            legacy_leave: true,
+        };
+        let bytes = serde_json::to_vec(&capability).unwrap();
+        let old: OldCapability = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(old.version, 1);
+        assert_eq!(old.nonce, [7; 32]);
+        assert_eq!(old.supported_kinds, Some(1 << 13));
+        assert!(capability.valid());
+        assert_eq!(capability.capabilities(), (1 << 13) | (1 << 14));
+        let old_bytes =
+            serde_json::json!({ "version": 1, "nonce": ([7u8;32]), "supported_kinds": 8192 });
+        let parsed: OperationCapability = serde_json::from_value(old_bytes).unwrap();
+        assert!(!parsed.legacy_leave);
+        assert_eq!(parsed.capabilities(), 1 << 13);
+    }
+    #[test]
+    fn legacy_child_continuation_requires_negotiated_flag_and_matching_completion() {
+        let key = AccountDocumentKey::GroupLegacyOperation {
+            channel: "a".repeat(64),
+            source_device: "b".repeat(32),
+        };
+        let mut completion = DocumentComplete {
+            enabled: true,
+            domain: AccountDocumentDomain::GroupControl,
+            next: Some(key),
+            digest: [4; 32],
+            operation: Some(OperationCapability {
+                version: 1,
+                nonce: [7; 32],
+                supported_kinds: Some(8192),
+                legacy_leave: false,
+            }),
+        };
+        assert!(!valid_complete(&serde_json::to_vec(&completion).unwrap()));
+        completion.operation.as_mut().unwrap().legacy_leave = true;
+        assert!(valid_complete(&serde_json::to_vec(&completion).unwrap()));
+        let mut probe = OperationProbe {
+            version: 1,
+            nonce: [7; 32],
+            after: Some(OperationContinuation {
+                channel: "a".repeat(64),
+                source_device: "b".repeat(32),
+                legacy_leave: true,
+            }),
+            known_digest: [0; 32],
+            asset: None,
+            legacy_leave: false,
+        };
+        assert!(!probe.supported());
+        probe.legacy_leave = true;
+        assert!(probe.supported());
+    }
     #[test]
     fn operation_completion_retains_an_authenticated_action_mask() {
         let body = serde_json::json!({ "version": 1, "nonce": ([7u8; 32]),

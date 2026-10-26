@@ -12,6 +12,8 @@
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
         "crates/mesh-talk-core/src/node/account_documents/group_operations.rs",
+        "crates/mesh-talk-core/src/node/account_documents/group_legacy_operations.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_legacy_leave.rs",
         "crates/mesh-talk-core/src/node/channels/simple_control.rs",
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/join_history.rs",

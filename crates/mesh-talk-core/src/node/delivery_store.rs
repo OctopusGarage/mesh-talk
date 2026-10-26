@@ -2,6 +2,7 @@
 
 mod group_file;
 mod group_invitation;
+mod group_legacy_leave;
 mod group_message;
 mod group_message_action;
 mod group_owner_control;
@@ -259,6 +260,11 @@ pub(crate) enum DeliveryTransaction {
         witness: super::channels::account_invitation::InvitationWitness,
         transaction: Box<DeliveryTransaction>,
     },
+    // Append-only: preserve every released WAL discriminant and witness layout.
+    LegacyMemberLeave {
+        witness: super::channels::account_self_control::LegacyMemberLeaveWitness,
+        events: Vec<Event>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,6 +350,7 @@ impl DeliveryTransaction {
             Self::ChannelOutgoing { events, .. }
             | Self::ChannelControl { events }
             | Self::AccountSelfControl { events, .. }
+            | Self::LegacyMemberLeave { events, .. }
             | Self::AccountOwnerControl { events, .. }
             | Self::ChannelMessageAction { events, .. } => {
                 events.last().expect("channel effect").id
@@ -628,6 +635,13 @@ impl DeliveryStore {
                             .iter()
                             .all(|event| event.author.ed25519_pub() == &own.ed25519_pub)
                 }
+                DeliveryTransaction::LegacyMemberLeave { witness, events } => {
+                    witness.own.public() == *own
+                        && witness.own.account_id().as_deref() == Some(account)
+                        && events
+                            .iter()
+                            .all(|event| event.author.ed25519_pub() == &own.ed25519_pub)
+                }
                 DeliveryTransaction::AccountOwnerControl {
                     witness, events, ..
                 } => {
@@ -875,6 +889,24 @@ impl DeliveryStore {
         } else {
             group_self_control::validate_direct_parent_view(*input, witness, event, log)?;
         }
+        self.check_counts(Some(tx))?;
+        let bytes = bincode::serialized_size(tx).map_err(|_| invalid("delivery encoding"))?;
+        self.check_capacity(1, bytes)
+    }
+
+    pub(in crate::node) fn preflight_legacy_member_leave_transaction(
+        &self,
+        tx: &DeliveryTransaction,
+        log: &PersistentEventLog,
+    ) -> Result<(), LogError> {
+        self.validate_transaction(tx)?;
+        let DeliveryTransaction::LegacyMemberLeave { witness, events } = tx.body() else {
+            return Err(invalid("legacy leave preflight requires a bound effect"));
+        };
+        let [event] = events.as_slice() else {
+            return Err(invalid("invalid legacy leave effect count"));
+        };
+        group_legacy_leave::validate_parent_view(tx.group_operation(), witness, event, log)?;
         self.check_counts(Some(tx))?;
         let bytes = bincode::serialized_size(tx).map_err(|_| invalid("delivery encoding"))?;
         self.check_capacity(1, bytes)
@@ -1277,6 +1309,18 @@ impl DeliveryStore {
                     log.append_durable(event.clone())?;
                 }
             }
+            DeliveryTransaction::LegacyMemberLeave { witness, events } => {
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid legacy leave effect count"));
+                };
+                group_legacy_leave::validate_parent_view(
+                    tx.group_operation(),
+                    witness,
+                    event,
+                    log,
+                )?;
+                log.append_durable(event.clone())?;
+            }
             DeliveryTransaction::AccountSelfControl {
                 input,
                 witness,
@@ -1424,6 +1468,7 @@ impl DeliveryStore {
                 DeliveryTransaction::ChannelControl { events }
                 | DeliveryTransaction::ChannelOutgoing { events, .. }
                 | DeliveryTransaction::AccountSelfControl { events, .. }
+                | DeliveryTransaction::LegacyMemberLeave { events, .. }
                 | DeliveryTransaction::AccountOwnerControl { events, .. }
                 | DeliveryTransaction::ChannelMessageAction { events, .. } => events,
                 _ => return Err(invalid("invalid group operation recovery effects")),
@@ -3094,6 +3139,13 @@ impl DeliveryStore {
                         .first()
                         .ok_or_else(|| invalid("missing invitation effect"))?
                 }
+                DeliveryTransaction::LegacyMemberLeave { witness, events } => {
+                    let [event] = events.as_slice() else {
+                        return Err(invalid("invalid legacy leave effect count"));
+                    };
+                    group_legacy_leave::validate_common(Some(operation), witness, event)?;
+                    event
+                }
                 DeliveryTransaction::AccountSelfControl {
                     input,
                     witness,
@@ -3171,6 +3223,18 @@ impl DeliveryStore {
                 } else {
                     Ok(())
                 }
+            }
+            DeliveryTransaction::LegacyMemberLeave { witness, events } => {
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid legacy leave effect count"));
+                };
+                if self.profile.as_ref().is_some_and(|(_, profile)| {
+                    profile.device != witness.own.public()
+                        || witness.own.account_id().as_deref() != Some(profile.account.as_str())
+                }) {
+                    return Err(invalid("legacy departure belongs to another profile"));
+                }
+                group_legacy_leave::validate_common(None, witness, event)
             }
             DeliveryTransaction::AccountSelfControl {
                 input,
@@ -3504,6 +3568,7 @@ fn metadata_for(tx: &DeliveryTransaction) -> Option<OutboxRecord> {
         DeliveryTransaction::ChannelOutgoing { .. }
         | DeliveryTransaction::ChannelControl { .. }
         | DeliveryTransaction::AccountSelfControl { .. }
+        | DeliveryTransaction::LegacyMemberLeave { .. }
         | DeliveryTransaction::AccountOwnerControl { .. }
         | DeliveryTransaction::ChannelMessageAction { .. } => None,
         DeliveryTransaction::Outgoing { message, .. }

@@ -9,6 +9,7 @@ mod custody;
 mod device_hostname;
 mod group_activity;
 mod group_control;
+mod group_legacy_operations;
 mod group_operations;
 mod inventory;
 mod public_profile;
@@ -107,6 +108,10 @@ pub enum AccountDocumentKey {
         channel: String,
         source_device: String,
     },
+    GroupLegacyOperation {
+        channel: String,
+        source_device: String,
+    },
 }
 impl DocumentConversation {
     fn valid(&self) -> bool {
@@ -136,9 +141,9 @@ impl AccountDocumentKey {
             Self::DmRecall { .. } => AccountDocumentDomain::DmRecall,
             Self::ChannelCustody { .. } => AccountDocumentDomain::ChannelCustody,
             Self::GroupInventory { .. } => AccountDocumentDomain::GroupInventory,
-            Self::GroupControl { .. } | Self::GroupOperation { .. } => {
-                AccountDocumentDomain::GroupControl
-            }
+            Self::GroupControl { .. }
+            | Self::GroupOperation { .. }
+            | Self::GroupLegacyOperation { .. } => AccountDocumentDomain::GroupControl,
         }
     }
     fn valid(&self) -> bool {
@@ -161,6 +166,10 @@ impl AccountDocumentKey {
                 source_device,
             }
             | Self::GroupOperation {
+                channel,
+                source_device,
+            }
+            | Self::GroupLegacyOperation {
                 channel,
                 source_device,
             } => hex(channel, 64) && hex(source_device, 32),
@@ -217,7 +226,7 @@ impl AccountDocumentKey {
             Self::DeviceHostname { .. } => 255,
             Self::GroupInventory { .. } => 128 * 1024,
             Self::GroupControl { .. } => super::account_group::wire::MAX_HEAD_BYTES,
-            Self::GroupOperation { .. } => 4 * 1024 * 1024,
+            Self::GroupOperation { .. } | Self::GroupLegacyOperation { .. } => 4 * 1024 * 1024,
             Self::ChannelCustody { .. } => 4096,
             Self::Draft { .. } => 64 * 1024,
             Self::ReadReceipt { .. } => 0,
@@ -237,6 +246,7 @@ impl AccountDocumentKey {
                 | Self::GroupInventory { .. }
                 | Self::GroupControl { .. }
                 | Self::GroupOperation { .. }
+                | Self::GroupLegacyOperation { .. }
                 | Self::DeviceHostname { .. }
         )
     }
@@ -245,7 +255,9 @@ impl AccountDocumentKey {
             Self::PublicProfile { .. } | Self::GroupActivity { .. } => 6,
             Self::DeviceHostname { .. } => 5,
             Self::GroupInventory { .. } => 4,
-            Self::GroupControl { .. } | Self::GroupOperation { .. } => 5,
+            Self::GroupControl { .. }
+            | Self::GroupOperation { .. }
+            | Self::GroupLegacyOperation { .. } => 5,
             Self::ChannelCustody { .. } => 3,
             Self::DmReaction { .. } | Self::DmRecall { .. } => 2,
             _ => 1,
@@ -305,6 +317,7 @@ impl AccountDocumentMeta {
             && (!matches!(&self.key, AccountDocumentKey::PublicProfile { source_device, .. } | AccountDocumentKey::GroupActivity { source_device, .. } if source_device != &self.writer_device))
             && (!matches!(&self.key, AccountDocumentKey::GroupInventory { source_device, .. } if source_device != &self.writer_device))
             && (!matches!(&self.key, AccountDocumentKey::GroupControl { source_device, .. } if source_device != &self.writer_device))
+            && (!matches!(&self.key, AccountDocumentKey::GroupLegacyOperation { source_device, .. } if source_device != &self.writer_device))
             && (!matches!(&self.key, AccountDocumentKey::DeviceHostname { device_id } if device_id != &self.writer_device))
             && self.content_len as usize <= self.key.limit()
             && (self.content_len != 0

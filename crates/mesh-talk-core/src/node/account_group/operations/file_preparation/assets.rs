@@ -391,6 +391,7 @@ impl Node {
                 after: None,
                 known_digest: [0; 32],
                 operation: Some(OperationProbe {
+                    legacy_leave: false,
                     version: 1,
                     nonce,
                     after: None,

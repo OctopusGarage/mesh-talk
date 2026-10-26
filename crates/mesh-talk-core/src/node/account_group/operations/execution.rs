@@ -114,6 +114,110 @@ impl Node {
     pub(in crate::node) fn maintain_account_group_operation_effects(
         self: &Arc<Self>,
     ) -> Vec<ConversationId> {
+        // Link the separately signed child namespace before ordinary admission
+        // can interpret a physical departure as a whole-account coordinator.
+        for (key, hash, frame) in self.account_group_legacy_inputs() {
+            if self
+                .operation_seen
+                .lock()
+                .expect("operation input mutex")
+                .get(&key)
+                == Some(&hash)
+            {
+                continue;
+            }
+            let mut processed = true;
+            for leg in frame.projection.requests {
+                if leg.parent.executor.device != self.identity.public()
+                    && leg.request.reference.executor.device != self.identity.public()
+                {
+                    continue;
+                }
+                let request = leg.request;
+                let child_id = request.reference.id;
+                let own_child = request.reference.executor.device == self.identity.public();
+                let linked = self
+                    .group_operations
+                    .lock()
+                    .expect("operation journal mutex")
+                    .put_legacy_child(
+                        leg.parent,
+                        Entry {
+                            file_copy: None,
+                            reference: request.reference.clone(),
+                            body: request.body.clone(),
+                            status: self.operation_status_for(
+                                &request.reference,
+                                AccountGroupOperationPhase::AwaitingAcceptance,
+                            ),
+                            source: false,
+                            cancel: request.cancel,
+                            sequence: 0,
+                        },
+                    );
+                if linked.is_err()
+                    || (own_child && self.admit_source_group_request(request).is_err())
+                {
+                    processed = false;
+                } else if own_child {
+                    // A newly observed parent query must lift this terminal
+                    // result into the bounded publication window. The outer
+                    // signed-frame hash coalesces unchanged request nonces.
+                    let mut journal = self
+                        .group_operations
+                        .lock()
+                        .expect("operation journal mutex");
+                    if let Some(entry) = journal
+                        .entries
+                        .get(&child_id)
+                        .filter(|entry| entry.source && entry.terminal())
+                        .cloned()
+                        && journal.put(entry).is_err()
+                    {
+                        processed = false;
+                    }
+                }
+            }
+            for leg in frame.projection.results {
+                if leg.parent.executor.device != self.identity.public()
+                    && leg.result.reference.executor.device != self.identity.public()
+                {
+                    continue;
+                }
+                let linked = self
+                    .group_operations
+                    .lock()
+                    .expect("operation journal mutex")
+                    .put_legacy_child(
+                        leg.parent,
+                        Entry {
+                            file_copy: None,
+                            reference: leg.result.reference.clone(),
+                            body: Some(AccountGroupOperation::LeaveAccount),
+                            status: self.operation_status_for(
+                                &leg.result.reference,
+                                AccountGroupOperationPhase::AwaitingAcceptance,
+                            ),
+                            source: false,
+                            cancel: false,
+                            sequence: 0,
+                        },
+                    );
+                if linked.is_err()
+                    || self
+                        .import_group_operation_result(leg.result, &frame.proof)
+                        .is_err()
+                {
+                    processed = false;
+                }
+            }
+            if processed {
+                self.operation_seen
+                    .lock()
+                    .expect("operation input mutex")
+                    .insert(key, hash);
+            }
+        }
         for (key, hash, frame) in self.account_group_operation_inputs() {
             if self
                 .operation_seen
@@ -127,7 +231,12 @@ impl Node {
             let mut processed = true;
             for request in frame.projection.requests {
                 if request.reference.executor.device == self.identity.public() {
-                    if self.admit_source_group_request(request).is_err() {
+                    let query = (request.reference.clone(), request.nonce);
+                    if self.admit_source_group_request(request).is_err()
+                        || self
+                            .observe_legacy_leave_parent_query(&query.0, query.1)
+                            .is_err()
+                    {
                         processed = false;
                     }
                 } else {
@@ -220,10 +329,98 @@ impl Node {
             self.publish_group_inventory_for(group);
         }
         self.publish_account_group_operations();
+        self.publish_account_group_legacy_operations();
         // No host, journal, membership or delivery guard escapes local work.
         fanout.into_iter().map(ConversationId::new).collect()
     }
-    fn operation_status_for(
+    fn observe_legacy_leave_parent_query(
+        &self,
+        reference: &journal::OperationReference,
+        nonce: [u8; 16],
+    ) -> Result<(), NodeError> {
+        if reference.kind != AccountGroupOperationKind::LeaveAccount
+            || reference.executor.authority.authority.is_some()
+        {
+            return Ok(());
+        }
+        let parent = {
+            let journal = self
+                .group_operations
+                .lock()
+                .expect("operation journal mutex");
+            if journal.legacy_children.contains_key(&reference.id) {
+                return Ok(());
+            }
+            journal
+                .entries
+                .get(&reference.id)
+                .filter(|entry| entry.source && entry.reference.same(reference))
+                .cloned()
+        };
+        let Some(parent) = parent else { return Ok(()) };
+        let key = format!("legacy-parent-query:{}", reference.id.to_hex());
+        let mut token = [0; 32];
+        token[..16].copy_from_slice(&nonce);
+        if self
+            .operation_seen
+            .lock()
+            .expect("operation input mutex")
+            .get(&key)
+            == Some(&token)
+        {
+            return Ok(());
+        }
+        // Reference-only origins poll the parent, not its hidden physical legs.
+        // Forward that fresh query through the coordinator's existing nonce so
+        // bounded child result windows can rotate without a new wire field.
+        if parent.terminal() {
+            self.group_operations
+                .lock()
+                .expect("operation journal mutex")
+                .put(parent)
+                .map_err(NodeError::Log)?;
+        }
+        {
+            let mut queries = self
+                .operation_queries
+                .lock()
+                .expect("operation query mutex");
+            let now = std::time::Instant::now();
+            let query = queries.entry(reference.id).or_insert((0, now));
+            query.0 = query.0.checked_add(1).ok_or_else(|| {
+                NodeError::InvalidInput("legacy departure query exhausted".into())
+            })?;
+            query.1 = now;
+        }
+        self.operation_seen
+            .lock()
+            .expect("operation input mutex")
+            .insert(key, token);
+        Ok(())
+    }
+    fn legacy_member_leave_source_matches(
+        &self,
+        reference: &journal::OperationReference,
+        source: &AccountGroupSource,
+    ) -> bool {
+        if reference.kind != AccountGroupOperationKind::LeaveAccount
+            || reference.executor.role != AccountGroupRole::Member
+            || source.role != AccountGroupRole::Member
+            || reference.executor.authority.authority.is_some()
+            || source.authority.authority.is_some()
+            || source.authority.epoch < reference.executor.authority.epoch
+        {
+            return false;
+        }
+        // Other legacy departures advance the epoch without replacing this
+        // physical membership. Parents and children retain that exact lifetime;
+        // migration, reinvitation, identity changes and backward epochs do not.
+        let mut current = source.clone();
+        current.execution = reference.executor.execution.clone();
+        current.authority.epoch = reference.executor.authority.epoch;
+        current == reference.executor
+    }
+    pub(super) fn operation_status_for(
         &self,
         reference: &journal::OperationReference,
         phase: AccountGroupOperationPhase,
@@ -243,13 +440,37 @@ impl Node {
             primary_event: None,
         }
     }
-    fn admit_source_group_request(&self, request: RequestProjection) -> Result<(), NodeError> {
+    pub(super) fn admit_source_group_request(
+        &self,
+        request: RequestProjection,
+    ) -> Result<(), NodeError> {
         if request.reference.executor.device != self.identity.public()
             || !request.reference.valid(&self.account.public().ed25519_pub)
         {
             return Err(NodeError::Authorization(
                 "invalid operation executor".into(),
             ));
+        }
+        let legacy_child = {
+            let journal = self
+                .group_operations
+                .lock()
+                .expect("operation journal mutex");
+            let child = journal.legacy_children.contains_key(&request.reference.id);
+            if child
+                && journal
+                    .entries
+                    .get(&request.reference.id)
+                    .is_none_or(|entry| !entry.reference.same(&request.reference))
+            {
+                return Err(NodeError::Authorization(
+                    "legacy departure child binding changed".into(),
+                ));
+            }
+            child
+        };
+        if legacy_child && self.try_complete_retired_legacy_leave_child(&request)? {
+            return Ok(());
         }
         let action_input = request
             .body
@@ -361,6 +582,8 @@ impl Node {
             } else if source.is_some_and(|source| {
                 source.lifetime != request.reference.executor.lifetime
                     || source.authority != request.reference.executor.authority
+            }) && !source.is_some_and(|source| {
+                self.legacy_member_leave_source_matches(&request.reference, source)
             }) {
                 phase = AccountGroupOperationPhase::Rejected {
                     reason: AccountGroupOperationRejection::MembershipChanged,
@@ -446,37 +669,76 @@ impl Node {
                 request.reference.group,
                 &log.events(&request.reference.group),
             );
-            match self.prepare_account_self_control_locked(
-                request.reference.group,
-                &log,
-                &projection,
-                input,
-                &self.own_group_proof(),
-            ) {
-                Ok(prepared) => {
-                    let id = prepared.event.id;
-                    let transaction = requested_effect(
-                        &request.reference,
-                        DeliveryTransaction::AccountSelfControl {
-                            input,
-                            witness: prepared.witness,
-                            events: vec![prepared.event],
-                        },
-                        id,
-                    );
-                    if delivery
-                        .preflight_group_self_control_transaction(&transaction, &log)
-                        .is_err()
-                    {
+            if legacy_child {
+                match self.prepare_legacy_member_leave_locked(
+                    request.reference.group,
+                    &log,
+                    &projection,
+                    &self.own_group_proof(),
+                ) {
+                    Ok(prepared) => {
+                        let id = prepared.event.id;
+                        let transaction = requested_effect(
+                            &request.reference,
+                            DeliveryTransaction::LegacyMemberLeave {
+                                witness: prepared.witness,
+                                events: vec![prepared.event],
+                            },
+                            id,
+                        );
+                        if delivery
+                            .preflight_legacy_member_leave_transaction(&transaction, &log)
+                            .is_err()
+                        {
+                            phase = AccountGroupOperationPhase::Rejected {
+                                reason: AccountGroupOperationRejection::ResourceLimit,
+                            };
+                        }
+                    }
+                    Err(_) => {
                         phase = AccountGroupOperationPhase::Rejected {
-                            reason: AccountGroupOperationRejection::ResourceLimit,
+                            reason: AccountGroupOperationRejection::MembershipChanged,
                         };
                     }
                 }
-                Err(_) => {
-                    phase = AccountGroupOperationPhase::Rejected {
-                        reason: AccountGroupOperationRejection::MembershipChanged,
-                    };
+            } else if request.reference.kind == AccountGroupOperationKind::LeaveAccount
+                && request.reference.executor.authority.authority.is_none()
+            {
+                // The durable coordinator prepares all exact physical legs;
+                // the parent itself never borrows modern account authority.
+            } else {
+                match self.prepare_account_self_control_locked(
+                    request.reference.group,
+                    &log,
+                    &projection,
+                    input,
+                    &self.own_group_proof(),
+                ) {
+                    Ok(prepared) => {
+                        let id = prepared.event.id;
+                        let transaction = requested_effect(
+                            &request.reference,
+                            DeliveryTransaction::AccountSelfControl {
+                                input,
+                                witness: prepared.witness,
+                                events: vec![prepared.event],
+                            },
+                            id,
+                        );
+                        if delivery
+                            .preflight_group_self_control_transaction(&transaction, &log)
+                            .is_err()
+                        {
+                            phase = AccountGroupOperationPhase::Rejected {
+                                reason: AccountGroupOperationRejection::ResourceLimit,
+                            };
+                        }
+                    }
+                    Err(_) => {
+                        phase = AccountGroupOperationPhase::Rejected {
+                            reason: AccountGroupOperationRejection::MembershipChanged,
+                        };
+                    }
                 }
             }
         }
@@ -587,7 +849,7 @@ impl Node {
             })
             .map_err(NodeError::Log)
     }
-    fn execute_source_control(
+    pub(super) fn execute_source_control(
         &self,
         id: AccountGroupOperationId,
     ) -> Result<Option<ConversationId>, NodeError> {
@@ -599,6 +861,11 @@ impl Node {
         id: AccountGroupOperationId,
         mut invitation_assets: Option<crate::node::channels::account_invitation::InvitationAssets>,
     ) -> Result<Option<ConversationId>, NodeError> {
+        // The account-wide legacy parent owns no public event. Its durable
+        // physical plan must progress even after this coordinator has left.
+        if self.try_execute_legacy_leave_coordinator(id)? {
+            return Ok(None);
+        }
         let file_snapshot = {
             let journal = self
                 .group_operations
@@ -684,6 +951,12 @@ impl Node {
         if !entry.source || entry.terminal() {
             return Ok(None);
         }
+        let legacy_child = self
+            .group_operations
+            .lock()
+            .expect("operation journal mutex")
+            .legacy_children
+            .contains_key(&entry.reference.id);
         // The existing bounded data worker verifies the invitee capability and
         // seals optional history before entering these synchronous guards.
         if entry.reference.kind == AccountGroupOperationKind::Invite
@@ -748,6 +1021,7 @@ impl Node {
                     !entry.reference.kind.admits_role(source.role)
                         || source.lifetime != entry.reference.executor.lifetime
                         || source.authority != entry.reference.executor.authority
+                            && !self.legacy_member_leave_source_matches(&entry.reference, source)
                 })
         {
             entry.status = self.operation_status_for(
@@ -794,6 +1068,7 @@ impl Node {
                 || source.device != entry.reference.executor.device
                 || source.lifetime != entry.reference.executor.lifetime
                 || source.authority != entry.reference.executor.authority
+                    && !self.legacy_member_leave_source_matches(&entry.reference, &source)
         }) {
             drop(log);
             drop(book);
@@ -940,25 +1215,42 @@ impl Node {
                 })
             }
             _ if body.self_control_input().is_some() => {
-                let input = body
-                    .self_control_input()
-                    .expect("selected account self-control");
-                let prepared = self.prepare_account_self_control_locked(
-                    entry.reference.group,
-                    &log,
-                    &projection,
-                    input,
-                    &self.own_group_proof(),
-                )?;
-                let id = prepared.event.id;
-                Some((
-                    DeliveryTransaction::AccountSelfControl {
+                if legacy_child {
+                    let prepared = self.prepare_legacy_member_leave_locked(
+                        entry.reference.group,
+                        &log,
+                        &projection,
+                        &self.own_group_proof(),
+                    )?;
+                    let id = prepared.event.id;
+                    Some((
+                        DeliveryTransaction::LegacyMemberLeave {
+                            witness: prepared.witness,
+                            events: vec![prepared.event],
+                        },
+                        id,
+                    ))
+                } else {
+                    let input = body
+                        .self_control_input()
+                        .expect("selected account self-control");
+                    let prepared = self.prepare_account_self_control_locked(
+                        entry.reference.group,
+                        &log,
+                        &projection,
                         input,
-                        witness: prepared.witness,
-                        events: vec![prepared.event],
-                    },
-                    id,
-                ))
+                        &self.own_group_proof(),
+                    )?;
+                    let id = prepared.event.id;
+                    Some((
+                        DeliveryTransaction::AccountSelfControl {
+                            input,
+                            witness: prepared.witness,
+                            events: vec![prepared.event],
+                        },
+                        id,
+                    ))
+                }
             }
             _ if body.message_action_input().is_some() => {
                 let input = body
@@ -1056,6 +1348,14 @@ impl Node {
         ) {
             delivery
                 .preflight_group_self_control_transaction(&transaction, &log)
+                .map_err(NodeError::Log)?;
+        }
+        if matches!(
+            transaction.body(),
+            DeliveryTransaction::LegacyMemberLeave { .. }
+        ) {
+            delivery
+                .preflight_legacy_member_leave_transaction(&transaction, &log)
                 .map_err(NodeError::Log)?;
         }
         if entry.reference.kind == AccountGroupOperationKind::Invite {
