@@ -96,7 +96,8 @@
             "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
             "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
             "incoming_wake_protects_idle_foreground_and_resumes_background_before_more_hints",
-            "node::account_sync::wake::tests::control_wake"
+            "node::account_sync::wake::tests::control_wake_fifo_coalesces_and_consumes_only_the_captured_generation",
+            "node::account_sync::wake::tests::control_wakes_bound_full_identities_and_prune_changed_bindings"
           ]
         }
       ],
