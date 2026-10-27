@@ -1416,3 +1416,76 @@ fn retirement_logical_visibility_precedes_physical_reclamation() {
     );
     assert!(repo.metadata(&e.conversation_id).is_err());
 }
+
+#[test]
+fn validated_growth_gate_blocks_without_mutation_and_never_runs_for_duplicates_or_invalid_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let e = event(&identity, 1, vec![], 1, EventKind::Message);
+    let charge = db.read(|c| repo.domain_charge_on(c)).unwrap();
+    let result = db
+        .transaction(|c| {
+            repo.append_with_gate_on(c, &e, |cost| {
+                assert_eq!(cost, 384);
+                Ok(AppendGate::Block("local resource"))
+            })
+        })
+        .unwrap();
+    assert!(matches!(result, GatedAppend::Blocked("local resource")));
+    assert_eq!(db.read(|c| repo.domain_charge_on(c)).unwrap(), charge);
+    assert!(repo.get(&e.id).unwrap().is_none());
+    repo.append(&e).unwrap();
+    let result = db
+        .transaction(|c| {
+            repo.append_with_gate_on(c, &e, |_| -> Result<AppendGate<()>, LogError> {
+                panic!("duplicate must not reserve growth")
+            })
+        })
+        .unwrap();
+    assert!(matches!(
+        result,
+        GatedAppend::Accepted(AppendOutcome::Duplicate)
+    ));
+    let mut forged = e.clone();
+    forged.sig[0] ^= 1;
+    assert!(matches!(
+        db.transaction(|c| repo.append_with_gate_on(
+            c,
+            &forged,
+            |_| -> Result<AppendGate<()>, LogError> {
+                panic!("invalid duplicate must not call growth gate")
+            }
+        )),
+        Err(LogError::BadSignature)
+    ));
+    let missing = event(
+        &identity,
+        2,
+        vec![EventId::new([9; 32])],
+        2,
+        EventKind::Message,
+    );
+    assert!(matches!(
+        db.transaction(|c| repo.append_with_gate_on(
+            c,
+            &missing,
+            |_| -> Result<AppendGate<()>, LogError> {
+                panic!("missing parent must not call growth gate")
+            }
+        )),
+        Err(LogError::MissingParents(_))
+    ));
+    let equiv = event(&identity, 1, vec![], 2, EventKind::Message);
+    assert!(matches!(
+        db.transaction(|c| repo.append_with_gate_on(
+            c,
+            &equiv,
+            |_| -> Result<AppendGate<()>, LogError> {
+                panic!("equivocation must not call growth gate")
+            }
+        )),
+        Err(LogError::AuthorEquivocation { .. })
+    ));
+}

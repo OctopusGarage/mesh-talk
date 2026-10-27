@@ -1396,22 +1396,58 @@ promise an equivalent reduction in filesystem size. A single oversized stored
 row is an explicit atomic-work exception; it is reported separately and consumes
 the step. Ordinary reclamation does not decode event bodies or collect history
 IDs. Only a transaction-owning wrapper measures commit latency; helpers within a
-caller's transaction cannot claim that timing. These primitives still require
-relay expiry, capacity and scheduler integration before runtime adoption.
+caller's transaction cannot claim that timing. The indexed relay role composes
+these primitives with expiry and capacity policy; actual serving and scheduler
+adoption remain separate integration requirements.
 
 The internal indexed relay state retains the existing shared profile connection
-and owns first-arrival time, touch ticks and role readiness. Validated event
-admission and arrival/touch changes commit in one transaction through the event
-repository's existing admission implementation. Signed duplicates do not add
-charge or advance touch; a valid trusted federation origin may lower their
-first-arrival time. Watch notifications follow successful commit only. Ordinary
-open and constructing additional role facades do not materialize mailbox history
-or open another database connection. During retirement its narrow physical
-metadata exposes charge and lifecycle without interpreting unavailable author
-or capability summaries. The role owner must remove arrival metadata with final
-reclamation in the same transaction. An exact physically retained event read is
-not an expiry-safe custody qualification: expiry visibility, capacity policy and
-the maintenance scheduler must be integrated before this state serves the runtime.
+and owns first-arrival time, touch ticks, role readiness and retention policy.
+Validated admission and arrival/touch changes commit in one transaction through
+the event repository. Its new-growth gate runs after signature, causal and
+counter validation and before allocating the stored-event encoding; scalar size
+preflight preserves permanent counter errors. Input ownership and cryptographic
+validation retain their existing per-event allocations. Signed duplicates are authenticated
+without invoking the growth gate, adding charge or advancing touch. Watch
+notifications follow successful commit only.
+
+Expiry uses a nullable, persisted monotonic cutoff and indexed arrival deadlines.
+A mailbox becomes unavailable at thirty days even before physical reclamation;
+clock rollback cannot restore eligibility. Time before the first representable
+expiry and deadline overflow do not wrap or prematurely expire an arrival at
+zero. Unchanged idle checks neither walk history nor update policy. A trusted
+origin must still pass the existing expiry and future-skew checks. After clock
+rollback, an earlier valid origin on an authenticated duplicate can correct its
+arrival below the persisted cutoff and commit an unavailable result. Rejected
+new growth does not make that correction.
+
+Policy-bearing exact reads qualify the current mailbox before fetching a body
+or returning positive custody. Their leased views bind the database, domain,
+conversation, destructive generation, cutoff and first-arrival identity. Changed
+bindings become stale before newer reclamation progress is interpreted; ordinary
+appends and touches do not change these policy identities. Physical diagnostics
+remain distinct from eligible availability. Warm open validates fixed policy
+records and exact schema authority, including required unique indexes, without
+materializing mailbox history or opening another database connection.
+
+Capacity reuses the event domain's physical count and estimated cost, including
+hidden rows awaiting reclamation. Defaults remain 100,000 events plus 5,000 slack
+and 512 MiB plus 16 MiB slack. An authenticated new event exceeding either
+envelope requests persistent draining and returns local retryable backpressure
+without inserting its body or arrival. An event unable to fit even an empty
+envelope has a distinct local failure and cannot trigger futile eviction.
+Validation and permanent counter failures remain errors rather than capacity
+pressure. These local resource outcomes are not peer-event rejections.
+
+Draining continues until both base targets are met. Indexed expiry selection
+precedes least-recently-touched capacity selection. At most one selected mailbox
+is pending physical reclamation, preventing unchanged physical charge from
+causing repeated over-selection. Role pending state and repository retirement
+change together; completion removes the matching arrival in the same transaction
+as final graph reclamation. Metadata probes, scope selection and graph work have
+separate budgets. Physical charge is not an exact live-mailbox total or a promise
+of equivalent filesystem shrinkage. The next-deadline and pending-work scalars
+support a later paced worker; these internal operations do not yet replace the
+legacy participant or dedicated relay runtime.
 
 Profile maintenance records pending conversations on disk and examines candidates
 in bounded steps. Its snapshot keeps the newest two unreferenced Profile leaves

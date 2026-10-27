@@ -807,6 +807,10 @@
           {
             "name": "Retained-event payloads use integer-rowid storage with metadata before the final body column; small composite-key and covering indexes keep header and GC metadata reads independent of overflowing payload size, verified by engine plans and SQLite page-cache miss counters.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "A same-transaction new-growth gate runs only after existing event and permanent counter validation and before allocating the stored-event encoding; signed duplicates bypass reservation, and blocked growth leaves graph rows, ordinals and charge unchanged.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
@@ -920,6 +924,22 @@
           {
             "name": "Indexed relay metadata reads narrow physical charge and lifecycle during retirement without exposing unavailable graph summaries; ordinary hidden reads remain local availability errors, and arrival removal belongs in the same outer transaction as repository finalization.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed relay policy persists a nullable monotonic expiry cutoff through indexed deadlines, denies expired exact reads and custody before GC, preserves clock rollback and valid-origin semantics, and performs no idle history walk or policy rewrite.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Validated temporary capacity pressure commits a persistent drain request without accepting new growth; impossible individual events and permanent counter failures cannot cause futile eviction, and both base targets must be reached before drain completion.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "One indexed pending mailbox couples role state with repository retirement; bounded maintenance keeps hidden data physically charged, proves expiry selection before LRU, and removes the matching arrival with final reclamation in one transaction.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Leased relay policy views bind cutoff, arrival and repository destructive identity; stale bindings fail before newer work is interpreted, while current authority corruption and storage failures remain explicit errors.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
@@ -1017,6 +1037,10 @@
           },
           {
             "name": "Relay role readiness and metadata charge validation publish with both mandatory source domains; published missing or unready authority fails closed, while warm profile open and additional role facades avoid historical body decoding and extra database connections.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Strict profile schema validation includes exact named unique-index authority and fixed relay cutoff/drain records; missing or weakened authority never becomes a repaired or empty successful profile.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

@@ -120,6 +120,11 @@ pub(crate) fn validate_ddl(c: &Connection, schema: &str) -> Result<(), LogError>
                     .strip_prefix("CREATE INDEX ")
                     .map(|s| (s, "index"))
             })
+            .or_else(|| {
+                statement
+                    .strip_prefix("CREATE UNIQUE INDEX ")
+                    .map(|s| (s, "index"))
+            })
             .ok_or_else(|| invalid("invalid owned schema declaration"))?;
         let name = object
             .0
@@ -203,5 +208,25 @@ mod tests {
             decode(vec![0x61, 0x00, 0x62]),
             Err(LogError::CorruptFile(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod ddl_tests {
+    use super::*;
+    #[test]
+    fn unique_index_authority_is_checked_exactly_and_never_skipped() {
+        const EXPECTED: &str = "CREATE TABLE pending(domain BLOB,active INTEGER);CREATE UNIQUE INDEX single_pending ON pending(domain) WHERE active=1;";
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(EXPECTED).unwrap();
+        validate_ddl(&c, EXPECTED).unwrap();
+        c.execute_batch("DROP INDEX single_pending").unwrap();
+        assert!(validate_ddl(&c, EXPECTED).is_err());
+        c.execute_batch("CREATE INDEX single_pending ON pending(domain) WHERE active=1")
+            .unwrap();
+        assert!(
+            validate_ddl(&c, EXPECTED).is_err(),
+            "nonunique replacement cannot satisfy unique authority"
+        );
     }
 }

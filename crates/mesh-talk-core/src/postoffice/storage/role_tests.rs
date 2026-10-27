@@ -309,7 +309,29 @@ fn single_outer_transaction_finishes_and_clones_retain_one_profile_lease() {
         state.record(&e, 100, None).unwrap();
         assert!(ProfileStorageLease::acquire(root.path()).is_err());
         drop(state);
-        assert_eq!(clone.retained_event(&e.id).unwrap(), Some(e));
+        assert_eq!(
+            clone.retained_event_at(&e.id, 100).unwrap(),
+            Some(e.clone())
+        );
+        assert!(
+            clone
+                .durable_have_at(&e.conversation_id, &e.id, 100)
+                .unwrap()
+        );
+        let view = clone
+            .policy_view_at(&e.conversation_id, 100)
+            .unwrap()
+            .unwrap();
+        clone.validate_policy_view_at(&view, 100).unwrap();
+        assert!(!clone.next_work_at(100).unwrap().has_work());
+        assert!(
+            clone
+                .maintenance_step_at(100, Default::default())
+                .unwrap()
+                .reclaim
+                .is_none()
+        );
+        drop(view);
         assert!(ProfileStorageLease::acquire(root.path()).is_err());
         drop(clone);
         drop(ProfileStorageLease::acquire(root.path()).unwrap());
@@ -415,6 +437,20 @@ fn warm_reopen_uses_only_fixed_authority_and_never_hydrates_history() {
         crate::storage::profile::publication::tests::DECODES.with(|v| v.get()),
         0
     );
+    let age = super::super::MAX_RELAY_AGE.as_secs();
+    assert!(state.next_work_at(age + 10).unwrap().expired);
+    let progress = state
+        .maintenance_step_at(
+            age + 10,
+            super::role::maintenance::RelayMaintenanceBudget::tiny(),
+        )
+        .unwrap();
+    assert_eq!(progress.selected_scopes, 1);
+    assert_eq!(
+        state.physical_charge().unwrap().event_count,
+        128,
+        "warm policy and GC prefix never decode corrupt retained bodies"
+    );
 }
 
 #[test]
@@ -458,7 +494,17 @@ fn retirement_keeps_honest_physical_mailbox_metadata_and_token_holds_profile_lea
     let repo = profile.events().unwrap();
     let token = match profile
         .database()
-        .transaction(|c| repo.begin_retirement_on(c, &e.conversation_id))
+        .transaction(|c| {
+            let result = repo.begin_retirement_on(c, &e.conversation_id)?;
+            c.execute(
+                "UPDATE relay_mailboxes SET pending=1 WHERE domain=?1 AND conversation=?2",
+                params![
+                    RELAY_ARRIVALS.as_slice(),
+                    e.conversation_id.as_bytes().as_slice()
+                ],
+            )?;
+            Ok(result)
+        })
         .unwrap()
     {
         RetirementBegin::Started(t) => t,
@@ -504,3 +550,30 @@ fn retirement_keeps_honest_physical_mailbox_metadata_and_token_holds_profile_lea
     drop(token);
     drop(ProfileStorageLease::acquire(root.path()).unwrap());
 }
+
+#[test]
+fn expired_duplicate_is_unavailable_immediately_before_any_gc() {
+    let root = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let profile = open(&root, &identity);
+    let state = relay(profile);
+    let e = event(&identity, 1, vec![]);
+    state.record(&e, 0, None).unwrap();
+    assert_eq!(
+        state
+            .record(&e, super::super::MAX_RELAY_AGE.as_secs() - 1, None)
+            .unwrap(),
+        AppendOutcome::Duplicate
+    );
+    assert!(
+        state
+            .record(&e, super::super::MAX_RELAY_AGE.as_secs(), None)
+            .is_err(),
+        "expired duplicate must not report positive custody before GC"
+    );
+    assert_eq!(state.physical_charge().unwrap().event_count, 1);
+}
+
+mod policy_tests;
+
+mod maintenance_tests;

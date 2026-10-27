@@ -38,6 +38,12 @@ pub enum LogError {
     StaleCursor,
     /// The local scope is logically retired while physical reclamation continues.
     ConversationRetiring,
+    /// The local relay mailbox is no longer eligible for custody.
+    RelayMailboxUnavailable,
+    /// Retryable local relay pressure; durable drain work has been requested.
+    RelayCapacityUnavailable,
+    /// The event cannot fit an empty local relay envelope; retrying cannot help.
+    RelayEventTooLarge,
     /// Page limits cannot make progress.
     InvalidPageBudget,
     /// The first selected row exceeds the requested allocation budget.
@@ -88,6 +94,14 @@ impl std::fmt::Display for LogError {
             LogError::ClockExhausted => write!(f, "event clock exhausted"),
             LogError::SequenceExhausted => write!(f, "event author sequence exhausted"),
             LogError::ConversationRetiring => write!(f, "conversation retirement is in progress"),
+            LogError::RelayCapacityUnavailable => write!(
+                f,
+                "local relay capacity unavailable; retry after maintenance"
+            ),
+            LogError::RelayEventTooLarge => {
+                write!(f, "event exceeds the empty local relay capacity")
+            }
+            LogError::RelayMailboxUnavailable => write!(f, "relay mailbox is unavailable"),
             LogError::StaleCursor => write!(f, "stale event page cursor"),
             LogError::InvalidPageBudget => write!(f, "invalid event page budget"),
             LogError::PageBudgetTooSmall { required } => {

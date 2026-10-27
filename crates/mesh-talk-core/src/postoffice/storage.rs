@@ -18,16 +18,17 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 const SCHEMA:&str="
 CREATE TABLE relay_arrival_stage(conversation BLOB PRIMARY KEY CHECK(length(conversation)=32), first_seen BLOB NOT NULL CHECK(length(first_seen)=8)) WITHOUT ROWID;
-CREATE TABLE relay_runtime(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version=1), ready INTEGER NOT NULL CHECK(typeof(ready)='integer' AND ready IN (0,1)), next_touch BLOB NOT NULL CHECK(typeof(next_touch)='blob' AND length(next_touch)=8));
-CREATE TABLE relay_mailboxes(domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16), conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32), first_seen BLOB NOT NULL CHECK(typeof(first_seen)='blob' AND length(first_seen)=8), touched BLOB NOT NULL CHECK(typeof(touched)='blob' AND length(touched)=8), PRIMARY KEY(domain,conversation)) WITHOUT ROWID;
-CREATE INDEX relay_mailboxes_expiry ON relay_mailboxes(domain,first_seen,conversation);
-CREATE INDEX relay_mailboxes_lru ON relay_mailboxes(domain,touched,conversation);
+CREATE TABLE relay_runtime(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version=1), ready INTEGER NOT NULL CHECK(typeof(ready)='integer' AND ready IN (0,1)), next_touch BLOB NOT NULL CHECK(typeof(next_touch)='blob' AND length(next_touch)=8), expired_cutoff BLOB CHECK(expired_cutoff IS NULL OR (typeof(expired_cutoff)='blob' AND length(expired_cutoff)=8)), drain_requested INTEGER NOT NULL DEFAULT 0 CHECK(typeof(drain_requested)='integer' AND drain_requested IN (0,1)));
+CREATE TABLE relay_mailboxes(domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16), conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32), first_seen BLOB NOT NULL CHECK(typeof(first_seen)='blob' AND length(first_seen)=8), touched BLOB NOT NULL CHECK(typeof(touched)='blob' AND length(touched)=8), pending INTEGER NOT NULL DEFAULT 0 CHECK(typeof(pending)='integer' AND pending IN (0,1)), PRIMARY KEY(domain,conversation)) WITHOUT ROWID;
+CREATE INDEX relay_mailboxes_expiry ON relay_mailboxes(domain,first_seen,conversation) WHERE pending=0;
+CREATE INDEX relay_mailboxes_lru ON relay_mailboxes(domain,touched,conversation) WHERE pending=0;
+CREATE UNIQUE INDEX relay_mailboxes_pending ON relay_mailboxes(domain) WHERE pending=1;
 ";
 pub(crate) fn initialize(db: &EncryptedDatabase) -> Result<(), LogError> {
     db.transaction(|tx| {
         tx.execute_batch(SCHEMA)?;
         tx.execute(
-            "INSERT INTO relay_runtime VALUES(1,1,0,?1)",
+            "INSERT INTO relay_runtime(singleton,version,ready,next_touch) VALUES(1,1,0,?1)",
             [1u64.to_be_bytes().as_slice()],
         )?;
         Ok(())
@@ -155,7 +156,7 @@ pub(crate) fn publish(
             .ok_or(LogError::RepositoryCounterExhausted)?;
         let first_seen = first_seen.unwrap_or_else(|| now.to_be_bytes().to_vec());
         c.execute(
-            "INSERT INTO relay_mailboxes VALUES(?1,?2,?3,?4)",
+            "INSERT INTO relay_mailboxes(domain,conversation,first_seen,touched) VALUES(?1,?2,?3,?4)",
             params![
                 RELAY_ARRIVALS.as_slice(),
                 conversation,
@@ -185,11 +186,14 @@ pub(crate) fn publish(
 }
 
 fn runtime_state(c: &Connection) -> Result<(bool, u64), LogError> {
-    let (version, ready, next): (i64, i64, Vec<u8>) = c.query_row(
-        "SELECT version,ready,next_touch FROM relay_runtime WHERE singleton=1",
+    let (version, ready, next, cutoff, drain): (i64, i64, Vec<u8>, Option<Vec<u8>>, i64) = c.query_row(
+        "SELECT version,ready,next_touch,expired_cutoff,drain_requested FROM relay_runtime WHERE singleton=1",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
+    if cutoff.is_some_and(|v| v.len() != 8) || !(0..=1).contains(&drain) {
+        return Err(invalid("invalid relay policy authority"));
+    }
     if version != 1 || !(0..=1).contains(&ready) {
         return Err(invalid("incompatible relay runtime authority"));
     }

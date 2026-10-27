@@ -1907,6 +1907,18 @@ decode failures abort the exchange while preserving any committed received prefi
 Store and runtime owners must adopt the direct paged path before claiming bounded
 production startup or serving.
 
+The internal indexed relay policy applies persisted monotonic expiry before an
+exact custody result or eligible body read. Its policy views also bind arrival
+and cutoff identities; an old view cannot freeze eligibility across expiry,
+origin correction or retirement. Capacity charges hidden rows until bounded
+reclamation removes them. Temporary pressure requests persistent draining and
+returns a local retryable error; a permanently oversized event has a distinct
+local resource failure. Neither outcome is a rejected peer event or successful
+custody. Arrival removal and graph finalization commit together. The
+[storage owner](ARCHITECTURE.md#storage-replay-and-query-budgets) defines these
+transactions and budgets; actual paged serving and supervised worker adoption
+are still required before this internal role replaces the legacy runtime.
+
 An opaque mailbox exchange retains IDs of wrappers whose inner events cannot yet
 be admitted, so a rejected page cannot repeatedly occupy every response while
 later valid events wait. These hints belong only to that mailbox operation and

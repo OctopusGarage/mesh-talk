@@ -11,6 +11,8 @@ mod decode;
 pub(crate) mod import;
 pub(crate) mod maintenance;
 mod metadata;
+mod policy;
+pub(crate) use policy::RepositoryPolicyView;
 pub(crate) mod network;
 pub(crate) mod order;
 pub(crate) mod pages;
@@ -41,6 +43,16 @@ pub(crate) struct EventHeader {
     pub stored_bytes: usize,
 }
 const HEADER_COLUMNS: &str = "id,conversation,author,seq,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes";
+
+/// Same-transaction decision after owner validation and before new graph writes.
+pub(crate) enum AppendGate<B> {
+    Accept,
+    Block(B),
+}
+pub(crate) enum GatedAppend<B> {
+    Accepted(AppendOutcome),
+    Blocked(B),
+}
 
 pub(crate) struct EventRepository {
     database: RepositoryOwner,
@@ -136,6 +148,22 @@ impl EventRepository {
         c: &Connection,
         event: &Event,
     ) -> Result<AppendOutcome, LogError> {
+        match self.append_with_gate_on(c, event, |_| {
+            Ok(AppendGate::<std::convert::Infallible>::Accept)
+        })? {
+            GatedAppend::Accepted(outcome) => Ok(outcome),
+            GatedAppend::Blocked(never) => match never {},
+        }
+    }
+
+    /// Caller owns the connection transaction. The gate cannot outlive validation;
+    /// a duplicate is still authenticated but never invokes a growth reservation.
+    pub(crate) fn append_with_gate_on<B>(
+        &self,
+        c: &Connection,
+        event: &Event,
+        gate: impl FnOnce(u64) -> Result<AppendGate<B>, LogError>,
+    ) -> Result<GatedAppend<B>, LogError> {
         self.require_active_on(c, &event.conversation_id)?;
         // Match the pure EventLog validation order, including invalid duplicates.
         if !event.is_canonical() {
@@ -148,7 +176,7 @@ impl EventRepository {
             return Err(LogError::BadSignature);
         }
         if self.has_on(c, &event.id)? {
-            return Ok(AppendOutcome::Duplicate);
+            return Ok(GatedAppend::Accepted(AppendOutcome::Duplicate));
         }
         let domain = self.domain.0.as_slice();
         let conv = event.conversation_id.as_bytes().as_slice();
@@ -181,8 +209,7 @@ impl EventRepository {
                 seq: event.seq,
             });
         }
-        let body = bincode::serialize(event).map_err(|e| LogError::Serialization(e.to_string()))?;
-        let header = EventHeader::of(event, body.len());
+        let estimate = estimated_cost(event.ciphertext.len(), event.parents.len())?;
         let commit: i64 = c.query_row(
             "SELECT next_commit FROM event_domains WHERE domain=?1",
             [domain],
@@ -196,10 +223,14 @@ impl EventRepository {
         )?;
         let domain_count = advance(domain_count)?;
         let source_revision = advance(source_revision)?;
-        let estimate = estimated_cost(event.ciphertext.len(), event.parents.len())?;
         let domain_estimate = checked_total(domain_estimate, estimate)?;
-        c.execute("INSERT INTO event_conversations(domain,conversation,revision,event_count,stored_bytes,max_lamport,v2_count,v3_count,v4_count) VALUES(?1,?2,0,0,0,?3,0,0,0) ON CONFLICT(domain,conversation) DO NOTHING",params![domain,conv,0_u64.to_be_bytes().as_slice()])?;
-        let (revision,count,stored,v2,v3,v4,max,estimated): (i64,i64,i64,i64,i64,i64,Vec<u8>,i64) = c.query_row("SELECT revision,event_count,stored_bytes,v2_count,v3_count,v4_count,max_lamport,estimated_bytes FROM event_conversations WHERE domain=?1 AND conversation=?2", params![domain,conv], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)))?;
+        // Preflight permanent arithmetic before asking a role to evict anything.
+        // serialized_size computes scalar length without allocating an event body.
+        let body_len = usize::try_from(
+            bincode::serialized_size(event).map_err(|e| LogError::Serialization(e.to_string()))?,
+        )
+        .map_err(|_| LogError::RepositoryCounterExhausted)?;
+        let (revision,count,stored,v2,v3,v4,max,estimated): (i64,i64,i64,i64,i64,i64,Vec<u8>,i64) = c.query_row("SELECT revision,event_count,stored_bytes,v2_count,v3_count,v4_count,max_lamport,estimated_bytes FROM event_conversations WHERE domain=?1 AND conversation=?2", params![domain,conv], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional()?.unwrap_or((0,0,0,0,0,0,0u64.to_be_bytes().to_vec(),0));
         let max = u64::from_be_bytes(
             max.try_into()
                 .map_err(|_| corrupt("invalid maximum clock"))?,
@@ -208,12 +239,21 @@ impl EventRepository {
         let estimated = checked_total(estimated, estimate)?;
         let count = advance(count)?;
         let stored = nonnegative(stored)?
-            .checked_add(integer(body.len())?)
+            .checked_add(integer(body_len)?)
             .ok_or(LogError::RepositoryCounterExhausted)?;
         let (flag2, flag3, flag4) = kind_flags(event.kind);
         let v2 = add_flag(v2, flag2)?;
         let v3 = add_flag(v3, flag3)?;
         let v4 = add_flag(v4, flag4)?;
+        if let AppendGate::Block(reason) = gate(estimate as u64)? {
+            return Ok(GatedAppend::Blocked(reason));
+        }
+        let body = bincode::serialize(event).map_err(|e| LogError::Serialization(e.to_string()))?;
+        if body.len() != body_len {
+            return Err(corrupt("event serialization length changed"));
+        }
+        let header = EventHeader::of(event, body_len);
+        c.execute("INSERT INTO event_conversations(domain,conversation,revision,event_count,stored_bytes,max_lamport,v2_count,v3_count,v4_count) VALUES(?1,?2,0,0,0,?3,0,0,0) ON CONFLICT(domain,conversation) DO NOTHING",params![domain,conv,0_u64.to_be_bytes().as_slice()])?;
         c.execute("INSERT INTO retained_events(domain,id,conversation,author,seq,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes,body,commit_ordinal) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![domain,event.id.as_bytes().as_slice(),conv,event.author.ed25519_pub().as_slice(),event.seq.to_be_bytes().as_slice(),event.lamport.to_be_bytes().as_slice(),event.wall_clock.to_be_bytes().as_slice(),event.kind as i64,integer(header.parent_count)?,integer(header.encoded_bytes)?,integer(header.ciphertext_bytes)?,integer(header.signature_bytes)?,integer(header.stored_bytes)?,body,commit])?;
         for parent in &event.parents {
             c.execute(
@@ -245,7 +285,7 @@ impl EventRepository {
             params![domain, next_commit,source_revision,domain_estimate,domain_count],
         )?;
         self.order_appended(c, event, revision, count)?;
-        Ok(AppendOutcome::Appended)
+        Ok(GatedAppend::Accepted(AppendOutcome::Appended))
     }
 
     fn has_on(&self, c: &Connection, id: &EventId) -> Result<bool, LogError> {

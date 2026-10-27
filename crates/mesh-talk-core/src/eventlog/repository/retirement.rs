@@ -197,7 +197,7 @@ impl EventRepository {
             retiring: scope.lifecycle == 1,
         }))
     }
-    fn require_retirement_connection_on(&self, c: &Connection) -> Result<(), LogError> {
+    pub(super) fn require_retirement_connection_on(&self, c: &Connection) -> Result<(), LogError> {
         let actual = {
             let mut stmt =
                 c.prepare("SELECT store_uuid FROM mesh_database_metadata WHERE singleton=1")?;

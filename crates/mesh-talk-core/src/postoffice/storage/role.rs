@@ -1,5 +1,5 @@
-//! Internal physical retention foundation. Expiry visibility, retirement, bounded
-//! reclamation and capacity policy must be added before any runtime serves it.
+//! Internal indexed relay policy and bounded reclamation. Network serving and
+//! scheduler/runtime adoption remain separate owner work.
 use super::*;
 use crate::{
     eventlog::{
@@ -31,11 +31,24 @@ impl MailboxMetadata {
     }
 }
 
+pub(crate) struct RelayPolicyView {
+    repository: crate::eventlog::repository::RepositoryPolicyView,
+    conversation: ConversationId,
+    cutoff: Option<u64>,
+    first_seen: u64,
+}
+struct ArrivalState {
+    first_seen: u64,
+    touched: u64,
+    pending: bool,
+}
+
 pub(crate) struct IndexedRelayState {
     profile: Arc<ProfileStorage>,
     repository: EventRepository,
     admission: RelayAdmission,
     changes: tokio::sync::watch::Sender<u64>,
+    limits: capacity::RelayLimits,
 }
 impl IndexedRelayState {
     /// Takes the existing shared profile; never opens another connection/KDF/cache.
@@ -52,6 +65,7 @@ impl IndexedRelayState {
             repository,
             admission,
             changes: tokio::sync::watch::channel(0).0,
+            limits: capacity::RelayLimits::default(),
         })
     }
     pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -63,6 +77,7 @@ impl IndexedRelayState {
             self.repository.domain_charge_on(c)
         })
     }
+    #[cfg(test)]
     pub(crate) fn mailbox_metadata(
         &self,
         conversation: &ConversationId,
@@ -72,30 +87,55 @@ impl IndexedRelayState {
             self.mailbox_on(c, conversation)
         })
     }
+    fn arrival_on(
+        &self,
+        c: &Connection,
+        conversation: &ConversationId,
+    ) -> Result<Option<ArrivalState>, LogError> {
+        let arrival: Option<(Vec<u8>,Vec<u8>,i64)> = c.query_row(
+            "SELECT first_seen,touched,pending FROM relay_mailboxes WHERE domain=?1 AND conversation=?2",
+            params![RELAY_ARRIVALS.as_slice(),conversation.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        arrival
+            .map(|(first, touched, pending)| {
+                if !(0..=1).contains(&pending) {
+                    return Err(invalid("invalid relay pending marker"));
+                }
+                Ok(ArrivalState {
+                    first_seen: decode_time(first)?,
+                    touched: decode_time(touched)?,
+                    pending: pending == 1,
+                })
+            })
+            .transpose()
+    }
     fn mailbox_on(
         &self,
         c: &Connection,
         conversation: &ConversationId,
     ) -> Result<Option<MailboxMetadata>, LogError> {
-        let arrival: Option<(Vec<u8>,Vec<u8>)> = c.query_row(
-            "SELECT first_seen,touched FROM relay_mailboxes WHERE domain=?1 AND conversation=?2",
-            params![RELAY_ARRIVALS.as_slice(),conversation.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let arrival = self.arrival_on(c, conversation)?;
         let retained = self
             .repository
             .conversation_charge_on(c, conversation)?
             .filter(|m| m.count > 0 || m.retiring);
         match (arrival, retained) {
             (None, None) => Ok(None),
-            (Some((first_seen, touched)), Some(retained)) => Ok(Some(MailboxMetadata {
-                first_seen: decode_time(first_seen)?,
-                touched: decode_time(touched)?,
-                retained,
-            })),
+            (Some(arrival), Some(retained)) => {
+                if arrival.pending != retained.retiring {
+                    return Err(invalid("relay pending and repository lifecycle disagree"));
+                }
+                Ok(Some(MailboxMetadata {
+                    first_seen: arrival.first_seen,
+                    touched: arrival.touched,
+                    retained,
+                }))
+            }
             _ => Err(invalid("relay arrival and retained mailbox disagree")),
         }
     }
     /// Exact physically retained row, revalidated on the shared current connection.
     /// This does NOT assert expiry-safe positive custody; no runtime may serve it yet.
+    #[cfg(test)]
     pub(crate) fn retained_event(&self, id: &EventId) -> Result<Option<Event>, LogError> {
         self.profile.database().read(|c| {
             require_ready(c)?;
@@ -116,7 +156,7 @@ impl IndexedRelayState {
         now: u64,
         origin: Option<u64>,
     ) -> Result<AppendOutcome, LogError> {
-        let (outcome, changed) = self.profile.database().transaction(|c| {
+        self.policy_transaction(now, |c, cutoff| {
             let next_touch = require_ready(c)?;
             if matches!(self.admission, RelayAdmission::OpaqueOnly)
                 && !super::super::opaque::envelope_shape(event)
@@ -138,19 +178,31 @@ impl IndexedRelayState {
                 }
             }
             let prior = self.mailbox_on(c, &event.conversation_id)?;
-            // Repository owns every validation rule, including signed duplicates.
-            let outcome = self.repository.append_on(c, event)?;
-            fault_cut(c, "event")?;
             let first = origin.unwrap_or(now).min(now);
             let lowered = prior.is_some_and(|m| origin.is_some() && first < m.first_seen);
+            let effective_first = prior.map_or(first, |m| if lowered {first} else {m.first_seen});
+            // The repository authenticates duplicates and all new growth before
+            // this role may schedule drain or persist an origin correction.
+            let mut following_touch=None;
+            let outcome = self.repository.append_with_gate_on(c, event, |cost| {
+                if cutoff.is_some_and(|cutoff| effective_first <= cutoff) {
+                    return Ok(crate::eventlog::repository::AppendGate::Block(capacity::RelayBlock::Unavailable));
+                }
+                following_touch=Some(next_touch.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?);
+                self.capacity_gate_on(c, cost)
+            })?;
+            let outcome = match outcome {
+                crate::eventlog::repository::GatedAppend::Accepted(outcome) => outcome,
+                crate::eventlog::repository::GatedAppend::Blocked(reason) => return Err(reason.error()),
+            };
+            fault_cut(c, "event")?;
             let appended = matches!(outcome, AppendOutcome::Appended);
             let mailbox = event.conversation_id.as_bytes().as_slice();
             if appended {
-                let following = next_touch.checked_add(1)
-                    .ok_or(LogError::RepositoryCounterExhausted)?;
+                let following = following_touch.ok_or_else(||invalid("accepted relay growth lacks reserved touch"))?;
                 if prior.is_none() {
                     c.execute(
-                        "INSERT INTO relay_mailboxes VALUES(?1,?2,?3,?4)",
+                        "INSERT INTO relay_mailboxes(domain,conversation,first_seen,touched) VALUES(?1,?2,?3,?4)",
                         params![RELAY_ARRIVALS.as_slice(), mailbox,
                             first.to_be_bytes().as_slice(), next_touch.to_be_bytes().as_slice()],
                     )?;
@@ -177,14 +229,11 @@ impl IndexedRelayState {
                 )?;
             }
             fault_cut(c, "runtime")?;
-            fault_cut(c, "commit")?;
-            Ok((outcome, appended || lowered))
-        })?;
-        if changed {
-            self.changes
-                .send_modify(|generation| *generation = generation.wrapping_add(1));
-        }
-        Ok(outcome)
+            let cutoff = self.advance_cutoff_on(c, now)?;
+            self.eligible_on(c, &event.conversation_id, cutoff)?;
+
+            Ok(outcome)
+        })
     }
 }
 fn decode_time(bytes: Vec<u8>) -> Result<u64, LogError> {
@@ -207,3 +256,7 @@ fn fault_cut(_c: &Connection, _point: &str) -> Result<(), LogError> {
     }
     Ok(())
 }
+
+mod capacity;
+pub(crate) mod maintenance;
+mod policy;
