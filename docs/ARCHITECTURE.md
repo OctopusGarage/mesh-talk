@@ -1235,6 +1235,24 @@ superseded requests invalidate pending results and context.
 
 ### Storage replay and query budgets
 
+The indexed-storage connection owner in `storage/database.rs` uses SQLCipher
+for encrypted and authenticated database pages, including indexes and WAL data.
+It verifies the application/schema version and encrypted owner binding before
+use, and never replaces unreadable storage with an empty database. A profile
+shares one serialized connection; domain stores own their tables and bounded
+queries. SQLCipher passphrases are domain-separated so user input cannot select
+the raw-key syntax. Production key derivation retains a 600,000-iteration
+password work factor; only existing test configurations reduce it.
+
+Connection policy disables mmap, keeps temporary data in memory, suggests a
+4 MiB page cache, and uses FULL synchronization with automatic WAL checkpointing
+after 256 pages and a 4 MiB retained-journal target. These are connection budgets,
+not a global RAM or disk cap: query results, concurrent domain work, long readers
+and historical data require their own bounds. Failed commits, failed rollbacks
+and fatal storage errors invalidate the handle until reopening. Read failures
+remain errors rather than missing records. The connection owner does not by
+itself convert legacy event or transcript stores to demand loading.
+
 Encrypted record logs replay one framed record at a time instead of retaining a
 second buffer containing the complete encrypted file. The loader validates a
 declared frame length against the remaining file bytes before allocating that

@@ -1,3 +1,4 @@
+pub(crate) mod database;
 pub mod encryption;
 pub mod errors;
 pub mod file_manager;

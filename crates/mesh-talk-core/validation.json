@@ -940,7 +940,7 @@
     {
       "id": "core-storage",
       "capability": {
-        "summary": "Replay encrypted record framing incrementally without buffering the complete ciphertext log, preserving exact corruption and crash-tail recovery semantics.",
+        "summary": "Own encrypted indexed storage and streamed legacy record framing, preserving authenticated errors, owner binding, transactional durability and crash-tail recovery.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
@@ -949,6 +949,10 @@
           },
           {
             "name": "Streaming replay preserves the encrypted file format, authenticated decode errors and platform-specific repair ownership",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed storage encrypts metadata and WAL; wrong keys, owners, versions or fatal transaction failures never become an empty successful history.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

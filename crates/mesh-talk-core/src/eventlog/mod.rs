@@ -36,6 +36,8 @@ pub enum LogError {
     AuthorEquivocation { author: Author, seq: u64 },
     /// At-rest crypto failure (key derivation / encryption).
     Storage(crate::storage::errors::StorageError),
+    /// Indexed encrypted database failure. SQL/key text is excluded from driver errors.
+    Database(Box<dyn std::error::Error + Send + Sync>),
     /// (De)serialization of an event failed.
     Serialization(String),
     /// I/O failure on the log file.
@@ -57,6 +59,7 @@ impl std::fmt::Display for LogError {
                 write!(f, "author equivocation at seq {seq}")
             }
             LogError::Storage(e) => write!(f, "storage error: {e}"),
+            LogError::Database(e) => write!(f, "database error: {e}"),
             LogError::Serialization(m) => write!(f, "serialization error: {m}"),
             LogError::Io(e) => write!(f, "io error: {e}"),
             LogError::CorruptFile(m) => write!(f, "corrupt log file: {m}"),
@@ -69,6 +72,7 @@ impl std::error::Error for LogError {
         match self {
             LogError::Storage(e) => Some(e),
             LogError::Io(e) => Some(e),
+            LogError::Database(e) => Some(e.as_ref()),
             _ => None,
         }
     }
@@ -83,5 +87,20 @@ impl From<crate::storage::errors::StorageError> for LogError {
 impl From<std::io::Error> for LogError {
     fn from(e: std::io::Error) -> Self {
         LogError::Io(e)
+    }
+}
+
+impl From<rusqlite::Error> for LogError {
+    fn from(error: rusqlite::Error) -> Self {
+        // SQLite input errors can include the complete SQL statement. In
+        // particular, a failing key pragma must never expose its passphrase.
+        let sanitized = match error {
+            rusqlite::Error::SqlInputError { error, .. }
+            | rusqlite::Error::SqliteFailure(error, _) => {
+                rusqlite::Error::SqliteFailure(error, None)
+            }
+            other => other,
+        };
+        Self::Database(Box::new(sanitized))
     }
 }
