@@ -549,6 +549,30 @@ mod tests {
     }
 
     #[test]
+    fn owner_control_envelope_rejects_unsorted_distinct_members_before_parent_replay() {
+        let f = Fixture::new();
+        let input = OwnerControlInput::Rename("Envelope ordering".into());
+        let (reference, mut prepared) = f.prepare(&input);
+        validate_direct(&input, &prepared.witness, &prepared.event).unwrap();
+        validate_bound(&reference, &input, &prepared.witness, &prepared.event).unwrap();
+        let identities = prepared
+            .witness
+            .members
+            .iter()
+            .map(|row| row.lifetime.member.ed25519_pub)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(identities.len(), prepared.witness.members.len());
+        assert!(prepared.witness.members.len() >= 2);
+        prepared.witness.members.swap(0, 1);
+        // Keep every signed proof and the original event/intent intact. Only
+        // canonical ordering is invalid; uniqueness cannot mask its rejection.
+        assert!(prepared.event.verify_integrity() && prepared.event.verify_signature());
+        assert!(reference.valid(&f.node.account.public().ed25519_pub));
+        assert!(validate_direct(&input, &prepared.witness, &prepared.event).is_err());
+        assert!(validate_bound(&reference, &input, &prepared.witness, &prepared.event).is_err());
+    }
+
+    #[test]
     fn owner_witness_rejects_omitted_physical_lifetime_and_changed_source() {
         let f = Fixture::new();
         let input = OwnerControlInput::RemoveAccount(f.target.account_id());

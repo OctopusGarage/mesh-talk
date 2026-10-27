@@ -149,6 +149,18 @@ relax thresholds or infer a speedup or zero omissions from a small sample.
 
 Private account-action fixtures follow the [account/device ownership contract](module-boundaries.md#account-and-device-ownership): source commit, durable requester adoption and public member receipt are separate observations. Keep the private request/result deadline around source and requester commitment, exact effect IDs and durable private projections with optional History disabled. Verify public receipt afterward through the existing authenticated sync owner, retaining original signature, author, sealed payload and reduction assertions. Never install an event or decrypted body directly to make receipt pass. Dedicated automatic-fanout fixtures retain coverage for scheduling, backpressure, delayed work and real member delivery.
 
+When a reference-device fixture requires a synchronous capability-cache override
+and admission on one current-thread runtime, keep that requester and its watchers
+there. Run the other simulated devices' complete accept/background owners on
+independent owned current-thread runtimes. Transfer listeners through standard
+sockets before registering them on the owning reactor; release all server start
+gates together without warmup traffic. Preserve the original deadlines, resource
+budgets and signed-provenance assertions. Post-commit public network observations
+run on the observing device's runtime. Shutdown closes admission, cancels and joins
+producers, clears idle sessions, drains admitted writers and joins every owned
+thread, including panic cleanup. A same-source topology comparison diagnoses a
+fixture constraint; it does not establish the cause of every CI timing failure.
+
 Role-bootstrap helpers bind readiness to the requested group, the exact full source identity and a signed head floor captured when invoked. If none exists yet, pin the first non-tombstone source head observed within the same setup deadline. Accept that exact metadata or a strictly newer signed revision for the same key and full source; reject older, tombstoned or same-revision conflicting records. A later concurrent publication must not move an already satisfied snapshot barrier. Helpers may observe that durable role through the existing local document watch while an unrelated page tail remains in flight. A prior completed capability response for the exact full source identity is required before cancelling that redundant read. Preserve the setup deadline, current-binding validation and completed protocol-error checks; an incomplete first capability page cannot establish readiness.
 
 Pagination fixtures distinguish a completed comparison sweep from a settled full
@@ -158,6 +170,15 @@ through the existing cursor owner after a completed mismatch, retain partial
 continuations and the original total pull bound, and require both full settlement
 and the complete exact source metadata set. Failure diagnostics should report
 body-free cursor flags and metadata-class differences rather than message bodies.
+
+Explicit custody-page fixtures follow the production cursor's local-admission
+contract. A typed local-capacity rejection exchanges no bytes: preserve the same
+cursor and continuation, wait for its existing retry time, and retry within the
+fixture's bounded deadline. An early successful no-op while admission is still
+deferred does not prove a completed exchange. Other errors fail immediately;
+History-off, exact signed negative versions and repaired-positive assertions stay
+unchanged. Do not clear cooldowns, create a new cursor or warm the connection to
+avoid this boundary.
 
 ## Change-aware development plans
 

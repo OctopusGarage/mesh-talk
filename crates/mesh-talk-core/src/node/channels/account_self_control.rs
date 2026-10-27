@@ -1328,11 +1328,12 @@ pub(in crate::node) mod tests {
                 node.group_control_heads(group).iter().any(|head| head.proof.public() == *public
                     && head.access.observation.role == AccountGroupRole::Member)
             }));
-            format!("real private role/capability and old Member provenance must arrive before self-control admission: ready_role_forward_reverse_old={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}",
+            format!("real private role/capability and old Member provenance must arrive before self-control admission: ready_role_forward_reverse_old={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; bounded_request_header_trace_tail={:?}",
                 readiness(), forward, reverse, old_heads,
                 [reference.certified_sibling(&online.identity.public()), online.certified_sibling(&reference.identity.public())],
                 [reference.routing_peer(&online.user_id()).is_some_and(|peer| peer.public == online.identity.public()),
-                 online.routing_peer(&reference.user_id()).is_some_and(|peer| peer.public == reference.identity.public())])
+                 online.routing_peer(&reference.user_id()).is_some_and(|peer| peer.public == reference.identity.public())],
+                trace.lock().unwrap().iter().cloned().collect::<Vec<_>>())
         }).await;
         if let Some(index) = offline_index {
             let offline = offline.as_ref().unwrap();

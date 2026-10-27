@@ -110,6 +110,36 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         cursor.domain = AccountDocumentDomain::ChannelCustody as usize;
         cursor
     };
+    // A local admission rejection exchanges no bytes and retains this page.
+    // Follow the existing cursor retry contract rather than treating transient
+    // backpressure as a protocol failure or discarding its continuation.
+    async fn pull_custody_page(
+        node: &std::sync::Arc<Node>,
+        peer: &crate::discovery::roster::PeerRecord,
+        cursor: &mut sync::DocumentSyncCursor,
+    ) {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(retry_at) = cursor.retry_at {
+                    tokio::time::sleep_until(retry_at.into()).await;
+                }
+                match node.pull_account_documents_page(peer, cursor).await {
+                    Ok(()) if !cursor.admission_deferred() => return,
+                    Ok(()) => {}
+                    Err(error) => {
+                        assert!(
+                            super::super::account_sync::local_sync_capacity_busy(&error),
+                            "custody page protocol exchange failed: {error}"
+                        );
+                    }
+                }
+                assert!(cursor.admission_deferred());
+                assert!(cursor.retry_at.is_some());
+            }
+        })
+        .await
+        .expect("custody page must recover from local admission within eight seconds");
+    }
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let other = Account::generate();
@@ -284,10 +314,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         );
         let source_peer = sibling.routing_peer(&a.user_id()).unwrap();
         let mut cursor = custody_cursor();
-        sibling
-            .pull_account_documents_page(&source_peer, &mut cursor)
-            .await
-            .unwrap();
+        pull_custody_page(&sibling, &source_peer, &mut cursor).await;
         assert_eq!(
             sibling.channel_custody_count(channel, event),
             Some(0),
@@ -297,10 +324,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .set_device_sync_category(SyncCategory::History, true)
             .unwrap();
         let mut cursor = custody_cursor();
-        sibling
-            .pull_account_documents_page(&source_peer, &mut cursor)
-            .await
-            .unwrap();
+        pull_custody_page(&sibling, &source_peer, &mut cursor).await;
         assert_eq!(
             sibling.channel_custody_count(channel, event),
             Some(1),
@@ -349,10 +373,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         assert_eq!(a.channel_custody_count(channel, event), Some(0));
         let negative_version = a.account_document_meta(&held.key).unwrap().version();
         let mut cursor = custody_cursor();
-        sibling
-            .pull_account_documents_page(&source_peer, &mut cursor)
-            .await
-            .unwrap();
+        pull_custody_page(&sibling, &source_peer, &mut cursor).await;
         assert_eq!(
             a.channel_custody_count(channel, event),
             Some(0),
@@ -440,10 +461,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             lost.list_channels()
         );
         let mut cursor = custody_cursor();
-        sibling
-            .pull_account_documents_page(&source_peer, &mut cursor)
-            .await
-            .unwrap();
+        pull_custody_page(&sibling, &source_peer, &mut cursor).await;
         assert_eq!(sibling.channel_custody_count(channel, event), Some(1));
         final_expected = 1;
         lost.runtime_work.close();

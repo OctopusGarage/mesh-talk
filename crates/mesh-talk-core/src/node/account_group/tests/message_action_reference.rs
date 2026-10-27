@@ -262,6 +262,170 @@ pub(super) async fn pull_reference_action_control(
     });
 }
 
+// Keep simulated remote devices on their own reactor/scheduling thread while
+// B retains its current-thread capability override + synchronous admission seam.
+pub(super) struct ActionPeerRuntime {
+    launch: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    handle: tokio::runtime::Handle,
+}
+impl ActionPeerRuntime {
+    pub(super) async fn start(node: Arc<Node>, listener: TcpListener) -> Self {
+        let listener = listener.into_std().unwrap();
+        let (shutdown, mut stopped) = tokio::sync::oneshot::channel();
+        let (launch, launched) = tokio::sync::oneshot::channel();
+        let (ready, ready_rx) = tokio::sync::oneshot::channel();
+        let thread = std::thread::Builder::new()
+            .name("account-action-peer".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let listener = TcpListener::from_std(listener).unwrap();
+                    ready.send(tokio::runtime::Handle::current()).unwrap();
+                    let launched = tokio::select! {
+                        _ = &mut stopped => false,
+                        result = launched => result.is_ok(),
+                    };
+                    let task = if launched {
+                        let task = tokio::spawn(node.clone().run_accept_loop(listener));
+                        let _ = stopped.await;
+                        Some(task)
+                    } else {
+                        None
+                    };
+                    node.runtime_work.close();
+                    if let Some(task) = task {
+                        task.abort();
+                        if let Err(error) = task.await {
+                            assert!(
+                                error.is_cancelled(),
+                                "owned peer server failed before shutdown"
+                            );
+                        }
+                    }
+                    node.sessions.clear();
+                    node.runtime_work.drain().await;
+                });
+            })
+            .unwrap();
+        Self {
+            launch: Some(launch),
+            shutdown: Some(shutdown),
+            thread: Some(thread),
+            handle: ready_rx.await.unwrap(),
+        }
+    }
+    pub(super) fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.handle.clone()
+    }
+    pub(super) fn launch(&mut self) {
+        self.launch.take().unwrap().send(()).unwrap();
+    }
+    pub(super) async fn stop(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let thread = self.thread.take().unwrap();
+        let joined = tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .unwrap();
+        assert!(
+            joined.is_ok(),
+            "owned peer runtime must finish its shutdown and writer drain"
+        );
+    }
+}
+impl Drop for ActionPeerRuntime {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let joined = thread.join();
+            if !std::thread::panicking() {
+                assert!(joined.is_ok(), "owned peer runtime failed during cleanup");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn independent_action_peer_runtime_joins_accepted_connections_and_admitted_writers() {
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&directory.path().join("source"), &account);
+    let reference = node(&directory.path().join("reference"), &account);
+    link(&source, &reference);
+    link(&reference, &source);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(&source, &directory.path().join("source"), address.port());
+    configure(&reference, &directory.path().join("reference"), 1);
+    source.roster.lock().unwrap().update(
+        &reference.signed_announce("fixture reference", 1),
+        address.ip(),
+        &source.user_id(),
+    );
+    reference.roster.lock().unwrap().update(
+        &source.signed_announce("fixture source", address.port()),
+        address.ip(),
+        &reference.user_id(),
+    );
+    let mut owner = ActionPeerRuntime::start(source.clone(), listener).await;
+    owner.launch();
+    let peer_thread = owner
+        .handle
+        .spawn(async { std::thread::current().id() })
+        .await
+        .unwrap();
+    assert_ne!(peer_thread, std::thread::current().id());
+    let channel = reference
+        .privacy_sync_dial(address, &source.identity.public())
+        .await
+        .unwrap();
+    assert_eq!(channel.peer_identity(), &source.identity.public());
+    let (entered, entered_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let written = completed.clone();
+    let writer_node = source.clone();
+    let writer = owner.handle.spawn(async move {
+        writer_node
+            .account_blocking(move |_| {
+                entered.send(()).unwrap();
+                release_rx.recv().unwrap();
+                written.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            })
+            .await
+    });
+    entered_rx.await.unwrap();
+    let mut stopping = tokio::spawn(owner.stop());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut stopping)
+            .await
+            .is_err(),
+        "stop must retain the peer runtime while an admitted blocking writer remains active"
+    );
+    assert!(source.runtime_work.is_closed());
+    release.send(()).unwrap();
+    stopping.await.unwrap();
+    assert!(completed.load(std::sync::atomic::Ordering::Acquire));
+    match writer.await {
+        Ok(result) => result.unwrap(),
+        Err(error) => assert!(
+            error.is_cancelled(),
+            "retirement may cancel the waiter, never conceal a writer panic"
+        ),
+    }
+    source.runtime_work.drain().await;
+    drop(channel);
+}
+
 async fn reference_message_action(recall: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
@@ -450,9 +614,33 @@ async fn reference_message_action(recall: bool) {
             }
         });
     }
+    let mut peer_runtimes = Vec::new();
+    let mut external_runtime = None;
+    let mut reference_launch = None;
     for (target, listener) in nodes.into_iter().zip(listeners) {
-        tasks.spawn(target.clone().run_accept_loop(listener));
+        if target.user_id() != reference.user_id() {
+            let runtime = ActionPeerRuntime::start(target.clone(), listener).await;
+            if target.user_id() == external.user_id() {
+                external_runtime = Some(runtime.handle.clone());
+            }
+            peer_runtimes.push(runtime);
+        } else {
+            let (launch, launched) = tokio::sync::oneshot::channel();
+            let target = target.clone();
+            tasks.spawn(async move {
+                launched.await.unwrap();
+                Box::pin(target.run_accept_loop(listener)).await;
+            });
+            reference_launch = Some(launch);
+        }
     }
+    for runtime in &mut peer_runtimes {
+        runtime.launch();
+    }
+    if let Some(launch) = reference_launch {
+        launch.send(()).unwrap();
+    }
+    let external_runtime = external_runtime.expect("the external peer owns its runtime");
     source.publish_account_group_access(&mut None);
     pull_reference_action_control(&reference, &source, addresses[0], group).await;
     assert_eq!(
@@ -772,19 +960,24 @@ async fn reference_message_action(recall: bool) {
         // Private commitment is independent of optional history and background
         // public fanout. Exercise authenticated public receipt as its own seam;
         // never install the source event or plaintext directly in the receiver.
-        let peer = external.routing_peer(&selected.user_id()).unwrap();
-        assert_eq!(peer.public, selected.identity.public());
-        let mut connection = external
-            .privacy_sync_dial(peer.addr, &peer.public)
-            .await
-            .expect("the accepted external member must authenticate the original executor");
-        let store = external.pull_sync_store(connection.peer_identity());
-        super::super::super::session::request_round(&mut connection, &store, group)
-            .await
-            .expect("the normal authorized public sync must deliver the original event");
-        drop(store);
-        external.recycle_sync_channel(connection);
-        external.emit_new_messages(group);
+        let observing = external.clone();
+        let selected_public = selected.identity.public();
+        let public_receipt = async move {
+            let peer = observing.routing_peer(&selected_public.user_id()).unwrap();
+            assert_eq!(peer.public, selected_public);
+            let mut connection = observing
+                .privacy_sync_dial(peer.addr, &peer.public)
+                .await
+                .expect("the accepted external member must authenticate the original executor");
+            let store = observing.pull_sync_store(connection.peer_identity());
+            super::super::super::session::request_round(&mut connection, &store, group)
+                .await
+                .expect("the normal authorized public sync must deliver the original event");
+            drop(store);
+            observing.recycle_sync_channel(connection);
+            observing.emit_new_messages(group);
+        };
+        external_runtime.spawn(public_receipt).await.unwrap();
         effect_ids.push(effect_id);
         assert_eq!(status.id, id);
         assert_eq!(status.committed_events, vec![effect_id]);
@@ -940,7 +1133,13 @@ async fn reference_message_action(recall: bool) {
             }
         }
     }
+    reference.runtime_work.close();
     tasks.shutdown().await;
+    reference.sessions.clear();
+    reference.runtime_work.drain().await;
+    for runtime in peer_runtimes {
+        runtime.stop().await;
+    }
 }
 
 // Admission temporarily overrides cached support without awaiting. A single

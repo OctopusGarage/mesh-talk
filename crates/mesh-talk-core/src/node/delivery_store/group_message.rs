@@ -318,6 +318,52 @@ mod tests {
     }
 
     #[test]
+    fn typed_group_message_payload_limit_includes_exact_boundary() {
+        for kind in [
+            AccountGroupOperationKind::Text,
+            AccountGroupOperationKind::Sticker,
+        ] {
+            for offset in [-1isize, 0, 1] {
+                let f = fixture(kind);
+                let DeliveryTransaction::ChannelOutgoing { sent, events, .. } = f.tx.body() else {
+                    unreachable!()
+                };
+                assert!(
+                    events
+                        .iter()
+                        .all(|event| event.verify_integrity() && event.verify_signature())
+                );
+                let payload_len = sent.plaintext.len();
+                assert!(payload_len > 0);
+                let mut store = store(&f);
+                store.limits.payload_bytes = payload_len.checked_add_signed(offset).unwrap();
+                let request_id = f.tx.request().unwrap().request_id;
+                let id = f.tx.id();
+                assert!(store.pending_transactions().is_empty());
+                assert!(store.request(&request_id).is_none());
+                let accepted = store.begin(f.tx);
+                if offset < 0 {
+                    assert!(
+                        accepted.is_err(),
+                        "an over-limit typed payload must fail before WAL reservation"
+                    );
+                    assert!(store.pending_transactions().is_empty());
+                    assert!(store.request(&request_id).is_none());
+                } else {
+                    assert_eq!(
+                        accepted.unwrap(),
+                        id,
+                        "the exact payload boundary remains inclusive"
+                    );
+                    assert_eq!(store.pending_transactions().len(), 1);
+                    assert_eq!(store.pending_transactions()[0].id(), id);
+                    assert_eq!(store.request(&request_id).unwrap().message_id, id);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn typed_sticker_enters_original_requested_sender_wal() {
         let f = fixture(AccountGroupOperationKind::Sticker);
         let mut store = store(&f);

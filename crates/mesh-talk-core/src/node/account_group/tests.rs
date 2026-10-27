@@ -1393,12 +1393,38 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
     }
     // The first scheduler tick must see the real listening routes. This is
     // setup, distinct from the action's unchanged eight-second deadline.
+    let mut peer_runtimes = Vec::new();
+    let mut reference_launch = None;
+    let mut external_runtime = None;
     for (target, listener) in [&owner, &member, &reference, &external]
         .into_iter()
         .zip(listeners)
     {
-        servers.spawn(target.clone().run_accept_loop(listener));
+        if target.user_id() != reference.user_id() {
+            let runtime =
+                message_action_reference::ActionPeerRuntime::start(target.clone(), listener).await;
+            if target.user_id() == external.user_id() {
+                external_runtime = Some(runtime.runtime_handle());
+            }
+            peer_runtimes.push(runtime);
+        } else {
+            let (launch, launched) = tokio::sync::oneshot::channel();
+            let target = target.clone();
+            servers.spawn(async move {
+                launched.await.unwrap();
+                Box::pin(target.run_accept_loop(listener)).await;
+            });
+            reference_launch = Some(launch);
+        }
     }
+    for runtime in &mut peer_runtimes {
+        runtime.launch();
+    }
+    if let Some(launch) = reference_launch {
+        launch.send(()).unwrap();
+    }
+    let external_runtime =
+        external_runtime.expect("the external owner-rename peer owns its runtime");
     owner.publish_account_group_access(&mut None);
     pull_group_control(&reference, &owner, addresses[0], genesis.conversation_id).await;
     pull_group_control(&member, &owner, addresses[0], genesis.conversation_id).await;
@@ -1448,6 +1474,7 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
         submitted.committed_events.is_empty(),
         "source acceptance is not a fabricated public EventId"
     );
+    let private_started = std::time::Instant::now();
     let committed = tokio::time::timeout(std::time::Duration::from_secs(8), async {
         loop {
             let status = reference
@@ -1487,23 +1514,32 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
             reference.group_operation_versions.lock().unwrap().contains_key(&owner.user_id()),
             owner.group_operation_versions.lock().unwrap().contains_key(&reference.user_id()));
     });
+    eprintln!(
+        "owner rename private receipt elapsed_ms={}",
+        private_started.elapsed().as_millis()
+    );
     // Durable private commitment does not certify public fanout or directory
     // arrival. Observe those through their existing authenticated owners after
     // the original eight-second private request/result barrier has completed.
     tokio::time::timeout(std::time::Duration::from_secs(8), async {
-        let peer = external.routing_peer(&owner.user_id()).unwrap();
-        assert_eq!(peer.public, owner.identity.public());
-        let mut connection = external
-            .privacy_sync_dial(peer.addr, &peer.public)
-            .await
-            .expect("the real external member must authenticate the original owner");
-        let store = external.pull_sync_store(connection.peer_identity());
-        crate::node::session::request_round(&mut connection, &store, group)
-            .await
-            .expect("authorized public sync must retain the original owner rename");
-        drop(store);
-        external.recycle_sync_channel(connection);
-        external.emit_new_messages(group);
+        let observing = external.clone();
+        let owner_public = owner.identity.public();
+        let public_receipt = async move {
+            let peer = observing.routing_peer(&owner_public.user_id()).unwrap();
+            assert_eq!(peer.public, owner_public);
+            let mut connection = observing
+                .privacy_sync_dial(peer.addr, &peer.public)
+                .await
+                .expect("the real external member must authenticate the original owner");
+            let store = observing.pull_sync_store(connection.peer_identity());
+            crate::node::session::request_round(&mut connection, &store, group)
+                .await
+                .expect("authorized public sync must retain the original owner rename");
+            drop(store);
+            observing.recycle_sync_channel(connection);
+            observing.emit_new_messages(group);
+        };
+        external_runtime.spawn(public_receipt).await.unwrap();
         loop {
             if reference
                 .channel_shared_reference(group)
@@ -1556,8 +1592,14 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
         reference.channel_members(group).is_empty(),
         "delegation cannot install a public membership grant"
     );
+    reference.runtime_work.close();
     servers.abort_all();
     while servers.join_next().await.is_some() {}
+    reference.sessions.clear();
+    reference.runtime_work.drain().await;
+    for runtime in peer_runtimes {
+        runtime.stop().await;
+    }
 }
 
 #[test]

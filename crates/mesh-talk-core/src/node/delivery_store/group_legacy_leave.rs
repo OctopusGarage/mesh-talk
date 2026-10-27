@@ -280,6 +280,45 @@ mod tests {
     }
 
     #[test]
+    fn legacy_departure_rejects_recipient_mismatch_without_epoch_overflow() {
+        let (reference, witness, event, parents) = fixture(false);
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("events"), "pw").unwrap();
+        for parent in parents {
+            assert!(parent.verify_integrity() && parent.verify_signature());
+            log.append_durable(parent).unwrap();
+        }
+        let projection = ChannelBook::project_membership(
+            event.conversation_id,
+            &log.events(&event.conversation_id),
+        );
+        assert!(
+            projection
+                .state
+                .as_ref()
+                .unwrap()
+                .epoch()
+                .checked_add(1)
+                .is_some()
+        );
+        assert!(validate_common(Some(&reference), &witness, &event).is_ok());
+        assert_eq!(
+            validate_parent_view(Some(&reference), &witness, &event, &log).unwrap(),
+            witness.recipients,
+        );
+        let mut missing_recipient = witness.clone();
+        assert!(missing_recipient.recipients.pop().is_some());
+        // The original signed request, departure and causal parents still match;
+        // the saved audience alone differs from canonical physical membership.
+        assert!(validate_common(Some(&reference), &missing_recipient, &event).is_ok());
+        assert!(
+            expected_legacy_member_leave(event.conversation_id, &projection, &missing_recipient)
+                .is_err()
+        );
+        assert!(validate_parent_view(Some(&reference), &missing_recipient, &event, &log).is_err());
+    }
+
+    #[test]
     fn legacy_departure_allows_other_departure_epoch_drift_but_not_reinvitation() {
         let member = DeviceIdentity::generate();
         let owner = DeviceIdentity::generate();

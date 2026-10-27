@@ -314,6 +314,47 @@ mod tests {
         assert!(DocumentRequest::decode(&serde_json::to_vec(&body).unwrap()).is_none());
     }
     #[test]
+    fn personal_continuation_requires_v7_without_rejecting_legacy_role_continuations() {
+        let mut request = DocumentRequest {
+            version: 5,
+            account_id: "a".repeat(32),
+            domain: AccountDocumentDomain::GroupControl,
+            after: Some(AccountDocumentKey::GroupControl {
+                channel: "b".repeat(64),
+                source_device: "c".repeat(32),
+            }),
+            known_digest: [0; 32],
+            operation: Some(OperationProbe {
+                version: 1,
+                nonce: [7; 32],
+                after: None,
+                known_digest: [0; 32],
+                asset: None,
+                legacy_leave: false,
+                personal: true,
+            }),
+        };
+        let legacy = request.encode();
+        assert_eq!(DocumentRequest::decode(&legacy).unwrap().encode(), legacy);
+        request.after = Some(AccountDocumentKey::ConversationPersonal {
+            conversation: DocumentConversation::Account("d".repeat(32)),
+            action_id: "e".repeat(64),
+        });
+        assert!(request.after.as_ref().unwrap().valid());
+        assert!(request.operation.as_ref().unwrap().supported());
+        assert!(
+            DocumentRequest::decode(&request.encode()).is_none(),
+            "a personal probe cannot upgrade a v5 continuation's permitted key scope",
+        );
+        request.version = 7;
+        let personal = request.encode();
+        let decoded = DocumentRequest::decode(&personal)
+            .expect("v7 with supported personal capability must retain its personal continuation");
+        assert_eq!(decoded.after, request.after);
+        assert_eq!(decoded.encode(), personal);
+    }
+
+    #[test]
     fn execution_asset_request_keeps_its_bytes_when_result_mode_is_absent() {
         #[derive(Serialize)]
         struct LegacyAsset {
