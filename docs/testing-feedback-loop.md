@@ -151,6 +151,14 @@ Private account-action fixtures follow the [account/device ownership contract](m
 
 Role-bootstrap helpers bind readiness to the requested group, the exact full source identity and a signed head floor captured when invoked. If none exists yet, pin the first non-tombstone source head observed within the same setup deadline. Accept that exact metadata or a strictly newer signed revision for the same key and full source; reject older, tombstoned or same-revision conflicting records. A later concurrent publication must not move an already satisfied snapshot barrier. Helpers may observe that durable role through the existing local document watch while an unrelated page tail remains in flight. A prior completed capability response for the exact full source identity is required before cancelling that redundant read. Preserve the setup deadline, current-binding validation and completed protocol-error checks; an incomplete first capability page cannot establish readiness.
 
+Pagination fixtures distinguish a completed comparison sweep from a settled full
+scope. A selected signed row can advance after its completion digest was captured;
+`pending == false` alone does not prove `up_to_date`. Start a fresh comparison
+through the existing cursor owner after a completed mismatch, retain partial
+continuations and the original total pull bound, and require both full settlement
+and the complete exact source metadata set. Failure diagnostics should report
+body-free cursor flags and metadata-class differences rather than message bodies.
+
 ## Change-aware development plans
 
 Use the affected-test planner during development:

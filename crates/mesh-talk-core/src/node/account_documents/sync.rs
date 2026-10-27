@@ -2682,6 +2682,204 @@ mod group_control_tests {
         assert_eq!(repeated_roles.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
+    fn control_scope_metadata(node: &Node) -> Vec<AccountDocumentMeta> {
+        let store = node.account_documents.lock().unwrap();
+        let mut rows = Vec::new();
+        loop {
+            let page = store.list_exchange_scope(
+                AccountDocumentDomain::GroupControl,
+                rows.last().map(|meta: &AccountDocumentMeta| &meta.key),
+                64,
+                true,
+                true,
+                true,
+            );
+            if page.is_empty() {
+                return rows;
+            }
+            rows.extend(page);
+        }
+    }
+    fn control_scope_differences(source: &Node, target: &Node) -> [[usize; 4]; 3] {
+        let source = control_scope_metadata(source);
+        let target = control_scope_metadata(target);
+        let class = |key: &AccountDocumentKey| match key {
+            AccountDocumentKey::GroupControl { .. } => 0,
+            AccountDocumentKey::GroupOperation { .. } => 1,
+            AccountDocumentKey::GroupLegacyOperation { .. } => 2,
+            AccountDocumentKey::ConversationPersonal { .. } => 3,
+            _ => unreachable!("the negotiated control scope contains only its four key classes"),
+        };
+        let mut differences = [[0; 4]; 3];
+        for meta in &source {
+            match target.iter().find(|other| other.key == meta.key) {
+                None => differences[0][class(&meta.key)] += 1,
+                Some(other) if other != meta => differences[2][class(&meta.key)] += 1,
+                _ => {}
+            }
+        }
+        for meta in &target {
+            if !source.iter().any(|other| other.key == meta.key) {
+                differences[1][class(&meta.key)] += 1;
+            }
+        }
+        differences
+    }
+    async fn repair_control_scope(
+        target: &Arc<Node>,
+        peer: &PeerRecord,
+        mut cursor: DocumentSyncCursor,
+    ) -> (DocumentSyncCursor, usize) {
+        let mut completed_unsettled = 0;
+        for _ in 0..16 {
+            if !cursor.pending && !cursor.up_to_date {
+                assert!(
+                    cursor.begin_refresh(),
+                    "only a completed scope starts a fresh comparison"
+                );
+            }
+            target
+                .pull_account_documents_page(peer, &mut cursor)
+                .await
+                .unwrap();
+            if !cursor.pending && cursor.up_to_date {
+                break;
+            }
+            if !cursor.pending {
+                completed_unsettled += 1;
+            }
+        }
+        (cursor, completed_unsettled)
+    }
+    fn assert_control_scope_settled(source: &Node, target: &Node, cursor: &DocumentSyncCursor) {
+        assert!(
+            !cursor.pending && cursor.up_to_date && cursor.after.is_none(),
+            "repair must finish a fully settled scope: pending={} after={} settled={} visited={} up_to_date={} error={} deferred={} retry={} group_upgrade={} personal_upgrade={} differences(source-only,target-only,changed;role,operation,legacy,personal)={:?}",
+            cursor.pending,
+            cursor.after.is_some(),
+            cursor.settled,
+            cursor.visited,
+            cursor.up_to_date,
+            cursor.error.is_some(),
+            cursor.admission_deferred,
+            cursor.retry_at.is_some(),
+            cursor.group_upgrade,
+            cursor.personal_upgrade,
+            control_scope_differences(source, target),
+        );
+        assert!(
+            control_scope_metadata(source) == control_scope_metadata(target),
+            "settled repair must retain the complete exact source metadata set"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot() {
+        let mut fixture = UpgradeFixture::new().await;
+        let first = fixture
+            .source
+            .create_channel("first snapshot role", vec![])
+            .await
+            .unwrap();
+        let second = fixture
+            .source
+            .create_channel("second snapshot role", vec![])
+            .await
+            .unwrap();
+        fixture
+            .source
+            .maintain_account_channels(
+                &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
+            )
+            .await;
+        fixture.source.publish_account_group_access(&mut None);
+        let (cursor, _) = repair_control_scope(
+            &fixture.target,
+            &fixture.peer,
+            DocumentSyncCursor::control(),
+        )
+        .await;
+        assert!(
+            !cursor.pending && cursor.up_to_date && cursor.after.is_none(),
+            "fixture warmup must settle before controlled source growth"
+        );
+        assert!(
+            control_scope_metadata(&fixture.source) == control_scope_metadata(&fixture.target),
+            "fixture warmup must contain the exact source metadata before controlled growth"
+        );
+        let rows = control_scope_metadata(&fixture.source);
+        assert_eq!(rows.len(), 2);
+        let first_key = rows[0].key.clone();
+        let lower = if matches!(&first_key, AccountDocumentKey::GroupControl { channel, .. } if *channel == hex::encode(first.as_bytes()))
+        {
+            first
+        } else {
+            second
+        };
+        let higher = if lower == first { second } else { first };
+        fixture.source.dissolve_channel(lower).await.unwrap();
+        fixture.source.publish_account_group_access_for(lower);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let entered_tx = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+        let release_rx = Arc::new(std::sync::Mutex::new(Some(release_rx)));
+        let exact_peer = fixture.target.identity.public();
+        *fixture.source.account_session_test_hook.lock().unwrap() =
+            Some(Arc::new(move |peer, frame| {
+                let first_key = first_key.clone();
+                let entered_tx = entered_tx.clone();
+                let release_rx = release_rx.clone();
+                let exact_peer = exact_peer.clone();
+                Box::pin(async move {
+                    if peer != exact_peer {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentHeader { body } = frame else {
+                        return;
+                    };
+                    let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                    if meta.key != first_key {
+                        return;
+                    }
+                    let entered = entered_tx.lock().unwrap().take();
+                    if let Some(entered) = entered {
+                        entered.send(()).unwrap();
+                        let release = release_rx.lock().unwrap().take().unwrap();
+                        release.await.unwrap();
+                    }
+                })
+            }));
+        let source_before = control_scope_metadata(&fixture.source);
+        let target = fixture.target.clone();
+        let peer = fixture.peer.clone();
+        let mut cursor = cursor;
+        assert!(cursor.begin_refresh());
+        let pulling =
+            tokio::spawn(async move { repair_control_scope(&target, &peer, cursor).await });
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        fixture.source.dissolve_channel(higher).await.unwrap();
+        fixture.source.publish_account_group_access_for(higher);
+        assert!(
+            control_scope_metadata(&fixture.source) != source_before,
+            "the real signed source role must advance after the page snapshot"
+        );
+        release_tx.send(()).unwrap();
+        let (cursor, completed_unsettled) = tokio::time::timeout(Duration::from_secs(5), pulling)
+            .await
+            .unwrap()
+            .unwrap();
+        *fixture.source.account_session_test_hook.lock().unwrap() = None;
+        fixture.servers.shutdown().await;
+        assert!(
+            completed_unsettled > 0,
+            "the controlled publication must exercise a completed but unsettled scope before fresh repair"
+        );
+        assert_control_scope_settled(&fixture.source, &fixture.target, &cursor);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages() {
         use crate::eventlog::ConversationId;
@@ -2854,23 +3052,16 @@ mod group_control_tests {
                 .keys()
                 .any(|key| matches!(key, AccountDocumentKey::ConversationPersonal { .. }))
         );
-        for _ in 0..16 {
-            fixture
-                .target
-                .pull_account_documents_page(&fixture.peer, &mut cursor)
-                .await
-                .unwrap();
-            if !cursor.pending {
-                break;
-            }
-        }
+        (cursor, _) = repair_control_scope(&fixture.target, &fixture.peer, cursor).await;
+        assert_control_scope_settled(&fixture.source, &fixture.target, &cursor);
+        let current_added = fixture.source.account_document_meta(&added_key).unwrap();
         assert!(
-            !cursor.pending && cursor.up_to_date && cursor.after.is_none(),
-            "repair must finish without an empty continuation loop"
+            current_added.revision >= added_meta.revision,
+            "repair must retain the role introduced behind the continuation"
         );
-        assert_eq!(
-            fixture.target.account_document_meta(&added_key).as_ref(),
-            Some(&added_meta)
+        assert!(
+            fixture.target.account_document_meta(&added_key).as_ref() == Some(&current_added),
+            "repair must retain the exact current signed source role"
         );
         assert!(
             operation_keys

@@ -377,7 +377,8 @@
             "late_group_clear_preserves_only_fresh_lifetime_ancestry",
             "known_role_digest_does_not_block_a_new_terminal_result_behind_repeated_role_headers",
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
-            "access_only_v5_keeps_its_role_scope_when_operation_rows_exist"
+            "access_only_v5_keeps_its_role_scope_when_operation_rows_exist",
+            "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot"
           ]
         }
       ],
