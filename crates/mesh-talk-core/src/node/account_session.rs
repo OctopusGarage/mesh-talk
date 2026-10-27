@@ -186,6 +186,10 @@ impl Node {
             _ => false,
         };
         for fresh in [false, true] {
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || {
+                format!("session_checkout_begin fresh={fresh}")
+            });
             let pooled = if fresh {
                 None
             } else {
@@ -194,6 +198,10 @@ impl Node {
                     .map_err(transport)?
             };
             let reused = pooled.is_some();
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || {
+                format!("session_checkout_end reused={reused}")
+            });
             let mut channel = match pooled {
                 Some(channel) => channel,
                 None => self
@@ -201,6 +209,8 @@ impl Node {
                     .await
                     .map_err(transport)?,
             };
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || "session_channel_ready".into());
             let key = self.peer_endpoint_key(
                 channel
                     .tcp_peer_addr()
@@ -221,6 +231,8 @@ impl Node {
                 rand_core::OsRng.fill_bytes(&mut request_id);
             }
             let opening = async {
+                #[cfg(test)]
+                self.trace_account_client(&peer.public, || "session_request_send_begin".into());
                 send(
                     &mut channel,
                     AccountSyncVersion::V2,
@@ -230,9 +242,17 @@ impl Node {
                     },
                 )
                 .await?;
+                #[cfg(test)]
+                self.trace_account_client(&peer.public, || {
+                    "session_request_send_end_ready_wait".into()
+                });
                 channel.recv().await
             }
             .await;
+            #[cfg(test)]
+            self.trace_account_client(&peer.public, || {
+                format!("session_ready_wait_end ok={}", opening.is_ok())
+            });
             match opening {
                 Ok(bytes) => {
                     if !matches!(AccountHistoryFrame::decode_versioned(&bytes), Some((AccountSyncVersion::V2, AccountHistoryFrame::SessionReady { request_id: echoed })) if echoed == request_id)

@@ -477,6 +477,15 @@ running all scenarios. Portable/native scenarios and snapshot assertions remain
 in place. Sharding trades more concurrent runner slots and setup work for shorter
 elapsed time; account concurrency limits can reduce the gain.
 
+Disposable GitHub-hosted Ubuntu browser and native UI runners prepare their APT
+sources before dependency installation. `scripts/ci/ubuntu-apt-source.mjs` replaces
+only the exact Azure Ubuntu archive URI with the official HTTPS Ubuntu archive;
+it preserves suites, components, signing keys, security repositories and other
+origins. The helper rejects other host environments and unsupported Azure URIs,
+validates all candidate files before writing, and preserves file ownership and
+permissions. This avoids a slow runner-image mirror consuming the existing job
+budget; browser workers, retries, test inventories and deadlines are unchanged.
+
 Windows full-regression runners expand the IPv4 TCP client port pool to
 10000–65534 before browser execution. Repeated fresh contexts load Vite's module
 graph over loopback; the default 16K pool can exhaust while closed connections

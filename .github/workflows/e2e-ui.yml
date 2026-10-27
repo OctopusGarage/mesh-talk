@@ -50,6 +50,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
       # Fresh browser contexts repeatedly load Vite's module graph. Windows'
@@ -244,6 +248,10 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
       - run: npx playwright install --with-deps chromium
       - name: Verify desktop build has no bundled packs
         run: npm run build && node ../scripts/release/check-variant-assets.mjs
@@ -293,6 +301,10 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
       - run: npx playwright install --with-deps ${{ matrix.browser }}
       # Portable workflows load the same Vite module graph as the full UI suite.
       # Preserve its Windows client-port budget here as well; the server's
@@ -347,6 +359,10 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
       - run: npx playwright install --with-deps firefox
       - run: node ../scripts/evals/portable-runner.mjs
         env:

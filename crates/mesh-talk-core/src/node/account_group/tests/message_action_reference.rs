@@ -45,42 +45,63 @@ async fn wait_action_fixture_diagnosed(
     .unwrap_or_else(|_| panic!("{}", diagnosis()));
 }
 
+#[derive(Debug, Default)]
+struct RoleBootstrapDiagnostics {
+    // Binding, access capability, operation capability, absent source, metadata,
+    // and decoded exact-source role failures. All fields are body-free.
+    rejected: [usize; 6],
+    captured_source_revision: Option<u64>,
+    observed_revisions: std::collections::VecDeque<(Option<u64>, Option<u64>)>,
+}
+
 fn authenticated_source_role_ready(
     target: &Node,
     source: &Node,
     group: crate::eventlog::ConversationId,
+    diagnosis: &mut RoleBootstrapDiagnostics,
 ) -> bool {
     let public = source.identity.public();
-    if !target.certified_sibling(&public)
-        || !target
-            .account_group_versions
-            .lock()
-            .unwrap()
-            .get(&source.user_id())
-            .is_some_and(|support| support.public == public)
-        || !target
-            .group_operation_versions
-            .lock()
-            .unwrap()
-            .get(&source.user_id())
-            .is_some_and(|support| support.public == public)
-    {
-        return false;
-    }
     let key = crate::node::AccountDocumentKey::GroupControl {
         channel: hex::encode(group.as_bytes()),
         source_device: source.user_id(),
     };
-    let Some(expected) = source
+    let expected = source
         .account_document_meta(&key)
-        .filter(|meta| !meta.tombstone)
-    else {
-        return false;
-    };
-    if target.account_document_meta(&key).as_ref() != Some(&expected) {
-        return false;
+        .filter(|meta| !meta.tombstone);
+    let actual = target.account_document_meta(&key);
+    let revisions = (
+        expected.as_ref().map(|meta| meta.revision),
+        actual.as_ref().map(|meta| meta.revision),
+    );
+    if diagnosis.observed_revisions.back() != Some(&revisions) {
+        if diagnosis.observed_revisions.len() == 16 {
+            diagnosis.observed_revisions.pop_front();
+        }
+        diagnosis.observed_revisions.push_back(revisions);
     }
-    target
+    let rejected = if !target.certified_sibling(&public) {
+        Some(0)
+    } else if !target
+        .account_group_versions
+        .lock()
+        .unwrap()
+        .get(&source.user_id())
+        .is_some_and(|support| support.public == public)
+    {
+        Some(1)
+    } else if !target
+        .group_operation_versions
+        .lock()
+        .unwrap()
+        .get(&source.user_id())
+        .is_some_and(|support| support.public == public)
+    {
+        Some(2)
+    } else if expected.is_none() {
+        Some(3)
+    } else if actual != expected {
+        Some(4)
+    } else if !target
         .account_document(&key)
         .unwrap()
         .is_some_and(|document| {
@@ -94,6 +115,17 @@ fn authenticated_source_role_ready(
                     && target.account_group_binding_current(&head.proof)
             })
         })
+    {
+        Some(5)
+    } else {
+        None
+    };
+    if let Some(reason) = rejected {
+        diagnosis.rejected[reason] += 1;
+        false
+    } else {
+        true
+    }
 }
 
 /// Role-page publication can invalidate the authenticated page mid-transfer.
@@ -121,7 +153,15 @@ pub(super) async fn pull_reference_action_control(
     let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::control();
     let mut interruptions = 0;
     let mut updates = target.subscribe_account_documents();
-    if authenticated_source_role_ready(target, source, group) {
+    let key = crate::node::AccountDocumentKey::GroupControl {
+        channel: hex::encode(group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let mut diagnosis = RoleBootstrapDiagnostics {
+        captured_source_revision: source.account_document_meta(&key).map(|meta| meta.revision),
+        ..Default::default()
+    };
+    if authenticated_source_role_ready(target, source, group, &mut diagnosis) {
         return;
     }
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -135,7 +175,7 @@ pub(super) async fn pull_reference_action_control(
                         result = &mut pull => break result,
                         changed = updates.changed() => {
                             assert!(changed.is_ok(), "the local document observer must remain live");
-                            if authenticated_source_role_ready(target,source,group) {return;}
+                            if authenticated_source_role_ready(target,source,group, &mut diagnosis) {return;}
                         }
                     }
                 }
@@ -146,7 +186,7 @@ pub(super) async fn pull_reference_action_control(
                         cursor.error.is_none() && !cursor.requires_upgrade,
                         "control bootstrap must not hide a protocol error or capability rejection"
                     );
-                    if authenticated_source_role_ready(target,source,group) { break; }
+                    if authenticated_source_role_ready(target,source,group, &mut diagnosis) { break; }
                     // A GroupControl interruption may leave a private 100ms
                     // domain cooldown while another mandatory domain succeeds.
                     // That success does not prove this source's role row arrived.
@@ -190,9 +230,10 @@ pub(super) async fn pull_reference_action_control(
         }
     })
     .await
-    .expect(
-        "the exact authenticated source GroupControl row must arrive within the bootstrap budget",
-    );
+    .unwrap_or_else(|_| {
+        panic!("the exact authenticated source GroupControl row must arrive within the bootstrap budget: captured_source_revision={:?}, rejected={:?}, observed_revisions={:?}",
+            diagnosis.captured_source_revision, diagnosis.rejected, diagnosis.observed_revisions);
+    });
 }
 
 async fn reference_message_action(recall: bool) {

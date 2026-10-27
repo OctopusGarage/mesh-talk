@@ -1252,7 +1252,11 @@ impl Node {
         addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
         #[cfg(test)]
         timing.phase("dial-privacy-gate");
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_privacy_gate_wait".into());
         let _operation = self.privacy.gate.read().await;
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_privacy_gate_acquired".into());
         let own = self.own_presence();
         let transitions = self.own_account_transitions();
         #[cfg(test)]
@@ -1269,6 +1273,8 @@ impl Node {
         {
             return Err(TransportError::AdmissionDenied);
         }
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_policy_admitted".into());
         let candidates = self.privacy_route_candidates(addr, expected, announce.as_ref());
         // A departed LAN endpoint may still accept TCP through a proxy/TUN but
         // never complete Noise. Give a second verified candidate a turn after
@@ -1280,19 +1286,35 @@ impl Node {
             let transitions = transitions.as_slice();
             async move {
                 let result = async {
+                    #[cfg(test)]
+                    self.trace_account_client(expected, || {
+                        "dial_authentication_admission_wait".into()
+                    });
                     let _authentication = self
                         .sessions
                         .authentication_admission(self.peer_endpoint_key(candidate, expected))
                         .await?;
+                    #[cfg(test)]
+                    self.trace_account_client(expected, || {
+                        "dial_authentication_admission_acquired_outbound_wait".into()
+                    });
                     let permits = self.sessions.outbound().await?;
+                    #[cfg(test)]
+                    self.trace_account_client(expected, || "dial_outbound_acquired".into());
                     let started = std::time::Instant::now();
                     let result = tokio::time::timeout(
                         self.sessions.authentication_timeout(expected, candidate),
                         async {
+                            #[cfg(test)]
+                            self.trace_account_client(expected, || "dial_tcp_connect_begin".into());
                             let stream = TcpStream::connect(candidate).await?;
+                            #[cfg(test)]
+                            self.trace_account_client(expected, || "dial_tcp_connect_end".into());
                             stream.set_nodelay(true)?;
                             crate::transport::net::set_tcp_keepalive(&stream);
                             let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
+                            #[cfg(test)]
+                            self.trace_account_client(expected, || "dial_noise_begin".into());
                             SecureChannel::connect_with_transitions(
                                 stream,
                                 &self.identity,
@@ -1308,6 +1330,10 @@ impl Node {
                     .unwrap_or_else(|_| {
                         self.sessions.authentication_timed_out(expected, candidate);
                         Err(TransportError::Noise("dial timed out".into()))
+                    });
+                    #[cfg(test)]
+                    self.trace_account_client(expected, || {
+                        format!("dial_noise_end ok={}", result.is_ok())
                     });
                     if started.elapsed() >= Duration::from_secs(2) {
                         log::warn!(
@@ -1360,6 +1386,8 @@ impl Node {
         channel.retain_connection_permits(permits);
         #[cfg(test)]
         timing.phase("dial-proof-validation");
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_proof_validation_begin".into());
         self.apply_account_transition(channel.verified_peer())?;
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         #[cfg(test)]
@@ -1380,6 +1408,8 @@ impl Node {
         self.note_dialed_route(requested_addr, &channel);
         #[cfg(test)]
         timing.finish();
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_complete".into());
         Ok(channel)
     }
     #[cfg(test)]

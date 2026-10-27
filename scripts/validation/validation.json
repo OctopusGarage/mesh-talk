@@ -262,6 +262,7 @@
         ".github/workflows/ci.yml",
         ".github/workflows/check-health.yml",
         ".github/workflows/e2e-ui.yml",
+        ".github/workflows/hidden-contacts-native.yml",
         ".github/workflows/e2e-backend.yml",
         ".github/workflows/sanitizers.yml",
         ".github/workflows/mutants.yml",
@@ -274,10 +275,13 @@
         ".github/workflows/dependency-review.yml",
         "scripts/ci/collect-ui-coverage.mjs",
         "scripts/ci/unit-coverage-artifact.mjs",
+        "scripts/ci/ubuntu-apt-source.mjs",
+        "scripts/ci/ubuntu-apt-source.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs",
         ".gitleaks.toml"
       ],
       "node": [
+        "scripts/ci/ubuntu-apt-source.test.mjs",
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
         "scripts/diagnostics/merge-queue.test.mjs",

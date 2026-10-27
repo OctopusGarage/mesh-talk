@@ -2622,6 +2622,13 @@ impl Node {
                     if !selected_waiting {
                         foreground_next = wake_waiting;
                     }
+                    #[cfg(test)]
+                    self.trace_account_client(&key.public(), || {
+                        format!(
+                            "control_owned_abort reason={}",
+                            if selected_waiting { "selected" } else { "wake" }
+                        )
+                    });
                     handle.abort();
                 }
             }
@@ -2889,6 +2896,8 @@ impl Node {
                             document_aborts.remove(&error.id());
                             document_protected.remove(&error.id());
                             if document_preemptions.remove(&error.id()) {
+                                #[cfg(test)]
+                                self.trace_account_client(&key.public(), || "control_owned_abort_released".into());
                                 if let Some((peer, state)) = document_checkpoints.remove(&error.id())
                                     && self.certified_sibling(&peer.public) {
                                     document_cursors.insert(key.clone(), state);
