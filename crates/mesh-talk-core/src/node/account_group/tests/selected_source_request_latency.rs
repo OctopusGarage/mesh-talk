@@ -466,3 +466,158 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     assert_eq!(source.committed_events, requester.committed_events);
     assert!(reference.channel_members(group).is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_terminal_publication_retries_a_locally_busy_wake_without_remote_cooldown() {
+    use crate::node::account_documents::{AccountDocumentKey, sync::DocumentSyncCursor};
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&directory.path().join("source"), &account);
+    let reference = node(&directory.path().join("reference"), &account);
+    link(&source, &reference);
+    link(&reference, &source);
+    let mut listeners = Vec::new();
+    let mut addresses = Vec::new();
+    for (name, node) in [("source", &source), ("reference", &reference)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        configure(node, &directory.path().join(name), address.port());
+        node.set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        addresses.push(address);
+        listeners.push((node.clone(), listener));
+    }
+    let group = source
+        .create_channel("Wake result fixture", vec![])
+        .await
+        .unwrap();
+    source
+        .maintain_account_channels(
+            &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
+        )
+        .await;
+    source.publish_account_group_access_for(group);
+    for (left, right, address) in [
+        (&source, &reference, addresses[1]),
+        (&reference, &source, addresses[0]),
+    ] {
+        left.roster.lock().unwrap().update(
+            &right.signed_announce("Wake capacity fixture", address.port()),
+            address.ip(),
+            &left.user_id(),
+        );
+    }
+    let mut capacity = Vec::new();
+    while let Some(permit) = source.sessions.try_outbound() {
+        capacity.push(permit);
+    }
+    assert_eq!(
+        capacity.len(),
+        crate::node::session_pool::MAX_DIRECTION_CONNECTIONS
+    );
+    let (busy_tx, busy_rx) = oneshot::channel();
+    let busy_tx = Arc::new(Mutex::new(Some(busy_tx)));
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, event| {
+        // The only source client task in this fixture is the real Wake owner.
+        if event.starts_with("negotiation_end ")
+            && event.ends_with("outcome=capacity_busy")
+            && let Some(tx) = busy_tx.lock().unwrap().take()
+        {
+            let _ = tx.send(());
+        }
+    }));
+    let (wake_tx, wake_rx) = oneshot::channel();
+    let wake_tx = Arc::new(Mutex::new(Some(wake_tx)));
+    *reference.account_session_test_hook.lock().unwrap() = Some(Arc::new(move |_, frame| {
+        if matches!(frame, AccountHistoryFrame::Wake { .. })
+            && let Some(tx) = wake_tx.lock().unwrap().take()
+        {
+            let _ = tx.send(());
+        }
+        Box::pin(async {})
+    }));
+    let mut servers = tokio::task::JoinSet::new();
+    for (node, listener) in listeners {
+        servers.spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let node = node.clone();
+                        connections.spawn(async move {
+                            let channel = node.privacy_accept(stream).await.unwrap();
+                            node.serve_connection(channel).await;
+                        });
+                    }
+                    finished = connections.join_next(), if !connections.is_empty() => { finished.unwrap().unwrap(); }
+                }
+            }
+        });
+    }
+    let wake_worker = tokio::spawn(source.clone().run_account_wake_loop());
+    let busy = tokio::time::timeout(Duration::from_secs(5), busy_rx).await;
+    assert!(
+        busy.is_ok_and(|result| result.is_ok()),
+        "the real Wake must first exhaust local TCP capacity"
+    );
+    drop(capacity);
+    let id = source
+        .new_account_group_operation_id(&account.account_id())
+        .unwrap();
+    source
+        .submit_account_group_text_if(
+            &account.account_id(),
+            id,
+            group,
+            crate::node::AccountGroupTextInput {
+                text: b"real terminal result after local admission recovery".to_vec(),
+                reply_to: None,
+                expires_at_ms: None,
+                protection: None,
+            },
+            |commit| commit(),
+        )
+        .unwrap();
+    source.maintain_account_group_operation_effects();
+    let status = source
+        .account_group_operation_status(&account.account_id(), id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
+    assert_eq!(status.committed_events.len(), 1);
+    source.publish_account_group_operations_for(group);
+    let key = AccountDocumentKey::GroupOperation {
+        channel: hex::encode(group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let expected = source.account_document_meta(&key).unwrap();
+    let peer = reference.routing_peer(&source.user_id()).unwrap();
+    let receipt = tokio::time::timeout(Duration::from_secs(8), async {
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(5), wake_rx).await,
+            Ok(Ok(()))
+        ) {
+            return false;
+        }
+        let mut cursor = DocumentSyncCursor::control();
+        loop {
+            reference
+                .pull_account_documents_page(&peer, &mut cursor)
+                .await
+                .unwrap();
+            if reference.account_document_meta(&key).as_ref() == Some(&expected) {
+                break;
+            }
+        }
+        true
+    })
+    .await;
+    wake_worker.abort();
+    let _ = wake_worker.await;
+    servers.shutdown().await;
+    assert!(
+        matches!(receipt, Ok(true)),
+        "local capacity recovery must not suppress a real new terminal publication for the remote-failure cooldown"
+    );
+}

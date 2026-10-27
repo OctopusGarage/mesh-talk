@@ -13,6 +13,39 @@ const DEBOUNCE: Duration = Duration::from_millis(100);
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 
+// A failed local admission exchanged no bytes and says nothing about the peer.
+// Keep its revision pending without retrying unchanged work on every loop turn.
+struct WakeRetry {
+    routes: Vec<std::net::SocketAddr>,
+    until: Instant,
+    local_revision: Option<u64>,
+}
+impl WakeRetry {
+    fn after_failure(
+        routes: Vec<std::net::SocketAddr>,
+        revision: u64,
+        error: &NodeError,
+        now: Instant,
+    ) -> Self {
+        let local = local_sync_capacity_busy(error);
+        Self {
+            routes,
+            until: now
+                + if local {
+                    RETRY_INTERVAL
+                } else {
+                    FAILURE_COOLDOWN
+                },
+            local_revision: local.then_some(revision),
+        }
+    }
+    fn blocks(&self, routes: &[std::net::SocketAddr], revision: u64, now: Instant) -> bool {
+        self.until > now
+            && self.routes == routes
+            && self.local_revision.is_none_or(|failed| revision <= failed)
+    }
+}
+
 pub(super) type WakeIdentity = ([u8; 32], [u8; 32]);
 pub(super) fn wake_identity(public: &PublicIdentity) -> WakeIdentity {
     (public.ed25519_pub, public.x25519_pub)
@@ -256,7 +289,7 @@ impl Node {
             .subscribe_changes();
         let mut network = self.network_changes.subscribe();
         let mut acknowledged: HashMap<String, u64> = HashMap::new();
-        let mut retry_after: HashMap<String, (Vec<std::net::SocketAddr>, Instant)> = HashMap::new();
+        let mut retry_after: HashMap<String, WakeRetry> = HashMap::new();
         let mut active = HashSet::new();
         let mut queue: VecDeque<(String, PeerRecord)> = VecDeque::new();
         let mut senders = tokio::task::JoinSet::new();
@@ -310,15 +343,17 @@ impl Node {
                         Some(Ok((task, (id, revision, result)))) => {
                             let routes = task_owners.remove(&task).map(|(_, routes)| routes).unwrap_or_default();
                             active.remove(&id); aborts.remove(&id);
-                            if result.is_ok() { acknowledged.insert(id.clone(), revision); retry_after.remove(&id); }
-                            else { retry_after.insert(id, (routes, Instant::now() + FAILURE_COOLDOWN)); }
+                            match result {
+                                Ok(()) => { acknowledged.insert(id.clone(), revision); retry_after.remove(&id); }
+                                Err(error) => { retry_after.insert(id, WakeRetry::after_failure(routes, revision, &error, Instant::now())); }
+                            }
                         }
                         Some(Err(error)) => {
                             if let Some((id, routes)) = task_owners.remove(&error.id()) {
                                 active.remove(&id); aborts.remove(&id);
                                 if !error.is_cancelled() {
                                     log::warn!("Sibling wake worker terminated; periodic reconciliation remains available");
-                                    retry_after.insert(id, (routes, Instant::now() + FAILURE_COOLDOWN));
+                                    retry_after.insert(id, WakeRetry { routes, until: Instant::now() + FAILURE_COOLDOWN, local_revision: None });
                                 }
                             }
                         }
@@ -352,8 +387,8 @@ impl Node {
                 else {
                     continue;
                 };
-                if retry_after.get(&id).is_some_and(|(routes, until)| {
-                    *until > Instant::now() && *routes == wake_routes(&peer)
+                if retry_after.get(&id).is_some_and(|retry| {
+                    retry.blocks(&wake_routes(&peer), revision, Instant::now())
                 }) {
                     continue;
                 }
@@ -378,6 +413,41 @@ fn wake_routes(peer: &PeerRecord) -> Vec<std::net::SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_capacity_retry_requires_a_new_publication_but_remote_failure_keeps_its_cooldown() {
+        let now = Instant::now();
+        let routes = vec!["127.0.0.1:47474".parse().unwrap()];
+        let busy = NodeError::Session(super::super::session::SessionError::Transport(
+            crate::transport::TransportError::Noise("TCP connection capacity busy".into()),
+        ));
+        let local = WakeRetry::after_failure(routes.clone(), 7, &busy, now);
+        assert_eq!(local.until, now + RETRY_INTERVAL);
+        for _ in 0..64 {
+            assert!(
+                local.blocks(&routes, 7, now),
+                "unchanged busy work must not self-requeue"
+            );
+        }
+        assert!(
+            !local.blocks(&routes, 8, now),
+            "a real new publication uses the existing Notify"
+        );
+        assert!(!local.blocks(&routes, 7, now + RETRY_INTERVAL));
+        let remote = WakeRetry::after_failure(
+            routes.clone(),
+            7,
+            &NodeError::Channel("sibling wake capability unavailable".into()),
+            now,
+        );
+        assert_eq!(remote.until, now + FAILURE_COOLDOWN);
+        assert!(remote.blocks(&routes, 8, now + RETRY_INTERVAL));
+        assert!(remote.blocks(&routes, u64::MAX, now));
+        assert!(!remote.blocks(&routes, 8, now + FAILURE_COOLDOWN));
+        let changed_routes = vec!["127.0.0.1:47475".parse().unwrap()];
+        assert!(!local.blocks(&changed_routes, 7, now));
+        assert!(!remote.blocks(&changed_routes, 7, now));
+    }
 
     #[test]
     fn control_wake_fifo_coalesces_and_consumes_only_the_captured_generation() {

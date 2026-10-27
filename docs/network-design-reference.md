@@ -1297,7 +1297,12 @@ Authenticated sibling Wake hints carry invalidation metadata only. Their bounded
 existing worker remains active when optional history, attachment, appearance and
 contact synchronization are disabled, so mandatory account control requests and
 results can progress promptly. Every subsequent content exchange independently
-enforces its category permissions.
+enforces its category permissions. A local TCP/authentication capacity rejection
+leaves the Wake revision unacknowledged and retries unchanged work on the existing
+ten-second reconciliation interval. A newer durable local publication may bypass
+only that local-admission cooldown through the existing notification/debounce;
+remote exchange or capability failures retain their sixty-second cooldown even
+when another local publication occurs. Neither path adds a sender or TCP slot.
 
 The two existing mandatory account-document workers reserve one slot for
 GroupControl and one for GroupInventory/DeviceHostname. Their independent
