@@ -137,13 +137,16 @@ impl Node {
             return;
         }
         for ((event, holder), held) in rows {
+            let selected = self.log.lock().expect("log mutex").get(&event);
+            let selected = match selected {
+                Ok(selected) => selected,
+                Err(error) => {
+                    log::warn!("custody migration deferred: {error}");
+                    return;
+                }
+            };
             *after = Some((event, holder.clone()));
-            let channel = self
-                .log
-                .lock()
-                .expect("log mutex")
-                .get(&event)
-                .map(|event| event.conversation_id);
+            let channel = selected.map(|event| event.conversation_id);
             let Some(channel) = channel else {
                 continue;
             };

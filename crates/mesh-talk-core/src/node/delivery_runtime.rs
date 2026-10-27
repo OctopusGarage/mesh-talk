@@ -496,7 +496,13 @@ impl Node {
             .sync()
             .map_err(NodeError::Log)?;
         store.begin(transaction).map_err(NodeError::Log)?;
-        let recovered = self.recover_delivery(store).is_ok();
+        let recovered = match self.recover_delivery(store) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("accepted outgoing delivery awaits local recovery: {error}");
+                false
+            }
+        };
         self.delivery_notify.notify_one();
         Ok(recovered)
     }
@@ -884,8 +890,8 @@ impl Node {
             })
             .ok()?;
         drop(policy);
-        if self.recover_delivery(store).is_err() {
-            log::warn!("accepted incoming delivery awaits local recovery");
+        if let Err(error) = self.recover_delivery(store) {
+            log::warn!("accepted incoming delivery awaits local recovery: {error}");
             return None;
         }
         self.delivery_notify.notify_one();
@@ -965,6 +971,15 @@ impl Node {
                     }
                     _ => None,
                 });
+            let prepared_file_scopes =
+                match store.pending_transactions().first().map(|tx| tx.body()) {
+                    Some(DeliveryTransaction::OutgoingManifest {
+                        message,
+                        received,
+                        file,
+                    }) => self.prepare_manifest_transaction_scopes(message, received, file)?,
+                    _ => Vec::new(),
+                };
             // Channel manifests already carry their complete plaintext in the WAL.
             // Retain their signed chunk scope before retiring that transaction; a
             // failed scope/sidecar write remains recoverable after acceptance.
@@ -1064,6 +1079,9 @@ impl Node {
                     }
                 }
             }
+            if removed {
+                self.install_file_card_scopes(prepared_file_scopes);
+            }
             if removed && wake_local {
                 self.note_account_local_change();
             }
@@ -1088,9 +1106,6 @@ impl Node {
                             crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
                             entry.event_id,
                         );
-                        if !incoming {
-                            self.install_file_card_scopes_for(store, Some(entry.event_id));
-                        }
                         if incoming
                             && fresh
                             && !self.recipient_expired(
@@ -1340,7 +1355,14 @@ impl Node {
         let canonical = store
             .logical_for_original(opened.original_event_id())
             .unwrap_or_else(|| opened.logical_id());
-        let Some(message) = self.immutable_delivery(store, canonical) else {
+        let message = match self.immutable_delivery(store, canonical) {
+            Ok(message) => message,
+            Err(error) => {
+                log::warn!("delivery receipt lookup deferred: {error}");
+                return;
+            }
+        };
+        let Some(message) = message else {
             return;
         };
         let Some(authenticated) = opened.authenticate(&message) else {
@@ -1371,15 +1393,23 @@ impl Node {
         }
     }
 
-    fn immutable_delivery(&self, store: &DeliveryStore, id: EventId) -> Option<OutgoingDelivery> {
+    fn immutable_delivery(
+        &self,
+        store: &DeliveryStore,
+        id: EventId,
+    ) -> Result<Option<OutgoingDelivery>, crate::eventlog::LogError> {
         if let Some(message) = store.message(id) {
-            return Some(message.clone());
+            return Ok(Some(message.clone()));
         }
-        let completed = store.completed_work(id)?;
+        let Some(completed) = store.completed_work(id) else {
+            return Ok(None);
+        };
         let log = self.log.lock().expect("log lock not poisoned");
         let mut destinations = Vec::with_capacity(completed.remaining.len());
         for reference in &completed.remaining {
-            let event = log.get(&reference.event_id)?;
+            let Some(event) = log.get(&reference.event_id)? else {
+                return Ok(None);
+            };
             if event.author.ed25519_pub() != &self.identity.public().ed25519_pub
                 || event.wall_clock != completed.wall_clock
                 || event.conversation_id
@@ -1390,23 +1420,23 @@ impl Node {
                 || !event.verify_integrity()
                 || !event.verify_signature()
             {
-                return None;
+                return Ok(None);
             }
             destinations.push(DeliveryDestination {
                 device: reference.device.clone(),
                 account: reference.account.clone(),
-                event: event.clone(),
+                event,
                 receipt_eligible: reference.receipt_eligible,
             });
         }
-        Some(OutgoingDelivery {
+        Ok(Some(OutgoingDelivery {
             logical_id: id,
             sender_account: self.account_id(),
             recipient_account: completed.recipient_account.clone(),
             conversation: completed.conversation,
             wall_clock: completed.wall_clock,
             destinations,
-        })
+        }))
     }
 
     /// Immediate best-effort transfer of an already accepted immutable intent.
@@ -1414,10 +1444,17 @@ impl Node {
     pub async fn flush_delivery(&self, id: EventId) {
         let message = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-            if self.recover_delivery(&mut store).is_err() {
+            if let Err(error) = self.recover_delivery(&mut store) {
+                log::warn!("delivery recovery deferred: {error}");
                 return;
             }
-            self.immutable_delivery(&store, id)
+            match self.immutable_delivery(&store, id) {
+                Ok(message) => message,
+                Err(error) => {
+                    log::warn!("delivery flush lookup deferred: {error}");
+                    return;
+                }
+            }
         };
         let Some(message) = message else {
             return;
@@ -1457,7 +1494,8 @@ impl Node {
     pub async fn flush_delivery_receipts(&self, limit: usize) {
         let receipts = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-            if self.recover_delivery(&mut store).is_err() {
+            if let Err(error) = self.recover_delivery(&mut store) {
+                log::warn!("delivery recovery deferred: {error}");
                 return;
             }
             store.retry_receipts(limit)
@@ -1926,19 +1964,19 @@ impl Node {
                     hook();
                 }
                 let mut store = node.delivery.lock().expect("delivery lock not poisoned");
-                if node.recover_delivery(&mut store).is_err() {
-                    return None;
-                }
+                node.recover_delivery(&mut store)?;
                 let next = destination_capacity
                     .then(|| store.next_destination(destination_cursor))
                     .flatten();
-                let destination = next.and_then(|(id, reference)| {
+                let destination = if let Some((id, reference)) = next {
                     let event = node
                         .log
                         .lock()
                         .expect("log lock not poisoned")
-                        .get(&reference.event_id)?
-                        .clone();
+                        .get(&reference.event_id)?;
+                    let Some(event) = event else {
+                        return Ok::<_, crate::eventlog::LogError>(None);
+                    };
                     Some((
                         id,
                         DeliveryDestination {
@@ -1948,7 +1986,9 @@ impl Node {
                             receipt_eligible: reference.receipt_eligible,
                         },
                     ))
-                });
+                } else {
+                    None
+                };
                 let receipt = if receipt_capacity {
                     store
                         .retry_receipts_after(receipt_cursor, 1)
@@ -1959,12 +1999,25 @@ impl Node {
                     None
                 };
                 let (files, cursor) = file_scan.read(&store);
-                Some((destination, receipt, files, cursor))
+                Ok(Some((destination, receipt, files, cursor)))
             })
             .await;
-            let Ok(Some((destination, receipt, files, cursor))) = snapshot else {
-                diagnostic.warn_if_due();
-                continue;
+            let (destination, receipt, files, cursor) = match snapshot {
+                Ok(Ok(Some(snapshot))) => snapshot,
+                Ok(Err(error)) => {
+                    log::warn!("delivery snapshot deferred: {error}");
+                    diagnostic.warn_if_due();
+                    continue;
+                }
+                Err(error) => {
+                    log::warn!("delivery snapshot worker failed: {error}");
+                    diagnostic.warn_if_due();
+                    continue;
+                }
+                Ok(Ok(None)) => {
+                    diagnostic.warn_if_due();
+                    continue;
+                }
             };
             if let Some((id, destination)) = destination {
                 destination_cursor = Some(id);
@@ -2336,63 +2389,134 @@ impl Node {
         )
     }
 
-    pub(in crate::node) fn install_file_card_scopes(&self, store: &DeliveryStore) {
-        self.install_file_card_scopes_for(store, None);
+    fn file_card_manifest_matches(
+        &self,
+        file: &super::delivery_store::FileCard,
+        entry: &super::received_log::ReceivedEntry,
+        original: Option<&Event>,
+    ) -> bool {
+        entry.conversation == file.conversation
+            && entry.from == self.user_id()
+            && super::files::eligible_manifest_row(entry, original, None).is_some_and(|manifest| {
+                manifest.file_conv() == file.file_conversation
+                    && manifest.chunk_count() == file.chunk_count
+            })
     }
 
-    fn install_file_card_scopes_for(&self, store: &DeliveryStore, current: Option<EventId>) {
-        let cards = if let Some(id) = current {
-            store.file_card(id).into_iter().collect::<Vec<_>>()
-        } else {
-            store.file_cards().collect::<Vec<_>>()
+    fn file_card_scope(
+        &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+        event: &Event,
+    ) -> Option<super::privacy_runtime::ManifestScope> {
+        (event.id == destination.binding.event_id
+            && event.kind == crate::eventlog::EventKind::FileManifest
+            && event.author.ed25519_pub() == &self.identity.public().ed25519_pub
+            && event.conversation_id
+                == super::conversation::dm_conversation_id(
+                    &self.identity.public(),
+                    &destination.binding.device,
+                )
+            && event.conversation_id != file.file_conversation
+            && event.verify_signature()
+            && event.verify_integrity())
+        .then_some(super::privacy_runtime::ManifestScope {
+            parent: event.conversation_id,
+            author: event.author,
+            event: event.id,
+        })
+    }
+
+    /// Stage every fallible record lookup before callers replace live projections.
+    pub(in crate::node) fn collect_file_card_scopes(
+        &self,
+        store: &DeliveryStore,
+    ) -> Result<Vec<(ConversationId, super::privacy_runtime::ManifestScope)>, LogError> {
+        let rows = self
+            .received_files
+            .lock()
+            .expect("file rows lock not poisoned");
+        let log = self.log.lock().expect("log lock not poisoned");
+        let mut scopes = Vec::new();
+        for file in store.file_cards() {
+            let Some(entry) = rows.entry(file.id) else {
+                continue;
+            };
+            if entry.conversation != file.conversation || entry.from != self.user_id() {
+                continue;
+            }
+            let original = log.get(&entry.event_id)?;
+            if !self.file_card_manifest_matches(file, entry, original.as_ref()) {
+                continue;
+            }
+            for destination in &file.destinations {
+                let Some(event) = log.get(&destination.binding.event_id)? else {
+                    continue;
+                };
+                if let Some(scope) = self.file_card_scope(file, destination, &event) {
+                    scopes.push((file.file_conversation, scope));
+                }
+            }
+        }
+        Ok(scopes)
+    }
+
+    /// The accepted WAL already owns complete signed destinations. Resolve and
+    /// validate this overlay before retirement, without a post-retirement read.
+    fn prepare_manifest_transaction_scopes(
+        &self,
+        message: &OutgoingDelivery,
+        entry: &super::received_log::ReceivedEntry,
+        file: &super::delivery_store::FileCard,
+    ) -> Result<Vec<(ConversationId, super::privacy_runtime::ManifestScope)>, LogError> {
+        let invalid = || {
+            LogError::CorruptFile(
+                "accepted manifest journal has incomplete or invalid scope material".into(),
+            )
         };
-        let scopes = {
-            let rows = self
-                .received_files
-                .lock()
-                .expect("file rows lock not poisoned");
-            let log = self.log.lock().expect("log lock not poisoned");
-            cards
-                .into_iter()
-                .filter(|file| {
-                    rows.entry(file.id).is_some_and(|entry| {
-                        entry.conversation == file.conversation
-                            && entry.from == self.user_id()
-                            && super::files::eligible_manifest_row(
-                                entry,
-                                log.get(&entry.event_id),
-                                None,
-                            )
-                            .is_some_and(|manifest| {
-                                manifest.file_conv() == file.file_conversation
-                                    && manifest.chunk_count() == file.chunk_count
-                            })
-                    })
-                })
-                .flat_map(|file| {
-                    file.destinations.iter().filter_map(|destination| {
-                        let event = log.get(&destination.binding.event_id)?;
-                        (event.kind == crate::eventlog::EventKind::FileManifest
-                            && event.author.ed25519_pub() == &self.identity.public().ed25519_pub
-                            && event.conversation_id
-                                == super::conversation::dm_conversation_id(
-                                    &self.identity.public(),
-                                    &destination.binding.device,
-                                )
-                            && event.verify_signature()
-                            && event.verify_integrity())
-                        .then_some((
-                            file.file_conversation,
-                            event.conversation_id,
-                            event.author,
-                            event.id,
-                        ))
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        for (file, parent, author, event) in scopes {
-            self.remember_manifest_scope(file, parent, author, event);
+        // A personal file with no transport destinations has no external scopes.
+        // The delivery owner validates its local account/profile binding.
+        if message.destinations.is_empty() && file.destinations.is_empty() {
+            return Ok(Vec::new());
+        }
+        let events: std::collections::HashMap<_, _> = message
+            .destinations
+            .iter()
+            .map(|destination| (destination.event.id, destination))
+            .collect();
+        let original = events
+            .get(&entry.event_id)
+            .map(|destination| &destination.event);
+        if message.logical_id != file.id
+            || entry.event_id != file.id
+            || !self.file_card_manifest_matches(file, entry, original)
+        {
+            return Err(invalid());
+        }
+        let mut scopes = Vec::with_capacity(file.destinations.len());
+        for destination in &file.destinations {
+            let signed = events
+                .get(&destination.binding.event_id)
+                .ok_or_else(invalid)?;
+            if signed.device != destination.binding.device
+                || signed.account != destination.binding.account
+            {
+                return Err(invalid());
+            }
+            let scope = self
+                .file_card_scope(file, destination, &signed.event)
+                .ok_or_else(invalid)?;
+            scopes.push((file.file_conversation, scope));
+        }
+        Ok(scopes)
+    }
+
+    fn install_file_card_scopes(
+        &self,
+        scopes: Vec<(ConversationId, super::privacy_runtime::ManifestScope)>,
+    ) {
+        for (file, scope) in scopes {
+            self.remember_manifest_scope(file, scope.parent, scope.author, scope.event);
         }
     }
 
@@ -3163,7 +3287,8 @@ impl Node {
     pub(in crate::node) async fn flush_file_delivery(&self, id: EventId) {
         let file = {
             let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-            if self.recover_delivery(&mut store).is_err() {
+            if let Err(error) = self.recover_delivery(&mut store) {
+                log::warn!("delivery recovery deferred: {error}");
                 return;
             }
             store.file_card(id).cloned()

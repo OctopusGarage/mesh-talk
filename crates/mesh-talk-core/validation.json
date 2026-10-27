@@ -771,6 +771,10 @@
           {
             "name": "Fallible sync reads propagate local storage failures without successful empty history, fingerprint matches or custody claims; explicit peer rejection remains distinct and committed batch prefixes survive retries",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Individual durable event lookups return complete owned events or explicit read errors; absence-based proof fallbacks, media reclamation and delivery progress never hide failed reads; affected Node/runtime queries preserve errors and host success payloads",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }

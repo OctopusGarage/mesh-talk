@@ -175,6 +175,7 @@ impl Chain {
     fn has_text(&self, index: usize, channel: ConversationId, text: &[u8]) -> bool {
         self.nodes[index]
             .channel_history(channel, 100)
+            .unwrap()
             .iter()
             .any(|entry| entry.text == text)
     }
@@ -195,9 +196,9 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
             "member {i} decrypts original author's event"
         );
     }
-    let original = chain.nodes[0].channel_history(group, 100)[0].id;
+    let original = chain.nodes[0].channel_history(group, 100).unwrap()[0].id;
     for node in &chain.nodes[1..6] {
-        assert_eq!(node.channel_history(group, 100)[0].id, original);
+        assert_eq!(node.channel_history(group, 100).unwrap()[0].id, original);
     }
     // A fully authenticated nonmember guesses the group id and bypasses the
     // local projection using a raw sync store: the serving member must deny it.
@@ -214,7 +215,7 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
     );
     // A second reconciliation does not duplicate the delivered message.
     chain.recover(5).await;
-    assert_eq!(chain.nodes[5].channel_history(group, 100).len(), 1);
+    assert_eq!(chain.nodes[5].channel_history(group, 100).unwrap().len(), 1);
     // Removal rotates the epoch. Even a formerly accepted member cannot
     // recover the later sender key or ciphertext by guessing the group id.
     chain.nodes[0]
@@ -321,10 +322,11 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
                 .unwrap()
                 .is_empty()
         );
-        assert!(store.authorized_event_ids(&file).is_empty());
+        assert!(store.authorized_event_ids(&file).unwrap().is_empty());
         assert!(
             store
                 .authorized_event_page(&file, &chunk_ids, 50_000)
+                .unwrap()
                 .is_empty()
         );
         assert!(
@@ -433,7 +435,7 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
     // A local send must not smuggle the retained A message as causal ancestry.
     // With this append-only DAG it waits downstream until a sharing holder can
     // supply those missing parents; the local send remains durably accepted.
-    let held = chain.nodes[0].channel_history(group, 100)[0].id;
+    let held = chain.nodes[0].channel_history(group, 100).unwrap()[0].id;
     chain.nodes[2]
         .send_channel_message(group, b"C while not sharing")
         .await
@@ -796,7 +798,7 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
         .send_channel_message(group, b"legitimate group content")
         .await
         .unwrap();
-    let original = chain.nodes[0].channel_history(group, 100)[0].id;
+    let original = chain.nodes[0].channel_history(group, 100).unwrap()[0].id;
     let attacker = &chain.nodes[6];
     // Valid signature and self-consistent metadata do not confer authority over
     // an existing conversation id. A lower Lamport makes the rival root replay
@@ -960,5 +962,85 @@ async fn channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet() {
         .await
         .is_err(),
         "already surfaced messages and empty anti-entropy rounds must not self-wake"
+    );
+}
+
+#[tokio::test]
+async fn owned_read_failure_retains_untracked_group_chunks_and_existing_media() {
+    let chain = Chain::new().await;
+    let group = chain.accepted_group().await;
+    let source = chain._dir.path().join("reclamation.png");
+    let mut bytes = vec![7; crate::file::CHUNK_SIZE + 31];
+    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    std::fs::write(&source, &bytes).unwrap();
+    let file = chain.nodes[0]
+        .send_file_channel(group, &source, crate::file::FileKind::Media)
+        .await
+        .unwrap();
+    chain.round(1, 0, group).await;
+    chain.nodes[1].process_file_events(group);
+    chain.round(1, 0, file).await;
+    let receiver = &chain.nodes[1];
+    receiver
+        .set_channel_replica_enabled(group, false)
+        .await
+        .unwrap();
+    receiver
+        .media
+        .store_bytes(file, "reclamation.png", &bytes)
+        .unwrap();
+    let path = receiver.media.path(file).unwrap();
+    let encrypted_before = std::fs::read(&path).unwrap();
+    let chunks_before = receiver.log.lock().unwrap().events(&file).len();
+    assert!(chunks_before > 0);
+    assert!(
+        receiver.completion_candidates(file).is_empty(),
+        "group reception uses the untracked fallback"
+    );
+    let mut reached_completion = false;
+    let result =
+        receiver.save_file_progress(file, &chain._dir.path().join("export.png"), |progress| {
+            if progress.done == progress.total {
+                reached_completion = true;
+                receiver.log.lock().unwrap().fail_reads(true);
+            }
+        });
+    assert!(
+        reached_completion,
+        "arm failure only after the final chunk read"
+    );
+    assert!(matches!(
+        result,
+        Err(super::NodeError::Log(crate::eventlog::LogError::Io(_)))
+    ));
+    assert_eq!(
+        receiver.log.lock().unwrap().events(&file).len(),
+        chunks_before
+    );
+    assert!(
+        std::fs::read(&path).unwrap() == encrypted_before,
+        "failed reclaim must preserve encrypted managed bytes"
+    );
+    assert!(
+        receiver.media.read(file).unwrap() == bytes,
+        "retained media must decrypt to complete original bytes"
+    );
+    let checks_before_retry = receiver
+        .untracked_chunk_validations
+        .load(std::sync::atomic::Ordering::Relaxed);
+    receiver.log.lock().unwrap().fail_reads(false);
+    receiver
+        .save_file(file, &chain._dir.path().join("export-retry.png"))
+        .unwrap();
+    assert!(
+        receiver
+            .untracked_chunk_validations
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > checks_before_retry,
+        "a real untracked retry must verify retained chunk ancestry"
+    );
+    assert!(
+        receiver.log.lock().unwrap().events(&file).is_empty(),
+        "successful share-off reclaim removes the same chunks after storage recovers"
     );
 }

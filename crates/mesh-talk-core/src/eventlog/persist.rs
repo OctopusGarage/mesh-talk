@@ -49,6 +49,10 @@ pub struct PersistentEventLog {
     last_profile_rewrite_attempt: Option<Instant>,
     #[cfg(test)]
     rewrite_count: usize,
+    #[cfg(test)]
+    read_failure: bool,
+    #[cfg(test)]
+    read_failure_id: Option<EventId>,
     fingerprint_cache: Mutex<HashMap<ConversationId, ([u8; 32], usize)>>,
     #[cfg(test)]
     sync_event_exports: std::cell::Cell<usize>,
@@ -102,6 +106,10 @@ impl PersistentEventLog {
             last_profile_rewrite_attempt: None,
             #[cfg(test)]
             rewrite_count: 0,
+            #[cfg(test)]
+            read_failure: false,
+            #[cfg(test)]
+            read_failure_id: None,
             fingerprint_cache: Mutex::new(HashMap::new()),
             #[cfg(test)]
             sync_event_exports: std::cell::Cell::new(0),
@@ -201,16 +209,42 @@ impl PersistentEventLog {
     pub fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
         self.log.requires_channel_v2(conversation)
     }
-    pub fn get(&self, id: &EventId) -> Option<&Event> {
-        self.log.get(id)
+    /// Read one complete owned event. Absence is distinct from a storage failure.
+    pub fn get(&self, id: &EventId) -> Result<Option<Event>, LogError> {
+        self.check_read(Some(id))?;
+        Ok(self.log.get(id).cloned())
+    }
+    #[cfg(test)]
+    pub(crate) fn fail_reads(&mut self, fail: bool) {
+        self.read_failure = fail;
+    }
+    #[cfg(test)]
+    pub(crate) fn fail_read_for(&mut self, id: Option<EventId>) {
+        self.read_failure_id = id;
+    }
+    fn check_read(&self, _id: Option<&EventId>) -> Result<(), LogError> {
+        #[cfg(test)]
+        if self.read_failure
+            || self
+                .read_failure_id
+                .as_ref()
+                .is_some_and(|id| Some(id) == _id)
+        {
+            return Err(LogError::Io(std::io::Error::other(
+                "injected event read failure",
+            )));
+        }
+        Ok(())
     }
     pub fn authored_event(
         &self,
         conversation: ConversationId,
         author: crate::eventlog::event::Author,
         seq: u64,
-    ) -> Option<&Event> {
-        self.log.authored_event(conversation, author, seq)
+    ) -> Result<Option<Event>, LogError> {
+        let selected = self.log.authored_event(conversation, author, seq);
+        self.check_read(selected.map(|event| &event.id))?;
+        Ok(selected.cloned())
     }
     pub fn events(&self, conversation: &ConversationId) -> Vec<&Event> {
         self.log.events(conversation)
@@ -638,6 +672,100 @@ mod tests {
     }
 
     #[test]
+    fn owned_read_failure_is_not_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = PersistentEventLog::open(&dir.path().join("events.log"), "pw").unwrap();
+        let event = mk(&DeviceIdentity::generate(), 1, 1, b"bytes");
+        log.append(event.clone()).unwrap();
+        log.fail_reads(true);
+        for result in [
+            log.get(&event.id),
+            log.authored_event(event.conversation_id, event.author, event.seq),
+            log.get(&EventId::new([88; 32])),
+        ] {
+            assert!(
+                matches!(result, Err(LogError::Io(error)) if error.to_string() == "injected event read failure")
+            );
+        }
+        log.fail_reads(false);
+        assert_eq!(log.get(&event.id).unwrap(), Some(event));
+    }
+
+    #[test]
+    fn owned_reads_preserve_complete_events_after_log_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = DeviceIdentity::generate();
+        let parent = mk(&signer, 1, 1, b"parent");
+        let child = Event::new(
+            &signer,
+            parent.conversation_id,
+            2,
+            vec![parent.id],
+            2,
+            3,
+            EventKind::Message,
+            b"complete ciphertext".to_vec(),
+        );
+        let (selected, authored): (Event, Event) = {
+            let mut log = PersistentEventLog::open(&dir.path().join("events.log"), "pw").unwrap();
+            log.append(parent).unwrap();
+            log.append(child.clone()).unwrap();
+            let other = mk(&DeviceIdentity::generate(), child.seq, 2, b"other author");
+            log.append(other.clone()).unwrap();
+            let other_conversation = Event::new(
+                &signer,
+                ConversationId::new([55; 32]),
+                child.seq,
+                vec![],
+                1,
+                0,
+                EventKind::Message,
+                b"other conversation".to_vec(),
+            );
+            log.append(other_conversation.clone()).unwrap();
+            assert_eq!(
+                log.authored_event(other.conversation_id, other.author, other.seq)
+                    .unwrap(),
+                Some(other)
+            );
+            assert_eq!(
+                log.authored_event(
+                    other_conversation.conversation_id,
+                    other_conversation.author,
+                    other_conversation.seq
+                )
+                .unwrap(),
+                Some(other_conversation)
+            );
+            assert!(log.get(&EventId::new([99; 32])).unwrap().is_none());
+            assert!(
+                log.authored_event(ConversationId::new([99; 32]), child.author, child.seq)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                log.authored_event(
+                    child.conversation_id,
+                    mk(&DeviceIdentity::generate(), 1, 1, b"other").author,
+                    child.seq
+                )
+                .unwrap()
+                .is_none()
+            );
+            (
+                log.get(&child.id).unwrap().unwrap(),
+                log.authored_event(child.conversation_id, child.author, child.seq)
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(selected, child);
+        assert_eq!(authored, child);
+        assert!(selected.verify_integrity());
+        assert!(selected.verify_signature());
+    }
+
+    #[test]
     fn account_channel_version_index_rejects_invalid_events_and_survives_restart() {
         use crate::eventlog::sync::SyncStore;
         for kind in [
@@ -886,7 +1014,7 @@ mod tests {
         ));
         drop(log);
         let reopened = PersistentEventLog::open(&path, "pw").unwrap();
-        assert_eq!(reopened.get(&event.id), Some(&event));
+        assert_eq!(reopened.get(&event.id).unwrap(), Some(event.clone()));
         assert_eq!(reopened.all_event_ids(), vec![event.id]);
     }
 
@@ -990,8 +1118,8 @@ mod tests {
         );
         drop(log);
         let log = PersistentEventLog::open(&path, "pw").unwrap();
-        assert_eq!(log.get(&parent.id), Some(&parent));
-        assert_eq!(log.get(&child.id), Some(&child));
+        assert_eq!(log.get(&parent.id).unwrap(), Some(parent.clone()));
+        assert_eq!(log.get(&child.id).unwrap(), Some(child.clone()));
         assert_eq!(log.conversation_len(&parent.conversation_id), 2);
     }
 

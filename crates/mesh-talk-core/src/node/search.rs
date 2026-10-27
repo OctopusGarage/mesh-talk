@@ -60,10 +60,10 @@ impl Node {
     /// Scans the sent + received stores by reference without cloning their
     /// entry vectors. It resolves channel sent event IDs only when a matching
     /// channel has recalls; other searches skip the history log scan.
-    pub fn search(&self, query: &str) -> Vec<SearchHit> {
+    pub fn search(&self, query: &str) -> Result<Vec<SearchHit>, super::NodeError> {
         let q = query.trim().to_lowercase();
         if q.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         const PER_CONV: usize = 2000;
         let mut hits: Vec<SearchHit> = Vec::new();
@@ -74,12 +74,12 @@ impl Node {
                 SearchSource::Channel => SearchScope::Channel,
                 SearchSource::LegacyDevice(_) => SearchScope::LegacyDm,
             };
-            for line in self.scan_conversation(conversation.id, &q, PER_CONV, scope) {
+            for line in self.scan_conversation(conversation.id, &q, PER_CONV, scope)? {
                 hits.push(conversation.hit(line.from_me, line.who, line.text, line.wall_clock));
             }
         }
         hits.sort_by_key(|b| std::cmp::Reverse(b.wall_clock));
-        hits
+        Ok(hits)
     }
 
     /// Search the latest 2,000 canonical history entries per eligible conversation.
@@ -90,7 +90,7 @@ impl Node {
     ///
     /// Canonical projection scans retained metadata and decodes only the selected
     /// window. Scan time and identity/causal metadata remain proportional to history.
-    pub fn search_recent(&self, query: &str) -> RecentSearchResults {
+    pub fn search_recent(&self, query: &str) -> Result<RecentSearchResults, super::NodeError> {
         self.search_recent_limited(query, usize::MAX)
     }
 
@@ -98,24 +98,30 @@ impl Node {
     /// [`Node::search_recent`]. Retains at most `limit` accumulated hits between
     /// conversations, plus the current conversation's 2,000-entry window.
     /// Metadata scans still cover retained history in every eligible conversation.
-    pub fn search_recent_limited(&self, query: &str, limit: usize) -> RecentSearchResults {
+    pub fn search_recent_limited(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<RecentSearchResults, super::NodeError> {
         let q = query.trim().to_lowercase();
         let mut response = RecentSearchResults {
             hits: Vec::new(),
             per_conversation_limit: RECENT_HISTORY_LIMIT,
         };
         if q.is_empty() || limit == 0 {
-            return response;
+            return Ok(response);
         }
         for conversation in self.search_conversations() {
             let history = match &conversation.source {
                 SearchSource::Account(account) => {
-                    self.account_history(account, RECENT_HISTORY_LIMIT)
+                    self.account_history(account, RECENT_HISTORY_LIMIT)?
                 }
                 SearchSource::Channel => {
-                    self.channel_history(conversation.id, RECENT_HISTORY_LIMIT)
+                    self.channel_history(conversation.id, RECENT_HISTORY_LIMIT)?
                 }
-                SearchSource::LegacyDevice(public) => self.dm_history(public, RECENT_HISTORY_LIMIT),
+                SearchSource::LegacyDevice(public) => {
+                    self.dm_history(public, RECENT_HISTORY_LIMIT)?
+                }
             };
             for entry in history.into_iter().rev() {
                 if entry.recalled
@@ -156,7 +162,7 @@ impl Node {
         response
             .hits
             .sort_by_key(|hit| std::cmp::Reverse(hit.hit.wall_clock));
-        response
+        Ok(response)
     }
 
     /// Return protected image bytes only for an exact currently eligible retained message.
@@ -164,93 +170,113 @@ impl Node {
     pub fn protected_image_protection(
         &self,
         reference: &SearchReference,
-    ) -> Option<super::MessageProtection> {
-        let context = self.reference_context(reference, true)?;
-        let entry = context.messages.into_iter().next()?;
-        let protection = entry.protection?;
-        let file = entry.file?;
-        if !file.media || !file.mime.starts_with("image/") || file.size > 16 * 1024 * 1024 {
-            return None;
-        }
-        let manifest = self
-            .files
-            .lock()
-            .expect("files lock")
-            .manifest(&file.file_conv)
-            .cloned()?;
-        if manifest.protection() != Some(protection)
-            || !crate::node::media_store::automatic_inline_image(&manifest)
-        {
-            return None;
-        }
-        Some(protection)
+    ) -> Result<Option<super::MessageProtection>, super::NodeError> {
+        let Some(context) = self.reference_context(reference, true)? else {
+            return Ok(None);
+        };
+        Ok((|| {
+            let entry = context.messages.into_iter().next()?;
+            let protection = entry.protection?;
+            let file = entry.file?;
+            if !file.media || !file.mime.starts_with("image/") || file.size > 16 * 1024 * 1024 {
+                return None;
+            }
+            let manifest = self
+                .files
+                .lock()
+                .expect("files lock")
+                .manifest(&file.file_conv)
+                .cloned()?;
+            if manifest.protection() != Some(protection)
+                || !crate::node::media_store::automatic_inline_image(&manifest)
+            {
+                return None;
+            }
+            Some(protection)
+        })())
     }
 
     pub fn protected_image_content(
         &self,
         reference: &SearchReference,
-    ) -> Option<(super::MessageProtection, Vec<u8>)> {
-        let context = self.reference_context(reference, true)?;
-        let entry = context.messages.into_iter().next()?;
-        let protection = entry.protection?;
-        let file = entry.file?;
+    ) -> Result<Option<(super::MessageProtection, Vec<u8>)>, super::NodeError> {
+        let Some(context) = self.reference_context(reference, true)? else {
+            return Ok(None);
+        };
+        let Some(entry) = context.messages.into_iter().next() else {
+            return Ok(None);
+        };
+        let (Some(protection), Some(file)) = (entry.protection, entry.file) else {
+            return Ok(None);
+        };
         if !file.media || !file.mime.starts_with("image/") || file.size > 16 * 1024 * 1024 {
-            return None;
+            return Ok(None);
         }
-        let manifest = self
+        let Some(manifest) = self
             .files
             .lock()
             .expect("files lock")
             .manifest(&file.file_conv)
-            .cloned()?;
+            .cloned()
+        else {
+            return Ok(None);
+        };
         if manifest.protection() != Some(protection)
             || !crate::node::media_store::automatic_inline_image(&manifest)
         {
-            return None;
+            return Ok(None);
         }
-        let bytes = self
-            .media
-            .read(file.file_conv)
-            .or_else(|| self.read_file_internal(file.file_conv).ok())?;
+        let bytes = match self.media.read(file.file_conv) {
+            Some(bytes) => bytes,
+            None => match self.read_file_internal(file.file_conv) {
+                Ok(bytes) => bytes,
+                Err(error @ super::NodeError::Log(_)) => return Err(error),
+                Err(_) => return Ok(None),
+            },
+        };
         if bytes.len() as u64 != manifest.size()
             || crate::file::file_checksum(&bytes) != manifest.checksum()
+            || !crate::node::media_store::raster_signature_matches(manifest.mime(), &bytes)
+            || self.protected_image_protection(reference)? != Some(protection)
         {
-            return None;
+            return Ok(None);
         }
-        if !crate::node::media_store::raster_signature_matches(manifest.mime(), &bytes)
-            || self.protected_image_protection(reference) != Some(protection)
-        {
-            return None;
-        }
-        Some((protection, bytes))
+        Ok(Some((protection, bytes)))
     }
 
     /// Explicit retained content lookup. Hosts must authorize each reveal before calling.
     pub fn protected_message_content(
         &self,
         reference: &SearchReference,
-    ) -> Option<(super::MessageProtection, Vec<u8>)> {
-        let context = self.reference_context(reference, true)?;
-        let id = match reference {
-            SearchReference::Account { message_id, .. }
-            | SearchReference::Channel { message_id, .. }
-            | SearchReference::LegacyDevice { message_id, .. } => (*message_id)?,
+    ) -> Result<Option<(super::MessageProtection, Vec<u8>)>, super::NodeError> {
+        let Some(context) = self.reference_context(reference, true)? else {
+            return Ok(None);
         };
-        let entry = context
-            .messages
-            .into_iter()
-            .find(|entry| entry.id == id && !entry.recalled)?;
-        if entry.file.is_some() {
-            return None;
-        }
-        Some((entry.protection?, entry.text))
+        Ok((|| {
+            let id = match reference {
+                SearchReference::Account { message_id, .. }
+                | SearchReference::Channel { message_id, .. }
+                | SearchReference::LegacyDevice { message_id, .. } => (*message_id)?,
+            };
+            let entry = context
+                .messages
+                .into_iter()
+                .find(|entry| entry.id == id && !entry.recalled)?;
+            if entry.file.is_some() {
+                return None;
+            }
+            Some((entry.protection?, entry.text))
+        })())
     }
 
     /// Resolve an exact reference against currently eligible canonical history.
     /// Returns at most 25 entries on each side, preserving canonical order. The
     /// retained projection scans identity/order metadata, then decodes only the
     /// context window. Scan time and metadata still scale with retained history.
-    pub fn search_context(&self, reference: &SearchReference) -> Option<SearchContext> {
+    pub fn search_context(
+        &self,
+        reference: &SearchReference,
+    ) -> Result<Option<SearchContext>, super::NodeError> {
         self.reference_context(reference, false)
     }
 
@@ -258,14 +284,19 @@ impl Node {
         &self,
         reference: &SearchReference,
         reveal: bool,
-    ) -> Option<SearchContext> {
+    ) -> Result<Option<SearchContext>, super::NodeError> {
         let message_id = match reference {
             SearchReference::Account { message_id, .. }
             | SearchReference::Channel { message_id, .. }
-            | SearchReference::LegacyDevice { message_id, .. } => (*message_id)?,
+            | SearchReference::LegacyDevice { message_id, .. } => {
+                let Some(id) = *message_id else {
+                    return Ok(None);
+                };
+                id
+            }
         };
         if message_id == EventId::new([0; 32]) {
-            return None;
+            return Ok(None);
         }
         if let SearchReference::Account { account_id, .. } = reference
             && account_id == &self.account_id()
@@ -295,7 +326,10 @@ impl Node {
                     SearchSource::LegacyDevice(public),
                 ) => *device_id == public.user_id(),
                 _ => false,
-            })?;
+            });
+        let Some(conversation) = conversation else {
+            return Ok(None);
+        };
         let account = match &conversation.source {
             SearchSource::Account(account) => Some(account.as_str()),
             _ => None,
@@ -430,7 +464,7 @@ impl Node {
         q: &str,
         limit: usize,
         scope: SearchScope<'_>,
-    ) -> Vec<ScanMatch> {
+    ) -> Result<Vec<ScanMatch>, super::NodeError> {
         let my_account = self.account.account_id();
         let own_devices: std::collections::HashSet<_> = self
             .linked_devices()
@@ -521,15 +555,15 @@ impl Node {
             })
             .collect();
         if matches.is_empty() {
-            return matches;
+            return Ok(matches);
         }
         let recalled = match scope {
-            SearchScope::LegacyDm => return matches,
+            SearchScope::LegacyDm => return Ok(matches),
             SearchScope::Account(peer) => self.recalled_targets_account(peer),
-            SearchScope::Channel => self.recalled_targets_channel(conv),
+            SearchScope::Channel => self.recalled_targets_channel(conv)?,
         };
         if recalled.is_empty() {
-            return matches;
+            return Ok(matches);
         }
         // Channel sent entries store sequence numbers, while recall markers
         // name event IDs. Reuse the history resolver only for channel matches
@@ -551,7 +585,7 @@ impl Node {
                     .sent_seq
                     .is_some_and(|seq| recalled_sent_sequences.contains(&seq))
         });
-        matches
+        Ok(matches)
     }
 }
 

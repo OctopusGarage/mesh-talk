@@ -127,7 +127,7 @@ impl SyncStore for OpaqueRoundStore<'_> {
                 .sync_store(self.recipient)
                 .lock()
                 .expect("projection lock not poisoned")
-                .authorized_event_page(&conv, &wanted, WRAPPER_PAGE_BYTES)
+                .authorized_event_page(&conv, &wanted, WRAPPER_PAGE_BYTES)?
         } else {
             Vec::new()
         };
@@ -322,12 +322,13 @@ impl Node {
                     .sync_store(&progress.recipient)
                     .lock()
                     .expect("projection lock not poisoned")
-                    .authorized_event_ids(&conv);
+                    .authorized_event_ids(&conv)?;
             }
-            match self.file_consent_events(&progress.recipient) {
-                Ok(events) => controls.extend(events.into_iter().map(|event| (event.id, event))),
-                Err(error) => log::debug!("file consent publication deferred: {error}"),
-            }
+            controls.extend(
+                self.file_consent_events(&progress.recipient)?
+                    .into_iter()
+                    .map(|event| (event.id, event)),
+            );
         }
         let requested: HashSet<_> = source_ids.iter().copied().collect();
         source_ids.extend(controls.keys().copied());
@@ -342,13 +343,14 @@ impl Node {
             let outer = if let Some(outer) = progress.wrapper_ids.get(&inner) {
                 *outer
             } else {
-                let event = controls.get(&inner).cloned().or_else(|| {
-                    self.log
+                let event = match controls.get(&inner) {
+                    Some(event) => Some(event.clone()),
+                    None => self
+                        .log
                         .lock()
                         .expect("log lock not poisoned")
-                        .get(&inner)
-                        .cloned()
-                });
+                        .get(&inner)?,
+                };
                 let Some(event) = event else {
                     continue;
                 };

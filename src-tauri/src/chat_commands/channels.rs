@@ -307,18 +307,22 @@ pub async fn channel_custody_statuses<R: tauri::Runtime>(
     admission
         .with_runtime(move |runtime| {
             let node = runtime.handle();
-            Ok(ids
-                .into_iter()
-                .filter_map(|id| {
-                    let replicas = node.channel_custody_count(channel, id)?;
-                    let post_offices = node.channel_post_office_custody_count(channel, id)?;
-                    Some(ChannelCustodyInfo {
-                        id: id.to_hex(),
-                        replicas,
-                        post_offices,
-                    })
-                })
-                .collect())
+            let mut counts = Vec::new();
+            for id in ids {
+                let Some(replicas) = node.channel_custody_count(channel, id)? else {
+                    continue;
+                };
+                let Some(post_offices) = node.channel_post_office_custody_count(channel, id)?
+                else {
+                    continue;
+                };
+                counts.push(ChannelCustodyInfo {
+                    id: id.to_hex(),
+                    replicas,
+                    post_offices,
+                });
+            }
+            Ok(counts)
         })
         .await
 }
@@ -620,7 +624,7 @@ pub async fn channel_history<R: tauri::Runtime>(
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     let history = rt
-        .channel_history(id, limit)
+        .channel_history(id, limit)?
         .into_iter()
         .map(HistoryItem::from)
         .collect();

@@ -75,11 +75,14 @@ impl Node {
         })
     }
 
-    pub(in crate::node) fn shares_replica(&self, conversation: &ConversationId) -> bool {
+    pub(in crate::node) fn shares_replica(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<bool, LogError> {
         let me = self.user_id();
         let book = self.channels.lock().expect("channels lock not poisoned");
         if book.state(conversation).is_some() {
-            return book.replica_enabled(*conversation, &me);
+            return Ok(book.replica_enabled(*conversation, &me));
         }
         drop(book);
         let manifests = self
@@ -89,15 +92,18 @@ impl Node {
             .manifest_events(*conversation);
         let parents: Vec<_> = {
             let log = self.log.lock().expect("log lock not poisoned");
-            manifests
-                .iter()
-                .filter_map(|id| log.get(id).map(|event| event.conversation_id))
-                .collect()
+            let mut parents = Vec::new();
+            for id in &manifests {
+                if let Some(event) = log.get(id)? {
+                    parents.push(event.conversation_id);
+                }
+            }
+            parents
         };
         let book = self.channels.lock().expect("channels lock not poisoned");
-        parents
+        Ok(parents
             .into_iter()
-            .all(|parent| book.state(&parent).is_none() || book.replica_enabled(parent, &me))
+            .all(|parent| book.state(&parent).is_none() || book.replica_enabled(parent, &me)))
     }
 }
 impl GuardedSyncStore<'_> {
@@ -854,7 +860,7 @@ impl GuardedSyncStore<'_> {
     fn public_projection_key(
         &self,
         conversation: &ConversationId,
-    ) -> Option<super::channel_projection_cache::ProjectionKey> {
+    ) -> Result<Option<super::channel_projection_cache::ProjectionKey>, LogError> {
         let guard = self
             .node
             .privacy
@@ -866,7 +872,7 @@ impl GuardedSyncStore<'_> {
             .is_some_and(|state| state.policy.snapshot().invisible)
             || self.pending_channels.contains_key(conversation)
         {
-            return None;
+            return Ok(None);
         }
         let privacy_configured = guard.is_some();
         let privacy_generation = self
@@ -874,7 +880,7 @@ impl GuardedSyncStore<'_> {
             .privacy
             .generation
             .load(std::sync::atomic::Ordering::SeqCst);
-        let sharing = self.node.shares_replica(conversation);
+        let sharing = self.node.shares_replica(conversation)?;
         let established = self
             .node
             .channels
@@ -900,7 +906,7 @@ impl GuardedSyncStore<'_> {
             .lock()
             .expect("log lock not poisoned")
             .fingerprint_and_len(conversation);
-        Some(super::channel_projection_cache::ProjectionKey {
+        Ok(Some(super::channel_projection_cache::ProjectionKey {
             conversation: *conversation,
             raw,
             peer: self.peer.clone(),
@@ -911,14 +917,16 @@ impl GuardedSyncStore<'_> {
             privacy_configured,
             inbound: self.inbound,
             sharing,
-        })
+        }))
     }
 
     fn public_projection_metadata(
         &self,
         conversation: &ConversationId,
-    ) -> Option<super::channel_projection_cache::ProjectionMetadata> {
-        let key = self.public_projection_key(conversation)?;
+    ) -> Result<Option<super::channel_projection_cache::ProjectionMetadata>, LogError> {
+        let Some(key) = self.public_projection_key(conversation)? else {
+            return Ok(None);
+        };
         let cached = self
             .node
             .channel_projection_cache
@@ -926,10 +934,10 @@ impl GuardedSyncStore<'_> {
             .expect("projection cache lock not poisoned")
             .get(&key);
         if let Some(metadata) = cached {
-            if self.public_projection_key(conversation).as_ref() == Some(&key) {
-                return Some(metadata);
+            if self.public_projection_key(conversation)?.as_ref() == Some(&key) {
+                return Ok(Some(metadata));
             }
-            return None;
+            return Ok(None);
         }
         // On a miss, detect signed channel ancestry directly in the durable log.
         // ChannelBook may lag behind the append; it is not the public authority.
@@ -943,9 +951,9 @@ impl GuardedSyncStore<'_> {
                 .iter()
                 .any(|event| event.kind == EventKind::MembershipChange);
         if !channel {
-            return None;
+            return Ok(None);
         }
-        let visible = self.visible(conversation);
+        let visible = self.visible(conversation)?;
         let metadata = super::channel_projection_cache::ProjectionMetadata {
             fingerprint: crate::eventlog::sync::fingerprint(
                 visible.iter().map(|event| event.id).collect(),
@@ -967,15 +975,15 @@ impl GuardedSyncStore<'_> {
                 .iter()
                 .any(|event| event.kind == EventKind::ChannelReplica),
         };
-        if self.public_projection_key(conversation).as_ref() != Some(&key) {
-            return None;
+        if self.public_projection_key(conversation)?.as_ref() != Some(&key) {
+            return Ok(None);
         }
         self.node
             .channel_projection_cache
             .lock()
             .expect("projection cache lock not poisoned")
             .insert(key, metadata);
-        Some(metadata)
+        Ok(Some(metadata))
     }
 
     fn outgoing_projection(
@@ -983,17 +991,17 @@ impl GuardedSyncStore<'_> {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
         payloads: bool,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         if self.pull_only {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut events = self.visible_projection(conversation, payloads);
+        let mut events = self.visible_projection(conversation, payloads)?;
         // Recheck each payload page in either direction, including pooled sessions.
         // Preserve the actual possession inventory/fingerprint: hiding retained IDs
         // would make peers push these same chunks back to a metered holder.
         if self
             .node
-            .restricts_group_file_replica(conversation, &self.peer)
+            .restricts_group_file_replica(conversation, &self.peer)?
         {
             let own = self.node.identity.public().ed25519_pub;
             events.retain(|event| event.author.ed25519_pub() == &own);
@@ -1021,14 +1029,14 @@ impl GuardedSyncStore<'_> {
                 allowed
             });
         }
-        if !self.inbound && !self.node.shares_replica(conversation) {
+        if !self.inbound && !self.node.shares_replica(conversation)? {
             // Share-off applies to outbound retries and explicit sends too.
             // Own records can advance only across parents the receiver already
             // has, or other eligible own records in this same ordered batch.
             // Missing third-party ancestry must come from a sharing holder.
             let mut available = have.clone();
             let own = self.node.identity.public().ed25519_pub;
-            return events
+            return Ok(events
                 .into_iter()
                 .filter(|event| {
                     let eligible = event.author.ed25519_pub() == &own
@@ -1041,12 +1049,12 @@ impl GuardedSyncStore<'_> {
                     }
                     eligible && !have.contains(&event.id)
                 })
-                .collect();
+                .collect());
         }
-        events
+        Ok(events
             .into_iter()
             .filter(|event| !have.contains(&event.id))
-            .collect()
+            .collect())
     }
 
     /// Authorized identities without cloning large message/file ciphertext.
@@ -1056,11 +1064,12 @@ impl GuardedSyncStore<'_> {
     pub(in crate::node) fn authorized_event_ids(
         &self,
         conversation: &ConversationId,
-    ) -> Vec<EventId> {
-        self.outgoing_projection(conversation, &HashSet::new(), false)
+    ) -> Result<Vec<EventId>, LogError> {
+        Ok(self
+            .outgoing_projection(conversation, &HashSet::new(), false)?
             .into_iter()
             .map(|event| event.id)
-            .collect()
+            .collect())
     }
 
     pub(in crate::node) fn authorized_event_page(
@@ -1068,32 +1077,36 @@ impl GuardedSyncStore<'_> {
         conversation: &ConversationId,
         wanted: &HashSet<EventId>,
         budget: usize,
-    ) -> Vec<Event> {
-        let ids = self.authorized_event_ids(conversation);
+    ) -> Result<Vec<Event>, LogError> {
+        let ids = self.authorized_event_ids(conversation)?;
         let log = self.node.log.lock().expect("log lock not poisoned");
         let mut used = 0usize;
-        ids.into_iter()
-            .filter(|id| wanted.contains(id))
-            .filter_map(|id| log.get(&id))
-            .take_while(|event| {
-                let bytes = event.ciphertext.len().saturating_add(512);
-                if used > 0 && used.saturating_add(bytes) > budget {
-                    return false;
-                }
-                used = used.saturating_add(bytes);
-                true
-            })
-            .cloned()
-            .collect()
+        let mut events = Vec::new();
+        for id in ids.into_iter().filter(|id| wanted.contains(id)) {
+            let Some(event) = log.get(&id)? else {
+                continue;
+            };
+            let bytes = event.ciphertext.len().saturating_add(512);
+            if used > 0 && used.saturating_add(bytes) > budget {
+                break;
+            }
+            used = used.saturating_add(bytes);
+            events.push(event);
+        }
+        Ok(events)
     }
 
-    fn visible(&self, conversation: &ConversationId) -> Vec<Event> {
+    fn visible(&self, conversation: &ConversationId) -> Result<Vec<Event>, LogError> {
         self.visible_projection(conversation, true)
     }
 
-    fn visible_projection(&self, conversation: &ConversationId, payloads: bool) -> Vec<Event> {
-        if self.inbound && !self.node.shares_replica(conversation) {
-            return Vec::new();
+    fn visible_projection(
+        &self,
+        conversation: &ConversationId,
+        payloads: bool,
+    ) -> Result<Vec<Event>, LogError> {
+        if self.inbound && !self.node.shares_replica(conversation)? {
+            return Ok(Vec::new());
         }
         let guard = self
             .node
@@ -1146,10 +1159,10 @@ impl GuardedSyncStore<'_> {
         {
             let allowed =
                 self.channel_projection(conversation, &events, false, false, guard.as_ref());
-            return events
+            return Ok(events
                 .into_iter()
                 .filter(|event| allowed.contains(&event.id))
-                .collect();
+                .collect());
         }
         // Local erase cancels receipt retries, while preserving encrypted chat
         // history's established non-recall semantics. Apply this in public mode
@@ -1193,18 +1206,18 @@ impl GuardedSyncStore<'_> {
         });
         drop(controls);
         let Some(state) = guard.as_ref().filter(|s| s.policy.snapshot().invisible) else {
-            return events;
+            return Ok(events);
         };
         let allowed = self.projection(state, conversation, &events);
-        events
+        Ok(events
             .into_iter()
             .filter(|e| allowed.contains(&e.id))
-            .collect()
+            .collect())
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
     fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
-        if let Some(metadata) = self.public_projection_metadata(conversation) {
+        if let Some(metadata) = self.public_projection_metadata(conversation)? {
             return Ok(metadata.requires_v4);
         }
         if !self
@@ -1218,7 +1231,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         }
         Ok(
             // A private/rejected control must not reveal itself to this principal.
-            self.visible(conversation).iter().any(|event| {
+            self.visible(conversation)?.iter().any(|event| {
                 matches!(
                     event.kind,
                     EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
@@ -1228,7 +1241,7 @@ impl SyncStore for GuardedSyncStore<'_> {
     }
 
     fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
-        if let Some(metadata) = self.public_projection_metadata(conversation) {
+        if let Some(metadata) = self.public_projection_metadata(conversation)? {
             return Ok(metadata.requires_v3);
         }
         if !self
@@ -1240,7 +1253,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         {
             return Ok(false);
         }
-        Ok(self.visible(conversation).iter().any(|event| {
+        Ok(self.visible(conversation)?.iter().any(|event| {
             matches!(
                 event.kind,
                 EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory
@@ -1249,7 +1262,7 @@ impl SyncStore for GuardedSyncStore<'_> {
     }
 
     fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
-        if let Some(metadata) = self.public_projection_metadata(conversation) {
+        if let Some(metadata) = self.public_projection_metadata(conversation)? {
             return Ok(metadata.requires_v2);
         }
         // Inspect the peer's projection: a hidden event must not affect the
@@ -1264,7 +1277,7 @@ impl SyncStore for GuardedSyncStore<'_> {
             return Ok(false);
         }
         Ok(self
-            .visible(conversation)
+            .visible(conversation)?
             .iter()
             .any(|event| event.kind == EventKind::ChannelReplica))
     }
@@ -1272,7 +1285,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         &self,
         conversation: &ConversationId,
     ) -> Result<([u8; 32], usize), LogError> {
-        if let Some(metadata) = self.public_projection_metadata(conversation) {
+        if let Some(metadata) = self.public_projection_metadata(conversation)? {
             return Ok((metadata.fingerprint, metadata.len));
         }
         let ids = self.event_ids(conversation)?;
@@ -1288,7 +1301,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         Ok(
             match self
                 .node
-                .attachment_consent_for_peer(*file, *manifest, &self.peer)
+                .attachment_consent_for_peer(*file, *manifest, &self.peer)?
             {
                 super::attachment_consent::ReceiveDecision::Pending => FileConsentStatus::Pending,
                 super::attachment_consent::ReceiveDecision::Accepted => FileConsentStatus::Accepted,
@@ -1305,11 +1318,11 @@ impl SyncStore for GuardedSyncStore<'_> {
             .direct_file_consent_control(&self.peer, *file, *manifest)
     }
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
-        if !self.visible(conversation).iter().any(|e| e.id == *id) {
+        if !self.visible(conversation)?.iter().any(|e| e.id == *id) {
             return Ok(!self.denied
                 && self
                     .node
-                    .historical_file_completion(*conversation, *id, &self.peer));
+                    .historical_file_completion(*conversation, *id, &self.peer)?);
         }
         self.node
             .log
@@ -1322,7 +1335,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         self.denied
     }
     fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
-        let mut ids: Vec<_> = self.visible(conversation).iter().map(|e| e.id).collect();
+        let mut ids: Vec<_> = self.visible(conversation)?.iter().map(|e| e.id).collect();
         if let Some(pending) = self.pending_channels.get(conversation) {
             ids.extend(pending.events.iter().map(|event| event.id));
         }
@@ -1333,7 +1346,7 @@ impl SyncStore for GuardedSyncStore<'_> {
         conversation: &ConversationId,
         have: &HashSet<EventId>,
     ) -> Result<Vec<Event>, LogError> {
-        Ok(self.outgoing_projection(conversation, have, true))
+        self.outgoing_projection(conversation, have, true)
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         let node = self.node;
@@ -1410,9 +1423,10 @@ impl SyncStore for GuardedSyncStore<'_> {
         // ordinary sync. Enforce the same receive decision at the durable log gate.
         if event.kind == EventKind::Message
             && known_file
-            && !self
-                .node
-                .attachment_chunk_author_allowed(event.conversation_id, event.author.ed25519_pub())
+            && !self.node.attachment_chunk_author_allowed(
+                event.conversation_id,
+                event.author.ed25519_pub(),
+            )?
         {
             self.denied = true;
             return Err(LogError::AdmissionRejected(
@@ -1652,16 +1666,20 @@ mod causal_export_tests {
         let guarded = node.sync_store(&peer.public());
         let store = guarded.lock().unwrap();
         assert_eq!(
-            store.authorized_event_ids(&conversation),
+            store.authorized_event_ids(&conversation).unwrap(),
             store.event_ids(&conversation).unwrap()
         );
         let wanted = HashSet::from([parent.id, child.id]);
         assert_eq!(
-            store.authorized_event_page(&conversation, &wanted, 50_000),
+            store
+                .authorized_event_page(&conversation, &wanted, 50_000)
+                .unwrap(),
             vec![parent]
         );
         assert_eq!(
-            store.authorized_event_page(&conversation, &HashSet::from([child.id]), 50_000),
+            store
+                .authorized_event_page(&conversation, &HashSet::from([child.id]), 50_000)
+                .unwrap(),
             vec![child]
         );
     }

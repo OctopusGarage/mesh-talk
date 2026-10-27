@@ -224,7 +224,7 @@ impl Node {
             acceptance_event: None,
         });
         let policy = self.channel_history_policy(channel);
-        let selected = self.select_join_history(channel, policy, super::node::now_millis());
+        let selected = self.select_join_history(channel, policy, super::node::now_millis())?;
         self.append_invitation_with_history_and_control(
             channel,
             &meta,
@@ -507,10 +507,11 @@ mod tests {
         let log = f.node.log.lock().unwrap();
         let event = log
             .get(&projection.authority.current_event().unwrap())
+            .unwrap()
             .unwrap();
         assert!(event.parents.contains(&grant.membership_event));
         assert_eq!(
-            log.get(&grant.membership_event).unwrap().kind,
+            log.get(&grant.membership_event).unwrap().unwrap().kind,
             EventKind::MembershipChange
         );
         server.abort();

@@ -121,7 +121,7 @@ impl Node {
             }
             Ok(())
         })();
-        self.reseed_live_file_book(&delivery);
+        self.reseed_live_file_book(&delivery)?;
         erased?;
         removed += self
             .received_files
@@ -129,7 +129,7 @@ impl Node {
             .expect("received_files mutex not poisoned")
             .remove_where(|e| e.conversation == conv && e.event_id == target)
             .map_err(NodeError::Log)?;
-        self.reseed_live_file_book(&delivery);
+        self.reseed_live_file_book(&delivery)?;
         self.remove_unreferenced_media(media_to_remove)?;
 
         // Sent plaintext sidecar: account entries carry the msg id in their envelope; plain
@@ -332,7 +332,7 @@ impl Node {
             }
             Ok(())
         })();
-        self.reseed_live_file_book(&delivery);
+        self.reseed_live_file_book(&delivery)?;
         erased?;
         let mut removed = 0;
         removed += self
@@ -348,7 +348,7 @@ impl Node {
             .expect("received_files mutex not poisoned")
             .remove_where(|e| should_remove(e.conversation, e.wall_clock))
             .map_err(NodeError::Log)?;
-        self.reseed_live_file_book(&delivery);
+        self.reseed_live_file_book(&delivery)?;
         self.remove_unreferenced_media(media_to_remove)?;
         removed += self
             .sentlog

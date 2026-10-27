@@ -379,6 +379,11 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   `SequenceExhausted` when the author counter has no successor. Exhaustive
   `LogError` matches must account for these variants. Event serialization and
   wire formats are unchanged.
+  Individual durable lookups `PersistentEventLog::get` and `authored_event`
+  return `Result<Option<Event>, LogError>` with an owned, complete event. The
+  in-memory `EventLog` keeps its borrowed API. Only `Ok(None)` permits an
+  absence-based fallback; a failed read must stop authorization, media reclamation
+  or the affected delivery/recovery attempt without advancing its progress.
 - **Sync** (`sync.rs`) — three-message id-set reconciliation: `Request(have)` →
   `Response(missing + responder have)` → `Followup(what responder lacks)`, bounded by
   frame budget (`MAX_PLAINTEXT`), multiple rounds (≤ `MAX_SYNC_ROUNDS`). Every event is
@@ -1261,6 +1266,26 @@ and historical data require their own bounds. Failed commits, failed rollbacks
 and fatal storage errors invalidate the handle until reopening. Read failures
 remain errors rather than missing records. The connection owner does not by
 itself convert legacy event or transcript stores to demand loading.
+
+Owned individual event reads copy only the selected event from the current
+resident index. They establish the fallible ownership boundary needed for disk
+queries, but do not bound the existing index or whole-conversation replay.
+Canonical history, search, protected-content, attachment availability and custody
+queries propagate these read failures through `Node` and affected `NodeRuntime`
+methods. Host IPC preserves its successful payload shapes and uses its existing
+error channel for failures. Boolean Favorites eligibility logs failed canonical
+reads and denies capture/export eligibility; it does not authorize a snapshot or
+substitute a successful empty history. Typed node/runtime wrappers retain their
+underlying error sources.
+The outgoing journal's existing acceptance boundary remains authoritative: a
+later projection/recovery read failure does not revoke durable acceptance or
+turn it into a retryable send result. Supervisors log the original failure and
+retain queued work for retry without claiming a send or recipient delivery.
+Live receive notifications and derived channel-recall persistence remain separate.
+A failed recall-target lookup leaves the signed `Delete` event in the log and
+records the failure; canonical queries report the read error rather than an empty
+recall set. Control-only recall repair currently depends on a later processing
+pass or canonical query, without an independent background retry clock.
 
 Sync storage reads and handlers propagate local failures as errors before sending
 a successful empty history, fingerprint match or custody claim. Explicit invalid

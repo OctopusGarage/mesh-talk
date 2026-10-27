@@ -305,7 +305,7 @@ impl Node {
         let wall = {
             let log = self.log.lock().expect("log mutex not poisoned");
             let event = log
-                .get(&target)
+                .get(&target)?
                 .ok_or_else(|| NodeError::Channel("unknown message".into()))?;
             if event.author != me {
                 return Err(NodeError::Channel(
@@ -380,7 +380,7 @@ impl Node {
     pub(in crate::node) fn recalled_targets_channel(
         &self,
         conv: ConversationId,
-    ) -> HashSet<EventId> {
+    ) -> Result<HashSet<EventId>, NodeError> {
         let content_gate = self.channel_content_gate(conv);
         let mut out: HashSet<EventId> = self
             .recalls
@@ -433,7 +433,7 @@ impl Node {
             // Only the message's own author may recall it.
             let target_wall_clock = {
                 let log = self.log.lock().expect("log mutex not poisoned");
-                log.get(&p.target)
+                log.get(&p.target)?
                     .filter(|target| target.author == event.author)
                     .map(|target| target.wall_clock)
             };
@@ -449,7 +449,7 @@ impl Node {
                 out.insert(p.target);
             }
         }
-        out
+        Ok(out)
     }
 
     /// The set of recalled (logical) message ids for the ACCOUNT conversation with

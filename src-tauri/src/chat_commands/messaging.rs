@@ -74,7 +74,7 @@ pub async fn history<R: tauri::Runtime>(
         .peer_public(&peer)
         .ok_or_else(|| CommandError::Validation(format!("unknown peer: {peer}")))?;
     let history = rt
-        .history(&public, limit)
+        .history(&public, limit)?
         .into_iter()
         .map(HistoryItem::from)
         .collect();
@@ -169,7 +169,7 @@ pub async fn account_history<R: tauri::Runtime>(
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     let history = rt
-        .account_history(&account, limit)
+        .account_history(&account, limit)?
         .into_iter()
         .map(HistoryItem::from)
         .collect();
@@ -366,7 +366,7 @@ pub async fn search<R: tauri::Runtime>(
     let admission = RuntimeAdmission::capture_current(app.state::<AppState>().inner(), &state)?;
     let hits = admission
         .clone()
-        .blocking(move |runtime, _| Ok(runtime.handle().search(&query)))
+        .blocking(move |runtime, _| Ok(runtime.handle().search(&query)?))
         .await?;
     admission
         .with_runtime(move |_| {

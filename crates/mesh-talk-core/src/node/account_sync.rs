@@ -682,8 +682,8 @@ impl Node {
             .log
             .lock()
             .expect("log mutex not poisoned")
-            .get(&event_id)
-            && existing != &payload.proof
+            .get(&event_id)?
+            && existing != payload.proof
         {
             return Err(NodeError::Authorization(
                 "file proof conflicts with signed event".into(),
@@ -719,7 +719,7 @@ impl Node {
             .map_err(NodeError::Log)?;
         drop(files);
         let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-        self.reseed_live_file_book(&delivery);
+        self.reseed_live_file_book(&delivery)?;
         if fresh {
             self.note_account_history_change();
         }
@@ -766,7 +766,7 @@ impl Node {
         &self,
         file_conv: ConversationId,
         requester: &PublicIdentity,
-    ) -> Option<crate::file::AnyManifest> {
+    ) -> Result<Option<crate::file::AnyManifest>, NodeError> {
         let (recalled, _) = self.account_archive_recalls();
         let own = self.account_id();
         let me = self.user_id();
@@ -813,15 +813,16 @@ impl Node {
                 {
                     continue;
                 }
-                let proof = log.get(&row.event_id).or_else(|| proofs.get(&row.event_id));
+                let selected = log.get(&row.event_id)?;
+                let proof = selected.as_ref().or_else(|| proofs.get(&row.event_id));
                 if let Some(manifest) = super::files::eligible_manifest_row(row, proof, None)
                     && manifest.file_conv() == file_conv
                 {
-                    return Some(manifest);
+                    return Ok(Some(manifest));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     fn account_recalled_files(&self) -> HashSet<ConversationId> {
@@ -856,15 +857,34 @@ impl Node {
             {
                 return false;
             }
-            self.attachment_for_sibling(file_conv, channel.peer_identity())
+            match self.attachment_for_sibling(file_conv, channel.peer_identity()) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    log::warn!("account attachment lookup deferred: {error}");
+                    return false;
+                }
+            }
         };
         // An admitted sibling gets one uniform negative for absent, erased,
         // unshared, or unavailable copies. It learns no existence distinction.
-        let available = manifest.as_ref().is_some_and(|manifest| {
-            self.file_progress(file_conv)
+        let available = if let Some(manifest) = manifest.as_ref() {
+            if self
+                .file_progress(file_conv)
                 .is_some_and(|progress| progress.done == progress.total)
-                || self.managed_media_for_export(file_conv, manifest).is_some()
-        });
+            {
+                true
+            } else {
+                match self.managed_media_for_export(file_conv, manifest) {
+                    Ok(path) => path.is_some(),
+                    Err(error) => {
+                        log::warn!("account attachment export deferred: {error}");
+                        return false;
+                    }
+                }
+            }
+        } else {
+            false
+        };
         if !policy.attachments || !available {
             return self
                 .send_account_frame(
@@ -931,7 +951,7 @@ impl Node {
         let staging = self
             .account_blocking(move |node| {
                 let manifest = node
-                    .attachment_for_sibling(file_conv, &peer)
+                    .attachment_for_sibling(file_conv, &peer)?
                     .ok_or_else(|| {
                         NodeError::Authorization("attachment no longer shared".into())
                     })?;
@@ -1317,7 +1337,7 @@ impl Node {
                 for record in page {
                     if let HistoryRecord::Channel(record) = record {
                         let channel = ConversationId::new(record.conversation);
-                        if let Some(event) = log.get(&EventId::new(record.event_id))
+                        if let Some(event) = log.get(&EventId::new(record.event_id))?
                             && (event.conversation_id != channel
                                 || event.kind != crate::eventlog::EventKind::Message
                                 || event.author.user_id() != record.from)
@@ -2309,7 +2329,7 @@ mod tests {
             contents,
             "the requested attachment actually exists and is readable locally"
         );
-        assert!(!victim.channel_history(group, 10).is_empty());
+        assert!(!victim.channel_history(group, 10).unwrap().is_empty());
         assert!(
             !victim
                 .account_preferences(SyncCategory::Appearance)

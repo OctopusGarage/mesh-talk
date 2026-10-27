@@ -986,7 +986,7 @@ impl Node {
                 let Some(root) = root else {
                     continue;
                 };
-                let recalled = self.recalled_targets_channel(channel);
+                let recalled = self.recalled_targets_channel(channel)?;
                 let now = super::node::now_millis();
                 let keys: Vec<_> = offer
                     .rows
@@ -1049,11 +1049,15 @@ impl Node {
         channel: ConversationId,
         policy: HistoryPolicy,
         now: u64,
-    ) -> Vec<HistoryEntry> {
+    ) -> Result<Vec<HistoryEntry>, NodeError> {
         if policy == HistoryPolicy::Off {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        select_history(self.channel_history(channel, 500), policy, now)
+        Ok(select_history(
+            self.channel_history(channel, 500)?,
+            policy,
+            now,
+        ))
     }
 }
 

@@ -1173,8 +1173,8 @@ mod tests {
             let guard = node.0.read().await;
             let runtime = guard.as_ref().unwrap();
             (
-                runtime.handle().channel_history(channel, 100),
-                runtime.handle().channel_history(private, 100),
+                runtime.handle().channel_history(channel, 100).unwrap(),
+                runtime.handle().channel_history(private, 100).unwrap(),
             )
         };
         node.0.write().await.take().unwrap().stop().await;

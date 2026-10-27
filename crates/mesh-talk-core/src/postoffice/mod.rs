@@ -558,14 +558,14 @@ impl SyncStore for PostOffice {
         Ok(self.log.fingerprint_and_len(conversation))
     }
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
+        self.log.sync()?;
         if !self
             .log
-            .get(id)
+            .get(id)?
             .is_some_and(|event| event.conversation_id == *conversation)
         {
             return Ok(false);
         }
-        self.log.sync()?;
         Ok(true)
     }
     fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
@@ -628,6 +628,35 @@ mod tests {
             EventKind::Message,
             body.to_vec(),
         )
+    }
+
+    #[test]
+    fn owned_read_failure_aborts_durable_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let signer = DeviceIdentity::generate();
+        let event = Event::new(
+            &signer,
+            ConversationId::new([9; 32]),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::Message,
+            b"event".to_vec(),
+        );
+        relay.accept(event.clone()).unwrap();
+        relay.log.fail_reads(true);
+        assert!(
+            matches!(SyncStore::durable_have(&relay, &event.conversation_id, &event.id), Err(LogError::Io(error)) if error.to_string() == "injected event read failure")
+        );
+        relay.log.fail_reads(false);
+        assert!(SyncStore::durable_have(&relay, &event.conversation_id, &event.id).unwrap());
     }
 
     #[test]

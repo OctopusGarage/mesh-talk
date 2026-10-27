@@ -430,7 +430,7 @@ pub async fn owner_account_history<R: tauri::Runtime>(
     let history = admission
         .with_runtime(|runtime| {
             Ok(runtime
-                .account_history(&account, limit.min(500))
+                .account_history(&account, limit.min(500))?
                 .into_iter()
                 .map(HistoryItem::from)
                 .collect())
@@ -2615,7 +2615,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            rt.history(&legacy_device.public(), 10)[0].id
+            rt.history(&legacy_device.public(), 10).unwrap()[0].id
         });
         let status = fixture.invoke("owner_delivery_statuses", serde_json::json!({"owner":"alice", "account":legacy_account.account_id(), "ids":[hex::encode(legacy_id.as_bytes())]})).unwrap();
         assert_eq!(status, serde_json::json!([]));
@@ -2684,6 +2684,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .account_history(remote.account_id(), 10)
+                    .unwrap()
                     .is_empty()
                 {
                     tokio::task::yield_now().await;
@@ -2984,6 +2985,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .account_history(&account, 10)
+                .unwrap()
                 .len(),
             3
         );
@@ -3022,6 +3024,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .account_history(&account, 10)
+                .unwrap()
                 .is_empty()
         );
     }
@@ -3912,7 +3915,7 @@ mod tests {
                 .all_event_ids()
                 .into_iter()
                 .filter(|id| {
-                    let profile = log.get(id).unwrap().kind
+                    let profile = log.get(id).unwrap().unwrap().kind
                         == mesh_talk_core::eventlog::event::EventKind::Profile;
                     profiles += usize::from(profile);
                     !profile
@@ -4046,7 +4049,7 @@ mod tests {
         let (after_log, after_profiles) = event_ids();
         let non_profile_log_unchanged = after_log == before_log;
         let staged = staged.load(Ordering::SeqCst);
-        let history_empty = node.account_history(&account, 10).is_empty();
+        let history_empty = node.account_history(&account, 10).unwrap().is_empty();
         let work_unchanged = work() == before_work;
         drop(node);
         // The registered logout child has completed its real retirement barrier.
@@ -4065,7 +4068,7 @@ mod tests {
         ))
         .unwrap();
         let reopened_policy = reopened.handle().privacy_snapshot();
-        let reopened_empty = reopened.account_history(&account, 10).is_empty();
+        let reopened_empty = reopened.account_history(&account, 10).unwrap().is_empty();
         tauri::async_runtime::block_on(reopened.stop());
         eprintln!(
             "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, non_profile_log_unchanged={non_profile_log_unchanged}, profiles_before={before_profiles}, profiles_after={after_profiles}"
@@ -4176,7 +4179,7 @@ mod tests {
             let mut guard = fixture.node.0.write().await;
             let old = guard.take().unwrap();
             assert!(
-                old.account_history(&account, 10).is_empty(),
+                old.account_history(&account, 10).unwrap().is_empty(),
                 "changed owner must reject the staged card before WAL acceptance"
             );
             drop(guard);

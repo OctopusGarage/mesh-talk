@@ -157,7 +157,7 @@ impl Node {
         version: AccountSyncVersion,
         previous: Option<ArchiveIndex>,
         recalled: &RecalledAccounts,
-    ) -> ArchiveIndex {
+    ) -> Result<ArchiveIndex, NodeError> {
         let own = self.account_id();
         let mut page = previous.unwrap_or_default();
         let requester_id = requester.user_id();
@@ -290,16 +290,13 @@ impl Node {
                         if entry.plaintext.is_empty() || entry.plaintext.len() > MAX_RECORD {
                             continue;
                         }
-                        let id = recovered
-                            .as_ref()
-                            .and_then(|saved| saved.id_for(entry))
-                            .or_else(|| {
-                                log.authored_event(channel, author, entry.seq)
-                                    .filter(|event| {
-                                        event.kind == crate::eventlog::EventKind::Message
-                                    })
-                                    .map(|event| event.id)
-                            });
+                        let id = match recovered.as_ref().and_then(|saved| saved.id_for(entry)) {
+                            Some(id) => Some(id),
+                            None => log
+                                .authored_event(channel, author, entry.seq)?
+                                .filter(|event| event.kind == crate::eventlog::EventKind::Message)
+                                .map(|event| event.id),
+                        };
                         let Some(id) = id else { continue };
                         if self.recipient_expired(&entry.plaintext, id, entry.wall_clock) {
                             continue;
@@ -393,9 +390,8 @@ impl Node {
                     {
                         continue;
                     }
-                    let Some(proof) = log
-                        .get(&entry.event_id)
-                        .or_else(|| proofs.get(&entry.event_id))
+                    let selected = log.get(&entry.event_id)?;
+                    let Some(proof) = selected.as_ref().or_else(|| proofs.get(&entry.event_id))
                     else {
                         continue;
                     };
@@ -428,7 +424,7 @@ impl Node {
                 }
             }
         }
-        page.finish()
+        Ok(page.finish())
     }
 
     fn archive_key(
@@ -536,7 +532,7 @@ impl Node {
                 .as_ref()
                 .map_or(0, |index| index.scanned.values().sum());
             let index =
-                self.build_archive_index(requester, history, files, version, previous, &recalled);
+                self.build_archive_index(requester, history, files, version, previous, &recalled)?;
             #[cfg(test)]
             {
                 cache.scanned_rows += index.scanned.values().sum::<usize>() - scanned_before;
@@ -745,8 +741,9 @@ impl Node {
                     .account_file_proofs
                     .lock()
                     .expect("file proofs mutex not poisoned");
-                let proof = log
-                    .get(&entry.event_id)
+                let selected = log.get(&entry.event_id)?;
+                let proof = selected
+                    .as_ref()
                     .or_else(|| proofs.get(&entry.event_id))
                     .ok_or_else(stale)?;
                 if super::super::files::eligible_manifest_row(entry, Some(proof), None).is_none() {

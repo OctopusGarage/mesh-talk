@@ -179,7 +179,13 @@ async fn v4_pairing_adopts_login_preserving_storage_device_and_encrypted_history
         .send_to_account(&old_account, b"retained local history", None)
         .await
         .unwrap();
-    assert_eq!(target_runtime.account_history(&old_account, 10).len(), 1);
+    assert_eq!(
+        target_runtime
+            .account_history(&old_account, 10)
+            .unwrap()
+            .len(),
+        1
+    );
     let history_path = target
         .root
         .path()

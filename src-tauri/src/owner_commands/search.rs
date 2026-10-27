@@ -139,7 +139,7 @@ pub async fn owner_search_recent(
             // matching plaintext across every conversation in the desktop host.
             let results = runtime
                 .handle()
-                .search_recent_limited(&query, RESULT_LIMIT + 1);
+                .search_recent_limited(&query, RESULT_LIMIT + 1)?;
             let truncated = results.hits.len() > RESULT_LIMIT;
             let candidates = results.hits.into_iter().take(RESULT_LIMIT).map(|result| {
                 let hit = result.hit;
@@ -211,7 +211,7 @@ pub async fn owner_search_context(
     let response = admission
         .clone()
         .blocking(move |runtime, _| {
-            let context = runtime.handle().search_context(&core_reference);
+            let context = runtime.handle().search_context(&core_reference)?;
             let mut response = SearchContextInfo {
                 status: "unavailable",
                 reference,
@@ -368,7 +368,7 @@ where
         ProtectedContentReader {
             protection: |node, reference| {
                 node.protected_message_content(reference)
-                    .map(|(mode, _)| mode)
+                    .map(|content| content.map(|(mode, _)| mode))
             },
             content: mesh_talk_core::node::Node::protected_message_content,
         },
@@ -388,8 +388,14 @@ struct ProtectedContentReader {
     protection: fn(
         &mesh_talk_core::node::Node,
         &SearchReference,
-    ) -> Option<mesh_talk_core::node::MessageProtection>,
-    content: fn(&mesh_talk_core::node::Node, &SearchReference) -> Option<ProtectedContent>,
+    ) -> Result<
+        Option<mesh_talk_core::node::MessageProtection>,
+        mesh_talk_core::node::NodeError,
+    >,
+    content: fn(
+        &mesh_talk_core::node::Node,
+        &SearchReference,
+    ) -> Result<Option<ProtectedContent>, mesh_talk_core::node::NodeError>,
 }
 
 async fn reveal_content_with_verifier<T, F, Fut>(
@@ -409,7 +415,7 @@ where
     let (protection, original_node) = admission
         .with_runtime(|runtime| {
             let handle = runtime.handle();
-            let protection = (reader.protection)(&handle, &reference).ok_or_else(|| {
+            let protection = (reader.protection)(&handle, &reference)?.ok_or_else(|| {
                 CommandError::Authorization("protected message unavailable".into())
             })?;
             Ok((protection, handle))
@@ -429,7 +435,7 @@ where
                 ));
             }
             let (current_protection, content) =
-                (reader.content)(&handle, &reference).ok_or_else(|| {
+                (reader.content)(&handle, &reference)?.ok_or_else(|| {
                     CommandError::Authorization("protected message unavailable".into())
                 })?;
             if current_protection != protection {

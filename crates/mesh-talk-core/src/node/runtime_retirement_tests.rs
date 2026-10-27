@@ -86,7 +86,16 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
     replacement.node.log.lock().unwrap().append(event).unwrap();
     retire(replacement).await;
     let reopened = start(dir.path()).await;
-    assert!(reopened.node.log.lock().unwrap().get(&event_id).is_some());
+    assert!(
+        reopened
+            .node
+            .log
+            .lock()
+            .unwrap()
+            .get(&event_id)
+            .unwrap()
+            .is_some()
+    );
     retire(reopened).await;
 }
 

@@ -211,11 +211,11 @@ fn offline_dm_delivered_via_post_office() {
             )
         {
             replicated = sender.all_event_ids().into_iter().find_map(|id| {
-                let event = sender.get(&id)?;
+                let event = sender.get(&id).unwrap()?;
                 if event.kind != EventKind::Message || event.author.user_id() != alice_uid {
                     return None;
                 }
-                let outer = mailbox.wrap(event).ok()?;
+                let outer = mailbox.wrap(&event).ok()?;
                 (relay.has(&outer.id) && !relay.has(&id)).then_some(outer.id)
             });
         }
@@ -251,11 +251,11 @@ fn offline_dm_delivered_via_post_office() {
                 "channel ID stays private"
             );
             replicated_group = sender.all_event_ids().into_iter().find_map(|id| {
-                let event = sender.get(&id)?;
+                let event = sender.get(&id).unwrap()?;
                 if event.conversation_id != group || event.kind != EventKind::Message {
                     return None;
                 }
-                let outer = mailbox.wrap(event).ok()?;
+                let outer = mailbox.wrap(&event).ok()?;
                 relay.has(&outer.id).then_some(outer.id)
             });
         }

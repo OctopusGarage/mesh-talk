@@ -292,7 +292,7 @@ impl Node {
     pub(in crate::node) fn reseed_live_file_book(
         &self,
         delivery: &super::delivery_store::DeliveryStore,
-    ) {
+    ) -> Result<(), NodeError> {
         let mut book = FileBook::new();
         let mut rows = Vec::new();
         {
@@ -309,9 +309,8 @@ impl Node {
                     {
                         continue;
                     }
-                    let original = log
-                        .get(&entry.event_id)
-                        .or_else(|| proofs.get(&entry.event_id));
+                    let selected = log.get(&entry.event_id)?;
+                    let original = selected.as_ref().or_else(|| proofs.get(&entry.event_id));
                     let decoded = validated_manifest(&entry.plaintext);
                     let existing = decoded.as_ref().and_then(|m| book.manifest(&m.file_conv()));
                     if let Some(manifest) = eligible_manifest_row(&entry, original, existing) {
@@ -350,7 +349,7 @@ impl Node {
             let log = self.log.lock().expect("log lock not poisoned");
             let mut own_files = std::collections::HashSet::new();
             for (file, id) in rows {
-                if let Some(event) = log.get(&id).filter(|event| {
+                if let Some(event) = log.get(&id)?.filter(|event| {
                     event.kind == EventKind::FileManifest
                         && event.verify_integrity()
                         && event.verify_signature()
@@ -371,7 +370,7 @@ impl Node {
             for (file, scope) in legacy {
                 if own_files.contains(&file)
                     && !delivery.manifest_event_erased(scope.event)
-                    && log.get(&scope.event).is_some_and(|event| {
+                    && log.get(&scope.event)?.is_some_and(|event| {
                         event.kind == EventKind::FileManifest
                             && event.author == scope.author
                             && event.conversation_id == scope.parent
@@ -385,6 +384,12 @@ impl Node {
                         retained.push(scope);
                     }
                 }
+            }
+        }
+        for (file, scope) in self.collect_file_card_scopes(delivery)? {
+            let retained = scopes.entry(file).or_default();
+            if !retained.contains(&scope) {
+                retained.push(scope);
             }
         }
         *self.files.lock().expect("files lock not poisoned") = book;
@@ -401,7 +406,7 @@ impl Node {
         {
             state.file_scopes = scopes;
         }
-        self.install_file_card_scopes(delivery);
+        Ok(())
     }
     /// Send the file at `path` to a DM peer. Streams + seals it into a fresh per-file
     /// conversation, seals the manifest to the recipient, posts a `FileManifest`
@@ -1162,7 +1167,7 @@ impl Node {
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
             if let Some(manifest) =
-                node.reusable_sticker(host, account.as_deref(), name, &bytes, deadline)
+                node.reusable_sticker(host, account.as_deref(), name, &bytes, deadline)?
             {
                 on_progress(FileProgress {
                     done: manifest.v2.chunk_count,
@@ -1412,7 +1417,10 @@ impl Node {
             return false; // attachment — never written to the media store
         }
         if self.media.contains(file_conv) && self.has_verified_file_completion(file_conv) {
-            self.complete_sticker_aliases(file_conv);
+            if let Err(error) = self.complete_sticker_aliases(file_conv) {
+                log::warn!("sticker completion deferred: {error}");
+                return false;
+            }
             if !self.pending_sticker_aliases(file_conv) {
                 return false; // every retained offer is already complete
             }
@@ -1425,7 +1433,10 @@ impl Node {
                     // The durable media copy now exists, so the transient chunks are
                     // reclaimable — mirror save_file's prune (history still shows the bubble
                     // from the FileBook + received_files; the preview loads from the store).
-                    self.commit_file_completion(file_conv, &candidates);
+                    if let Err(error) = self.commit_file_completion(file_conv, &candidates) {
+                        log::warn!("media reclamation deferred: {error}");
+                        return false;
+                    }
                     self.pending_files
                         .lock()
                         .expect("pending_files mutex not poisoned")
@@ -1468,25 +1479,28 @@ impl Node {
     /// Historical exports alone do not imply that this node still holds the bytes.
     /// This bounded metadata/path check does not read content: save verifies the
     /// complete managed copy's size and checksum on the blocking export path.
-    pub fn file_ready_to_save(&self, file_conv: ConversationId) -> bool {
+    pub fn file_ready_to_save(&self, file_conv: ConversationId) -> Result<bool, NodeError> {
         if self.file_is_protected(file_conv) {
-            return false;
+            return Ok(false);
         }
-        self.file_progress(file_conv).is_some_and(|progress| {
-            if progress.done == progress.total {
-                return true;
-            }
-            let manifest = self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .manifest(&file_conv)
-                .cloned();
-            manifest.is_some_and(|manifest| {
-                self.managed_media_for_export(file_conv, &manifest)
-                    .is_some()
-            })
-        })
+        let Some(progress) = self.file_progress(file_conv) else {
+            return Ok(false);
+        };
+        if progress.done == progress.total {
+            return Ok(true);
+        }
+        let manifest = self
+            .files
+            .lock()
+            .expect("files lock not poisoned")
+            .manifest(&file_conv)
+            .cloned();
+        let Some(manifest) = manifest else {
+            return Ok(false);
+        };
+        Ok(self
+            .managed_media_for_export(file_conv, &manifest)?
+            .is_some())
     }
 
     /// Reassemble + verify a received file into its decrypted bytes (whole, in memory
@@ -1617,9 +1631,13 @@ impl Node {
         self.save_file_progress_inner(file_conv, dest, |_| {}, false)
     }
 
-    pub(crate) fn complete_directory_save(&self, file_conv: ConversationId) {
+    pub(crate) fn complete_directory_save(
+        &self,
+        file_conv: ConversationId,
+    ) -> Result<(), NodeError> {
         let candidates = self.completion_candidates(file_conv);
-        self.commit_file_completion(file_conv, &candidates);
+        self.commit_file_completion(file_conv, &candidates)?;
+        Ok(())
     }
 
     fn save_file_progress_inner(
@@ -1641,7 +1659,7 @@ impl Node {
         let chunk_ids = self.chunk_ids(file_conv);
         if chunk_ids.len() as u32 != total {
             if self
-                .managed_media_for_export(file_conv, &manifest)
+                .managed_media_for_export(file_conv, &manifest)?
                 .is_some()
             {
                 let part = part_path(dest);
@@ -1765,7 +1783,7 @@ impl Node {
         }
         // The file is fully reassembled + verified on disk: reclaim its chunk events.
         if commit_completion {
-            self.commit_file_completion(file_conv, &candidates);
+            self.commit_file_completion(file_conv, &candidates)?;
         }
         Ok(())
     }
@@ -1793,9 +1811,9 @@ impl Node {
         self.log
             .lock()
             .expect("log mutex not poisoned")
-            .get(&id)
+            .get(&id)?
             .filter(|event| event.kind == EventKind::Message)
-            .map(|event| event.ciphertext.clone())
+            .map(|event| event.ciphertext)
             .ok_or_else(|| NodeError::File("file chunk is no longer available".into()))
     }
 }

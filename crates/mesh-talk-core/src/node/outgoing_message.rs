@@ -74,7 +74,7 @@ impl Node {
             });
         }
         if let Some(reply_to) = request.reply_to
-            && !self.integration_reply_retained(&request.destination, reply_to)
+            && !self.integration_reply_retained(&request.destination, reply_to)?
         {
             return Err(NodeError::InvalidInput(
                 "reply target is not retained within the most recent 500 records per destination history".into(),
@@ -116,7 +116,7 @@ impl Node {
         &self,
         destination: &MessageDestination,
         reply_to: EventId,
-    ) -> bool {
+    ) -> Result<bool, NodeError> {
         const RECENT_RECORDS: usize = 500;
         let conversation = match destination {
             MessageDestination::Account(account) => {
@@ -129,7 +129,7 @@ impl Node {
                 .log
                 .lock()
                 .expect("log lock")
-                .get(&reply_to)
+                .get(&reply_to)?
                 .filter(|event| {
                     event.conversation_id == conversation
                         && event.author.user_id() == self.user_id()
@@ -150,7 +150,7 @@ impl Node {
             });
         drop(sent);
         if own_retained {
-            return true;
+            return Ok(true);
         }
         let received = self.received.lock().expect("received lock");
         let incoming_retained = received
@@ -175,9 +175,10 @@ impl Node {
             });
         drop(received);
         if incoming_retained {
-            return true;
+            return Ok(true);
         }
-        self.received_files
+        Ok(self
+            .received_files
             .lock()
             .expect("file history lock")
             .entries_ref(&conversation)
@@ -187,7 +188,7 @@ impl Node {
             .any(|entry| {
                 entry.event_id == reply_to
                     && !self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
-            })
+            }))
     }
 
     pub fn message_request_status(
@@ -227,7 +228,13 @@ impl Node {
             MessageDestination::Channel(channel) => {
                 let ready = {
                     let mut store = self.delivery.lock().expect("delivery lock");
-                    self.recover_delivery(&mut store).is_ok()
+                    match self.recover_delivery(&mut store) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            log::warn!("accepted channel delivery recovery deferred: {error}");
+                            false
+                        }
+                    }
                 };
                 if !ready {
                     return;
@@ -372,8 +379,8 @@ impl Node {
             NodeError::Authorization("authorization did not execute acceptance".into())
         })?;
         let mut store = self.delivery.lock().expect("delivery lock");
-        if self.recover_delivery(&mut store).is_err() {
-            log::warn!("accepted channel message awaits local recovery");
+        if let Err(error) = self.recover_delivery(&mut store) {
+            log::warn!("accepted channel message awaits local recovery: {error}");
         }
         self.delivery_notify.notify_one();
         Ok(id)

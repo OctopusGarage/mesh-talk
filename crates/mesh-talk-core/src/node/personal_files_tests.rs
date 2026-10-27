@@ -39,7 +39,7 @@ async fn personal_file_is_durable_without_siblings() {
         .await
         .unwrap();
     std::fs::remove_file(&source).unwrap();
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
     assert!(history[0].from_me);
@@ -55,10 +55,10 @@ async fn personal_file_is_durable_without_siblings() {
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
         Account::from_secret_bytes(account_secret),
     );
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
-    assert!(node.file_ready_to_save(file));
+    assert!(node.file_ready_to_save(file).unwrap());
     node.save_file(file, &dir.path().join("reopened.txt"))
         .unwrap();
     assert_eq!(
@@ -104,7 +104,7 @@ async fn personal_file_projection_failure_recovers_once() {
     );
     node.recover_delivery(&mut node.delivery.lock().unwrap())
         .unwrap();
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
     assert_eq!(node.read_file(file).unwrap(), b"recovery");
@@ -155,14 +155,14 @@ async fn personal_file_unaccepted_wal_leaves_no_history() {
             .pending_transactions()
             .is_empty()
     );
-    assert!(node.account_history(&target, 10).is_empty());
+    assert!(node.account_history(&target, 10).unwrap().is_empty());
     drop(node);
     let node = open(
         &profile,
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
         Account::from_secret_bytes(account_secret),
     );
-    assert!(node.account_history(&target, 10).is_empty());
+    assert!(node.account_history(&target, 10).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -233,7 +233,8 @@ async fn personal_file_signed_proof_binds_plaintext_and_host() {
         .unwrap()
         .record_file_alias_durable(&forged)
         .unwrap();
-    node.reseed_live_file_book(&node.delivery.lock().unwrap());
+    node.reseed_live_file_book(&node.delivery.lock().unwrap())
+        .unwrap();
     let file = validated_manifest(&row.plaintext).unwrap().file_conv();
     assert_eq!(node.files.lock().unwrap().manifest_events(file), vec![id]);
     let secret = node.identity.secret_bytes();

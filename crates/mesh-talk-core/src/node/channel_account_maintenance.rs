@@ -1174,24 +1174,28 @@ mod tests {
         assert!(
             source
                 .channel_history(channel, 20)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.text == b"from independently enrolled device")
         );
         assert!(
             target
                 .channel_history(channel, 20)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.text == b"after inheritance")
         );
         assert!(
             target
                 .channel_history(channel, 20)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.text == b"other account still participates")
         );
         assert!(
             !target
                 .channel_history(channel, 20)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.text == b"before inheritance")
         );

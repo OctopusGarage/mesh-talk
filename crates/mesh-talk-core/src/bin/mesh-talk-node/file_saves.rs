@@ -82,7 +82,7 @@ pub(super) async fn run(
                 let Some(file) = file else { break; };
                 if queue.enqueue(file.clone()).is_err() {
                     emit(&format!("file from {}: {} ({} bytes) save failed: pending save capacity exhausted", file.from, file.name, file.size));
-                } else if node.attachment_consent_status(file.file_conv) == Some(ReceiveDecision::Pending) {
+                } else if match node.attachment_consent_status(file.file_conv) { Ok(status) => status == Some(ReceiveDecision::Pending), Err(error) => { emit(&format!("file consent unavailable: {error}")); false } } {
                     emit(&format!("file offer from {}: {} ({} bytes) id {} — /receive {} or /decline {}", file.from, file.name, file.size, hex::encode(file.file_conv.as_bytes()), hex::encode(file.file_conv.as_bytes()), hex::encode(file.file_conv.as_bytes())));
                 }
             }
@@ -94,9 +94,10 @@ pub(super) async fn run(
                         let mut ready = false;
                         let states = candidates.into_iter().map(|file| {
                             let state = checking_node.file_progress(file).map(|mut progress| {
-                                if matches!(checking_node.attachment_consent_status(file), Some(ReceiveDecision::Pending | ReceiveDecision::Declined)) {
+                                let consent = match checking_node.attachment_consent_status(file) { Ok(consent) => consent, Err(error) => { log::warn!("file consent unavailable: {error}"); progress.done = 0; return progress; } };
+                                if matches!(consent, Some(ReceiveDecision::Pending | ReceiveDecision::Declined)) {
                                     progress.done = 0;
-                                } else if !ready && checking_node.file_ready_to_save(file) { progress.done = progress.total; ready = true; }
+                                } else if !ready && match checking_node.file_ready_to_save(file) { Ok(ready) => ready, Err(error) => { log::warn!("file readiness unavailable: {error}"); false } } { progress.done = progress.total; ready = true; }
                                 progress
                             });
                             (file, state)

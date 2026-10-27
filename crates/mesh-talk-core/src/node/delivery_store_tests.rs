@@ -1495,7 +1495,7 @@ fn recovery_installs_once_scrubs_secrets_and_keeps_exact_retry_event() {
         None
     );
     assert_eq!(sent.entries(&account_conv()).len(), 1);
-    assert_eq!(log.get(&exact.id), Some(&exact));
+    assert_eq!(log.get(&exact.id).unwrap(), Some(exact.clone()));
     assert_eq!(
         std::fs::metadata(dir.path().join("delivery-transactions.log"))
             .unwrap()

@@ -4,6 +4,7 @@ use super::*;
 impl Node {
     /// Favorite snapshots have no reveal policy. Reject a retained canonical
     /// protected source rather than turning that snapshot into another reveal path.
+    /// A failed canonical read is logged and denies this snapshot/export too.
     pub(in crate::node) fn favorite_has_protected_content(
         &self,
         favorite: &MessageFavorite,
@@ -46,12 +47,18 @@ impl Node {
             };
             (conv, None)
         };
-        self.project_history(
+        let context = match self.project_history(
             conv,
             account,
             crate::node::queries::HistorySelection::Selected(&selected),
-        )
-        .is_some_and(|context| {
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                log::warn!("favorite content eligibility denied: {error}");
+                return true;
+            }
+        };
+        context.is_some_and(|context| {
             context
                 .messages
                 .iter()
@@ -216,7 +223,7 @@ impl Node {
                 conv,
                 account,
                 crate::node::queries::HistorySelection::Selected(&selected_ids),
-            )
+            )?
             .map(|c| c.messages)
             .unwrap_or_default();
         let selected: BTreeSet<_> = source.message_ids.iter().cloned().collect();

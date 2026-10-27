@@ -445,7 +445,10 @@ async fn account_sync_v2_falls_back_once_only_before_a_valid_reply() {
         } else {
             assert_eq!(result.unwrap().2, AccountSyncVersion::V1);
             assert_eq!(
-                receiver.account_history(&receiver.account_id(), 10).len(),
+                receiver
+                    .account_history(&receiver.account_id(), 10)
+                    .unwrap()
+                    .len(),
                 1
             );
         }
@@ -488,7 +491,9 @@ async fn account_sync_v2_personal_file_metadata_and_bytes_have_independent_categ
                 .unwrap();
             assert_eq!(version, AccountSyncVersion::V2);
         }
-        let history = receiver.account_history(&receiver.account_id(), 10);
+        let history = receiver
+            .account_history(&receiver.account_id(), 10)
+            .unwrap();
         assert_eq!(
             history.len(),
             1,
@@ -602,6 +607,7 @@ async fn account_sync_personal_file_proof_rejects_changed_digest_host_author_and
         assert!(
             receiver
                 .account_history(&receiver.account_id(), 10)
+                .unwrap()
                 .is_empty()
         );
     }
@@ -609,7 +615,10 @@ async fn account_sync_personal_file_proof_rejects_changed_digest_host_author_and
         .import_account_file_card(&card, AccountSyncVersion::V2)
         .unwrap();
     assert_eq!(
-        receiver.account_history(&receiver.account_id(), 10).len(),
+        receiver
+            .account_history(&receiver.account_id(), 10)
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -713,6 +722,7 @@ async fn account_sync_attachment_receiver_rejects_off_on_revision_before_commit(
             assert!(
                 receiver
                     .account_history(&receiver.account_id(), 10)
+                    .unwrap()
                     .is_empty(),
                 "backfill must not resurrect a cleared card"
             );
@@ -871,7 +881,7 @@ async fn account_sync_third_sibling_uses_durable_copy_after_original_goes_offlin
             .await
             .unwrap();
     }
-    let history = third.account_history(&third.account_id(), 10);
+    let history = third.account_history(&third.account_id(), 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
     assert!(!third.media.contains(file));
@@ -930,18 +940,30 @@ async fn account_sync_legacy_sibling_file_offer_cannot_bypass_bytes_off() {
         .unwrap()
         .record_event(event.id, event.author, manifest);
     assert_eq!(
-        receiver.attachment_consent_for_peer(file, id, &source.identity.public()),
+        receiver
+            .attachment_consent_for_peer(file, id, &source.identity.public())
+            .unwrap(),
         super::super::attachment_consent::ReceiveDecision::Pending
     );
-    assert!(!receiver.attachment_chunk_author_allowed(file, &source.identity.public().ed25519_pub));
+    assert!(
+        !receiver
+            .attachment_chunk_author_allowed(file, &source.identity.public().ed25519_pub)
+            .unwrap()
+    );
     receiver
         .set_device_sync_category(SyncCategory::Attachments, true)
         .unwrap();
     assert_eq!(
-        receiver.attachment_consent_for_peer(file, id, &source.identity.public()),
+        receiver
+            .attachment_consent_for_peer(file, id, &source.identity.public())
+            .unwrap(),
         super::super::attachment_consent::ReceiveDecision::Accepted
     );
-    assert!(receiver.attachment_chunk_author_allowed(file, &source.identity.public().ed25519_pub));
+    assert!(
+        receiver
+            .attachment_chunk_author_allowed(file, &source.identity.public().ed25519_pub)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1043,6 +1065,7 @@ async fn account_sync_sibling_profile_remains_live_when_history_ancestor_is_paus
     assert!(
         receiver
             .account_history(&receiver.account_id(), 10)
+            .unwrap()
             .is_empty()
     );
     server.abort();
@@ -1098,6 +1121,7 @@ async fn account_sync_restart_replays_retained_sibling_cipher_without_discovery(
     assert!(
         receiver
             .account_history(&receiver.account_id(), 10)
+            .unwrap()
             .is_empty()
     );
     drop(receiver);
@@ -1134,7 +1158,10 @@ async fn account_sync_restart_replays_retained_sibling_cipher_without_discovery(
         .set_device_sync_category(SyncCategory::History, true)
         .unwrap();
     assert_eq!(
-        receiver.account_history(&receiver.account_id(), 10).len(),
+        receiver
+            .account_history(&receiver.account_id(), 10)
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -1222,6 +1249,7 @@ async fn account_sync_pending_channel_requester_receives_no_archive_or_file_byte
         assert_eq!(
             source
                 .attachment_for_sibling(file, &receiver.identity.public())
+                .unwrap()
                 .is_some(),
             accepted,
             "attachment serving requires accepted requester membership"
@@ -1267,7 +1295,12 @@ async fn account_history_worker_drains_continuation_without_waiting_retry_interv
     let worker = tokio::spawn(receiver.clone().run_account_history_loop());
     let outcome = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if receiver.account_history(&receiver.account_id(), 100).len() == 40 {
+            if receiver
+                .account_history(&receiver.account_id(), 100)
+                .unwrap()
+                .len()
+                == 40
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1507,7 +1540,12 @@ async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancel
     let outcome = tokio::time::timeout(Duration::from_secs(3), async {
         started.notified().await;
         loop {
-            if receiver.account_history(&receiver.account_id(), 100).len() >= 41 {
+            if receiver
+                .account_history(&receiver.account_id(), 100)
+                .unwrap()
+                .len()
+                >= 41
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1571,6 +1609,7 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
     }
     let original: HashSet<_> = source
         .account_history(&source.account_id(), 200)
+        .unwrap()
         .into_iter()
         .map(|row| row.id)
         .collect();
@@ -1614,6 +1653,7 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
         loop {
             let imported: HashSet<_> = receiver
                 .account_history(&receiver.account_id(), 20_000)
+                .unwrap()
                 .into_iter()
                 .map(|row| row.id)
                 .collect();
@@ -2125,6 +2165,7 @@ async fn account_history_wake_during_active_page_retains_an_immediate_follow_up(
         loop {
             if receiver
                 .account_history(&receiver.account_id(), 10)
+                .unwrap()
                 .iter()
                 .any(|row| row.text == b"saved while an old page is in flight")
             {
@@ -2169,7 +2210,7 @@ async fn manifest_only_sibling_reports_waiting_for_files_without_transport_error
     source
         .apply_account_history_page(&cards, AccountSyncVersion::V2)
         .unwrap();
-    assert!(!source.file_ready_to_save(file));
+    assert!(!source.file_ready_to_save(file).unwrap());
     let receiver = open_sibling(&dir.path().join("third"), &source.account);
     for (owner, other) in [(&source, &receiver), (&receiver, &source)] {
         owner
@@ -2696,6 +2737,7 @@ async fn recalled_direct_plaintext_is_not_exported_from_cached_archive_to_new_si
     assert!(
         !third
             .account_history(&third.account_id(), 10)
+            .unwrap()
             .iter()
             .any(|row| row.id == target)
     );
@@ -2853,4 +2895,91 @@ async fn recalled_private_file_blocks_late_cards_and_stale_sibling_byte_release(
     ));
     stale_server.abort();
     let _ = stale_server.await;
+}
+
+#[tokio::test]
+async fn owned_read_failure_aborts_archive_and_valid_file_proof_fallback() {
+    let (dir, source, receiver) = sibling_nodes();
+    let path = dir.path().join("proof.bin");
+    std::fs::write(&path, b"independent valid proof").unwrap();
+    let (_, file) = source
+        .enqueue_file_to_account(&source.account_id(), &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let (records, _, _) = source.export_sync_records(
+        &receiver.identity.public(),
+        None,
+        true,
+        true,
+        AccountSyncVersion::V2,
+    );
+    let card = records
+        .into_iter()
+        .find_map(|record| match record {
+            HistoryRecord::FileCard(card) => Some(card),
+            _ => None,
+        })
+        .unwrap();
+    receiver
+        .import_account_file_card(&card, AccountSyncVersion::V2)
+        .unwrap();
+    assert!(
+        receiver
+            .attachment_for_sibling(file, &source.identity.public())
+            .unwrap()
+            .is_some(),
+        "absent event may use the valid independent proof"
+    );
+    receiver.log.lock().unwrap().fail_reads(true);
+    assert!(matches!(
+        receiver.attachment_for_sibling(file, &source.identity.public()),
+        Err(NodeError::Log(crate::eventlog::LogError::Io(_)))
+    ));
+    let Err(error) = receiver.prepare_account_export(
+        &source.identity.public(),
+        None,
+        true,
+        true,
+        AccountSyncVersion::V2,
+    ) else {
+        panic!("read failure must abort archive selection");
+    };
+    assert!(matches!(
+        error,
+        NodeError::Log(crate::eventlog::LogError::Io(_))
+    ));
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<crate::eventlog::LogError>()
+            .is_some()
+    );
+    receiver.log.lock().unwrap().fail_reads(false);
+    assert!(
+        !receiver
+            .prepare_account_export(
+                &source.identity.public(),
+                None,
+                true,
+                true,
+                AccountSyncVersion::V2
+            )
+            .unwrap()
+            .0
+            .is_empty()
+    );
+    receiver.log.lock().unwrap().fail_reads(true);
+    assert!(
+        matches!(
+            receiver.prepare_account_export(
+                &source.identity.public(),
+                None,
+                true,
+                true,
+                AccountSyncVersion::V2
+            ),
+            Err(NodeError::Log(crate::eventlog::LogError::Io(_)))
+        ),
+        "a cached archive index must not hide materialization read failure"
+    );
 }

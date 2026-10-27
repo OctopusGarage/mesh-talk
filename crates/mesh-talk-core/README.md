@@ -91,6 +91,29 @@ a prefix, so retries must retain content-addressed duplicate handling. Event IDs
 and wire serialization are unchanged. See the [protocol guide](../../docs/ARCHITECTURE.md)
 for reconciliation and durability contracts.
 
+Individual durable lookups, `PersistentEventLog::get` and `authored_event`, return
+`Result<Option<Event>, LogError>`. A successful event owns its complete signed
+bytes and can outlive the log or its mutex guard; `Ok(None)` means absence, while
+`Err` means the lookup failed. Propagate failure before selecting a fallback proof,
+authorizing a transfer or reclaiming media. The explicit in-memory `EventLog`
+retains its borrowed lookup API. This ownership boundary alone does not replace
+the existing resident history indexes or startup replay with demand loading.
+
+Affected `Node` history and search methods, protected-content queries, attachment
+consent and save-readiness queries, and channel custody counts also return
+`Result` values. `attachment_consent_status` exposes `LogError`; the other listed
+node queries use `NodeError`. Matching `NodeRuntime` history/search methods propagate
+these failures. Use `?` before consuming their existing successful values;
+absence or a zero count must not stand in for a failed read. Typed node/runtime
+errors retain their sources. Host IPC keeps its successful JSON payloads and
+reports read failures through its existing error channel. Boolean Favorites
+eligibility remains a conservative boundary: it logs a failed canonical read
+and denies capture/export eligibility without claiming the content is absent.
+An outgoing request already durably accepted into the delivery journal remains
+accepted if subsequent projection/recovery reads fail. Its supervisor logs the
+failure and retains queued work for retry; acceptance does not assert a send or
+recipient delivery. Query failures still use the error channel above.
+
 ## CLI: `mesh-talk-node`
 
 A headless node ships with the crate as a reference consumer:

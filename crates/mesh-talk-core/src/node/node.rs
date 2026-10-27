@@ -210,7 +210,22 @@ impl std::fmt::Display for NodeError {
     }
 }
 
-impl std::error::Error for NodeError {}
+impl std::error::Error for NodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Log(error) => Some(error),
+            Self::Session(error) => Some(error),
+            Self::Linking(error) => Some(error),
+            Self::Seal(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl From<crate::eventlog::LogError> for NodeError {
+    fn from(error: crate::eventlog::LogError) -> Self {
+        Self::Log(error)
+    }
+}
 
 #[cfg(test)]
 type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
@@ -225,6 +240,8 @@ pub struct Node {
     pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
     #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) untracked_chunk_validations: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(in crate::node) profile_read_hook: BlockingTestHook,
     #[cfg(test)]
@@ -726,8 +743,9 @@ impl Node {
                 let existing = decoded
                     .as_ref()
                     .and_then(|m| files.manifest(&m.file_conv()));
-                let proof = log
-                    .get(&entry.event_id)
+                let proof = log.get(&entry.event_id)?;
+                let proof = proof
+                    .as_ref()
                     .or_else(|| account_file_proofs.get(&entry.event_id));
                 if let Some(manifest) = super::files::eligible_manifest_row(&entry, proof, existing)
                 {
@@ -812,6 +830,8 @@ impl Node {
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            untracked_chunk_validations: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             profile_read_hook: Mutex::new(None),
             #[cfg(test)]
@@ -1229,7 +1249,7 @@ impl Node {
         }
         if let Some(parent) = required_profile_parent {
             if kind != EventKind::Profile
-                || !log.get(&parent).is_some_and(|event| {
+                || !log.get(&parent)?.is_some_and(|event| {
                     event.kind == EventKind::Profile
                         && event.conversation_id == channel
                         && event.author == self_author

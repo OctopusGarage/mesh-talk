@@ -135,19 +135,22 @@ impl Node {
         for (file, manifests) in offers {
             let manifests: Vec<_> = {
                 let log = self.log.lock().expect("log lock not poisoned");
-                manifests
-                    .into_iter()
-                    .filter(|id| {
-                        log.get(id)
-                            .is_some_and(|event| event.conversation_id == scope)
-                    })
-                    .collect()
+                let mut selected = Vec::new();
+                for id in manifests {
+                    if log
+                        .get(&id)?
+                        .is_some_and(|event| event.conversation_id == scope)
+                    {
+                        selected.push(id);
+                    }
+                }
+                selected
             };
             let Some(first) = manifests.first() else {
                 continue;
             };
             let Some((automatic, account, _, _)) =
-                self.incoming_offer(file, Some(*first), Some(sender))
+                self.incoming_offer(file, Some(*first), Some(sender))?
             else {
                 continue;
             };

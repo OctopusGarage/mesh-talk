@@ -1007,7 +1007,7 @@ impl Node {
                 owner,
             };
             let policy = self.channel_history_policy(channel);
-            let selected = self.select_join_history(channel, policy, now_millis());
+            let selected = self.select_join_history(channel, policy, now_millis())?;
             self.append_invitation_with_history(channel, &meta, &new_member, selected, policy)?;
             self.process_channel(channel);
             distribution = Some(new_members.clone());
@@ -1768,7 +1768,10 @@ impl Node {
             hex::encode(&channel.as_bytes()[..4]),
             members.len(),
             seeded,
-            self.channel_custody_count(channel, event_id).unwrap_or(0),
+            match self.channel_custody_count(channel, event_id) {
+                Ok(count) => count.unwrap_or(0),
+                Err(error) => { log::warn!("channel send custody observation deferred: {error}"); return; }
+            },
             sent_frame_bytes,
             started.elapsed().as_millis(),
         );
@@ -1777,12 +1780,18 @@ impl Node {
     /// Number of distinct other accepted member accounts with historical
     /// authenticated custody evidence. This never establishes delivery or reading.
     /// A sibling-authored row without synchronized evidence remains unknown.
-    pub fn channel_custody_count(&self, channel: ConversationId, id: EventId) -> Option<usize> {
+    pub fn channel_custody_count(
+        &self,
+        channel: ConversationId,
+        id: EventId,
+    ) -> Result<Option<usize>, NodeError> {
         {
             let book = self.channels.lock().expect("channels mutex");
-            let state = book.state(&channel)?;
+            let Some(state) = book.state(&channel) else {
+                return Ok(None);
+            };
             if !self.channel_identity_matches_account(state) {
-                return None;
+                return Ok(None);
             }
         }
         let own_devices: HashSet<_> = self
@@ -1795,7 +1804,7 @@ impl Node {
             .log
             .lock()
             .expect("log mutex")
-            .get(&id)
+            .get(&id)?
             .is_some_and(|event| {
                 event.conversation_id == channel
                     && event.kind == EventKind::Message
@@ -1805,7 +1814,7 @@ impl Node {
             .log
             .lock()
             .expect("log mutex")
-            .get(&id)
+            .get(&id)?
             .is_some_and(|event| {
                 event.conversation_id == channel
                     && event.kind == EventKind::Message
@@ -1818,17 +1827,17 @@ impl Node {
             .entry(id)
             .is_some_and(|row| row.conversation == channel && own_devices.contains(&row.from));
         if !own_signed && !own_archived {
-            return None;
+            return Ok(None);
         }
         let observations = self.channel_custody_observations(channel, id);
         if !own_local && observations.is_empty() {
-            return None;
+            return Ok(None);
         }
         let (principals, unreadable) = self.confirmed_channel_custody_principals(channel, id);
         if unreadable && principals.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some(principals.len())
+            Ok(Some(principals.len()))
         }
     }
 
@@ -1961,19 +1970,21 @@ impl Node {
         &self,
         channel: ConversationId,
         id: EventId,
-    ) -> Option<usize> {
-        self.channel_custody_count(channel, id)?;
+    ) -> Result<Option<usize>, NodeError> {
+        if self.channel_custody_count(channel, id)?.is_none() {
+            return Ok(None);
+        }
         let (confirmed, observations) = self.effective_channel_custody_observations(channel, id);
         let unreadable = observations.iter().any(|meta| !meta.tombstone && matches!(&meta.key, super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder.starts_with("relay:")) && self.channel_custody_holder_binding(&meta.key).is_none());
         if unreadable {
-            return None;
+            return Ok(None);
         }
-        Some(
+        Ok(Some(
             confirmed
                 .iter()
                 .filter(|peer| peer.starts_with("relay:"))
                 .count(),
-        )
+        ))
     }
 
     async fn sync_and_confirm_custody(
@@ -2175,7 +2186,14 @@ impl Node {
                 .collect::<HashSet<_>>()
                 .len()
                 .min(2);
-            if target == 0 || self.channel_custody_count(channel, event_id).unwrap_or(0) >= target {
+            let custody = match self.channel_custody_count(channel, event_id) {
+                Ok(custody) => custody,
+                Err(error) => {
+                    log::warn!("channel custody recovery deferred: {error}");
+                    continue;
+                }
+            };
+            if target == 0 || custody.unwrap_or(0) >= target {
                 continue;
             }
             let (principals, _) = self.confirmed_channel_custody_principals(channel, event_id);
@@ -2344,7 +2362,14 @@ impl Node {
                         };
                         // Recovery fetches retained history; it must not turn an
                         // outbound connection into a sharing-preference bypass.
-                        let store = if self.shares_replica(channel_id) {
+                        let sharing = match self.shares_replica(channel_id) {
+                            Ok(sharing) => sharing,
+                            Err(error) => {
+                                log::warn!("channel replica export deferred: {error}");
+                                return None;
+                            }
+                        };
+                        let store = if sharing {
                             self.sync_store(conn.peer_identity())
                         } else {
                             self.pull_sync_store(conn.peer_identity())
@@ -2446,7 +2471,7 @@ mod fanout_tests {
             node.send_channel_message(channel, b"synthetic retry target")
                 .await
                 .unwrap();
-            let event = node.channel_history(channel, 10)[0].id;
+            let event = node.channel_history(channel, 10).unwrap()[0].id;
             if external {
                 node.publish_channel_custody(channel, event, &holder.public(), true, false, false)
                     .unwrap();
@@ -2455,7 +2480,7 @@ mod fanout_tests {
                     .unwrap()
                     .confirm(event, &holder.public().user_id())
                     .unwrap();
-                assert_eq!(node.channel_custody_count(channel, event), Some(1));
+                assert_eq!(node.channel_custody_count(channel, event).unwrap(), Some(1));
             }
             // A newly advertised endpoint accepts TCP but intentionally never
             // completes Noise. Any unnecessary retry is observable at this socket.

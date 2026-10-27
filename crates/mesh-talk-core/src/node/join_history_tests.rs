@@ -61,20 +61,20 @@ async fn join_history_default_is_bounded_and_requires_acceptance() {
         .unwrap();
     copy(&alice, &bob, channel);
     assert!(
-        bob.channel_history(channel, 100).is_empty(),
+        bob.channel_history(channel, 100).unwrap().is_empty(),
         "pending invite must not decrypt a history offer"
     );
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
     alice.retry_join_history().unwrap();
     copy(&alice, &bob, channel);
-    let history = bob.channel_history(channel, 100);
+    let history = bob.channel_history(channel, 100).unwrap();
     assert_eq!(history.len(), 10);
     assert_eq!(history[0].text, b"message 4");
     assert_eq!(history[9].text, b"message 13");
     copy(&alice, &bob, channel);
     assert_eq!(
-        bob.channel_history(channel, 100).len(),
+        bob.channel_history(channel, 100).unwrap().len(),
         10,
         "delivery replay must deduplicate"
     );
@@ -268,7 +268,7 @@ async fn join_history_foreign_protected_offer_preserves_concealed_receiver_proje
         );
     }
     drop(log);
-    let history = bob.channel_history(channel, 10);
+    let history = bob.channel_history(channel, 10).unwrap();
     assert_eq!(history.len(), 2);
     assert!(
         history
@@ -314,7 +314,10 @@ async fn join_history_acceptance_before_offer_arrives_is_recoverable() {
     copy(&bob, &alice, channel);
     alice.retry_join_history().unwrap();
     copy(&alice, &bob, channel);
-    assert_eq!(bob.channel_history(channel, 10)[0].text, b"earlier");
+    assert_eq!(
+        bob.channel_history(channel, 10).unwrap()[0].text,
+        b"earlier"
+    );
 }
 
 #[tokio::test]
@@ -344,7 +347,7 @@ async fn join_history_policy_change_does_not_expand_or_cancel_frozen_invitation(
     copy(&bob, &alice, channel);
     alice.retry_join_history().unwrap();
     copy(&alice, &bob, channel);
-    assert_eq!(bob.channel_history(channel, 10).len(), 1);
+    assert_eq!(bob.channel_history(channel, 10).unwrap().len(), 1);
     let c = tempfile::tempdir().unwrap();
     let carol = node(c.path());
     alice
@@ -356,7 +359,7 @@ async fn join_history_policy_change_does_not_expand_or_cancel_frozen_invitation(
     copy(&carol, &alice, channel);
     alice.retry_join_history().unwrap();
     copy(&alice, &carol, channel);
-    assert!(carol.channel_history(channel, 10).is_empty());
+    assert!(carol.channel_history(channel, 10).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -395,7 +398,7 @@ async fn join_history_obsolete_offers_never_append_invalid_retry_releases() {
     }
     assert_eq!(alice.log.lock().unwrap().events(&channel).len(), count);
     copy(&alice, &bob, channel);
-    assert_eq!(bob.channel_history(channel, 10).len(), 1);
+    assert_eq!(bob.channel_history(channel, 10).unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -433,13 +436,16 @@ async fn join_history_authorized_replica_releases_without_owner_and_survives_res
         .unwrap();
     bob.retry_join_history().unwrap();
     copy(&bob, &carol, channel);
-    assert!(carol.channel_history(channel, 10).is_empty());
+    assert!(carol.channel_history(channel, 10).unwrap().is_empty());
     bob.set_channel_replica_enabled(channel, true)
         .await
         .unwrap();
     bob.retry_join_history().unwrap();
     copy(&bob, &carol, channel);
-    assert_eq!(carol.channel_history(channel, 10)[0].text, b"earlier");
+    assert_eq!(
+        carol.channel_history(channel, 10).unwrap()[0].text,
+        b"earlier"
+    );
     let (ed, x) = carol.identity.secret_bytes();
     drop(carol);
     let (dm, _) = tokio::sync::mpsc::unbounded_channel();
@@ -456,9 +462,9 @@ async fn join_history_authorized_replica_releases_without_owner_and_survives_res
         "pw",
     )
     .unwrap();
-    assert_eq!(reopened.channel_history(channel, 10).len(), 1);
+    assert_eq!(reopened.channel_history(channel, 10).unwrap().len(), 1);
     copy(&bob, &reopened, channel);
-    assert_eq!(reopened.channel_history(channel, 10).len(), 1);
+    assert_eq!(reopened.channel_history(channel, 10).unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -512,7 +518,7 @@ async fn join_history_does_not_grant_existing_late_members_access_as_sources() {
         assert!(offer.keys.open(&bob.identity, &author.x25519_pub).is_none());
     }
     drop(log);
-    assert!(bob.channel_history(channel, 10).is_empty());
+    assert!(bob.channel_history(channel, 10).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -530,7 +536,12 @@ async fn join_history_expiry_and_recall_are_rechecked_before_key_release() {
         .send_channel_message(channel, b"recall before acceptance")
         .await
         .unwrap();
-    let recall = alice.channel_history(channel, 10).last().unwrap().id;
+    let recall = alice
+        .channel_history(channel, 10)
+        .unwrap()
+        .last()
+        .unwrap()
+        .id;
     let deadline = super::super::node::now_millis() + 2000;
     alice
         .send_channel_message_reply_expiring(
@@ -555,7 +566,7 @@ async fn join_history_expiry_and_recall_are_rechecked_before_key_release() {
     copy(&bob, &alice, channel);
     alice.retry_join_history().unwrap();
     copy(&alice, &bob, channel);
-    let history = bob.channel_history(channel, 10);
+    let history = bob.channel_history(channel, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].text, b"keep");
     // Deadlines and future timestamps also fail closed in the selection owner.
@@ -683,7 +694,7 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
                 .all(|row| !protected_ids.contains(&row.id))
         );
     }
-    assert!(bob.channel_history(channel, 10).is_empty());
+    assert!(bob.channel_history(channel, 10).unwrap().is_empty());
     bob.accept_channel_invite(channel).await.unwrap();
     alice.retry_channel_controls().await;
     let message = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
@@ -692,7 +703,7 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
         .unwrap();
     assert_eq!(message.text, b"earlier over loopback");
     assert_eq!(message.arrival_kind, "history_sync");
-    let history = bob.channel_history(channel, 10);
+    let history = bob.channel_history(channel, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, message.event_id);
     assert_eq!(history[0].protection, None);
@@ -784,7 +795,7 @@ async fn join_history_leave_then_rejoin_off_closes_the_original_permission() {
     alice.retry_join_history().unwrap();
     assert_eq!(alice.log.lock().unwrap().events(&channel).len(), count);
     copy(&alice, &bob, channel);
-    assert!(bob.channel_history(channel, 10).is_empty());
+    assert!(bob.channel_history(channel, 10).unwrap().is_empty());
 }
 
 #[test]
@@ -896,7 +907,7 @@ async fn join_history_three_day_cutoff_checks_original_signed_times() {
     copy(&bob, &alice, channel);
     alice.retry_join_history().unwrap();
     copy(&alice, &bob, channel);
-    let history = bob.channel_history(channel, 10);
+    let history = bob.channel_history(channel, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].text, b"recent");
 }
@@ -1143,7 +1154,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
         )
         .unwrap();
     copy(&owner, &sibling, channel);
-    assert!(sibling.channel_history(channel, 100).is_empty());
+    assert!(sibling.channel_history(channel, 100).unwrap().is_empty());
     let projection = sibling.account_group_projection(channel);
     let authority = projection.authority.current_event().unwrap();
     let grant = projection
@@ -1178,7 +1189,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
     copy(&sibling, &owner, channel);
     owner.retry_join_history().unwrap();
     copy(&owner, &sibling, channel);
-    let history = sibling.channel_history(channel, 100);
+    let history = sibling.channel_history(channel, 100).unwrap();
     assert_eq!(
         history.len(),
         10,
@@ -1188,7 +1199,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
     assert_eq!(history[9].text, b"frozen row 13");
     copy(&owner, &sibling, channel);
     assert_eq!(
-        sibling.channel_history(channel, 100).len(),
+        sibling.channel_history(channel, 100).unwrap().len(),
         10,
         "account release replay stays deduplicated"
     );
@@ -1402,17 +1413,25 @@ async fn account_invitation_three_event_wal_recovers_atomically_after_restart() 
             },
         })
         .unwrap();
-    assert!(
-        transaction
-            .iter()
-            .all(|event| before_crash.log.lock().unwrap().get(&event.id).is_none())
-    );
+    assert!(transaction.iter().all(|event| {
+        before_crash
+            .log
+            .lock()
+            .unwrap()
+            .get(&event.id)
+            .unwrap()
+            .is_none()
+    }));
     drop(before_crash);
     let recovered = open();
     assert!(
-        transaction
-            .iter()
-            .all(|event| recovered.log.lock().unwrap().get(&event.id).is_some()),
+        transaction.iter().all(|event| recovered
+            .log
+            .lock()
+            .unwrap()
+            .get(&event.id)
+            .unwrap()
+            .is_some()),
         "one pending WAL record recovers invitation, account grant and frozen offer together"
     );
     let projection = recovered.account_group_projection(channel);

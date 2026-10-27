@@ -61,7 +61,7 @@ async fn repeated_sticker_reuses_bytes_and_history_survives_source_removal_and_r
         file, repeated,
         "repeated stickers reuse the verified file conversation"
     );
-    assert_eq!(node.account_history(&target, 10).len(), 2);
+    assert_eq!(node.account_history(&target, 10).unwrap().len(), 2);
     assert!(
         node.reusable_sticker(
             crate::eventlog::ConversationId::new([9; 32]),
@@ -70,6 +70,7 @@ async fn repeated_sticker_reuses_bytes_and_history_survives_source_removal_and_r
             &bytes,
             None
         )
+        .unwrap()
         .is_none(),
         "a different host cannot reuse this file key"
     );
@@ -93,7 +94,7 @@ async fn repeated_sticker_reuses_bytes_and_history_survives_source_removal_and_r
         Account::from_secret_bytes(account_secret),
     );
     assert_eq!(reopened.read_media(file).unwrap(), bytes);
-    assert_eq!(reopened.account_history(&target, 10).len(), 1);
+    assert_eq!(reopened.account_history(&target, 10).unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -143,7 +144,7 @@ async fn malformed_sticker_image_is_rejected_before_staging() {
             .await
             .is_err()
     );
-    assert!(node.account_history(&target, 10).is_empty());
+    assert!(node.account_history(&target, 10).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -162,7 +163,7 @@ async fn sticker_recall_account_keeps_other_reference_and_excludes_recalled_cach
         .unwrap();
     assert_eq!(shared, repeated);
     node.recall_account(&target, first).await.unwrap();
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert!(history.iter().find(|row| row.id == first).unwrap().recalled);
     assert!(
         history
@@ -214,7 +215,7 @@ async fn sticker_recall_channel_preserves_other_message_references() {
         .unwrap();
     assert_eq!(file, shared);
     node.recall_channel(channel, first).await.unwrap();
-    let history = node.channel_history(channel, 10);
+    let history = node.channel_history(channel, 10).unwrap();
     assert!(history.iter().find(|row| row.id == first).unwrap().recalled);
     assert!(
         history
@@ -270,7 +271,7 @@ async fn channel_sticker_reuses_only_its_own_group_transfer() {
     assert_eq!(first, repeated);
     assert_ne!(first, different_group);
     assert_eq!(node.read_media(first).unwrap(), bytes);
-    assert_eq!(node.channel_history(first_group, 10).len(), 2);
+    assert_eq!(node.channel_history(first_group, 10).unwrap().len(), 2);
     node.clear_conversation(first_group).unwrap();
     assert!(node.read_media(first).is_none());
     assert_eq!(node.read_media(different_group).unwrap(), bytes);
@@ -348,12 +349,14 @@ async fn sticker_media_delivers_after_source_removal_without_receiver_installati
     a.recall_account(&target, id).await.unwrap();
     assert!(
         b.account_history(&a.account_id(), 10)
+            .unwrap()
             .iter()
             .any(|row| row.id == id && row.recalled && row.file.is_none()),
         "the authenticated sender recall hides sticker media on the recipient"
     );
     assert!(
         b.account_history(&a.account_id(), 10)
+            .unwrap()
             .iter()
             .any(|row| row.id == second_id
                 && !row.recalled
@@ -500,13 +503,13 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
     let alias = cards.iter().find(|card| card.id != prior[0].id).unwrap();
     let name = manifest.v2.name.as_str();
     assert!(
-        !b.complete_sticker_aliases(file),
+        !b.complete_sticker_aliases(file).unwrap(),
         "corrupted durable bytes cannot complete an alias"
     );
     assert!(!b.delivery.lock().unwrap().file_completed(alias.id));
     b.media.remove(file).unwrap();
     assert!(
-        !b.complete_sticker_aliases(file),
+        !b.complete_sticker_aliases(file).unwrap(),
         "a cache index without bytes is insufficient"
     );
     b.media.store_bytes(file, name, &bytes).unwrap();
@@ -523,7 +526,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
         .remove_where(|row| row.event_id == prior[0].id)
         .unwrap();
     assert!(
-        !b.complete_sticker_aliases(file),
+        !b.complete_sticker_aliases(file).unwrap(),
         "the completed original manifest must remain retained"
     );
     for mismatch in 0..4 {
@@ -547,7 +550,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
             .record_durable(&row)
             .unwrap();
         assert!(
-            !b.complete_sticker_aliases(file),
+            !b.complete_sticker_aliases(file).unwrap(),
             "mismatched retained row {mismatch} cannot provide ancestry"
         );
         assert!(!b.delivery.lock().unwrap().file_completed(alias.id));
@@ -568,7 +571,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
         .erase_file(prior[0].conversation, prior[0].id)
         .unwrap();
     assert!(
-        !b.complete_sticker_aliases(file),
+        !b.complete_sticker_aliases(file).unwrap(),
         "erased completion is not reusable ancestry"
     );
     assert!(!b.delivery.lock().unwrap().file_completed(alias.id));

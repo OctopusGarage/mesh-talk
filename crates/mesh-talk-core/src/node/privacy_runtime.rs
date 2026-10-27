@@ -233,7 +233,8 @@ impl Node {
         *state = Some(next);
         drop(state);
         let delivery = self.delivery.lock().expect("delivery lock not poisoned");
-        self.reseed_live_file_book(&delivery);
+        self.reseed_live_file_book(&delivery)
+            .map_err(std::io::Error::other)?;
         Ok(())
     }
     /// Return current local policy; unconfigured SDK nodes report the public default.

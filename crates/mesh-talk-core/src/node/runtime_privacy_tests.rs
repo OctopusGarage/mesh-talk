@@ -268,6 +268,7 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
     assert!(
         alice
             .account_history(&old, 100)
+            .unwrap()
             .iter()
             .any(|e| e.text == b"before rekey")
     );
@@ -340,12 +341,14 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
     assert!(
         alice
             .account_history(&old, 100)
+            .unwrap()
             .iter()
             .all(|e| e.text != b"explicit contact after rekey")
     );
     assert!(
         alice
             .account_history(&new, 100)
+            .unwrap()
             .iter()
             .all(|e| e.text != b"before rekey")
     );
@@ -675,6 +678,7 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
         loop {
             if bob
                 .account_history(contact.account_id(), 10)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.text == b"after both restarts")
             {

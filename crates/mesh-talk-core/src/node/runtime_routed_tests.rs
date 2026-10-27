@@ -948,6 +948,7 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
     tokio::time::timeout(Duration::from_secs(12), async {
         while !receiver
             .account_history(receiver.account_id(), 20)
+            .unwrap()
             .iter()
             .any(|row| row.text == b"saved before sibling started")
         {
@@ -970,6 +971,7 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
     tokio::time::timeout(Duration::from_secs(12), async {
         while !receiver
             .account_history(receiver.account_id(), 20)
+            .unwrap()
             .iter()
             .any(|row| row.text == b"saved on first device")
         {
@@ -990,7 +992,12 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
         .unwrap();
     let reverse_accepted = clock.elapsed();
     tokio::time::timeout(Duration::from_secs(12), async {
-        while source.account_history(source.account_id(), 20).len() != 3 {
+        while source
+            .account_history(source.account_id(), 20)
+            .unwrap()
+            .len()
+            != 3
+        {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -1002,6 +1009,7 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
     );
     let expected: std::collections::HashSet<_> = source
         .account_history(source.account_id(), 20)
+        .unwrap()
         .into_iter()
         .map(|row| {
             assert!(row.from_me);
@@ -1012,6 +1020,7 @@ async fn saved_messages_sync_between_linked_runtimes_and_survive_restart() {
     let restarted = start("saved-receiver").await.unwrap();
     let actual: std::collections::HashSet<_> = restarted
         .account_history(restarted.account_id(), 20)
+        .unwrap()
         .into_iter()
         .map(|row| {
             assert!(row.from_me);

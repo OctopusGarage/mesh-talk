@@ -56,17 +56,20 @@ impl Node {
 
     /// Rebind retained original-author completion to an exact compatible sticker offer.
     /// Cached bytes alone never establish signed chunk ancestry or recipient delivery.
-    pub(in crate::node) fn complete_sticker_aliases(&self, conversation: ConversationId) -> bool {
+    pub(in crate::node) fn complete_sticker_aliases(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<bool, super::NodeError> {
         let manifest = {
             let files = self.files.lock().expect("files lock not poisoned");
             let Some(manifest) = files.manifest(&conversation) else {
-                return false;
+                return Ok(false);
             };
             if !crate::file::sticker::is_sticker_name(manifest.name())
                 || !super::media_store::manifest_is_media(manifest)
                 || manifest.protection().is_some()
             {
-                return false;
+                return Ok(false);
             }
             manifest.clone()
         };
@@ -84,15 +87,17 @@ impl Node {
         if !cards.iter().any(|(_, completion)| completion.is_none())
             || self.read_media(conversation).is_none()
         {
-            return false;
+            return Ok(false);
         }
         let rows: std::collections::HashMap<_, _> = self
             .retained_file_rows(conversation)
             .into_iter()
             .map(|row| (row.event_id, row))
             .collect();
-        let retained = |card: &FileCard| {
-            let binding = card.completion_binding.as_ref()?;
+        let retained = |card: &FileCard| -> Result<Option<Option<u64>>, super::NodeError> {
+            let Some(binding) = card.completion_binding.as_ref() else {
+                return Ok(None);
+            };
             if binding.owner_account != self.account_id()
                 || card.file_conversation != conversation
                 || card.chunk_count != manifest.chunk_count()
@@ -102,14 +107,20 @@ impl Node {
                     .expect("delivery lock not poisoned")
                     .manifest_event_erased(card.id)
             {
-                return None;
+                return Ok(None);
             }
-            let proof = self.historical_author(&binding.source.ed25519_pub)?;
+            let Some(proof) = self.historical_author(&binding.source.ed25519_pub) else {
+                return Ok(None);
+            };
             if proof.public() != binding.source || proof.account_cert != binding.certificate {
-                return None;
+                return Ok(None);
             }
-            let row = rows.get(&card.id)?;
-            let stored = super::files::validated_manifest(&row.plaintext)?;
+            let Some(row) = rows.get(&card.id) else {
+                return Ok(None);
+            };
+            let Some(stored) = super::files::validated_manifest(&row.plaintext) else {
+                return Ok(None);
+            };
             let deadline = crate::expiry::deadline(&row.plaintext);
             if row.conversation != card.conversation
                 || row.from != binding.source.user_id()
@@ -117,11 +128,13 @@ impl Node {
                 || !super::files::same_file_transfer(&manifest, &stored)
                 || deadline.is_some_and(|time| time <= super::node::now_millis())
             {
-                return None;
+                return Ok(None);
             }
             let log = self.log.lock().expect("log lock not poisoned");
-            let event = log.get(&card.id)?;
-            (event.kind == EventKind::FileManifest
+            let Some(event) = log.get(&card.id)? else {
+                return Ok(None);
+            };
+            Ok((event.kind == EventKind::FileManifest
                 && event.conversation_id
                     == super::conversation::dm_conversation_id(
                         &self.identity.public(),
@@ -130,7 +143,7 @@ impl Node {
                 && event.author.ed25519_pub() == &binding.source.ed25519_pub
                 && event.verify_integrity()
                 && event.verify_signature())
-            .then_some(deadline)
+            .then_some(deadline))
         };
         // One authorized completed ancestor per scope is sufficient. Bound new
         // completions per pass and validate retained rows once, not per alias pair.
@@ -155,11 +168,11 @@ impl Node {
                 continue;
             }
             let scope = key(card, crate::expiry::deadline(&row.plaintext));
-            if ancestors.contains_key(&scope) || retained(card).is_none() {
+            if ancestors.contains_key(&scope) || retained(card)?.is_none() {
                 continue;
             }
             let binding = card.completion_binding.as_ref().expect("validated binding");
-            if self.historical_file_completion(conversation, *final_chunk, &binding.source) {
+            if self.historical_file_completion(conversation, *final_chunk, &binding.source)? {
                 ancestors.insert(scope, (card, *final_chunk));
             }
         }
@@ -175,7 +188,7 @@ impl Node {
             % pending.len();
         pending.rotate_left(offset);
         for (card, _) in pending.into_iter().take(256) {
-            let Some(deadline) = retained(card) else {
+            let Some(deadline) = retained(card)? else {
                 continue;
             };
             if let Some((prior, final_chunk)) = ancestors.get(&key(card, deadline))
@@ -186,14 +199,14 @@ impl Node {
             }
         }
         if candidates.is_empty() {
-            return false;
+            return Ok(false);
         }
         let completed =
-            self.commit_file_completion_with_ancestors(conversation, &candidates, &proofs);
+            self.commit_file_completion_with_ancestors(conversation, &candidates, &proofs)?;
         if completed {
             self.note_file_change();
         }
-        completed
+        Ok(completed)
     }
 
     /// Capture exact original-author ancestry before any saved content replaces chunks.
@@ -245,7 +258,7 @@ impl Node {
         &self,
         conversation: ConversationId,
         candidates: &[(FileCard, EventId)],
-    ) -> bool {
+    ) -> Result<bool, super::NodeError> {
         self.commit_file_completion_with_ancestors(conversation, candidates, &[])
     }
 
@@ -254,12 +267,10 @@ impl Node {
         conversation: ConversationId,
         candidates: &[(FileCard, EventId)],
         ancestors: &[(EventId, FileCard, EventId)],
-    ) -> bool {
+    ) -> Result<bool, super::NodeError> {
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
-        if self.recover_delivery(&mut store).is_err() {
-            return false;
-        }
-        let mut committed = false;
+        self.recover_delivery(&mut store)?;
+        let mut eligible = Vec::with_capacity(candidates.len());
         for (card, final_chunk) in candidates {
             if store.file_card(card.id) != Some(card) {
                 continue;
@@ -297,38 +308,51 @@ impl Node {
             {
                 continue;
             }
-            if store.complete_file(card.id, *final_chunk).is_err() {
-                return false;
+            eligible.push((card, *final_chunk));
+        }
+        // Stage only the fallback needed for this decision, before completion writes.
+        // Tracked completion and active fanout never scan untracked chunk ancestry.
+        let active_fanout = store.cards_for_file(conversation).iter().any(|card| {
+            card.destinations
+                .iter()
+                .any(|destination| destination.active)
+        });
+        let untracked = eligible.is_empty()
+            && !active_fanout
+            && self.untracked_file_reclaimable(conversation, &store)?;
+        let retain_replica = if !active_fanout
+            && (!eligible.is_empty() || untracked)
+            && self.is_channel_file_replica(conversation)
+        {
+            let own_source = self
+                .retained_file_rows(conversation)
+                .iter()
+                .any(|row| row.from == self.user_id());
+            own_source || self.shares_replica(&conversation)?
+        } else {
+            false
+        };
+        let mut committed = false;
+        for (card, final_chunk) in eligible {
+            if store.complete_file(card.id, final_chunk).is_err() {
+                return Ok(false);
             }
             committed = true;
         }
         // Source fanout still needs the original signed chunks after a local export.
-        if store
-            .cards_for_file(conversation)
-            .iter()
-            .any(|card| card.destinations.iter().any(|d| d.active))
-        {
-            return false;
+        if active_fanout || (!committed && !untracked) {
+            return Ok(false);
         }
-        if !committed && !self.untracked_file_reclaimable(conversation, &store) {
-            return false;
-        }
-        let own_source = self
-            .retained_file_rows(conversation)
-            .iter()
-            .any(|row| row.from == self.user_id());
-        if self.is_channel_file_replica(conversation)
-            && (own_source || self.shares_replica(&conversation))
-        {
+        if retain_replica {
             self.prune_channel_file_replicas();
-            return true;
+            return Ok(true);
         }
         let _ = self
             .log
             .lock()
             .expect("log lock not poisoned")
             .drop_conversation(&conversation);
-        true
+        Ok(true)
     }
 
     fn is_channel_file_replica(&self, conversation: ConversationId) -> bool {
@@ -414,7 +438,7 @@ impl Node {
         &self,
         conversation: ConversationId,
         store: &super::delivery_store::DeliveryStore,
-    ) -> bool {
+    ) -> Result<bool, super::NodeError> {
         let rows: Vec<_> = self
             .retained_file_rows(conversation)
             .into_iter()
@@ -432,20 +456,25 @@ impl Node {
         let log = self.log.lock().expect("log lock not poisoned");
         let chunks = log.events(&conversation);
         let Some(first) = chunks.first() else {
-            return false;
+            return Ok(false);
         };
         let source = first.author;
-        let allowed = source.ed25519_pub() == &self.identity.public().ed25519_pub
-            || rows.iter().any(|(id, parent)| {
-                log.get(id).is_some_and(|event| {
+        let mut allowed = source.ed25519_pub() == &self.identity.public().ed25519_pub;
+        if !allowed {
+            for (id, parent) in &rows {
+                if log.get(id)?.is_some_and(|event| {
                     event.conversation_id == *parent
                         && event.kind == EventKind::FileManifest
                         && event.author == source
                         && event.verify_integrity()
                         && event.verify_signature()
-                })
-            });
-        allowed
+                }) {
+                    allowed = true;
+                    break;
+                }
+            }
+        }
+        Ok(allowed
             && chunks.iter().enumerate().all(|(index, event)| {
                 event.kind == EventKind::Message
                     && event.author == source
@@ -456,9 +485,13 @@ impl Node {
                         } else {
                             vec![chunks[index - 1].id]
                         }
-                    && event.verify_integrity()
-                    && event.verify_signature()
-            })
+                    && {
+                        #[cfg(test)]
+                        self.untracked_chunk_validations
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        event.verify_integrity() && event.verify_signature()
+                    }
+            }))
     }
 
     fn retained_file_rows(
@@ -488,14 +521,16 @@ impl Node {
         &self,
         conversation: ConversationId,
         manifest: &crate::file::AnyManifest,
-    ) -> Option<PathBuf> {
+    ) -> Result<Option<PathBuf>, super::NodeError> {
         let path = self.media.path_for(conversation, manifest.name());
-        let metadata = path.metadata().ok()?;
+        let Ok(metadata) = path.metadata() else {
+            return Ok(None);
+        };
         if !metadata.is_file() {
-            return None;
+            return Ok(None);
         }
         if self.has_verified_file_completion(conversation) {
-            return Some(path);
+            return Ok(Some(path));
         }
         for row in self.retained_file_rows(conversation) {
             if self
@@ -510,8 +545,7 @@ impl Node {
                 .log
                 .lock()
                 .expect("log lock not poisoned")
-                .get(&row.event_id)
-                .cloned()
+                .get(&row.event_id)?
                 .or_else(|| {
                     self.account_file_proofs
                         .lock()
@@ -542,10 +576,10 @@ impl Node {
                 && event.verify_integrity()
                 && event.verify_signature()
             {
-                return Some(path);
+                return Ok(Some(path));
             }
         }
-        None
+        Ok(None)
     }
 
     pub(in crate::node) fn has_verified_file_completion(
@@ -567,12 +601,12 @@ impl Node {
         conversation: ConversationId,
         final_chunk: EventId,
         peer: &PublicIdentity,
-    ) -> bool {
+    ) -> Result<bool, crate::eventlog::LogError> {
         if self
             .delivery_suspended
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            return false;
+            return Ok(false);
         }
         // Drop delivery before policy/proof lookup: erase/recovery acquire delivery first.
         let cards = self
@@ -580,28 +614,27 @@ impl Node {
             .lock()
             .expect("delivery lock not poisoned")
             .completed_files(conversation, final_chunk);
-        cards.iter().any(|card| {
+        for card in &cards {
             let Some(binding) = &card.completion_binding else {
-                return false;
+                continue;
             };
             if binding.source != *peer
                 || binding.owner_account != self.account_id()
                 || !self.known_account_allowed(peer)
             {
-                return false;
+                continue;
             }
             let Some(proof) = self.historical_author(&peer.ed25519_pub) else {
-                return false;
+                continue;
             };
             if proof.public() != *peer || proof.account_cert != binding.certificate {
-                return false;
+                continue;
             }
             let original = self
                 .log
                 .lock()
                 .expect("log lock not poisoned")
-                .get(&card.id)
-                .cloned();
+                .get(&card.id)?;
             let row = self
                 .received_files
                 .lock()
@@ -630,10 +663,10 @@ impl Node {
                 _ => false,
             };
             if !retained {
-                return false;
+                continue;
             }
             let store = self.delivery.lock().expect("delivery lock not poisoned");
-            store.file_card(card.id) == Some(card)
+            if store.file_card(card.id) == Some(card)
                 && store
                     .completed_files(conversation, final_chunk)
                     .iter()
@@ -643,7 +676,11 @@ impl Node {
                 && !self
                     .delivery_suspended
                     .load(std::sync::atomic::Ordering::Acquire)
-        })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -748,11 +785,15 @@ mod replica_tests {
                 .unwrap()
                 .record_durable(&changed)
                 .unwrap();
-            assert!(!node.commit_file_completion_with_ancestors(
-                file,
-                &[(cards[1].clone(), final_chunk)],
-                &prepared
-            ));
+            assert!(
+                !node
+                    .commit_file_completion_with_ancestors(
+                        file,
+                        &[(cards[1].clone(), final_chunk)],
+                        &prepared
+                    )
+                    .unwrap()
+            );
             assert!(!node.delivery.lock().unwrap().file_completed(cards[1].id));
         }
         node.received_files
@@ -770,11 +811,15 @@ mod replica_tests {
             .unwrap()
             .erase_file(host, cards[0].id)
             .unwrap();
-        assert!(!node.commit_file_completion_with_ancestors(
-            file,
-            &[(cards[1].clone(), final_chunk)],
-            &prepared
-        ));
+        assert!(
+            !node
+                .commit_file_completion_with_ancestors(
+                    file,
+                    &[(cards[1].clone(), final_chunk)],
+                    &prepared
+                )
+                .unwrap()
+        );
         assert!(!node.delivery.lock().unwrap().file_completed(cards[1].id));
     }
 

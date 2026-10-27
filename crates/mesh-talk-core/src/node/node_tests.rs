@@ -387,7 +387,7 @@ async fn auto_enrolls_certified_sibling_with_owner_signed_invitation() {
         .expect("automatic acceptance leaves a signed event");
     {
         let log = sibling.log.lock().unwrap();
-        let event = log.get(&acceptance).unwrap();
+        let event = log.get(&acceptance).unwrap().unwrap();
         assert_eq!(event.kind, EventKind::ChannelAccept);
         assert_eq!(event.author.user_id(), sibling.user_id());
     }
@@ -665,17 +665,17 @@ async fn expired_outgoing_account_message_is_hidden_and_erased() {
         .await
         .unwrap();
     assert_eq!(
-        node.account_history(&peer, 20)[0].expires_at_ms,
+        node.account_history(&peer, 20).unwrap()[0].expires_at_ms,
         Some(deadline)
     );
     let backfill = node.export_account_backfill();
     assert_eq!(backfill.len(), 1);
     Arc::get_mut(&mut node).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
     assert!(
-        node.account_history(&peer, 20).is_empty(),
+        node.account_history(&peer, 20).unwrap().is_empty(),
         "sender history must expire without waiting for maintenance"
     );
-    assert!(node.search("ephemeral secret").is_empty());
+    assert!(node.search("ephemeral secret").unwrap().is_empty());
     assert!(node.export_account_backfill().is_empty());
     node.import_account_backfill(&backfill).unwrap();
     let conv = crate::node::conversation::account_conversation_id(&node.account_id(), &peer);
@@ -703,7 +703,7 @@ async fn expired_outgoing_account_message_is_hidden_and_erased() {
         "pw",
     )
     .unwrap();
-    assert!(reopened.account_history(&peer, 20).is_empty());
+    assert!(reopened.account_history(&peer, 20).unwrap().is_empty());
     assert!(reopened.sent_entries_for_history(conv).is_empty());
 }
 
@@ -748,7 +748,7 @@ fn expired_incoming_account_message_is_hidden_from_history() {
             EventId::new([8; 32]),
         )
         .unwrap();
-    assert!(node.account_history(&peer, 20).is_empty());
+    assert!(node.account_history(&peer, 20).unwrap().is_empty());
     assert_eq!(node.prune_expired_received().unwrap(), 1);
     assert!(node.received.lock().unwrap().entries(&conv).is_empty());
 }
@@ -1016,10 +1016,11 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
         node.account.created_at_ms()
     );
     assert_ne!(restored.user_id(), old_device_id);
-    assert_eq!(restored.history(conversation, 10).len(), 3);
+    assert_eq!(restored.history(conversation, 10).unwrap().len(), 3);
     assert!(
         restored
             .history(conversation, 10)
+            .unwrap()
             .iter()
             .find(|entry| entry.id == file_event.id)
             .unwrap()
@@ -1053,6 +1054,7 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     assert!(
         twice_restored
             .history(conversation, 10)
+            .unwrap()
             .iter()
             .find(|entry| entry.id == file_event.id)
             .unwrap()
@@ -1089,7 +1091,7 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
     )
     .unwrap();
     assert_eq!(reopened.account_id(), account_id);
-    assert_eq!(reopened.history(conversation, 10).len(), 3);
+    assert_eq!(reopened.history(conversation, 10).unwrap().len(), 3);
     assert!(reopened.log.lock().unwrap().has(&signed.id));
     assert!(reopened.log.lock().unwrap().has(&file_event.id));
     assert_eq!(
@@ -1254,7 +1256,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
         Node::inspect_encrypted_recovery_archive(Cursor::new(archive), &key, dir.path()).unwrap();
     assert_eq!(preview.channels, 1);
     assert_eq!(preview.messages, 1);
-    let original_id = source.channel_history(channel, 10)[0].id;
+    let original_id = source.channel_history(channel, 10).unwrap()[0].id;
     source.recall_channel(channel, original_id).await.unwrap();
     let member_dir = dir.path().join("member");
     std::fs::create_dir_all(&member_dir).unwrap();
@@ -1365,6 +1367,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
     assert!(
         reopened
             .channel_history(channel, 10)
+            .unwrap()
             .iter()
             .any(|entry| { entry.id == original_id && entry.recalled })
     );
@@ -1381,6 +1384,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
     assert!(
         twice_restored
             .channel_history(channel, 10)
+            .unwrap()
             .iter()
             .any(|entry| entry.id == original_id && entry.recalled),
         "the original message ID and recall survive another backup and restore"
@@ -1394,6 +1398,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
     assert!(
         reopened
             .channel_history(channel, 10)
+            .unwrap()
             .iter()
             .all(|entry| entry.id != original_id)
     );
@@ -1449,7 +1454,7 @@ async fn recovered_channel_can_rejoin_send_and_reopen_without_sent_sequence_conf
         .unwrap();
     drop(rejoined);
     let reopened = Node::open_recovery_profile(&restored_dir, "new password").unwrap();
-    assert_eq!(reopened.channel_history(channel, 10).len(), 3);
+    assert_eq!(reopened.channel_history(channel, 10).unwrap().len(), 3);
 }
 
 #[test]
@@ -1538,7 +1543,7 @@ fn file_only_account_contact_remains_visible_after_recovery() {
     )
     .unwrap();
     assert!(restored.known_account_ids().contains(&contact));
-    assert_eq!(restored.history(conversation, 10).len(), 1);
+    assert_eq!(restored.history(conversation, 10).unwrap().len(), 1);
     let mut second_snapshot = Vec::new();
     restored
         .write_recovery_snapshot(&mut second_snapshot, 102)
@@ -2074,13 +2079,19 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
         .unwrap();
     let id = alice_node
         .channel_history(group, 10)
+        .unwrap()
         .into_iter()
         .find(|row| row.text == b"relay custody")
         .unwrap()
         .id;
-    assert_eq!(alice_node.channel_custody_count(group, id), Some(0));
     assert_eq!(
-        alice_node.channel_post_office_custody_count(group, id),
+        alice_node.channel_custody_count(group, id).unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        alice_node
+            .channel_post_office_custody_count(group, id)
+            .unwrap(),
         Some(1)
     );
     bob_node.drain_from_post_office().await;
@@ -2150,7 +2161,7 @@ async fn channel_custody_inherited_holder_requires_signed_account_authority() {
         .publish_channel_custody(channel, event, &bob_sibling.public(), true, false, false)
         .unwrap();
     assert_eq!(
-        owner.channel_custody_count(channel, event),
+        owner.channel_custody_count(channel, event).unwrap(),
         Some(0),
         "a certificate cannot enroll a nonmember into a legacy channel"
     );
@@ -2201,7 +2212,7 @@ async fn channel_custody_inherited_holder_requires_signed_account_authority() {
         assert!(!state.members().contains(&bob_sibling.public()));
     }
     assert_eq!(
-        owner.channel_custody_count(channel, event),
+        owner.channel_custody_count(channel, event).unwrap(),
         Some(1),
         "an accepted account grant admits its certified holder without another device invite"
     );
@@ -2209,7 +2220,7 @@ async fn channel_custody_inherited_holder_requires_signed_account_authority() {
         .publish_channel_custody(channel, event, &bob.public(), true, false, false)
         .unwrap();
     assert_eq!(
-        owner.channel_custody_count(channel, event),
+        owner.channel_custody_count(channel, event).unwrap(),
         Some(1),
         "two certified holders of the same accepted account count once"
     );
@@ -2218,7 +2229,7 @@ async fn channel_custody_inherited_holder_requires_signed_account_authority() {
         .await
         .unwrap();
     assert_eq!(
-        owner.channel_custody_count(channel, event),
+        owner.channel_custody_count(channel, event).unwrap(),
         Some(0),
         "old observations cannot preserve a revoked account's eligibility"
     );
@@ -2321,10 +2332,15 @@ async fn channel_custody_post_office_observation_survives_sibling_sync_without_r
         .send_channel_message(channel, b"synthetic relay copy observation")
         .await
         .unwrap();
-    let event = source.channel_history(channel, 10)[0].id;
-    assert_eq!(source.channel_custody_count(channel, event), Some(0));
+    let event = source.channel_history(channel, 10).unwrap()[0].id;
     assert_eq!(
-        source.channel_post_office_custody_count(channel, event),
+        source.channel_custody_count(channel, event).unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        source
+            .channel_post_office_custody_count(channel, event)
+            .unwrap(),
         Some(1)
     );
     assert!(
@@ -2354,11 +2370,15 @@ async fn channel_custody_post_office_observation_survives_sibling_sync_without_r
         loop {
             let own_message = sibling
                 .channel_history(channel, 10)
+                .unwrap()
                 .iter()
                 .any(|row| row.id == event && row.from_me);
             if own_message
-                && sibling.channel_custody_count(channel, event) == Some(0)
-                && sibling.channel_post_office_custody_count(channel, event) == Some(1)
+                && sibling.channel_custody_count(channel, event).unwrap() == Some(0)
+                && sibling
+                    .channel_post_office_custody_count(channel, event)
+                    .unwrap()
+                    == Some(1)
             {
                 break;
             }
@@ -2386,13 +2406,16 @@ async fn channel_custody_post_office_observation_survives_sibling_sync_without_r
         "sibling relay import: history={:?}, members={:?}, observations={}, copies={:?}/{:?}, sync={:?}",
         sibling
             .channel_history(channel, 10)
+            .unwrap()
             .iter()
             .map(|row| (row.id, row.from_me))
             .collect::<Vec<_>>(),
         members,
         sibling.channel_custody_observations(channel, event).len(),
-        sibling.channel_custody_count(channel, event),
-        sibling.channel_post_office_custody_count(channel, event),
+        sibling.channel_custody_count(channel, event).unwrap(),
+        sibling
+            .channel_post_office_custody_count(channel, event)
+            .unwrap(),
         sibling.device_sync_status(),
     );
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -2408,9 +2431,14 @@ async fn channel_custody_post_office_observation_survives_sibling_sync_without_r
         DeviceIdentity::from_secret_bytes(sibling_secret.0, sibling_secret.1),
         Account::from_secret_bytes(secret),
     );
-    assert_eq!(reopened.channel_custody_count(channel, event), Some(0));
     assert_eq!(
-        reopened.channel_post_office_custody_count(channel, event),
+        reopened.channel_custody_count(channel, event).unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        reopened
+            .channel_post_office_custody_count(channel, event)
+            .unwrap(),
         Some(1)
     );
 }
@@ -2743,13 +2771,13 @@ async fn history_merges_sent_and_received_in_time_order() {
         )
         .unwrap();
 
-    let hist = node.dm_history(&bob.public(), 10);
+    let hist = node.dm_history(&bob.public(), 10).unwrap();
     assert_eq!(hist.len(), 2);
     assert!(!hist[0].from_me && hist[0].text == b"hi from bob"); // t=1000 first
     assert!(hist[1].from_me && hist[1].who == "you" && hist[1].text == b"hi from me");
 
     // `limit` keeps the most-recent entries.
-    let last1 = node.dm_history(&bob.public(), 1);
+    let last1 = node.dm_history(&bob.public(), 1).unwrap();
     assert_eq!(last1.len(), 1);
     assert!(last1[0].from_me); // the newer (t=2000) one
 }
@@ -2809,11 +2837,11 @@ async fn delete_clear_and_prune_erase_local_history() {
             .unwrap();
     };
     seed(&node);
-    assert_eq!(node.dm_history(&bob.public(), 10).len(), 2);
+    assert_eq!(node.dm_history(&bob.public(), 10).unwrap().len(), 2);
 
     // 1. Delete Bob's message for me (matched by event id; not an account conversation).
     assert_eq!(node.delete_message(conv, bob_msg_id, false).unwrap(), 1);
-    let hist = node.dm_history(&bob.public(), 10);
+    let hist = node.dm_history(&bob.public(), 10).unwrap();
     assert_eq!(hist.len(), 1);
     assert!(hist[0].from_me, "only my message remains");
 
@@ -2831,14 +2859,14 @@ async fn delete_clear_and_prune_erase_local_history() {
         )
         .unwrap();
     assert_eq!(node.prune_older_than(1500).unwrap(), 1); // only the t=1000 one
-    let hist = node.dm_history(&bob.public(), 10);
+    let hist = node.dm_history(&bob.public(), 10).unwrap();
     assert_eq!(hist.len(), 1);
     assert!(hist[0].from_me && hist[0].wall_clock == 3000);
 
     // 3. Clear the whole conversation.
     let removed = node.clear_conversation(conv).unwrap();
     assert!(removed >= 1);
-    assert!(node.dm_history(&bob.public(), 10).is_empty());
+    assert!(node.dm_history(&bob.public(), 10).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2893,7 +2921,7 @@ async fn recall_account_tombstones_own_message_and_enforces_window() {
     // The window has passed for the old one.
     assert!(node.recall_account(&peer_account, old).await.is_err());
 
-    let hist = node.account_history(&peer_account, 10);
+    let hist = node.account_history(&peer_account, 10).unwrap();
     let recalled = hist
         .iter()
         .find(|e| e.id == fresh)
@@ -2964,7 +2992,7 @@ async fn account_history_sticker_delete_clear_channel_search_and_recall_guard() 
     );
 
     // Account history renders the sticker (id + emoji fallback) and the text.
-    let hist = node.account_history(&peer_account, 10);
+    let hist = node.account_history(&peer_account, 10).unwrap();
     assert_eq!(hist.len(), 2);
     let st = hist
         .iter()
@@ -2978,20 +3006,20 @@ async fn account_history_sticker_delete_clear_channel_search_and_recall_guard() 
         node.delete_account_message(&peer_account, text_id).unwrap(),
         1
     );
-    let hist = node.account_history(&peer_account, 10);
+    let hist = node.account_history(&peer_account, 10).unwrap();
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].id, sticker_id);
 
     // Clear the whole account conversation → empty.
     assert_eq!(node.clear_account_conversation(&peer_account).unwrap(), 1);
-    assert!(node.account_history(&peer_account, 10).is_empty());
+    assert!(node.account_history(&peer_account, 10).unwrap().is_empty());
 
     // Channel full-text search finds a channel message (the search test only covered DMs).
     let channel = node.create_channel("general", vec![]).await.unwrap();
     node.send_channel_message(channel, b"standup planning at ten")
         .await
         .unwrap();
-    let hits = node.search("STANDUP");
+    let hits = node.search("STANDUP").unwrap();
     assert!(
         hits.iter()
             .any(|h| h.is_channel && h.text == b"standup planning at ten"),
@@ -3039,7 +3067,7 @@ async fn channel_sticker_send_recall_and_delete() {
         .unwrap();
 
     // The sticker surfaces with its id + emoji fallback; the text message is normal.
-    let hist = node.channel_history(channel, 10);
+    let hist = node.channel_history(channel, 10).unwrap();
     assert_eq!(hist.len(), 2);
     let sticker = hist
         .iter()
@@ -3055,13 +3083,13 @@ async fn channel_sticker_send_recall_and_delete() {
 
     // Recall the sticker (our own, fresh) → tombstoned, sticker cleared.
     node.recall_channel(channel, sticker_id_ev).await.unwrap();
-    let hist = node.channel_history(channel, 10);
+    let hist = node.channel_history(channel, 10).unwrap();
     let recalled = hist.iter().find(|e| e.id == sticker_id_ev).unwrap();
     assert!(recalled.recalled && recalled.sticker.is_none());
 
     // Delete the text message locally (sent seq->id path) → gone from history.
     assert_eq!(node.delete_message(channel, text_id, false).unwrap(), 1);
-    let hist = node.channel_history(channel, 10);
+    let hist = node.channel_history(channel, 10).unwrap();
     assert!(!hist.iter().any(|e| e.id == text_id));
 }
 
@@ -3328,14 +3356,14 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
 
     // Alice's own channel_history shows her sent message — served from the sent
     // sidecar (the sender-key wire key is single-use and not self-decryptable).
-    let hist = alice_node.channel_history(channel, 10);
+    let hist = alice_node.channel_history(channel, 10).unwrap();
     assert_eq!(hist.len(), 1);
     assert!(hist[0].from_me);
     assert_eq!(hist[0].text, b"hello channel");
 
     // Bob's channel_history shows Alice's message — served from his received store
     // (he decrypted it once via the sender-key ratchet; the key is now consumed).
-    let bob_hist = bob_node.channel_history(channel, 10);
+    let bob_hist = bob_node.channel_history(channel, 10).unwrap();
     assert_eq!(bob_hist.len(), 1);
     assert!(!bob_hist[0].from_me);
     assert_eq!(bob_hist[0].text, b"hello channel");
@@ -3368,7 +3396,7 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
             .unwrap()
             .duplicate
     );
-    assert_eq!(bob_node.channel_history(channel, 10).len(), 2);
+    assert_eq!(bob_node.channel_history(channel, 10).unwrap().len(), 2);
 
     // The membership projection can lag the durable log while two commands
     // interleave. The transfer must not report success if replay sees a newer
@@ -3653,10 +3681,15 @@ async fn channel_member_recovers_missed_message_from_peer() {
         .send_channel_message(channel, b"recover from Bob")
         .await
         .unwrap();
-    let sent_id = alice_node.channel_history(channel, 10)[0].id;
-    assert_eq!(alice_node.channel_custody_count(channel, sent_id), Some(1));
+    let sent_id = alice_node.channel_history(channel, 10).unwrap()[0].id;
     assert_eq!(
-        alice_node.channel_custody_count(channel, EventId::new([0; 32])),
+        alice_node.channel_custody_count(channel, sent_id).unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        alice_node
+            .channel_custody_count(channel, EventId::new([0; 32]))
+            .unwrap(),
         None
     );
     drop(alice_node);
@@ -3666,7 +3699,9 @@ async fn channel_member_recovers_missed_message_from_peer() {
         "alice",
     );
     assert_eq!(
-        reopened_alice.channel_custody_count(channel, sent_id),
+        reopened_alice
+            .channel_custody_count(channel, sent_id)
+            .unwrap(),
         Some(1)
     );
     drop(reopened_alice);
@@ -3678,7 +3713,7 @@ async fn channel_member_recovers_missed_message_from_peer() {
         Arc::clone(&carol_roster_for_discovery),
         "carol",
     );
-    let before_recovery = carol_node.channel_history(channel, 10);
+    let before_recovery = carol_node.channel_history(channel, 10).unwrap();
     assert!(before_recovery.is_empty(), "{before_recovery:?}");
     assert!(
         !carol_node.verified_dm_pull_peer(&bob_node.user_id()),
@@ -3712,7 +3747,7 @@ async fn channel_member_recovers_missed_message_from_peer() {
     let recovery = carol_node.channel_recovery(channel).unwrap();
     assert!(matches!(recovery.phase, "peer_checked" | "catching_up"));
     assert!(recovery.checked_at.is_some());
-    assert_eq!(carol_node.channel_history(channel, 10).len(), 1);
+    assert_eq!(carol_node.channel_history(channel, 10).unwrap().len(), 1);
     let resumed_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, carol_port))
         .await
         .unwrap();
@@ -3733,7 +3768,11 @@ async fn channel_member_recovers_missed_message_from_peer() {
         &alice_id,
     );
     tokio::time::timeout(Duration::from_secs(8), async {
-        while reopened_alice.channel_custody_count(channel, sent_id) != Some(2) {
+        while reopened_alice
+            .channel_custody_count(channel, sent_id)
+            .unwrap()
+            != Some(2)
+        {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -3752,11 +3791,14 @@ async fn channel_member_recovers_missed_message_from_peer() {
         .unwrap();
     let local_id = reopened_alice
         .channel_history(channel, 10)
+        .unwrap()
         .last()
         .unwrap()
         .id;
     assert_eq!(
-        reopened_alice.channel_custody_count(channel, local_id),
+        reopened_alice
+            .channel_custody_count(channel, local_id)
+            .unwrap(),
         Some(0)
     );
     recovery_task.abort();
@@ -3853,7 +3895,7 @@ async fn channel_real_tcp_scale_rehearsal() {
         .await
         .unwrap();
     let sender_ms = send_started.elapsed().as_millis();
-    let event_id = nodes[0].channel_history(channel, 10)[0].id;
+    let event_id = nodes[0].channel_history(channel, 10).unwrap()[0].id;
     let (contacts, sender_frame_bytes) = nodes[0].channel_last_send.lock().unwrap().unwrap();
     assert_eq!(contacts, if count <= 5 { count - 1 } else { 2 });
     assert!(sender_frame_bytes > 0);
@@ -3888,6 +3930,7 @@ async fn channel_real_tcp_scale_rehearsal() {
             if (1..count).filter(|i| !offline.contains(i)).all(|i| {
                 nodes[i]
                     .channel_history(channel, 10)
+                    .unwrap()
                     .iter()
                     .any(|entry| entry.text == b"scale-check")
             }) {
@@ -3911,6 +3954,7 @@ async fn channel_real_tcp_scale_rehearsal() {
             if offline.iter().all(|&i| {
                 nodes[i]
                     .channel_history(channel, 10)
+                    .unwrap()
                     .iter()
                     .any(|entry| entry.text == b"scale-check")
             }) {
@@ -4097,7 +4141,7 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
         .await
         .unwrap();
     dana_node.pull_one_channel_from_member(0).await;
-    assert_eq!(dana_node.channel_history(channel, 10).len(), 1);
+    assert_eq!(dana_node.channel_history(channel, 10).unwrap().len(), 1);
 
     // Bob resumes sharing, but has no direct address for Dana: only Dana's pull
     // from Bob can deliver the missed second message.
@@ -4106,7 +4150,7 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
         .await
         .unwrap();
     dana_node.pull_one_channel_from_member(0).await;
-    assert_eq!(dana_node.channel_history(channel, 10).len(), 2);
+    assert_eq!(dana_node.channel_history(channel, 10).unwrap().len(), 2);
     bob_task.abort();
     dana_task.abort();
 }
@@ -4200,7 +4244,7 @@ async fn two_nodes_exchange_channel_messages_both_directions_over_loopback_tcp()
     assert_eq!(back.from, bob_node.user_id());
 
     // Alice's channel_history now shows both: her own sent line + Bob's decrypted one.
-    let alice_hist = alice_node.channel_history(channel, 10);
+    let alice_hist = alice_node.channel_history(channel, 10).unwrap();
     assert!(alice_hist.iter().any(|h| h.from_me && h.text == b"hi bob"));
     assert!(
         alice_hist
@@ -4493,7 +4537,7 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
 
     // Late-join isolation: Carol never receives the epoch-0 message (she joined at
     // epoch 1). Her history holds only the epoch-1 message.
-    let carol_hist = carol_node.channel_history(channel, 10);
+    let carol_hist = carol_node.channel_history(channel, 10).unwrap();
     assert!(
         carol_hist.iter().all(|h| h.text != b"epoch0 msg"),
         "late joiner must not read pre-join messages"
@@ -4692,6 +4736,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         assert!(
             bob_node
                 .channel_history(channel, 10)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.id == got.event_id && entry.wall_clock == got.wall_clock)
         );
@@ -4701,7 +4746,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
     assert_eq!(texts, vec![b"m0".to_vec(), b"m1".to_vec()]);
 
     // Bob's history is served from his received store (single-use keys consumed).
-    let bob_hist = bob_node.channel_history(channel, 10);
+    let bob_hist = bob_node.channel_history(channel, 10).unwrap();
     assert_eq!(bob_hist.len(), 2);
     assert!(bob_hist.iter().all(|e| !e.from_me));
     let mut htexts: Vec<Vec<u8>> = bob_hist.iter().map(|e| e.text.clone()).collect();
@@ -4715,7 +4760,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         b_ch_r.try_recv().is_err(),
         "a consumed message was re-opened"
     );
-    assert_eq!(bob_node.channel_history(channel, 10).len(), 2);
+    assert_eq!(bob_node.channel_history(channel, 10).unwrap().len(), 2);
     // Rebuilding the receiver projection (as at restart) must not replay alerts
     // for plaintext already saved locally.
     *bob_node.channels.lock().unwrap() = crate::node::channel::ChannelBook::default();
@@ -4738,7 +4783,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .await
         .unwrap();
     assert!(b_ch_r.try_recv().is_err());
-    assert_eq!(bob_node.channel_history(channel, 10).len(), 2);
+    assert_eq!(bob_node.channel_history(channel, 10).unwrap().len(), 2);
     bob_node
         .received
         .lock()
@@ -4756,7 +4801,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
     let completed = b_ch_r.try_recv().unwrap();
     assert!(completed.reception_only && completed.batch_complete);
     assert!(completed.text.is_empty() && completed.wrapped.is_empty());
-    assert_eq!(bob_node.channel_history(channel, 10).len(), 3);
+    assert_eq!(bob_node.channel_history(channel, 10).unwrap().len(), 3);
     bob_node.process_channel(channel);
     assert!(b_ch_r.try_recv().is_err(), "retry must surface once");
     bob_node
@@ -4771,6 +4816,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .unwrap();
     let erased = alice_node
         .channel_history(channel, 10)
+        .unwrap()
         .into_iter()
         .find(|entry| entry.text == b"erase before retry")
         .unwrap()
@@ -4787,6 +4833,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
     assert!(
         !bob_node
             .channel_history(channel, 10)
+            .unwrap()
             .iter()
             .any(|entry| entry.id == erased)
     );
@@ -4795,7 +4842,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
             .all(|event| event.reception_only && event.text.is_empty()),
         "local erase must cancel queued user messages"
     );
-    assert!(bob_node.channel_history(channel, 10).is_empty());
+    assert!(bob_node.channel_history(channel, 10).unwrap().is_empty());
     bob_node
         .received
         .lock()
@@ -4815,7 +4862,7 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
     bob_node.prune_older_than(u64::MAX).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     bob_node.retry_channel_plaintext();
-    assert!(bob_node.channel_history(channel, 10).is_empty());
+    assert!(bob_node.channel_history(channel, 10).unwrap().is_empty());
     assert!(
         std::iter::from_fn(|| b_ch_r.try_recv().ok())
             .all(|event| event.reception_only && event.text.is_empty()),
@@ -5058,6 +5105,7 @@ async fn owner_dissolves_channel_and_local_mutations_stop() {
     assert!(node.list_channels()[0].dissolved);
     assert!(
         node.channel_history(id, 10)
+            .unwrap()
             .iter()
             .any(|item| item.text == b"before closure")
     );
@@ -5092,6 +5140,7 @@ async fn owner_dissolves_channel_and_local_mutations_stop() {
     assert!(
         reopened
             .channel_history(id, 10)
+            .unwrap()
             .iter()
             .any(|item| item.text == b"before closure")
     );
@@ -5370,7 +5419,7 @@ async fn two_nodes_transfer_a_file_over_loopback_tcp() {
 
     // The sender sees her own sent file as a first-class history message immediately:
     // a `from_me` file entry carrying the manifest metadata (name/size/file_conv).
-    let alice_hist = alice_node.dm_history(&bob_public, 10);
+    let alice_hist = alice_node.dm_history(&bob_public, 10).unwrap();
     let alice_file = alice_hist
         .iter()
         .find(|h| h.file.is_some())
@@ -5394,7 +5443,7 @@ async fn two_nodes_transfer_a_file_over_loopback_tcp() {
 
     // And the received file appears in Bob's conversation history (not just the tray) as
     // a non-`from_me` file message — so it persists across reload.
-    let bob_hist = bob_node.dm_history(&alice_public, 10);
+    let bob_hist = bob_node.dm_history(&alice_public, 10).unwrap();
     let bob_file = bob_hist
         .iter()
         .find(|h| h.file.is_some())
@@ -5486,7 +5535,7 @@ async fn attachment_offer_waits_for_exact_recipient_approval() {
         .unwrap();
     assert_eq!(offer.file_conv, file);
     assert_eq!(
-        b.attachment_consent_status(file),
+        b.attachment_consent_status(file).unwrap(),
         Some(crate::node::ReceiveDecision::Pending)
     );
     assert_eq!(b.file_progress(file).unwrap().done, 0);
@@ -5510,24 +5559,26 @@ async fn attachment_offer_waits_for_exact_recipient_approval() {
     b.decide_attachment(file, false).unwrap();
     a.flush_file_delivery(card).await;
     assert_eq!(
-        b.attachment_consent_status(file),
+        b.attachment_consent_status(file).unwrap(),
         Some(crate::node::ReceiveDecision::Declined)
     );
     assert_eq!(b.file_progress(file).unwrap().done, 0);
     b.decide_attachment(file, true).unwrap();
     assert!(
         !b.attachment_chunk_author_allowed(file, &DeviceIdentity::generate().public().ed25519_pub)
+            .unwrap()
     );
     assert_eq!(
         b.attachment_consent_for_peer(
             file,
             crate::eventlog::EventId::new([0; 32]),
             &a.identity.public()
-        ),
+        )
+        .unwrap(),
         crate::node::ReceiveDecision::Pending
     );
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !b.file_ready_to_save(file) {
+        while !b.file_ready_to_save(file).unwrap() {
             a.flush_file_delivery(card).await;
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -5550,7 +5601,7 @@ async fn attachment_offer_waits_for_exact_recipient_approval() {
         .unwrap();
     assert_eq!(image_offer.file_conv, image_file);
     assert_eq!(
-        b.attachment_consent_status(image_file),
+        b.attachment_consent_status(image_file).unwrap(),
         Some(crate::node::ReceiveDecision::Accepted)
     );
 
@@ -5566,7 +5617,7 @@ async fn attachment_offer_waits_for_exact_recipient_approval() {
         .unwrap();
     assert_eq!(video_offer.file_conv, video_file);
     assert_eq!(
-        b.attachment_consent_status(video_file),
+        b.attachment_consent_status(video_file).unwrap(),
         Some(crate::node::ReceiveDecision::Pending)
     );
     assert_eq!(b.file_progress(video_file).unwrap().done, 0);
@@ -5652,7 +5703,7 @@ async fn two_nodes_transfer_nested_directory_and_save_it() {
     .await
     .expect("archive became complete");
     std::fs::remove_file(&temporary_archive).unwrap();
-    assert!(bob_node.file_ready_to_save(card.file_conv));
+    assert!(bob_node.file_ready_to_save(card.file_conv).unwrap());
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match bob_node.save_file_into_dir(card.file_conv, &downloads) {
@@ -5955,7 +6006,7 @@ async fn a_dm_reaction_is_visible_to_both_peers() {
     let conv = dm_conversation_id(&alice_pub, &bob_pub);
 
     let target = {
-        let h = bob_node.dm_history(&alice_pub, 10);
+        let h = bob_node.dm_history(&alice_pub, 10).unwrap();
         h.iter()
             .find(|e| !e.from_me)
             .map(|e| e.id)
@@ -6220,6 +6271,7 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     // own, `from_me`) and the receiver (Bob's, not `from_me`) — not just the tray.
     let alice_file = alice_node
         .channel_history(channel, 10)
+        .unwrap()
         .into_iter()
         .find(|h| h.file.is_some())
         .expect("sender sees her channel file in history");
@@ -6227,6 +6279,7 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     assert_eq!(alice_file.file.as_ref().unwrap().file_conv, file_conv);
     let bob_file = bob_node
         .channel_history(channel, 10)
+        .unwrap()
         .into_iter()
         .find(|h| h.file.is_some())
         .expect("receiver sees the channel file in history");
@@ -6395,9 +6448,13 @@ async fn saved_channel_file_remains_downloadable_from_member_after_author_discon
     assert!(!live_card.own_device);
     assert!(live_card.batch_complete);
     assert!(
-        carol_node.channel_history(channel, 10).iter().any(
-            |entry| entry.id == live_card.event_id && entry.wall_clock == live_card.authored_at
-        )
+        carol_node
+            .channel_history(channel, 10)
+            .unwrap()
+            .iter()
+            .any(
+                |entry| entry.id == live_card.event_id && entry.wall_clock == live_card.authored_at
+            )
     );
     bob_node.decide_attachment(file, true).unwrap();
     let bob_dest = dir.path().join("bob.bin");
@@ -6770,6 +6827,7 @@ async fn channel_recall_by_member_is_visible_and_survives_removal() {
     assert!(
         restored
             .channel_history(channel, 20)
+            .unwrap()
             .iter()
             .any(|entry| entry.id == bob_msg_id && entry.recalled),
         "an unseen peer channel recall must survive recovery"
@@ -6777,6 +6835,7 @@ async fn channel_recall_by_member_is_visible_and_survives_removal() {
 
     let tombstoned = |node: &Arc<Node>| {
         node.channel_history(channel, 20)
+            .unwrap()
             .into_iter()
             .any(|e| e.id == bob_msg_id && e.recalled)
     };
@@ -6875,6 +6934,7 @@ async fn a_reply_round_trips_with_its_reply_to() {
     // Bob looks up the parent message id from his history.
     let parent_id = bob_node
         .dm_history(&alice_pub, 10)
+        .unwrap()
         .into_iter()
         .find(|e| !e.from_me)
         .map(|e| e.id)
@@ -6899,7 +6959,7 @@ async fn a_reply_round_trips_with_its_reply_to() {
     );
 
     // Alice's dm_history shows the reply entry with reply_to.
-    let alice_hist = alice_node.dm_history(&bob_pub, 10);
+    let alice_hist = alice_node.dm_history(&bob_pub, 10).unwrap();
     let reply_entry = alice_hist
         .iter()
         .find(|e| !e.from_me)
@@ -6913,7 +6973,7 @@ async fn a_reply_round_trips_with_its_reply_to() {
 
     // A normal send_dm (no reply) yields reply_to == None in history.
     alice_node.send_dm(&bob_uid, b"just a message").await.ok();
-    let alice_hist2 = alice_node.dm_history(&bob_pub, 10);
+    let alice_hist2 = alice_node.dm_history(&bob_pub, 10).unwrap();
     let normal_sent = alice_hist2
         .iter()
         .find(|e| e.from_me && e.text == b"just a message")
@@ -6992,7 +7052,7 @@ async fn dm_messages_are_forward_secret_over_the_ratchet() {
 
     // (a) Bob's dm_history shows both (served from his received store).
     let conv = dm_conversation_id(&alice_pub, &bob_pub);
-    let hist = bob_node.dm_history(&alice_pub, 10);
+    let hist = bob_node.dm_history(&alice_pub, 10).unwrap();
     assert_eq!(hist.len(), 2);
     assert_eq!(hist[0].text, b"first");
     assert_eq!(hist[1].text, b"second");
@@ -7006,7 +7066,7 @@ async fn dm_messages_are_forward_secret_over_the_ratchet() {
         "consumed-key events must not re-surface"
     );
     assert_eq!(
-        bob_node.dm_history(&alice_pub, 10).len(),
+        bob_node.dm_history(&alice_pub, 10).unwrap().len(),
         2,
         "history unchanged after re-feed"
     );
@@ -7083,7 +7143,7 @@ async fn dm_messages_are_forward_secret_over_the_ratchet() {
         "out-of-order delivery surfaces all three messages"
     );
     // History (sorted by wall_clock) shows them in send order.
-    let dhist = dave_node.dm_history(&carol_pub, 10);
+    let dhist = dave_node.dm_history(&carol_pub, 10).unwrap();
     assert_eq!(
         dhist.iter().map(|e| e.text.clone()).collect::<Vec<_>>(),
         vec![b"m0".to_vec(), b"m1".to_vec(), b"m2".to_vec()]
@@ -7174,7 +7234,9 @@ async fn send_to_account_delivers_to_a_peer_account_over_loopback() {
     // Bob's account history (keyed by Alice's account) shows the message.
     let mut bob_hist = Vec::new();
     for _ in 0..50 {
-        bob_hist = bob_node.account_history(&alice_acct.account_id(), 10);
+        bob_hist = bob_node
+            .account_history(&alice_acct.account_id(), 10)
+            .unwrap();
         if !bob_hist.is_empty() {
             break;
         }
@@ -7189,7 +7251,9 @@ async fn send_to_account_delivers_to_a_peer_account_over_loopback() {
     assert_eq!(bob_hist[0].text, b"hi account");
 
     // Alice's own account history shows it once, from her.
-    let a_hist = alice_node.account_history(&bob_acct.account_id(), 10);
+    let a_hist = alice_node
+        .account_history(&bob_acct.account_id(), 10)
+        .unwrap();
     assert_eq!(a_hist.len(), 1);
     assert!(a_hist[0].from_me);
     assert_eq!(a_hist[0].text, b"hi account");
@@ -7275,7 +7339,9 @@ async fn account_recall_over_the_wire_tombstones_for_the_receiver() {
         .await
         .unwrap();
     let bob_msg_id = {
-        let h = bob_node.account_history(&alice_acct.account_id(), 10);
+        let h = bob_node
+            .account_history(&alice_acct.account_id(), 10)
+            .unwrap();
         assert_eq!(h.len(), 1);
         h[0].id
     };
@@ -7283,7 +7349,9 @@ async fn account_recall_over_the_wire_tombstones_for_the_receiver() {
     // Alice receives it.
     let mut received = false;
     for _ in 0..50 {
-        let h = alice_node.account_history(&bob_acct.account_id(), 10);
+        let h = alice_node
+            .account_history(&bob_acct.account_id(), 10)
+            .unwrap();
         if h.iter()
             .any(|e| e.id == bob_msg_id && !e.recalled && e.text == b"recall me")
         {
@@ -7341,13 +7409,16 @@ async fn account_recall_over_the_wire_tombstones_for_the_receiver() {
     assert!(
         restored
             .account_history(&bob_acct.account_id(), 10)
+            .unwrap()
             .iter()
             .any(|entry| entry.id == bob_msg_id && entry.recalled),
         "an unseen verified peer recall must survive recovery without old device keys"
     );
     let mut tombstoned = false;
     for _ in 0..50 {
-        let h = alice_node.account_history(&bob_acct.account_id(), 10);
+        let h = alice_node
+            .account_history(&bob_acct.account_id(), 10)
+            .unwrap();
         if h.iter().any(|e| e.id == bob_msg_id && e.recalled) {
             tombstoned = true;
             break;
@@ -7435,7 +7506,9 @@ async fn send_file_to_account_shows_in_sender_account_history() {
         .unwrap();
 
     // Alice's own account history shows the file she sent, once, as a from_me file message.
-    let a_hist = alice_node.account_history(&bob_acct.account_id(), 10);
+    let a_hist = alice_node
+        .account_history(&bob_acct.account_id(), 10)
+        .unwrap();
     let files: Vec<_> = a_hist.iter().filter(|e| e.file.is_some()).collect();
     assert_eq!(files.len(), 1, "sender sees exactly one file record");
     assert!(files[0].from_me, "the sent file shows as ours");
@@ -7494,7 +7567,7 @@ async fn personal_message_caches_new_sibling_binding_before_enqueue() {
         .enqueue_to_account(&target, b"new sibling note", None)
         .await
         .unwrap();
-    assert_eq!(node.account_history(&target, 10)[0].id, id);
+    assert_eq!(node.account_history(&target, 10).unwrap()[0].id, id);
     assert!(node.account_delivery_statuses(&target, &[id]).is_empty());
     let stored = node.delivery.lock().unwrap();
     let destination = &stored.message(id).unwrap().destinations[0];
@@ -7517,7 +7590,7 @@ async fn personal_message_is_durable_without_siblings() {
         .enqueue_to_account(&target, b"private note", None)
         .await
         .unwrap();
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
     assert!(history[0].from_me);
@@ -7531,7 +7604,7 @@ async fn personal_message_is_durable_without_siblings() {
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
         Account::from_secret_bytes(account_secret),
     );
-    let history = node.account_history(&target, 10);
+    let history = node.account_history(&target, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
     assert!(history[0].from_me);
@@ -7577,14 +7650,14 @@ async fn personal_message_unavailable_storage_is_unaccepted() {
             .pending_transactions()
             .is_empty()
     );
-    assert!(node.account_history(&target, 10).is_empty());
+    assert!(node.account_history(&target, 10).unwrap().is_empty());
     drop(node);
     let node = personal_message_node(
         &profile,
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
         Account::from_secret_bytes(account_secret),
     );
-    assert!(node.account_history(&target, 10).is_empty());
+    assert!(node.account_history(&target, 10).unwrap().is_empty());
     assert!(
         node.delivery
             .lock()
@@ -7618,8 +7691,8 @@ async fn personal_message_projection_failure_recovers_exactly_once() {
             node.delivery.lock().unwrap().pending_transactions().len(),
             1
         );
-        assert_eq!(node.account_history(&target, 10).len(), 1);
-        assert_eq!(node.account_history(&target, 10)[0].id, id);
+        assert_eq!(node.account_history(&target, 10).unwrap().len(), 1);
+        assert_eq!(node.account_history(&target, 10).unwrap()[0].id, id);
         node.sentlog
             .lock()
             .unwrap()
@@ -7639,7 +7712,7 @@ async fn personal_message_projection_failure_recovers_exactly_once() {
         };
         node.recover_delivery(&mut node.delivery.lock().unwrap())
             .unwrap();
-        let history = node.account_history(&target, 10);
+        let history = node.account_history(&target, 10).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, id);
         assert!(history[0].from_me);
@@ -7718,7 +7791,7 @@ async fn personal_message_later_linked_sibling_catches_up_once() {
         worker.abort();
         let _ = worker.await;
     }
-    let history = sibling.account_history(&target, 10);
+    let history = sibling.account_history(&target, 10).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, id);
     assert!(history[0].from_me);
@@ -7826,7 +7899,7 @@ async fn send_to_account_self_syncs_to_own_other_device() {
     // marked from_me (it was sent by Alice's account).
     let mut a2_hist = Vec::new();
     for _ in 0..50 {
-        a2_hist = a2_node.account_history(&bob_acct.account_id(), 10);
+        a2_hist = a2_node.account_history(&bob_acct.account_id(), 10).unwrap();
         if !a2_hist.is_empty() {
             break;
         }
@@ -7839,7 +7912,9 @@ async fn send_to_account_self_syncs_to_own_other_device() {
     // Bob receives it once, not from_me.
     let mut b_hist = Vec::new();
     for _ in 0..50 {
-        b_hist = bob_node.account_history(&alice_acct.account_id(), 10);
+        b_hist = bob_node
+            .account_history(&alice_acct.account_id(), 10)
+            .unwrap();
         if !b_hist.is_empty() {
             break;
         }
@@ -7859,7 +7934,9 @@ async fn send_to_account_self_syncs_to_own_other_device() {
         .unwrap();
     let mut a2_self = Vec::new();
     for _ in 0..50 {
-        a2_self = a2_node.account_history(&alice_acct.account_id(), 10);
+        a2_self = a2_node
+            .account_history(&alice_acct.account_id(), 10)
+            .unwrap();
         if !a2_self.is_empty() {
             break;
         }
@@ -8018,7 +8095,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .send_channel_message(channel, b"before sibling joined")
         .await
         .unwrap();
-    let old_channel_id = a1_node.channel_history(channel, 10)[0].id;
+    let old_channel_id = a1_node.channel_history(channel, 10).unwrap()[0].id;
     let channel_attachment_bytes = vec![0x35u8; 24_000];
     let channel_attachment_path = dir.path().join("old-channel.bin");
     std::fs::write(&channel_attachment_path, &channel_attachment_bytes).unwrap();
@@ -8032,6 +8109,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .unwrap();
     let channel_attachment_id = a1_node
         .channel_history(channel, 10)
+        .unwrap()
         .into_iter()
         .find(|entry| {
             entry
@@ -8054,12 +8132,14 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .unwrap();
     let dm_texts = |node: &Arc<Node>| {
         node.account_history(&bob_account.account_id(), 10)
+            .unwrap()
             .into_iter()
             .filter(|entry| entry.file.is_none())
             .collect::<Vec<_>>()
     };
     let channel_texts = |node: &Arc<Node>| {
         node.channel_history(channel, 10)
+            .unwrap()
             .into_iter()
             .filter(|entry| entry.file.is_none())
             .collect::<Vec<_>>()
@@ -8291,16 +8371,16 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     tokio::time::timeout(Duration::from_secs(35), async {
         loop {
             if a2_node
-                .account_history(&bob_account.account_id(), 20)
+                .account_history(&bob_account.account_id(), 20).unwrap()
                 .iter()
                 .any(|entry| entry.id == attachment_id && entry.file.is_some())
-                && a2_node.file_ready_to_save(attachment_file)
+                && a2_node.file_ready_to_save(attachment_file).unwrap()
                 && a2_node.media.contains(attachment_file)
                 && a2_node
-                    .channel_history(channel, 20)
+                    .channel_history(channel, 20).unwrap()
                     .iter()
                     .any(|entry| entry.id == channel_attachment_id && entry.file.is_some())
-                && a2_node.file_ready_to_save(channel_attachment_file)
+                && a2_node.file_ready_to_save(channel_attachment_file).unwrap()
                 && a2_node.media.contains(channel_attachment_file)
             {
                 break;
@@ -8313,10 +8393,10 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         panic!(
             "old attachment card and bytes reach certified sibling: status={:?}, account_card={}, channel_card={}, account_ready={}, channel_ready={}",
             a2_node.device_sync_status(),
-            a2_node.account_history(&bob_account.account_id(), 20).iter().any(|entry| entry.id == attachment_id && entry.file.is_some()),
-            a2_node.channel_history(channel, 20).iter().any(|entry| entry.id == channel_attachment_id && entry.file.is_some()),
-            a2_node.file_ready_to_save(attachment_file),
-            a2_node.file_ready_to_save(channel_attachment_file),
+            a2_node.account_history(&bob_account.account_id(), 20).unwrap().iter().any(|entry| entry.id == attachment_id && entry.file.is_some()),
+            a2_node.channel_history(channel, 20).unwrap().iter().any(|entry| entry.id == channel_attachment_id && entry.file.is_some()),
+            a2_node.file_ready_to_save(attachment_file).unwrap(),
+            a2_node.file_ready_to_save(channel_attachment_file).unwrap(),
         )
     });
     assert!(
@@ -8369,10 +8449,11 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     assert!(
         reopened
             .account_history(&bob_account.account_id(), 20)
+            .unwrap()
             .iter()
             .any(|entry| entry.id == attachment_id && entry.file.is_some())
     );
-    let ready = reopened.file_ready_to_save(attachment_file);
+    let ready = reopened.file_ready_to_save(attachment_file).unwrap();
     let progress = reopened.file_progress(attachment_file);
     let (has_manifest, manifest_events) = {
         let files = reopened.files.lock().unwrap();
@@ -8395,7 +8476,11 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         ready,
         "account file after reopen: progress={progress:?} manifest={has_manifest} media_exists={media_exists} manifest_events={manifest_events} proof={has_proof}"
     );
-    assert!(reopened.file_ready_to_save(channel_attachment_file));
+    assert!(
+        reopened
+            .file_ready_to_save(channel_attachment_file)
+            .unwrap()
+    );
     let reopened_account_copy = dir.path().join("reopened-sibling-copy.bin");
     reopened
         .save_file(attachment_file, &reopened_account_copy)
@@ -8469,7 +8554,7 @@ fn account_history_deduplicates_direct_and_linked_copies_by_message_id() {
     };
     node.import_account_backfill(std::slice::from_ref(&record))
         .unwrap();
-    assert_eq!(node.account_history(&bob_id, 10).len(), 1);
+    assert_eq!(node.account_history(&bob_id, 10).unwrap().len(), 1);
     assert_eq!(node.received.lock().unwrap().entries(&conv).len(), 1);
     let previous_account = Account::generate();
     let previous_conv = account_conversation_id(&previous_account.account_id(), &bob_id);
@@ -8499,7 +8584,7 @@ fn account_history_deduplicates_direct_and_linked_copies_by_message_id() {
     node.delete_account_message(&bob_id, EventId::new(msg_id))
         .unwrap();
     node.import_account_backfill(&[record]).unwrap();
-    assert!(node.account_history(&bob_id, 10).is_empty());
+    assert!(node.account_history(&bob_id, 10).unwrap().is_empty());
 }
 
 #[test]
@@ -8560,7 +8645,7 @@ fn linked_history_clear_and_retention_survive_restart_without_resurrection() {
     assert!(!node.device_sync_policy().history);
     node.import_account_backfill(std::slice::from_ref(&cleared))
         .unwrap();
-    assert!(node.account_history(&peer, 10).is_empty());
+    assert!(node.account_history(&peer, 10).unwrap().is_empty());
     node.set_device_sync_category(crate::node::SyncCategory::History, true)
         .unwrap();
     let pruned = record(32, 50);
@@ -8571,7 +8656,7 @@ fn linked_history_clear_and_retention_survive_restart_without_resurrection() {
 
     let node = open();
     node.import_account_backfill(&[cleared, pruned]).unwrap();
-    assert!(node.account_history(&peer, 10).is_empty());
+    assert!(node.account_history(&peer, 10).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -8939,7 +9024,9 @@ async fn account_reaction_aggregates_on_the_peer_account() {
         .unwrap();
     let mut target = None;
     for _ in 0..50 {
-        let h = alice_node.account_history(&bob_acct.account_id(), 10);
+        let h = alice_node
+            .account_history(&bob_acct.account_id(), 10)
+            .unwrap();
         if let Some(m) = h.first() {
             target = Some(m.id);
             break;
@@ -9084,7 +9171,9 @@ async fn account_history_backfills_to_a_linked_device() {
     .unwrap();
     alice2_node.import_account_backfill(&records).unwrap();
 
-    let hist = alice2_node.account_history(&bob_acct.account_id(), 10);
+    let hist = alice2_node
+        .account_history(&bob_acct.account_id(), 10)
+        .unwrap();
     assert_eq!(
         hist.len(),
         1,
@@ -9859,7 +9948,7 @@ async fn sibling_history_policy_retains_ciphertext_and_replays_without_network()
         .unwrap();
     receiver.emit_new_messages(destination.event.conversation_id);
     assert!(
-        receiver.account_history(&target, 10).is_empty(),
+        receiver.account_history(&target, 10).unwrap().is_empty(),
         "paused sibling text must remain ciphertext"
     );
     assert!(
@@ -9873,7 +9962,7 @@ async fn sibling_history_policy_retains_ciphertext_and_replays_without_network()
         .set_device_sync_category(SyncCategory::History, true)
         .unwrap();
     assert_eq!(
-        receiver.account_history(&target, 10).len(),
+        receiver.account_history(&target, 10).unwrap().len(),
         1,
         "reenable must replay retained text even without a reachable source"
     );
@@ -10065,7 +10154,7 @@ async fn group_reception_history_respects_signed_ancestry_despite_clock_skew() {
             )
             .unwrap();
     }
-    let history = node.channel_history(conv, 10);
+    let history = node.channel_history(conv, 10).unwrap();
     assert_eq!(
         history.iter().map(|entry| entry.id).collect::<Vec<_>>(),
         vec![question.id, reply.id]
@@ -10077,7 +10166,7 @@ async fn group_reception_history_respects_signed_ancestry_despite_clock_skew() {
             .collect::<Vec<_>>(),
         vec![9000, 1]
     );
-    assert_eq!(node.channel_history(conv, 1)[0].id, reply.id);
+    assert_eq!(node.channel_history(conv, 1).unwrap()[0].id, reply.id);
 
     let archive = crate::channel::new_channel_id();
     let genesis = Event::new(
@@ -10199,10 +10288,10 @@ async fn group_reception_projection_failure_case(failed_rollback: bool) {
     }
     node.process_channel_reception(conv, "catch_up");
     let prefix = if failed_rollback {
-        assert!(node.channel_history(conv, 100).is_empty());
+        assert!(node.channel_history(conv, 100).unwrap().is_empty());
         None
     } else {
-        assert_eq!(node.channel_history(conv, 100).len(), 1);
+        assert_eq!(node.channel_history(conv, 100).unwrap().len(), 1);
         let prefix = rx.try_recv().unwrap();
         assert_eq!(prefix.event_id, ids[0]);
         assert!(!prefix.reception_only && !prefix.batch_complete);
@@ -10220,7 +10309,7 @@ async fn group_reception_projection_failure_case(failed_rollback: bool) {
                 .run_channel_recovery_loop(Arc::new(tokio::sync::Notify::new())),
         );
         tokio::time::timeout(Duration::from_secs(5), async {
-            while node.channel_history(conv, 100).len() != 65 {
+            while node.channel_history(conv, 100).unwrap().len() != 65 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
@@ -10273,7 +10362,7 @@ async fn group_reception_projection_failure_case(failed_rollback: bool) {
     );
     assert!(!received.last().unwrap().batch_complete);
     assert_eq!(received.last().unwrap().batch_size, 65);
-    assert_eq!(node.channel_history(conv, 100).len(), 65);
+    assert_eq!(node.channel_history(conv, 100).unwrap().len(), 65);
     assert!(node.list_channels()[0].dissolved);
 
     // Simulate a sidecar projection missing after a crash, plus a separate
@@ -10286,7 +10375,7 @@ async fn group_reception_projection_failure_case(failed_rollback: bool) {
     node.delete_message(conv, ids[1], false).unwrap();
     drop(node);
     let (reopened, mut reopened_rx) = open(DeviceIdentity::from_secret_bytes(secret.0, secret.1));
-    let history = reopened.channel_history(conv, 100);
+    let history = reopened.channel_history(conv, 100).unwrap();
     assert_eq!(history.len(), 64);
     assert!(history.iter().any(|entry| entry.id == ids[0]));
     assert!(!history.iter().any(|entry| entry.id == ids[1]));
@@ -10304,7 +10393,7 @@ async fn group_reception_projection_failure_case(failed_rollback: bool) {
     reopened.clear_conversation(conv).unwrap();
     drop(reopened);
     let (cleared, mut cleared_rx) = open(DeviceIdentity::from_secret_bytes(secret.0, secret.1));
-    assert!(cleared.channel_history(conv, 100).is_empty());
+    assert!(cleared.channel_history(conv, 100).unwrap().is_empty());
     assert!(cleared_rx.try_recv().is_err());
 }
 
@@ -10387,7 +10476,7 @@ async fn group_reception_terminal_is_independent_of_erased_and_expired_rows() {
         "a terminal must retain real ownership metadata"
     );
     assert!(rx.try_recv().is_err());
-    assert!(node.channel_history(conv, 10).is_empty());
+    assert!(node.channel_history(conv, 10).unwrap().is_empty());
 
     let expiring = crate::expiry::wrap(
         &MessageBody::new(b"expiring prefix".to_vec(), None).encode(),
@@ -11186,7 +11275,7 @@ async fn channel_acceptance_returns_exact_ids_without_waiting_for_network_fanout
         )
         .await
         .unwrap();
-    let history = node.channel_history(channel, 10);
+    let history = node.channel_history(channel, 10).unwrap();
     assert_eq!(history.len(), 3);
     for id in [text, sticker, photo] {
         assert!(history.iter().any(|row| row.id == id));

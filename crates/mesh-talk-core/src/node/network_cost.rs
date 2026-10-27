@@ -113,9 +113,9 @@ impl Node {
         &self,
         file: &ConversationId,
         peer: &PublicIdentity,
-    ) -> bool {
+    ) -> Result<bool, crate::eventlog::LogError> {
         if !self.group_file_sharing_status().paused || self.certified_sibling(peer) {
-            return false;
+            return Ok(false);
         }
         let manifests = self
             .files
@@ -123,19 +123,22 @@ impl Node {
             .expect("files lock not poisoned")
             .manifest_events(*file);
         if manifests.is_empty() {
-            return false;
+            return Ok(false);
         }
         let parents: Vec<_> = {
             let log = self.log.lock().expect("log lock not poisoned");
-            manifests
-                .iter()
-                .filter_map(|id| log.get(id).map(|event| event.conversation_id))
-                .collect()
+            let mut parents = Vec::new();
+            for id in &manifests {
+                if let Some(event) = log.get(id)? {
+                    parents.push(event.conversation_id);
+                }
+            }
+            parents
         };
         let book = self.channels.lock().expect("channels lock not poisoned");
-        parents
+        Ok(parents
             .into_iter()
-            .any(|parent| book.state(&parent).is_some())
+            .any(|parent| book.state(&parent).is_some()))
     }
 }
 

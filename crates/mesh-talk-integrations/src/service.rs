@@ -485,7 +485,7 @@ mod tests {
             .unwrap();
         assert_eq!(first["message"], retry["message"]);
         assert_eq!(retry["duplicate"], true);
-        assert_eq!(node.channel_history(channel, 10).len(), 1);
+        assert_eq!(node.channel_history(channel, 10).unwrap().len(), 1);
         let mut changed = command.clone();
         changed["text"] = json!("Changed alert");
         assert_eq!(
@@ -635,7 +635,7 @@ mod tests {
         .await;
         host.resume.notify_one();
         assert!(pending.await.unwrap().is_err());
-        assert!(node.channel_history(channel, 10).is_empty());
+        assert!(node.channel_history(channel, 10).unwrap().is_empty());
         assert!(
             service
                 .recent_send_activity("desktop-local-agent")

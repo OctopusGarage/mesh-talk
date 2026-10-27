@@ -967,7 +967,13 @@ fn handle_history(node: &Arc<Node>, roster: &Arc<Mutex<Roster>>, rest: &str) {
         emit("peer vanished from roster");
         return;
     };
-    let entries = node.dm_history(&peer.public, limit);
+    let entries = match node.dm_history(&peer.public, limit) {
+        Ok(entries) => entries,
+        Err(error) => {
+            emit(&format!("history unavailable: {error}"));
+            return;
+        }
+    };
     if entries.is_empty() {
         emit("(no history)");
         return;
@@ -1750,6 +1756,7 @@ mod tests {
         assert!(
             recipient
                 .account_history(sender.account_id(), 20)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.text == b"native account delivery")
         );

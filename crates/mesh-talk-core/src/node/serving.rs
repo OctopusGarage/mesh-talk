@@ -857,7 +857,10 @@ impl Node {
                 continue;
             }
             if !is_channel {
-                self.complete_sticker_aliases(manifest.file_conv());
+                if let Err(error) = self.complete_sticker_aliases(manifest.file_conv()) {
+                    log::warn!("sticker completion deferred: {error}");
+                }
+
                 continue;
             } // live journal recovery owns DM file publication
             if !own_device {
@@ -893,8 +896,13 @@ impl Node {
             // from peers (the sender's one-shot push may have raced our discovery, and on a
             // PO-less LAN nothing else fetches them). Cleared once the file completes.
             let fc = rf.file_conv;
-            if self.attachment_consent_status(fc)
-                == Some(super::attachment_consent::ReceiveDecision::Accepted)
+            if match self.attachment_consent_status(fc) {
+                Ok(status) => status,
+                Err(error) => {
+                    log::warn!("attachment consent lookup deferred: {error}");
+                    continue;
+                }
+            } == Some(super::attachment_consent::ReceiveDecision::Accepted)
                 && matches!(self.file_progress(fc), Some(p) if p.done < p.total)
             {
                 self.pending_files
@@ -943,8 +951,13 @@ impl Node {
         pending.truncate(8);
         stream::iter(pending)
             .for_each_concurrent(2, |fc| async move {
-                if self.attachment_consent_status(fc)
-                    != Some(super::attachment_consent::ReceiveDecision::Accepted)
+                if match self.attachment_consent_status(fc) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        log::warn!("attachment consent lookup deferred: {error}");
+                        return;
+                    }
+                } != Some(super::attachment_consent::ReceiveDecision::Accepted)
                 {
                     self.pending_files
                         .lock()
@@ -953,7 +966,13 @@ impl Node {
                     return;
                 }
                 if self.media.contains(fc) && self.has_verified_file_completion(fc) {
-                    let progressed = self.complete_sticker_aliases(fc);
+                    let progressed = match self.complete_sticker_aliases(fc) {
+                        Ok(progressed) => progressed,
+                        Err(error) => {
+                            log::warn!("sticker completion deferred: {error}");
+                            return;
+                        }
+                    };
                     let pending = self.pending_sticker_aliases(fc);
                     if !pending {
                         self.pending_files
@@ -966,7 +985,13 @@ impl Node {
                     }
                 }
                 if self.file_progress(fc).is_none_or(|p| p.done < p.total) {
-                    let candidates = self.file_recovery_sources(fc, cursor / 8);
+                    let candidates = match self.file_recovery_sources(fc, cursor / 8) {
+                        Ok(candidates) => candidates,
+                        Err(error) => {
+                            log::warn!("file recovery deferred: {error}");
+                            return;
+                        }
+                    };
                     let mut pulls = stream::iter(candidates)
                         .map(|peer| async move {
                             let _ = tokio::time::timeout(
@@ -977,11 +1002,17 @@ impl Node {
                                     else {
                                         return;
                                     };
-                                    if self.attachment_consent_status(fc)
-                                        != Some(
-                                            super::attachment_consent::ReceiveDecision::Accepted,
-                                        )
-                                    {
+                                    if match self.attachment_consent_status(fc) {
+                                        Ok(status) => status,
+                                        Err(error) => {
+                                            log::warn!(
+                                                "attachment consent lookup deferred: {error}"
+                                            );
+                                            return;
+                                        }
+                                    } != Some(
+                                        super::attachment_consent::ReceiveDecision::Accepted,
+                                    ) {
                                         return;
                                     }
                                     let store = self.sync_store(channel.peer_identity());
@@ -1033,17 +1064,24 @@ impl Node {
             .await;
     }
 
-    fn file_recovery_sources(&self, file: ConversationId, cursor: usize) -> Vec<PeerRecord> {
+    fn file_recovery_sources(
+        &self,
+        file: ConversationId,
+        cursor: usize,
+    ) -> Result<Vec<PeerRecord>, NodeError> {
         let (authors, manifests) = {
             let files = self.files.lock().expect("files lock not poisoned");
             (files.authors(file), files.manifest_events(file))
         };
         let parents: Vec<_> = {
             let log = self.log.lock().expect("log lock not poisoned");
-            manifests
-                .iter()
-                .filter_map(|id| log.get(id).map(|event| event.conversation_id))
-                .collect()
+            let mut parents = Vec::new();
+            for id in &manifests {
+                if let Some(event) = log.get(id)? {
+                    parents.push(event.conversation_id);
+                }
+            }
+            parents
         };
         let mut identities = authors
             .into_iter()
@@ -1090,7 +1128,7 @@ impl Node {
             peers.rotate_left(offset);
         }
         peers.truncate(3);
-        peers
+        Ok(peers)
     }
 
     /// Run the channel book over `conv`'s events and stream any newly-decryptable
@@ -1292,15 +1330,15 @@ impl Node {
         // ChannelBook returns only newly validated, decryptable messages. A
         // coalesced domain-specific wake advances bounded background gossip;
         // repeated processing and empty sync rounds do not create feedback.
-        if self
+        let has_deletes = self
             .log
             .lock()
             .expect("log mutex not poisoned")
             .events(&conv)
             .iter()
-            .any(|event| event.kind == EventKind::Delete)
-        {
-            self.recalled_targets_channel(conv);
+            .any(|event| event.kind == EventKind::Delete);
+        if has_deletes && let Err(error) = self.recalled_targets_channel(conv) {
+            log::warn!("channel recall projection deferred: {error}");
         }
     }
 
@@ -1562,8 +1600,8 @@ impl Node {
     /// retried on a later sync rather than lost.
     pub(in crate::node) fn emit_new_messages(&self, conv: ConversationId) {
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
-        if self.recover_delivery(&mut delivery).is_err() {
-            log::warn!("DM processing awaits local delivery recovery");
+        if let Err(error) = self.recover_delivery(&mut delivery) {
+            log::warn!("DM processing awaits local delivery recovery: {error}");
             return;
         }
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
@@ -1769,7 +1807,7 @@ mod file_recovery_tests {
             .clone();
         b.log.lock().unwrap().append_durable(event.clone()).unwrap();
         b.process_file_events(event.conversation_id);
-        let sources = b.file_recovery_sources(file, 0);
+        let sources = b.file_recovery_sources(file, 0).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].public, ap.public());
     }

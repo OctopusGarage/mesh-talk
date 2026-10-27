@@ -1031,7 +1031,10 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
         );
     }
     assert_eq!(
-        alice.account_history(&account.account_id(), 100).len(),
+        alice
+            .account_history(&account.account_id(), 100)
+            .unwrap()
+            .len(),
         1,
         "one UI bubble, not one per destination"
     );
@@ -1084,7 +1087,10 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
         );
     }
     assert_eq!(
-        reopened.account_history(&account.account_id(), 100).len(),
+        reopened
+            .account_history(&account.account_id(), 100)
+            .unwrap()
+            .len(),
         1
     );
     let server = tokio::spawn(reopened.clone().run_accept_loop(listener));
@@ -1135,7 +1141,7 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                     Some(account.account_id().as_str())
                 );
                 let log = reopened.log.lock().unwrap();
-                let manifest = log.get(&destination.binding.event_id).unwrap();
+                let manifest = log.get(&destination.binding.event_id).unwrap().unwrap();
                 assert_eq!(manifest.kind, crate::eventlog::EventKind::FileManifest);
                 assert_eq!(
                     manifest.conversation_id,
@@ -1173,7 +1179,10 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
         );
     }
     assert_eq!(
-        reopened.account_history(&account.account_id(), 100).len(),
+        reopened
+            .account_history(&account.account_id(), 100)
+            .unwrap()
+            .len(),
         2
     );
     server.abort();
@@ -1325,6 +1334,7 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
         .lock()
         .unwrap()
         .get(&originals[0])
+        .unwrap()
         .unwrap()
         .wall_clock;
     alice

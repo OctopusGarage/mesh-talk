@@ -151,10 +151,11 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     a.send_channel_message(channel, b"synthetic custody fixture")
         .await
         .unwrap();
-    let event = a.channel_history(channel, 10)[0].id;
+    let event = a.channel_history(channel, 10).unwrap()[0].id;
     if external_online {
         assert!(
             bob.channel_history(channel, 10)
+                .unwrap()
                 .iter()
                 .any(|row| row.id == event)
         );
@@ -173,7 +174,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                 .unwrap();
         *a.account_documents.lock().unwrap() = reopened;
         assert_eq!(
-            a.channel_custody_count(channel, event),
+            a.channel_custody_count(channel, event).unwrap(),
             None,
             "unreadable positive evidence is unknown, never zero confirmed copies"
         );
@@ -185,7 +186,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             "identical positive evidence repairs its blob without version churn"
         );
         assert!(a.account_document(&key).unwrap().is_some());
-        assert_eq!(a.channel_custody_count(channel, event), Some(1));
+        assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(1));
         servers[2].abort();
         a.roster.lock().unwrap().forget(&bob.identity.public());
         sibling
@@ -198,6 +199,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     tokio::time::timeout(Duration::from_secs(8), async {
         while !sibling
             .channel_history(channel, 10)
+            .unwrap()
             .iter()
             .any(|row| row.id == event && row.from_me)
         {
@@ -209,7 +211,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     let expected = usize::from(external_online);
     let mut final_expected = expected;
     let actual = tokio::time::timeout(Duration::from_secs(8), async {
-        while sibling.channel_custody_count(channel, event) != Some(expected) {
+        while sibling.channel_custody_count(channel, event).unwrap() != Some(expected) {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -237,9 +239,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .members()
             .to_vec();
         a.distribute_channel_message(channel, &members, event).await;
-        assert_eq!(a.channel_custody_count(channel, event), Some(1));
+        assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(1));
         assert_eq!(
-            bob.channel_custody_count(channel, event),
+            bob.channel_custody_count(channel, event).unwrap(),
             None,
             "incoming foreign history is never own custody"
         );
@@ -251,7 +253,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .await
             .unwrap();
         assert_eq!(
-            sibling.channel_custody_count(channel, event),
+            sibling.channel_custody_count(channel, event).unwrap(),
             Some(0),
             "history-off must not import a late confirmation"
         );
@@ -265,7 +267,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .await
             .unwrap();
         assert_eq!(
-            sibling.channel_custody_count(channel, event),
+            sibling.channel_custody_count(channel, event).unwrap(),
             Some(1),
             "confirmation arriving after history must update independently"
         );
@@ -301,7 +303,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         let bob_peer = a.routing_peer(&bob.user_id()).unwrap();
         a.recheck_channel_custody_peer(channel, event, &bob_peer)
             .await;
-        assert_eq!(a.channel_custody_count(channel, event), Some(0));
+        assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(0));
         let mut cursor =
             sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
         sibling
@@ -309,7 +311,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .await
             .unwrap();
         assert_eq!(
-            sibling.channel_custody_count(channel, event),
+            sibling.channel_custody_count(channel, event).unwrap(),
             Some(0),
             "negative evidence must propagate after the earlier positive"
         );
@@ -322,7 +324,10 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                 .unwrap(),
             "stale positive replay cannot undo the shared tombstone"
         );
-        assert_eq!(sibling.channel_custody_count(channel, event), Some(0));
+        assert_eq!(
+            sibling.channel_custody_count(channel, event).unwrap(),
+            Some(0)
+        );
         a.channel_custody
             .lock()
             .unwrap()
@@ -330,7 +335,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .unwrap();
         a.migrate_channel_custody(&mut None);
         assert_eq!(
-            a.channel_custody_count(channel, event),
+            a.channel_custody_count(channel, event).unwrap(),
             Some(0),
             "an old journal positive cannot resurrect the newer shared negative"
         );
@@ -341,7 +346,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             DeviceIdentity::from_secret_bytes(secret.0, secret.1),
         );
         assert_eq!(
-            negative_reopened.channel_custody_count(channel, event),
+            negative_reopened
+                .channel_custody_count(channel, event)
+                .unwrap(),
             Some(0),
             "the negative survives a fresh encrypted-store open"
         );
@@ -353,7 +360,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         )
         .await;
         assert!(
-            lost.log.lock().unwrap().get(&event).is_some(),
+            lost.log.lock().unwrap().get(&event).unwrap().is_some(),
             "a shared negative must allow retry despite an old local journal positive"
         );
         // Apply the receiver's retained controls before asking it to qualify
@@ -366,7 +373,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         )
         .await;
         assert_eq!(
-            a.channel_custody_count(channel, event),
+            a.channel_custody_count(channel, event).unwrap(),
             Some(1),
             "a fresh authenticated probe repairs the negative; receiver={:?}",
             lost.list_channels()
@@ -377,7 +384,10 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .pull_account_documents_page(&source_peer, &mut cursor)
             .await
             .unwrap();
-        assert_eq!(sibling.channel_custody_count(channel, event), Some(1));
+        assert_eq!(
+            sibling.channel_custody_count(channel, event).unwrap(),
+            Some(1)
+        );
         final_expected = 1;
         lost_server.abort();
     }
@@ -392,20 +402,20 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
     );
     assert_eq!(
-        reopened.channel_custody_count(channel, event),
+        reopened.channel_custody_count(channel, event).unwrap(),
         Some(final_expected),
         "a fresh node must retain synchronized observations and tombstones"
     );
     assert_eq!(
-        a.channel_custody_count(channel, event),
+        a.channel_custody_count(channel, event).unwrap(),
         Some(final_expected),
         "sender siblings do not count as another member account; sibling status={:?}",
-        sibling.channel_custody_count(channel, event)
+        sibling.channel_custody_count(channel, event).unwrap()
     );
     assert!(
         actual.is_ok(),
         "authenticated external custody must converge on sibling: {:?}",
-        sibling.channel_custody_count(channel, event)
+        sibling.channel_custody_count(channel, event).unwrap()
     );
 }
 #[tokio::test]
@@ -1290,6 +1300,7 @@ async fn private_dm_recall_catches_up_before_a_late_original_message() {
     assert!(
         fresh
             .account_history(&peer, 10)
+            .unwrap()
             .iter()
             .all(|m| m.id != crate::eventlog::EventId::new(target) || m.recalled),
         "catch-up must never show the late recalled plaintext"
@@ -2128,6 +2139,7 @@ fn private_recall_witness_cannot_recall_another_accounts_target() {
     assert!(
         observer
             .account_history(&peer.account_id(), 10)
+            .unwrap()
             .iter()
             .all(|message| !message.recalled)
     );
@@ -2200,9 +2212,9 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         .send_channel_message(channel, b"synthetic certificate refresh")
         .await
         .unwrap();
-    let event = source.channel_history(channel, 10)[0].id;
+    let event = source.channel_history(channel, 10).unwrap()[0].id;
     assert_eq!(
-        source.channel_custody_count(channel, event),
+        source.channel_custody_count(channel, event).unwrap(),
         Some(2),
         "unbound explicit legacy members have separate device principals"
     );
@@ -2218,7 +2230,10 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         .pull_account_documents_page(&source_peer, &mut cursor)
         .await
         .unwrap();
-    assert_eq!(sibling.channel_custody_count(channel, event), Some(2));
+    assert_eq!(
+        sibling.channel_custody_count(channel, event).unwrap(),
+        Some(2)
+    );
     for (holder, address) in [(&bob, addresses[2]), (&bob2, addresses[3])] {
         source.roster.lock().unwrap().update(
             &Announce::new_with_account(&holder.identity, &bob_account, "Bob", address.port()),
@@ -2248,7 +2263,7 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         .await
         .unwrap();
     assert_eq!(
-        sibling.channel_custody_count(channel, event),
+        sibling.channel_custody_count(channel, event).unwrap(),
         Some(1),
         "positive runtime rechecks upgrade the sibling's certified principal projection"
     );
@@ -2268,7 +2283,9 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
             .is_err()
     );
     assert_eq!(
-        source.channel_custody_count(channel, EventId::new([0; 32])),
+        source
+            .channel_custody_count(channel, EventId::new([0; 32]))
+            .unwrap(),
         None
     );
     for server in servers {
@@ -2281,7 +2298,7 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         DeviceIdentity::from_secret_bytes(secret.0, secret.1),
     );
     assert_eq!(
-        reopened.channel_custody_count(channel, event),
+        reopened.channel_custody_count(channel, event).unwrap(),
         Some(1),
         "certified explicit members deduplicate after discovery is forgotten"
     );

@@ -16,20 +16,28 @@ impl Node {
     /// plaintext of others' messages we decrypted on receipt (the received store). That
     /// IS the forward-secrecy property, not a limitation. Returns empty for an unknown
     /// channel.
-    pub fn channel_history(&self, channel: ConversationId, limit: usize) -> Vec<HistoryEntry> {
+    pub fn channel_history(
+        &self,
+        channel: ConversationId,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         if !self
             .list_channels()
             .iter()
             .any(|summary| summary.id == channel)
         {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         self.history(channel, limit)
     }
 
     /// The last `limit` messages of the DM with `peer`, both directions, in time
     /// order. Convenience wrapper that derives the conversation id.
-    pub fn dm_history(&self, peer: &PublicIdentity, limit: usize) -> Vec<HistoryEntry> {
+    pub fn dm_history(
+        &self,
+        peer: &PublicIdentity,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         let conv = dm_conversation_id(&self.identity.public(), peer);
         self.history(conv, limit)
     }
@@ -38,13 +46,17 @@ impl Node {
     /// copies (recorded once under the account conversation) and the per-device copies
     /// we received and filed under it. `from_me` is derived from the recorded sender
     /// account, so self-synced copies of our own sends show as ours.
-    pub fn account_history(&self, peer_account_id: &str, limit: usize) -> Vec<HistoryEntry> {
+    pub fn account_history(
+        &self,
+        peer_account_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         self.project_history(
             account_conversation_id(&self.account.account_id(), peer_account_id),
             Some(peer_account_id),
             HistorySelection::Recent(limit),
         )
-        .map_or_else(Vec::new, |context| context.messages)
+        .map(|context| context.map_or_else(Vec::new, |context| context.messages))
     }
 
     /// The last `limit` messages of `conversation`, both directions, sorted by
@@ -52,9 +64,13 @@ impl Node {
     /// of peer-authored messages we decrypted on receipt (from the received store).
     /// The wire ratchet key is single-use and gone, so history is served from the
     /// stores — that IS the forward-secrecy property, not a limitation.
-    pub fn history(&self, conversation: ConversationId, limit: usize) -> Vec<HistoryEntry> {
+    pub fn history(
+        &self,
+        conversation: ConversationId,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         self.project_history(conversation, None, HistorySelection::Recent(limit))
-            .map_or_else(Vec::new, |context| context.messages)
+            .map(|context| context.map_or_else(Vec::new, |context| context.messages))
     }
 
     /// Build canonical identity/order from borrowed rows, then decode only the
@@ -65,7 +81,7 @@ impl Node {
         conversation: ConversationId,
         account: Option<&str>,
         selection: HistorySelection<'_>,
-    ) -> Option<super::search::SearchContext> {
+    ) -> Result<Option<super::search::SearchContext>, super::NodeError> {
         use super::delivery_store::DeliveryTransaction;
         use std::collections::{HashMap, HashSet};
 
@@ -294,11 +310,15 @@ impl Node {
             HistorySelection::Selected(_) => (0, rows.len(), 0),
             HistorySelection::Recent(limit) => (rows.len().saturating_sub(limit), rows.len(), 0),
             HistorySelection::Protected(id) => {
-                let target = rows.iter().position(|row| row.id == id)?;
+                let Some(target) = rows.iter().position(|row| row.id == id) else {
+                    return Ok(None);
+                };
                 (target, target + 1, rows.len() - target - 1)
             }
             HistorySelection::Context(id) => {
-                let target = rows.iter().position(|row| row.id == id)?;
+                let Some(target) = rows.iter().position(|row| row.id == id) else {
+                    return Ok(None);
+                };
                 (
                     target.saturating_sub(25),
                     target.saturating_add(26).min(rows.len()),
@@ -333,14 +353,14 @@ impl Node {
         let recalled = if let Some(peer) = account {
             self.recalled_targets_account(peer)
         } else if is_channel {
-            self.recalled_targets_channel(conversation)
+            self.recalled_targets_channel(conversation)?
         } else {
             HashSet::new()
         };
         if let HistorySelection::Context(id) | HistorySelection::Protected(id) = selection
             && recalled.contains(&id)
         {
-            return None;
+            return Ok(None);
         }
         tombstone_recalled(&mut messages, &recalled);
         if matches!(
@@ -351,10 +371,10 @@ impl Node {
                 entry.recalled_text = None;
             }
         }
-        Some(super::search::SearchContext {
+        Ok(Some(super::search::SearchContext {
             messages,
             newer_entries,
-        })
+        }))
     }
 }
 

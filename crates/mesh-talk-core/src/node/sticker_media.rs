@@ -46,7 +46,7 @@ impl Node {
         name: &str,
         bytes: &[u8],
         deadline: Option<u64>,
-    ) -> Option<FileManifestV3> {
+    ) -> Result<Option<FileManifestV3>, NodeError> {
         let checksum = file_checksum(bytes);
         let own = Author::from_ed25519(self.identity.public().ed25519_pub);
         // Canonical projection excludes recalled, locally erased and expired rows.
@@ -54,7 +54,7 @@ impl Node {
         let history = account.map_or_else(
             || self.history(host, 256),
             |account| self.account_history(account, 256),
-        );
+        )?;
         for row in history.into_iter().rev() {
             if !row.from_me || row.recalled || row.expires_at_ms != deadline {
                 continue;
@@ -77,10 +77,10 @@ impl Node {
                 // Verify retained signed chunks, not only a stale cache index or path.
                 && self.read_file_internal(file.file_conv).ok().as_deref() == Some(bytes)
             {
-                return Some(manifest);
+                return Ok(Some(manifest));
             }
         }
-        None
+        Ok(None)
     }
 
     pub(super) fn stage_sticker_snapshot(

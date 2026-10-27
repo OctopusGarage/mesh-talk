@@ -353,7 +353,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
                 .await
                 .unwrap();
             b.drain_from_post_office().await;
-            if b.file_ready_to_save(file) {
+            if b.file_ready_to_save(file).unwrap() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;

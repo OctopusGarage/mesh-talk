@@ -94,7 +94,14 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 
-impl std::error::Error for RuntimeError {}
+impl std::error::Error for RuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Open(error) => Some(error),
+            Self::Io(error) => Some(error),
+        }
+    }
+}
 
 impl From<LogError> for RuntimeError {
     fn from(e: LogError) -> Self {
@@ -953,7 +960,11 @@ impl NodeRuntime {
     }
 
     /// The last `limit` messages of the DM with `peer`, both directions.
-    pub fn history(&self, peer: &PublicIdentity, limit: usize) -> Vec<HistoryEntry> {
+    pub fn history(
+        &self,
+        peer: &PublicIdentity,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         self.node.dm_history(peer, limit)
     }
 
@@ -975,7 +986,11 @@ impl NodeRuntime {
     }
 
     /// Account-level conversation history with `peer_account_id`.
-    pub fn account_history(&self, peer_account_id: &str, limit: usize) -> Vec<HistoryEntry> {
+    pub fn account_history(
+        &self,
+        peer_account_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         self.node.account_history(peer_account_id, limit)
     }
 
@@ -1241,12 +1256,12 @@ impl NodeRuntime {
         &self,
         channel: crate::eventlog::event::ConversationId,
         limit: usize,
-    ) -> Vec<HistoryEntry> {
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         self.node.channel_history(channel, limit)
     }
 
     /// Search all DMs + channels for `query`.
-    pub fn search(&self, query: &str) -> Vec<crate::node::SearchHit> {
+    pub fn search(&self, query: &str) -> Result<Vec<crate::node::SearchHit>, super::NodeError> {
         self.node.search(query)
     }
 
