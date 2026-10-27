@@ -23,6 +23,7 @@ export interface ConversationListRow {
   subtitle: string;
   prioritizeSubtitle: boolean;
   personal?: boolean;
+  deletable?: boolean;
   /** Rename edits the announced name, not the displayed personal alias. */
   renameName: string;
 }
@@ -110,6 +111,7 @@ export function conversationList(
       id,
       channel: true,
       renameName: c.name,
+      deletable: !c.previous_account && (left || dissolved),
       conv: {
         kind: "channel",
         id,

@@ -1,3 +1,4 @@
+import { DeleteChatDialog } from "./DeleteChatDialog";
 import {
   canParticipateChannel,
   isChannelInvitation,
@@ -90,6 +91,10 @@ const NO_REACTIONS: ReactionInfo[] = [];
 
 export function ConversationView() {
   const { t } = useTranslation();
+  const [deletingChat, setDeletingChat] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const packs = usePacks((s) => s.packs);
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
@@ -884,6 +889,14 @@ export function ConversationView() {
           className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
           role="status"
         >
+          {deletingChat && (
+            <DeleteChatDialog
+              key={`${owner}:${authGeneration}:${deletingChat.id}`}
+              channelId={deletingChat.id}
+              name={deletingChat.name}
+              onClose={() => setDeletingChat(null)}
+            />
+          )}
           {t(
             previousAccount
               ? "conversation.previousAccountChannelHint"
@@ -899,6 +912,17 @@ export function ConversationView() {
                       ? "conversation.leftChannelHint"
                       : "conversation.archivedChannelHint",
             accessPending ? { defaultValue: "Updating group access…" } : {},
+          )}
+          {!previousAccount && !sharedReference && (left || dissolved) && (
+            <Button
+              variant="ghost"
+              className="ml-3 text-destructive hover:text-destructive"
+              onClick={() =>
+                setDeletingChat({ id: active.id, name: active.name })
+              }
+            >
+              {t("conversationDeletion.delete")}
+            </Button>
           )}
         </div>
       ) : !draftsLoaded ? (

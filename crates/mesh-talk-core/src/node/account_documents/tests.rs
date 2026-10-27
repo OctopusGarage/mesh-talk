@@ -63,7 +63,7 @@ fn signed_documents_survive_restart_and_enforce_cas_tombstones_and_account_scope
 pub(super) fn node(path: &std::path::Path, account: &Account) -> std::sync::Arc<Node> {
     node_with_identity(path, account, DeviceIdentity::generate())
 }
-fn node_with_identity(
+pub(super) fn node_with_identity(
     path: &std::path::Path,
     account: &Account,
     identity: DeviceIdentity,

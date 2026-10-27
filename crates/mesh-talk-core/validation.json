@@ -144,7 +144,7 @@
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-        "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick or a held mandatory directory response. Control, directory, optional document and history/favorites work retain independent cursors and one reserved worker each within the existing four-worker and shared TCP budgets; optional document progress preserves its category and entitlement checks independently of held archive responses.",
+            "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick or a held mandatory directory response. Control, directory, optional document and history/favorites work retain independent cursors and one reserved worker each within the existing four-worker and shared TCP budgets; optional document progress preserves its category and entitlement checks independently of held archive responses.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
@@ -180,6 +180,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_documents::",
+            "node::account_sync::personal_replay_tests::",
             "node::account_sync::",
             "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
             "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery"
@@ -335,20 +336,25 @@
       "id": "core-account-documents",
       "paths": [
         "crates/mesh-talk-core/src/node/account_documents/",
+        "crates/mesh-talk-core/src/node/account_sync/personal_replay_tests.rs",
         "crates/mesh-talk-core/src/node/account_profile_io.rs",
-        "crates/mesh-talk-core/src/node/account_profile_data.rs"
+        "crates/mesh-talk-core/src/node/account_profile_data.rs",
+        "crates/mesh-talk-core/src/node/lifecycle.rs",
+        "crates/mesh-talk-core/src/node/account_documents/controls.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
             "node::account_documents::",
-            "node::account_sync::selection_tests::foreign_public_profile_documents_cross_certified_loopback_with_profile_consent"
+            "node::account_sync::selection_tests::foreign_public_profile_documents_cross_certified_loopback_with_profile_consent",
+            "node::account_sync::personal_replay_tests::",
+            "node::lifecycle::personal_scope_tests::"
           ]
         }
       ],
       "capability": {
-        "summary": "Synchronize typed private drafts, exact read receipts, customization assets and authenticated DM reaction/recall controls through existing certified account sessions.",
+        "summary": "Synchronize typed private drafts, exact read receipts, customization assets, authenticated DM controls and account-personal conversation removal through existing certified account sessions.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
         "invariants": [
           {
@@ -358,11 +364,16 @@
           {
             "name": "Optional public profiles preserve original account signatures and consent; group activity is bounded, source-signed and tied to the selected inventory without importing authority.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Personal removal persists before cleanup, binds optional Leave cleanup to its original committed operation and closed membership lifetime, and preserves Favorites, exports and other accounts' copies. Exact full-device floor acknowledgements gate historical replay; presence alone cannot restore visibility or deleted content.",
+            "reference": "docs/network-design-reference.md#personal-conversation-removal"
           }
         ]
       },
       "escalation": [
-        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence."
+        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence.",
+        "For conversation removal, require keep/erase choices, pending/rejected/cancelled Leave safety, cleanup failure/restart retry, fresh invitation isolation, stale sibling history/draft/file rejection and exact-device loopback acknowledgements. Public Leave commitment alone is not private cleanup completion."
       ],
       "consumers": ["core-node"]
     },

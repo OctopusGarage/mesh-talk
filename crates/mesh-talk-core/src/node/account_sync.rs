@@ -51,6 +51,8 @@ pub(in crate::node) use wake::AccountWake;
 mod page;
 pub(in crate::node) use archive::ArchiveCache;
 #[cfg(test)]
+mod personal_replay_tests;
+#[cfg(test)]
 mod selection_tests;
 use page::{ChannelRecord, FileCardRecord, HistoryPageAssembler, HistoryRecord};
 #[cfg(test)]
@@ -367,7 +369,74 @@ impl Node {
             .await
     }
 
+    fn history_record_conversation(&self, record: &HistoryRecord) -> Option<DocumentConversation> {
+        match record {
+            HistoryRecord::Direct(row) => {
+                let envelope = DmEnvelope::decode(&row.plaintext)?;
+                let own = self.account_id();
+                let peer = if envelope.route.sender_account == own {
+                    envelope.route.recipient_account
+                } else if envelope.route.recipient_account == own {
+                    envelope.route.sender_account
+                } else {
+                    return None;
+                };
+                (account_conversation_id(&own, &peer).as_bytes() == &row.conv)
+                    .then_some(DocumentConversation::Account(peer))
+            }
+            HistoryRecord::Channel(row) => {
+                Some(DocumentConversation::Channel(hex::encode(row.conversation)))
+            }
+            HistoryRecord::FileCard(row) => Some(match &row.peer_account {
+                Some(peer) => DocumentConversation::Account(peer.clone()),
+                None => DocumentConversation::Channel(hex::encode(row.host)),
+            }),
+        }
+    }
+
+    fn personal_record_current(
+        &self,
+        record: &HistoryRecord,
+        cut: Option<&super::account_documents::personal::PersonalHistoryCut>,
+        source: Option<&PublicIdentity>,
+    ) -> bool {
+        let Some(conversation) = self.history_record_conversation(record) else {
+            // Keep malformed records on the existing validation path.
+            return true;
+        };
+        let channel_event = match record {
+            HistoryRecord::Channel(row) => Some((
+                ConversationId::new(row.conversation),
+                EventId::new(row.event_id),
+            )),
+            HistoryRecord::FileCard(row) if row.peer_account.is_none() => {
+                Some((ConversationId::new(row.host), EventId::new(row.event_id)))
+            }
+            _ => None,
+        };
+        if let Some((group, event)) = channel_event {
+            let state = self.conversation_personal_state(&conversation);
+            if state.floor.is_some()
+                && self.account_group_access(group).is_ok_and(|access| {
+                    matches!(
+                        access.role,
+                        AccountGroupRole::Member | AccountGroupRole::Owner
+                    )
+                })
+            {
+                return self.personal_channel_record_current(group, event);
+            }
+        }
+        cut.map_or_else(
+            || self.personal_history_source_allowed(&conversation, source),
+            |cut| cut.allows(self, &conversation),
+        )
+    }
+
     fn private_record_current(&self, requester: &PublicIdentity, record: &HistoryRecord) -> bool {
+        if !self.personal_record_current(record, None, Some(&self.identity.public())) {
+            return false;
+        }
         match record {
             HistoryRecord::Direct(row) => {
                 DmEnvelope::decode(&row.plaintext).is_some_and(|envelope| {
@@ -1117,6 +1186,39 @@ impl Node {
         Ok(())
     }
 
+    fn personal_host_conversation(&self, host: ConversationId) -> DocumentConversation {
+        let own = self.account_id();
+        self.personal_account_ids()
+            .into_iter()
+            .find(|peer| account_conversation_id(&own, peer) == host)
+            .map_or_else(
+                || DocumentConversation::Channel(hex::encode(host.as_bytes())),
+                DocumentConversation::Account,
+            )
+    }
+
+    fn personal_attachment_allowed(
+        &self,
+        file: ConversationId,
+        cut: &super::account_documents::personal::PersonalHistoryCut,
+    ) -> bool {
+        let hosts: Vec<_> = {
+            let rows = self.received_files.lock().expect("files mutex");
+            rows.conversations()
+                .into_iter()
+                .filter(|host| {
+                    rows.entries_ref(host).iter().any(|row| {
+                        super::files::validated_manifest(&row.plaintext)
+                            .is_some_and(|manifest| manifest.file_conv() == file)
+                    })
+                })
+                .collect()
+        };
+        hosts
+            .into_iter()
+            .any(|host| cut.allows(self, &self.personal_host_conversation(host)))
+    }
+
     fn has_live_local_file_card(&self, file_conv: ConversationId) -> bool {
         let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
         self.has_live_local_file_card_with(file_conv, &delivery)
@@ -1198,6 +1300,12 @@ impl Node {
                 .collect()
         };
         hosts.extend(channel_scopes.keys().copied());
+        hosts.retain(|host| {
+            self.personal_source_applied(
+                &self.personal_host_conversation(*host),
+                &self.identity.public(),
+            )
+        });
         if let Some(selected) = exact
             && (!hosts.contains(&selected.row.conversation)
                 || channel_scopes.get(&selected.row.conversation) != selected.scope.as_ref())
@@ -1506,6 +1614,7 @@ impl Node {
     ) -> Result<AttachmentOutcome, NodeError> {
         let (wanted, revision) = self.device_sync_policy_snapshot();
         let controls = self.private_dm_control_revision();
+        let personal_cut = self.capture_personal_history_cut(&peer.public);
         if !wanted.attachments {
             return Ok(AttachmentOutcome::Complete);
         }
@@ -1629,7 +1738,12 @@ impl Node {
                     let dir = staging.take().unwrap();
                     self.account_blocking(move |node| {
                         node.commit_account_attachment(
-                            file_conv, revision, controls, &manifest, dir,
+                            file_conv,
+                            revision,
+                            controls,
+                            &manifest,
+                            dir,
+                            &personal_cut,
                         )
                     })
                     .await?;
@@ -1648,12 +1762,14 @@ impl Node {
         controls: (u64, [u8; 32]),
         manifest: &crate::file::AnyManifest,
         dir: tempfile::TempDir,
+        personal_cut: &super::account_documents::personal::PersonalHistoryCut,
     ) -> Result<(), NodeError> {
         let _commit = self
             .account_sync_commit
             .lock()
             .expect("account sync commit mutex not poisoned");
-        if self.private_dm_control_revision() != controls
+        if !self.personal_attachment_allowed(file_conv, personal_cut)
+            || self.private_dm_control_revision() != controls
             || self.account_recalled_files().contains(&file_conv)
         {
             return Err(NodeError::Authorization(
@@ -1708,6 +1824,7 @@ impl Node {
             .cloned()
             .ok_or_else(|| NodeError::File("unknown attachment".into()))?;
         let controls = self.private_dm_control_revision();
+        let personal_cut = self.capture_personal_history_cut(&self.identity.public());
         let staging =
             tempfile::tempdir().map_err(|e| NodeError::File(format!("attachment staging: {e}")))?;
         let path = staging.path().join("verified-attachment");
@@ -1716,7 +1833,14 @@ impl Node {
         // commit_account_attachment expects the verified file at this staging path.
         std::fs::rename(&path, staging.path().join("incoming"))
             .map_err(|error| NodeError::File(error.to_string()))?;
-        self.commit_account_attachment(file_conv, revision, controls, &manifest, staging)?;
+        self.commit_account_attachment(
+            file_conv,
+            revision,
+            controls,
+            &manifest,
+            staging,
+            &personal_cut,
+        )?;
         Ok(true)
     }
 
@@ -1736,7 +1860,7 @@ impl Node {
         version: AccountSyncVersion,
         expected_revision: Option<u64>,
     ) -> Result<(), NodeError> {
-        self.apply_account_history_page_from_sibling(page, version, expected_revision, None)
+        self.apply_account_history_page_from_sibling(page, version, expected_revision, None, None)
     }
     fn apply_account_history_page_from_sibling(
         &self,
@@ -1744,6 +1868,7 @@ impl Node {
         version: AccountSyncVersion,
         expected_revision: Option<u64>,
         source: Option<&Announce>,
+        personal_cut: Option<&super::account_documents::personal::PersonalHistoryCut>,
     ) -> Result<(), NodeError> {
         let _commit = self
             .account_sync_commit
@@ -1755,8 +1880,25 @@ impl Node {
                 "account sync policy changed".into(),
             ));
         }
+        if source.is_some_and(|proof| !self.certified_sibling(&proof.public())) {
+            return Err(NodeError::Authorization(
+                "account history source changed".into(),
+            ));
+        }
+        // Eligibility belongs to the original request. A late ACK cannot make
+        // an already-buffered pre-cleanup page eligible at its commit boundary.
+        let admitted: Vec<_> = page
+            .iter()
+            .filter(|record| {
+                self.personal_record_current(
+                    record,
+                    personal_cut,
+                    source.map(Announce::public).as_ref(),
+                )
+            })
+            .collect();
         if policy.history {
-            for record in page {
+            for record in &admitted {
                 if let HistoryRecord::Channel(record) = record {
                     let channel = ConversationId::new(record.conversation);
                     let allowed = source.map_or_else(
@@ -1781,7 +1923,7 @@ impl Node {
             }
             {
                 let log = self.log.lock().expect("log mutex not poisoned");
-                for record in page {
+                for record in &admitted {
                     if let HistoryRecord::Channel(record) = record {
                         let channel = ConversationId::new(record.conversation);
                         if let Some(event) = log.get(&EventId::new(record.event_id))
@@ -1796,7 +1938,7 @@ impl Node {
                     }
                 }
             }
-            let direct: Vec<_> = page
+            let direct: Vec<_> = admitted
                 .iter()
                 .filter_map(|record| match record {
                     HistoryRecord::Direct(record) => Some(record.clone()),
@@ -1804,7 +1946,7 @@ impl Node {
                 })
                 .collect();
             self.import_account_backfill(&direct)?;
-            for record in page {
+            for record in &admitted {
                 if let HistoryRecord::Channel(record) = record {
                     self.record_private_channel_plaintext(&super::received_log::ReceivedEntry {
                         conversation: ConversationId::new(record.conversation),
@@ -1817,7 +1959,7 @@ impl Node {
             }
         }
         if version.includes_file_cards(policy.history, policy.attachments) {
-            for record in page {
+            for record in &admitted {
                 if let HistoryRecord::FileCard(record) = record {
                     self.import_account_file_card_from_sibling(record, version, source)?;
                 }
@@ -1836,6 +1978,14 @@ impl Node {
             .account_sync_commit
             .lock()
             .expect("account sync commit mutex");
+        let conversation = DocumentConversation::Channel(hex::encode(row.conversation.as_bytes()));
+        let state = self.conversation_personal_state(&conversation);
+        if state.floor.is_some()
+            && (state.hidden
+                || !self.personal_channel_record_current(row.conversation, row.event_id))
+        {
+            return Ok(());
+        }
         self.record_private_channel_plaintext(row)
     }
 
@@ -2084,6 +2234,7 @@ impl Node {
                 "peer is not a certified linked device".into(),
             ));
         }
+        let personal_cut = self.capture_personal_history_cut(&peer.public);
         let mut channel = self
             .begin_account_exchange(
                 peer,
@@ -2233,6 +2384,7 @@ impl Node {
                                 version,
                                 Some(revision),
                                 Some(&source_proof),
+                                Some(&personal_cut),
                             )
                         })
                         .await?;
@@ -2287,6 +2439,8 @@ impl Node {
         let mut custody_migration = None;
         let mut inventory_publication = None;
         let mut public_profile_publication = None;
+        let mut personal_after = None;
+        let mut personal_retry_at: Option<std::time::Instant> = None;
         let mut group_access_publication = None;
         let mut fanout = fanout::FanoutQueue::default();
         let mut fanout_cursor = 0u64;
@@ -2298,6 +2452,17 @@ impl Node {
                 .load(std::sync::atomic::Ordering::Acquire)
             {
                 return;
+            }
+            if personal_retry_at.is_none_or(|at| at <= std::time::Instant::now())
+                && let Some(conversation) = self.personal_cleanup_next(personal_after.as_ref())
+            {
+                personal_after = Some(conversation.clone());
+                let result = self
+                    .account_blocking(move |node| node.retry_personal_cleanup_for(&conversation))
+                    .await;
+                personal_retry_at = result
+                    .is_err()
+                    .then(|| std::time::Instant::now() + Duration::from_secs(5));
             }
             let affected = self.maintain_account_group_operation_effects();
             for (sequence, group) in self.account_group_fanout_page(fanout_cursor, fanout::CAPACITY)

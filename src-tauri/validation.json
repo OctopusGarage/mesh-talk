@@ -36,9 +36,7 @@
           }
         ]
       },
-      "consumers": [
-        "frontend-screenshot-shortcuts"
-      ],
+      "consumers": ["frontend-screenshot-shortcuts"],
       "escalation": [
         "Verify native packaged-app foreground/background/tray capture, OS shortcut conflicts and screen-recording permission on macOS, Windows and Linux; browser mocks do not prove native global shortcut registration."
       ]
@@ -73,9 +71,7 @@
           }
         ]
       },
-      "consumers": [
-        "frontend-sticker-media"
-      ],
+      "consumers": ["frontend-sticker-media"],
       "escalation": [
         "Verify real native direct sticker delivery with identical installed artwork, missing or changed artwork, and an older peer; focused unit checks do not prove installed candidate behavior."
       ]
@@ -287,6 +283,10 @@
           {
             "name": "Registered reference metadata exposes causal reconciliation separately from account permissions and distinguishes an observed history policy from an unknown local fallback; descriptive policy observations never authorize history disclosure.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Requested Leave history cleanup and exact-operation cleanup completion are distinct; standalone deletion succeeds only after local cleanup. Owner-scoped personal-state reads expose full revision/writer/hash floor identity without private payloads or changing saved host policy JSON.",
+            "reference": "docs/network-design-reference.md#personal-conversation-removal"
           }
         ]
       },
@@ -722,14 +722,34 @@
       "id": "desktop-contact-policy",
       "paths": [
         "src-tauri/src/contact_policy.rs",
-        "src-tauri/src/contact_policy/"
+        "src-tauri/src/contact_policy/",
+        "src-tauri/src/chat_commands/account.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["contact_policy::"]
+          "filters": [
+            "contact_policy::",
+            "owner_commands::group_operations::tests::history_floor_identity_includes_writer_and_content_hash",
+            "owner_commands::tests::registered_account_group_operation_reads_preserve_account_scope",
+            "owner_commands::tests::registered_account_group_operations_reject_queued_logout"
+          ]
         }
       ],
+      "capability": {
+        "summary": "Adapt account-scoped personal contact deletion and visibility under the exact installed runtime while preserving legacy host policy projection shape.",
+        "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
+        "invariants": [
+          {
+            "name": "Deletion requires the caller-captured account root and permits online contacts; missing clear-history defaults to true while explicit false retains history. Presence never restores deletion; shared reopen requires a matching caller-captured root, and core-known visibility supersedes legacy local suppression without removing an erasure floor.",
+            "reference": "docs/network-design-reference.md#personal-conversation-removal"
+          },
+          {
+            "name": "Account personal-state reads require exact runtime and account authority; local cleanup never removes network membership, verified identity, favorites or exports, and queued session retirement rejects destructive producers.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          }
+        ]
+      },
       "escalation": [
         "Contact deletion/admission changes require session-authority, persistence and native mesh acceptance evidence."
       ]

@@ -1044,6 +1044,15 @@ export const test = base.extend({
           account_id: SELF.account,
           group: String(args.channelId),
           kind,
+          ...(kind === "leave_account"
+            ? {
+                history_cleanup_complete: true,
+                delete_history: Boolean(
+                  (args.operation as { delete_history?: boolean })
+                    ?.delete_history,
+                ),
+              }
+            : {}),
           phase: { kind: "committed" },
           committed_events,
           primary_event: event,
@@ -1178,6 +1187,10 @@ export const test = base.extend({
                     break;
                   case "leave_account":
                     channel.left = true;
+                    if (operation.delete_history === true) {
+                      clearConversation(`ch:${a.channelId}`);
+                      channels.splice(channels.indexOf(channel), 1);
+                    }
                     break;
                   case "dissolve":
                     channel.dissolved = true;
@@ -1428,17 +1441,28 @@ export const test = base.extend({
 
           // roster
           list_peers: () => peers.map((peer) => ({ ...peer })),
+          owner_personal_conversation_states: (a) => {
+            groupAccount(a);
+            return [];
+          },
           list_accounts: () => {
-            const deleted = deletedContacts().filter(
-              (id) => !presenceMap[id]?.online,
-            );
-            localStorage.setItem(deletedKey(), JSON.stringify(deleted));
+            const deleted = deletedContacts();
             return accounts
               .filter((account) => !deleted.includes(account.account_id))
               .map((account) => ({
                 ...account,
                 names: [...account.names],
               }));
+          },
+          owner_delete_left_channel: (a) => {
+            groupAccount(a);
+            const channel = channels.find(
+              (channel) => channel.channel_id === a.channelId,
+            );
+            if (!channel || (!channel.left && !channel.dissolved))
+              throw new Error("Leave this group before deleting the chat");
+            clearConversation(`ch:${a.channelId}`);
+            channels.splice(channels.indexOf(channel), 1);
           },
           list_channels: () => channels.map((channel) => ({ ...channel })),
           // The test user (SELF) is the channel owner, so the member-management controls
@@ -1919,23 +1943,20 @@ export const test = base.extend({
           // Local contact deletion mirrors the native roster/history contract.
           delete_contact: (a) => {
             const account = String(a.account);
-            if (
-              a.owner !== contactOwner ||
-              account === SELF.account ||
-              presenceMap[account]?.online
-            )
+            if (a.owner !== contactOwner || account === SELF.account)
               throw new Error(
-                "Only another offline contact can be deleted by the current owner",
+                "Only another contact can be deleted by the current owner",
               );
-            clearConversation(`acc:${account}`);
+            if (a.clearHistory !== false) clearConversation(`acc:${account}`);
             localStorage.setItem(
               deletedKey(),
               JSON.stringify([...new Set([...deletedContacts(), account])]),
             );
-            localStorage.setItem(
-              `mock-erased-${contactOwner}`,
-              JSON.stringify([...new Set([...erasedHistory(), account])]),
-            );
+            if (a.clearHistory !== false)
+              localStorage.setItem(
+                `mock-erased-${contactOwner}`,
+                JSON.stringify([...new Set([...erasedHistory(), account])]),
+              );
             const key = `mock-hidden-${contactOwner}`;
             const contacts = (
               JSON.parse(localStorage.getItem(key) ?? "[]") as Array<{
@@ -2595,6 +2616,13 @@ export const test = base.extend({
           expires_at_ms?: number;
         },
       ) => {
+        if (conv.startsWith("acc:"))
+          localStorage.setItem(
+            deletedKey(),
+            JSON.stringify(
+              deletedContacts().filter((id) => id !== conv.slice(4)),
+            ),
+          );
         const entry = msg({ from_me: false, who, text, ...metadata });
         const history = (msgs[conv] ||= []);
         if (metadata?.index !== undefined)

@@ -244,16 +244,14 @@ pub async fn list_accounts(
             }
             let mut peers = rt.peers();
             peers.sort_by_key(|peer| std::cmp::Reverse(peer.last_seen));
-            let online = online_account_ids(peers.clone());
             let live = peers
                 .into_iter()
                 .filter_map(|p| p.account_id.map(|id| (id, p.name, p.post_office)))
                 .collect();
             let mut rows = merge_account_rows(live, rt.known_account_ids());
             fill_account_names(&mut rows, rt.known_account_names());
-            let accounts = rows.iter().map(|row| row.account_id.clone()).collect();
-            let visible = policy.visible_accounts(&owner, &online, accounts)?;
-            rows.retain(|row| visible.contains(&row.account_id));
+            let personal = policy.personal_snapshot(&owner, &rt.handle())?;
+            rows.retain(|row| !personal.deleted.contains(&row.account_id));
             Ok(rows)
         })
     })
@@ -262,6 +260,7 @@ pub async fn list_accounts(
     .map_err(CommandError::from)
 }
 
+#[cfg(test)]
 pub(crate) fn online_account_ids(
     peers: Vec<mesh_talk_core::discovery::roster::PeerRecord>,
 ) -> Vec<String> {

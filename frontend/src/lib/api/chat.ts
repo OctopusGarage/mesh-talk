@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AccountGroupControlRequest,
   AccountGroupOperationStatus,
+  PersonalConversationState,
 } from "../types";
 import { invokeSensitive } from "./sensitiveInvoke";
 
@@ -462,6 +463,11 @@ export const chat = {
   networkName: () => invoke<string | null>("network_name"),
 
   listPeers: () => invoke<PeerInfo[]>("list_peers"),
+  personalConversationStates: (owner: string, expectedAccount: string) =>
+    invoke<PersonalConversationState[]>("owner_personal_conversation_states", {
+      owner,
+      expectedAccount,
+    }),
   listAccounts: () => invoke<AccountInfo[]>("list_accounts"),
   listChannels: () => invoke<ChannelInfo[]>("list_channels"),
 
@@ -471,6 +477,17 @@ export const chat = {
     invoke<void>("delete_message", { convId, target, isChannel }),
   recallMessage: (convId: string, target: string, isChannel: boolean) =>
     invoke<void>("recall_message", { convId, target, isChannel }),
+  deleteLeftChannel: (
+    owner: string,
+    expectedAccount: string,
+    channelId: string,
+  ) =>
+    invoke<void>("owner_delete_left_channel", {
+      owner,
+      expectedAccount,
+      channelId,
+    }),
+
   clearConversation: (convId: string, isChannel: boolean) =>
     invoke<void>("clear_conversation", { convId, isChannel }),
   // Send an animated sticker as its own message. `fallback` is the emoji char shown if the

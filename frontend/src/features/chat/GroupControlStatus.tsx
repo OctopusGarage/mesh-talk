@@ -1,7 +1,11 @@
 import { errorMessage } from "@/lib/error";
 import { useTranslation } from "react-i18next";
 import { useChat } from "@/store/chat";
-import type { GroupOperationOutcome } from "@/store/accountGroupOperations";
+import {
+  isGroupHistoryCleanupPending,
+  isGroupOperationComplete,
+  type GroupOperationOutcome,
+} from "@/store/accountGroupOperations";
 import { Button } from "@/components/ui/button";
 
 export function GroupControlStatus({
@@ -24,10 +28,13 @@ export function GroupControlStatus({
     ),
   );
   if (!outcome || outcome.kind === "stale") return null;
-  const waiting = outcome.kind === "pending" || outcome.kind === "unconfirmed";
+  const cleaning = isGroupHistoryCleanupPending(status);
+  const waiting =
+    cleaning || outcome.kind === "pending" || outcome.kind === "unconfirmed";
   const phase = status?.phase.kind;
-  const key =
-    (cancelRequested && waiting) || phase === "cancellation_requested"
+  const key = cleaning
+    ? "cleaningHistory"
+    : (cancelRequested && waiting) || phase === "cancellation_requested"
       ? "cancelling"
       : outcome.kind === "unconfirmed"
         ? "unconfirmed"
@@ -72,14 +79,16 @@ export function GroupControlStatus({
             <Button variant="ghost" size="sm" onClick={() => void refresh()}>
               {t("groupOperation.refresh")}
             </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={cancelRequested || phase === "cancellation_requested"}
-              onClick={() => void cancel(outcome.id!)}
-            >
-              {t("groupOperation.cancel")}
-            </Button>
+            {!cleaning && phase !== "committed" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={cancelRequested || phase === "cancellation_requested"}
+                onClick={() => void cancel(outcome.id!)}
+              >
+                {t("groupOperation.cancel")}
+              </Button>
+            )}
           </div>
         </>
       )}
@@ -115,8 +124,7 @@ export function PendingGroupControls({
     leave_account: "members.leave",
   };
   const terminal = (ticket: NonNullable<typeof tickets>[string]) =>
-    ticket.status &&
-    ["committed", "cancelled", "rejected"].includes(ticket.status.phase.kind);
+    isGroupOperationComplete(ticket.status);
   const controls = Object.values(tickets ?? {})
     .filter(
       (ticket) =>
@@ -140,8 +148,11 @@ export function PendingGroupControls({
     >
       {controls.map((ticket) => {
         const phase = ticket.status?.phase.kind;
-        const kind =
-          phase === "committed" || phase === "cancelled" || phase === "rejected"
+        const kind = isGroupHistoryCleanupPending(ticket.status)
+          ? "pending"
+          : phase === "committed" ||
+              phase === "cancelled" ||
+              phase === "rejected"
             ? phase
             : "pending";
         return (

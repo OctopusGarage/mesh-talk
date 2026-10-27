@@ -21,6 +21,8 @@ import { SEND_INTENT_CAP } from "./outgoingIntent";
 import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
 import { useAvatars } from "./avatars";
+import { useDrafts } from "./drafts";
+import type { PersonalConversationState } from "@/lib/types";
 
 function committedGroupMessage(
   id: string,
@@ -2597,7 +2599,7 @@ describe("send/action failures", () => {
   });
 });
 
-describe("offline contact deletion", () => {
+describe("contact deletion", () => {
   beforeEach(() => {
     useChat.setState({
       ready: true,
@@ -2624,7 +2626,9 @@ describe("offline contact deletion", () => {
     expect(await useChat.getState().deleteContact("contact")).toBe(true);
     expect(invoke).toHaveBeenCalledWith("delete_contact", {
       owner: "host",
+      expectedAccount: "myacct",
       account: "contact",
+      clearHistory: true,
     });
     expect(useChat.getState().accounts).toEqual([]);
     expect(useChat.getState().active).toBeNull();
@@ -2632,11 +2636,57 @@ describe("offline contact deletion", () => {
     expect(useChat.getState().unread["account:other"]).toBe(2);
     expect(useChat.getState().messages["account:contact"]).toEqual([]);
   });
-  it("keeps the contact when persistence fails or it comes online", async () => {
-    invoke.mockRejectedValue(new Error("Contact is online"));
+  it("keeps cached history when removing a contact without clearing", async () => {
+    expect(await useChat.getState().deleteContact("contact", false)).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("delete_contact", {
+      owner: "host",
+      expectedAccount: "myacct",
+      account: "contact",
+      clearHistory: false,
+    });
+    expect(useChat.getState().accounts).toEqual([]);
+    expect(useChat.getState().messages["account:contact"]?.[0].text).toBe(
+      "private history",
+    );
+  });
+  it("keeps the contact when persistence fails", async () => {
+    invoke.mockRejectedValue(new Error("storage unavailable"));
     expect(await useChat.getState().deleteContact("contact")).toBe(false);
     expect(useChat.getState().accounts).toHaveLength(1);
     expect(useChat.getState().active?.id).toBe("contact");
+  });
+  it.each(["", "   "])(
+    "does not delete a contact when its own full account is blank (%j)",
+    async (myAccountId) => {
+      useChat.setState({ myAccountId });
+      expect(await useChat.getState().deleteContact("contact")).toBe(false);
+      expect(invoke).not.toHaveBeenCalled();
+      expect(useChat.getState().accounts).toHaveLength(1);
+    },
+  );
+  it("does not apply deletion to a replacement full account with the same session", async () => {
+    let complete!: (value: unknown) => void;
+    invoke.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const request = useChat.getState().deleteContact("contact");
+    useChat.setState({ myAccountId: "replacement-account" });
+    complete({ owner: "host", contacts: [] });
+    expect(await request).toBe(false);
+    expect(useChat.getState().accounts).toHaveLength(1);
+    expect(useChat.getState().active?.id).toBe("contact");
+    expect(useChat.getState().messages["account:contact"]?.[0].text).toBe(
+      "private history",
+    );
+    expect(invoke).toHaveBeenCalledWith("delete_contact", {
+      owner: "host",
+      expectedAccount: "myacct",
+      account: "contact",
+      clearHistory: true,
+    });
   });
   it("does not apply a deletion completion to a later session", async () => {
     let complete!: (value: unknown) => void;
@@ -5317,3 +5367,263 @@ it.each(["react", "recall"] as const)(
     reload.mockRestore();
   },
 );
+
+describe("delete left channel", () => {
+  beforeEach(() => {
+    useChat.setState({
+      ready: true,
+      active: { kind: "channel", id: "left", name: "Left" },
+      channels: [
+        {
+          channel_id: "left",
+          name: "Left",
+          member_count: 0,
+          owner: "other",
+          left: true,
+        },
+      ],
+      unread: { "channel:left": 3, "account:other": 2 },
+      messages: {
+        "channel:left": [
+          {
+            id: "old",
+            fromMe: true,
+            who: "me",
+            text: "old group history",
+            wallClock: 1,
+            replyTo: null,
+          },
+        ],
+      },
+      unreadIds: { "channel:left": ["old"] },
+      ledger: { "channel:left": { old: { seen: false, late: false } } },
+      error: null,
+    });
+    invoke.mockResolvedValue(undefined);
+  });
+  it("removes the named chat only after persisted account-scoped deletion", async () => {
+    expect(await useChat.getState().deleteLeftChannel("left")).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("owner_delete_left_channel", {
+      owner: "host",
+      expectedAccount: "myacct",
+      channelId: "left",
+    });
+    expect(useChat.getState().channels).toEqual([]);
+    expect(useChat.getState().active).toBeNull();
+    expect(useChat.getState().unread["channel:left"]).toBeUndefined();
+    expect(useChat.getState().messages["channel:left"]).toEqual([]);
+    expect(useChat.getState().unreadIds["channel:left"]).toBeUndefined();
+    expect(useChat.getState().ledger["channel:left"]).toBeUndefined();
+  });
+  it("keeps the row and history after a failed deletion", async () => {
+    invoke.mockRejectedValue(new Error("write failed"));
+    expect(await useChat.getState().deleteLeftChannel("left")).toBe(false);
+    expect(useChat.getState().channels).toHaveLength(1);
+    expect(useChat.getState().messages["channel:left"]).toHaveLength(1);
+  });
+  it("does not close another conversation opened while deletion is pending", async () => {
+    let finish!: () => void;
+    invoke.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const deleting = useChat.getState().deleteLeftChannel("left");
+    useChat.setState({
+      active: { kind: "account", id: "other", name: "Other" },
+    });
+    finish();
+    expect(await deleting).toBe(true);
+    expect(useChat.getState().active?.id).toBe("other");
+  });
+  it("does not apply deletion to a replacement account session", async () => {
+    let finish!: () => void;
+    invoke.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const deleting = useChat.getState().deleteLeftChannel("left");
+    useAuth.setState({ generation: useAuth.getState().generation + 1 });
+    finish();
+    expect(await deleting).toBe(false);
+    expect(useChat.getState().channels).toHaveLength(1);
+  });
+});
+
+describe("imported account-personal deletion", () => {
+  let personal: PersonalConversationState[];
+  beforeEach(() => {
+    personal = [];
+    useDrafts.getState().reset();
+    useDrafts.setState({
+      owner: "host",
+      generation: 0,
+      loaded: true,
+      texts: { "channel:gone": "old draft", "account:friend": "friend draft" },
+    });
+    useChat.setState({
+      ready: true,
+      personalConversationStates: {},
+      personalHistoryFloors: {},
+      historyScanBusy: false,
+      active: { kind: "channel", id: "gone", name: "Gone" },
+      channels: [
+        { channel_id: "gone", name: "Gone", member_count: 1, owner: "me" },
+      ],
+      accounts: [{ account_id: "friend", device_count: 1, names: ["Friend"] }],
+      messages: {
+        "channel:gone": [
+          {
+            id: "old",
+            fromMe: false,
+            who: "other",
+            text: "cached history",
+            wallClock: 1,
+            replyTo: null,
+          },
+        ],
+      },
+    });
+    invoke.mockImplementation((command: string) => {
+      if (command === "owner_node_identity")
+        return Promise.resolve({
+          owner: "host",
+          device_id: "me",
+          account_id: "myacct",
+        });
+      if (command === "owner_personal_conversation_states")
+        return Promise.resolve(personal);
+      if (command === "list_accounts")
+        return Promise.resolve([
+          { account_id: "friend", device_count: 1, names: ["Friend"] },
+        ]);
+      if (command === "list_channels")
+        return Promise.resolve([
+          { channel_id: "gone", name: "Gone", member_count: 1, owner: "me" },
+        ]);
+      if (command === "channel_members")
+        return Promise.resolve({
+          members: [],
+          owner: "me",
+          history_policy: "off",
+        });
+      return Promise.resolve([]);
+    });
+  });
+  it("purges an imported completed floor, closes its chat and suppresses an older listed row", async () => {
+    personal = [
+      {
+        conversation: { kind: "channel", id: "gone" },
+        hidden: true,
+        history_floor: "floor-one",
+        local_cleanup_complete: true,
+      },
+    ];
+    await useChat.getState().refreshRoster();
+    expect(invoke).toHaveBeenCalledWith("owner_personal_conversation_states", {
+      owner: "host",
+      expectedAccount: "myacct",
+    });
+    expect(useChat.getState().active).toBeNull();
+    expect(useChat.getState().channels).toEqual([]);
+    expect(useChat.getState().messages["channel:gone"]).toEqual([]);
+    expect(useDrafts.getState().texts["channel:gone"]).toBeUndefined();
+    expect(useDrafts.getState().texts["account:friend"]).toBe("friend draft");
+  });
+  it("invalidates a history response captured before sibling cleanup", async () => {
+    let finish!: (rows: unknown[]) => void;
+    const fallback = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command: string, ...args: unknown[]) =>
+      command === "channel_history"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : fallback(command, ...args),
+    );
+    const loading = useChat.getState().reload();
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    personal = [
+      {
+        conversation: { kind: "channel", id: "gone" },
+        hidden: true,
+        history_floor: "floor-late",
+        local_cleanup_complete: true,
+      },
+    ];
+    await useChat.getState().refreshRoster();
+    finish([
+      {
+        id: "old",
+        who: "other",
+        text: "must not return",
+        from_me: false,
+        wall_clock: 1,
+      },
+    ]);
+    await loading;
+    expect(useChat.getState().active).toBeNull();
+    expect(useChat.getState().messages["channel:gone"]).toEqual([]);
+  });
+  it("does not purge an incomplete imported floor or infer deletion from row absence", async () => {
+    personal = [
+      {
+        conversation: { kind: "channel", id: "gone" },
+        hidden: true,
+        history_floor: "floor-one",
+        local_cleanup_complete: false,
+      },
+    ];
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().active?.id).toBe("gone");
+    expect(useChat.getState().messages["channel:gone"]).toHaveLength(1);
+    expect(useDrafts.getState().texts["channel:gone"]).toBe("old draft");
+  });
+  it("hides a removed contact without erasing kept history and clears a floor only once after reopen", async () => {
+    useChat.setState({
+      active: { kind: "account", id: "friend", name: "Friend" },
+      messages: {
+        "account:friend": [
+          {
+            id: "dm",
+            fromMe: false,
+            who: "friend",
+            text: "keep",
+            wallClock: 1,
+            replyTo: null,
+          },
+        ],
+      },
+    });
+    personal = [
+      {
+        conversation: { kind: "account", id: "friend" },
+        hidden: true,
+        history_floor: null,
+        local_cleanup_complete: true,
+      },
+    ];
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().accounts).toEqual([]);
+    expect(useChat.getState().messages["account:friend"]).toHaveLength(1);
+    personal = [
+      {
+        conversation: { kind: "account", id: "friend" },
+        hidden: false,
+        history_floor: "floor-one",
+        local_cleanup_complete: true,
+      },
+    ];
+    await useChat.getState().refreshRoster();
+    expect(useChat.getState().messages["account:friend"]).toEqual([]);
+    useDrafts
+      .getState()
+      .edit("host", 0, "account:friend", "new draft after reopen");
+    await useChat.getState().refreshRoster();
+    expect(useDrafts.getState().texts["account:friend"]).toBe(
+      "new draft after reopen",
+    );
+  });
+});

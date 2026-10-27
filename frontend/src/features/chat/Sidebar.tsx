@@ -1,3 +1,4 @@
+import { DeleteChatDialog } from "./DeleteChatDialog";
 import { GroupControlStatus } from "./GroupControlStatus";
 import { useGroupControlOperation } from "./useGroupControlOperation";
 import { canManageChannel } from "./channelPermissions";
@@ -62,6 +63,10 @@ function SectionLabel({
 
 export function Sidebar() {
   const { t } = useTranslation();
+  const [deletingChat, setDeletingChat] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const rawAccounts = useChat((s) => s.accounts);
   const hiddenContacts = useContactPolicy((s) => s.contacts);
   const policyLoaded = useContactPolicy((s) => s.loaded);
@@ -242,6 +247,7 @@ export function Sidebar() {
     onTogglePin: togglePinned,
     onRename: startRename,
     onHide: setChannelHidden,
+    onDelete: (id: string, name: string) => setDeletingChat({ id, name }),
   };
 
   return (
@@ -614,6 +620,14 @@ export function Sidebar() {
           </div>
         </DialogContent>
       </Dialog>
+      {deletingChat && (
+        <DeleteChatDialog
+          key={`${owner}:${generation}:${deletingChat.id}`}
+          channelId={deletingChat.id}
+          name={deletingChat.name}
+          onClose={() => setDeletingChat(null)}
+        />
+      )}
     </aside>
   );
 }

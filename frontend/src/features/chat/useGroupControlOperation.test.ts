@@ -2,6 +2,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
+import type { AccountGroupOperationStatus } from "@/lib/types";
 import type { GroupOperationOutcome } from "@/store/accountGroupOperations";
 import type { GroupOperationTicket } from "@/store/accountGroupOperations";
 const { state, auth } = vi.hoisted(() => ({
@@ -191,6 +192,38 @@ it("rebinds an unknown Leave without treating it as cancelled or committed", asy
     expect(h.get().outcome).toEqual({ kind: "unconfirmed", id: "unknown" });
     expect(h.get().busy).toBe(true);
     expect(h.get().cancelRequested).toBe(true);
+  } finally {
+    state.groupOperations = {};
+    await h.stop();
+  }
+});
+
+it("restores a committed leave as busy until private history cleanup completes", async () => {
+  const status: AccountGroupOperationStatus = {
+    id: "cleanup",
+    account_id: "account",
+    group: "group",
+    kind: "leave_account",
+    phase: { kind: "committed" },
+    executions: [],
+    committed_events: [],
+    primary_event: null,
+    delete_history: true,
+  };
+  state.groupOperations.cleanup = {
+    id: status.id,
+    account_id: "account",
+    group: "group",
+    kind: "leave_account",
+    stage: "observed",
+    observation: 1,
+    status,
+  };
+  const h = await mount();
+  try {
+    expect(h.get().id).toBe("cleanup");
+    expect(h.get().busy).toBe(true);
+    expect(h.get().outcome?.kind).toBe("pending");
   } finally {
     state.groupOperations = {};
     await h.stop();

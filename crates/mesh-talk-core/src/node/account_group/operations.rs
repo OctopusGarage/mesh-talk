@@ -395,6 +395,20 @@ pub struct AccountGroupOperationQuery {
 }
 
 impl Node {
+    pub(in crate::node) fn committed_personal_leave(
+        &self,
+        reference: &journal::OperationReference,
+    ) -> bool {
+        self.group_operations
+            .lock()
+            .expect("group operation journal mutex")
+            .entries
+            .get(&reference.id)
+            .is_some_and(|entry| {
+                entry.reference.same(reference)
+                    && entry.status.phase == AccountGroupOperationPhase::Committed
+            })
+    }
     fn ensure_group_operation_account(&self, expected_account: &str) -> Result<(), NodeError> {
         if expected_account != self.account_id() {
             return Err(NodeError::Authorization("account changed".into()));
@@ -443,6 +457,24 @@ impl Node {
         id: AccountGroupOperationId,
         group: ConversationId,
         operation: AccountGroupOperation,
+        authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
+    ) -> Result<AccountGroupOperationStatus, NodeError> {
+        self.submit_account_group_operation_with_prepared_if(
+            expected_account,
+            id,
+            group,
+            operation,
+            |_| Ok(()),
+            authorize,
+        )
+    }
+    pub(in crate::node) fn submit_account_group_operation_with_prepared_if(
+        &self,
+        expected_account: &str,
+        id: AccountGroupOperationId,
+        group: ConversationId,
+        operation: AccountGroupOperation,
+        mut prepared: impl FnMut(&mut journal::OperationReference) -> Result<(), NodeError>,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<AccountGroupOperationStatus, NodeError> {
         self.ensure_group_operation_account(expected_account)?;
@@ -648,9 +680,22 @@ impl Node {
                 .into_iter()
                 .next()
                 .ok_or_else(|| NodeError::Channel("owner source is reconciling".into()))?;
-            let ready = self.account_group_source_ready_for(&executor, operation.kind());
-            let reference =
+            let mut reference =
                 journal::OperationReference::new(self, id, group, &operation, executor.clone());
+            prepared(&mut reference)?;
+            if !reference.valid(&self.account.public().ed25519_pub)
+                || reference.id != id
+                || reference.group != group
+                || reference.kind != operation.kind()
+                || reference.digest != digest
+                || reference.origin.public() != self.identity.public()
+            {
+                return Err(NodeError::Authorization(
+                    "prepared operation identity changed".into(),
+                ));
+            }
+            let executor = reference.executor.clone();
+            let ready = self.account_group_source_ready_for(&executor, operation.kind());
             if let AccountGroupOperation::Send { message } = &operation
                 && message.kind == AccountGroupOperationKind::File
             {
@@ -789,6 +834,9 @@ impl Node {
             query.group.is_none_or(|group| status.group == group)
                 && query.after.is_none_or(|after| status.id > after)
                 && (!query.pending_only
+                    || (status.phase == AccountGroupOperationPhase::Committed
+                        && self.account_group_leave_cleanup(status.id) == Some(true)
+                        && self.account_group_leave_cleanup_complete(status.id) != Some(true))
                     || !matches!(
                         status.phase,
                         AccountGroupOperationPhase::Committed

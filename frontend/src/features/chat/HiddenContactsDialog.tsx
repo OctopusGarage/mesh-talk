@@ -23,7 +23,6 @@ import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
 import { useContactPolicy } from "@/store/contactPolicy";
 import type { HiddenContact } from "@/lib/types";
-import { usePresenceFor } from "@/store/presence";
 import { DeleteContactDialog } from "./DeleteContactDialog";
 import { shortId } from "@/lib/format";
 
@@ -40,12 +39,19 @@ export function HideContactDialog({
   const error = useContactPolicy((s) => s.error);
   const loaded = useContactPolicy((s) => s.loaded);
   const policyOwner = useContactPolicy((s) => s.owner);
+  const myAccountId = useChat((s) => s.myAccountId);
   const save = async () => {
-    if (!contact || !owner) return;
+    const expectedAccount = myAccountId;
+    if (!contact || !owner || !expectedAccount.trim()) return;
     const ok = await useContactPolicy
       .getState()
-      .change(owner, contact.account_id, true, contact.name);
-    if (!ok || useAuth.getState().user?.id !== owner) return;
+      .change(owner, contact.account_id, true, contact.name, expectedAccount);
+    if (
+      !ok ||
+      useAuth.getState().user?.id !== owner ||
+      useChat.getState().myAccountId !== expectedAccount
+    )
+      return;
     const active = useChat.getState().active;
     if (active?.kind === "account" && active.id === contact.account_id)
       useChat.setState({ active: null });
@@ -127,7 +133,6 @@ export function ContactContextMenu({
   const { t } = useTranslation();
   const [confirm, setConfirm] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
-  const online = usePresenceFor(account).online;
   const ready = useChat((s) => s.ready);
   const loaded = useContactPolicy((s) => s.loaded);
   const myAccountId = useChat((s) => s.myAccountId);
@@ -149,7 +154,7 @@ export function ContactContextMenu({
             <EyeOff className="mr-2 h-4 w-4" />
             {t("contactVisibility.hide")}
           </ContextMenuItem>
-          {!online && account !== myAccountId && (
+          {account !== myAccountId && (
             <ContextMenuItem
               data-testid={`delete-contact-menu-${account}`}
               disabled={!ready || !loaded}
@@ -257,11 +262,12 @@ export function HiddenContactsDialog() {
               aria-label={`${t(restore ? "contactVisibility.restore" : "contactVisibility.hide")} ${c.name}`}
               disabled={busy || loading || (!restore && !ready)}
               onClick={() => {
-                if (restore && owner)
-                  void useContactPolicy
-                    .getState()
-                    .change(owner, c.account_id, false, c.name);
-                else {
+                if (restore) {
+                  if (owner && myAccountId.trim())
+                    void useContactPolicy
+                      .getState()
+                      .change(owner, c.account_id, false, c.name, myAccountId);
+                } else {
                   useContactPolicy.getState().clearSaveError();
                   setConfirm(c);
                 }

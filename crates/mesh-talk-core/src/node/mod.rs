@@ -30,8 +30,8 @@ mod account_session;
 pub(crate) mod file_message_identity;
 pub use account_documents::{
     AccountDocument, AccountDocumentDomain, AccountDocumentKey, AccountDocumentMeta,
-    AccountDocumentPage, DocumentConversation, DocumentVersion, GroupInventoryMember,
-    GroupInventoryReference,
+    AccountDocumentPage, ConversationPersonalState, DocumentConversation, DocumentVersion,
+    GroupInventoryMember, GroupInventoryReference,
 };
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;

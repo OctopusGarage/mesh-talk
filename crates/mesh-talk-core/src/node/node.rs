@@ -1007,6 +1007,9 @@ impl Node {
         }
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
+        if node.retry_conversation_personal_cleanup().is_err() {
+            log::debug!("personal conversation cleanup remains pending");
+        }
         node.queue_approved_incomplete_files();
         Ok(node)
     }

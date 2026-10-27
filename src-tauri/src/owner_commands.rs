@@ -714,6 +714,8 @@ mod tests {
                     crate::chat_commands::write_temp_file,
                     super::owner_create_channel,
                     super::owner_new_account_group_operation_id,
+                    super::owner_personal_conversation_states,
+                    super::owner_delete_left_channel,
                     super::owner_submit_account_group_control,
                     super::owner_submit_account_group_text,
                     super::owner_submit_account_group_sticker,
@@ -1102,6 +1104,15 @@ mod tests {
             "owner_list_account_group_operations",
             serde_json::json!({"owner":"alice", "expectedAccount":account, "pendingOnly":true, "limit":20}),
         ).unwrap(), serde_json::json!([]));
+        assert_eq!(
+            fixture
+                .invoke(
+                    "owner_personal_conversation_states",
+                    serde_json::json!({"owner":"alice", "expectedAccount":account})
+                )
+                .unwrap(),
+            serde_json::json!([])
+        );
         for (command, body) in [
             (
                 "owner_new_account_group_operation_id",
@@ -1123,6 +1134,11 @@ mod tests {
                 "owner_cancel_account_group_operation",
                 serde_json::json!({"operationId":operation_id}),
             ),
+            (
+                "owner_delete_left_channel",
+                serde_json::json!({"channelId":"34".repeat(32)}),
+            ),
+            ("owner_personal_conversation_states", serde_json::json!({})),
         ] {
             let mut body = body;
             body["owner"] = serde_json::json!("alice");
@@ -1251,6 +1267,8 @@ mod tests {
     fn registered_account_group_operations_reject_queued_logout() {
         for command in [
             "owner_create_channel",
+            "owner_delete_left_channel",
+            "owner_personal_conversation_states",
             "owner_new_account_group_operation_id",
             "owner_submit_account_group_control",
             "owner_submit_account_group_text",
@@ -1276,7 +1294,10 @@ mod tests {
                     body["memberAccountIds"] = serde_json::json!([]);
                 }
 
-                "owner_new_account_group_operation_id" => {}
+                "owner_delete_left_channel" => {
+                    body["channelId"] = serde_json::json!("34".repeat(32));
+                }
+                "owner_new_account_group_operation_id" | "owner_personal_conversation_states" => {}
                 "owner_submit_account_group_control" => {
                     body["operationId"] = serde_json::json!("12".repeat(32));
                     body["channelId"] = serde_json::json!("34".repeat(32));

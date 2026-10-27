@@ -1071,6 +1071,45 @@ from account archive export, including cached pages. Control revisions invalidat
 stale exports; late original content also observes accepted recall state. Local
 hide/delete and conversation clearing do not become global recalls.
 
+#### Personal conversation removal
+
+Removing a contact is an account-personal action, independent of its current
+presence. The confirmation offers keeping or deleting history; keeping history
+does not silently erase it. An exited group's separate **Delete chat** action
+removes that chat and its history. Leaving a group can request the same cleanup,
+but its original signed account Leave must commit before any private erasure.
+The accepted cleanup choice stays bound to that exact operation ID and membership
+lifetime. Rejection, cancellation, an orphaned intent or a later invitation must
+not authorize deletion of another lifetime.
+
+The encrypted account-document store owns these private controls and monotone
+history floors. They reuse the mandatory certified-sibling control lane through
+a separately negotiated version-7 document request. A nonce-bound capability
+echo on the ordinary version-5 control exchange authorizes this extension;
+transport failure alone is not evidence of unsupported capability. Version-5
+digests and pages exclude its new keys. Deployed public group operations and
+event encodings remain unchanged. Older peers retain their supported exchange
+and require an upgrade for this capability. Offline or older
+siblings are not reported as having completed deletion.
+
+Persist the winning floor before retryable sidecar and managed-media cleanup.
+Publish a full-device acknowledgement only after that local cleanup completes.
+Public Leave commitment and private history cleanup are separate observations:
+the desktop keeps the original ticket while cleanup remains incomplete, including
+after restart. It must not clear its cache or announce cleanup success solely
+because the public Leave committed. Standalone deletion returns success only
+after local cleanup; subsequent sibling convergence remains independently tracked.
+
+Conversation removal preserves canonical signed protocol events, membership
+proofs, independently retained Favorites and exported files. It does not grant or
+revoke another account's membership, erase its history or act as a communication
+block. Presence-only discovery cannot restore a removed contact. Explicit reopen
+or authenticated new live content can restore visibility while retaining the
+history floor. Historical sibling imports require that exact source device to
+have applied the current floor; stale archive, draft, file-card and cached repair
+work must not resurrect deleted content. Device-local **Clear history** retains
+its existing local scope.
+
 Sibling file bytes use an optional checked attachment request on the same account
 session. Only that request admits the appended typed unavailable/source-disabled
 response; legacy attachment layouts and responses remain frozen. The source checks
@@ -2296,7 +2335,7 @@ both live admission and replay, with clear tombstones winning equal revisions.
 Preference consumers use the core's `(revision, device_id)` order. Contact imports
 persist whole records in bounded batches, compare the expected local record at
 the commit boundary to preserve concurrent local edits, and reload each affected
-UI projection once. Linked imports preserve device-local contact deletions;
+UI projection once. Linked imports respect account-personal conversation removal;
 local committed mutations wake publication immediately.
 
 Federation wakes on durable mailbox, directory and effective route changes,

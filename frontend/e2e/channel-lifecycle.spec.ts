@@ -53,7 +53,9 @@ test("the owner transfers ownership before leaving", async ({ page }) => {
     .getByRole("button", { name: "Transfer ownership", exact: true })
     .click();
   await page.getByRole("button", { name: "Leave channel" }).click();
-  await expect(page.getByText(/Leave this channel/)).toBeVisible();
+  await expect(
+    page.getByText(/Your account will leave this group/),
+  ).toBeVisible();
   await page
     .getByRole("button", { name: "Leave channel", exact: true })
     .last()
@@ -61,4 +63,75 @@ test("the owner transfers ownership before leaving", async ({ page }) => {
   await expect(
     page.getByTestId(`conversation-row-${CHANNEL.id}`),
   ).toContainText("Left channel");
+});
+
+test("left channel history can be retained then deleted from the chat list", async ({
+  page,
+}, testInfo) => {
+  await enterChat(page);
+  const row = page.getByTestId(`conversation-row-${CHANNEL.id}`);
+  await row.click();
+  await page.getByTestId("members-trigger").click();
+  await page.getByRole("button", { name: "Transfer ownership bob" }).click();
+  await page
+    .getByRole("button", { name: "Transfer ownership", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Leave channel" }).click();
+  await expect(page.getByRole("checkbox")).not.toBeChecked();
+  await page
+    .getByRole("button", { name: "Leave channel", exact: true })
+    .last()
+    .click();
+  await expect(row).toContainText("Left channel");
+  await row.click();
+  await page.getByRole("button", { name: "Delete chat", exact: true }).click();
+  await expect(page.getByTestId("delete-chat-dialog")).toContainText(
+    "all your linked devices",
+  );
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(row).toBeVisible();
+  await row.hover();
+  await page.getByTestId(`conversation-actions-${CHANNEL.id}`).click();
+  await page.getByTestId(`conversation-delete-${CHANNEL.id}`).click();
+  await page.screenshot({
+    path: testInfo.outputPath("delete-left-channel.png"),
+    animations: "disabled",
+  });
+  await page.evaluate(() =>
+    (window as unknown as { __mockFailNext(cmd: string): void }).__mockFailNext(
+      "owner_delete_left_channel",
+    ),
+  );
+  await page
+    .getByTestId("delete-chat-dialog")
+    .getByRole("button", { name: "Delete chat", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("Try again");
+  await expect(row).toBeVisible();
+  await page
+    .getByTestId("delete-chat-dialog")
+    .getByRole("button", { name: "Delete chat", exact: true })
+    .click();
+  await expect(row).toHaveCount(0);
+  await expect(page.getByRole("log")).toHaveCount(0);
+});
+
+test("leave and delete history removes the chat only after leaving", async ({
+  page,
+}) => {
+  await enterChat(page);
+  const row = page.getByTestId(`conversation-row-${CHANNEL.id}`);
+  await row.click();
+  await page.getByTestId("members-trigger").click();
+  await page.getByRole("button", { name: "Transfer ownership bob" }).click();
+  await page
+    .getByRole("button", { name: "Transfer ownership", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Leave channel" }).click();
+  await page.getByRole("checkbox").check();
+  await page
+    .getByRole("button", { name: "Leave channel", exact: true })
+    .last()
+    .click();
+  await expect(row).toHaveCount(0);
 });

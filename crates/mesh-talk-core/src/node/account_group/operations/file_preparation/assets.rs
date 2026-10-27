@@ -397,6 +397,7 @@ impl Node {
                     after: None,
                     known_digest: [0; 32],
                     asset: Some(request),
+                    personal: false,
                 }),
             };
             let mut channel = self

@@ -93,6 +93,14 @@ _Avoid_: channel membership, device certificate, session token.
 
 ## Conversations and history
 
+**Personal conversation removal**:
+An account-private decision to remove a chat, optionally erasing its history on
+certified linked devices. Durable deletion floors prevent stale private replay;
+each device confirms its own cleanup separately. It is distinct from leaving or
+dissolving a group, recalling a message and blocking a contact.
+_Avoid_: global deletion, completed cleanup based only on a committed group Leave.
+See [removal semantics](docs/network-design-reference.md#personal-conversation-removal).
+
 **Conversation**:
 A direct or channel conversation whose authorized content can be retained and
 synchronized. A UI conversation selection is a view of that conversation.

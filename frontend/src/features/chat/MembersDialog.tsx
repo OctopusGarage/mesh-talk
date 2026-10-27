@@ -1,3 +1,4 @@
+import { DeleteChatDialog } from "./DeleteChatDialog";
 import { GroupControlStatus, PendingGroupControls } from "./GroupControlStatus";
 import { useGroupControlOperation } from "./useGroupControlOperation";
 import { canManageChannel, canParticipateChannel } from "./channelPermissions";
@@ -128,6 +129,10 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   // Whole presence map (the dialog reads many ids at once; one subscription).
   const presenceMap = usePresence((s) => s.map);
   const [open, setOpen] = useState(false);
+  const [deleteChatTarget, setDeleteChatTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const [profileTarget, setProfileTarget] =
     useState<MemberProfileTarget | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -148,6 +153,12 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   const transferring = busy;
   const [confirmLeave, setConfirmLeave] = useState<string | null>(null);
   const leaving = busy;
+  const savedLeaveHistory =
+    operation.outcome && "status" in operation.outcome
+      ? operation.outcome.status.delete_history
+      : undefined;
+  const [deleteLeaveHistory, setDeleteLeaveHistory] = useState(false);
+  useEffect(() => setDeleteLeaveHistory(false), [channelId]);
   const [activitySnapshot, setActivitySnapshot] = useState<{
     channelId: string;
     entries: ChannelActivityInfo[];
@@ -245,10 +256,13 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
   };
   const finishLeave = async () => {
     if (confirmLeave !== channelId || leaving) return;
-    await operation.run(leaveChannel, () => {
-      setConfirmLeave(null);
-      setOpen(false);
-    });
+    await operation.run(
+      () => leaveChannel(deleteLeaveHistory),
+      () => {
+        setConfirmLeave(null);
+        setOpen(false);
+      },
+    );
   };
 
   const statusFor = (accountId: string | null | undefined) =>
@@ -840,10 +854,19 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                       : "conversation.sharedReferenceHint",
                   )}
                 </p>
-              ) : dissolved ? (
-                <p className="text-xs text-muted-foreground">
-                  {t("conversation.dissolvedChannelHint")}
-                </p>
+              ) : dissolved ||
+                accountAccess?.role === "left" ||
+                (!accountAccess && channel?.left) ? (
+                <Button
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => {
+                    if (active?.kind === "channel")
+                      setDeleteChatTarget({ id: active.id, name: active.name });
+                  }}
+                >
+                  {t("conversationDeletion.delete")}
+                </Button>
               ) : isOwner ? (
                 <p className="text-xs text-muted-foreground">
                   {t("members.transferBeforeLeave")}
@@ -853,15 +876,36 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                 confirmLeave === channelId ? (
                 <div className="space-y-3">
                   <p className="text-sm" role="status">
-                    {t("members.confirmLeave")}
+                    {t(
+                      leaving
+                        ? "members.savedLeaveOptions"
+                        : "members.confirmLeave",
+                    )}
                   </p>
+                  {(!leaving || typeof savedLeaveHistory === "boolean") && (
+                    <label className="flex items-start gap-3 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={
+                          leaving
+                            ? savedLeaveHistory === true
+                            : deleteLeaveHistory
+                        }
+                        disabled={leaving}
+                        onChange={(event) =>
+                          setDeleteLeaveHistory(event.target.checked)
+                        }
+                        className="mt-1 accent-primary"
+                      />
+                      <span>{t("members.deleteLeaveHistory")}</span>
+                    </label>
+                  )}
                   <div className="flex justify-end gap-2">
                     <Button
                       variant="ghost"
-                      disabled={leaving}
                       onClick={() => setConfirmLeave(null)}
                     >
-                      {t("common.cancel")}
+                      {t(leaving ? "common.close" : "common.cancel")}
                     </Button>
                     <Button
                       variant="destructive"
@@ -876,7 +920,10 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
                 <Button
                   variant="ghost"
                   className="text-destructive hover:text-destructive"
-                  onClick={() => setConfirmLeave(channelId)}
+                  onClick={() => {
+                    setDeleteLeaveHistory(false);
+                    setConfirmLeave(channelId);
+                  }}
                 >
                   <LogOut className="h-4 w-4" />
                   {t("members.leave")}
@@ -884,6 +931,14 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               )}
             </div>
           </>
+        )}
+        {deleteChatTarget && (
+          <DeleteChatDialog
+            key={deleteChatTarget.id}
+            channelId={deleteChatTarget.id}
+            name={deleteChatTarget.name}
+            onClose={() => setDeleteChatTarget(null)}
+          />
         )}
         <MemberProfileDialog
           target={profileTarget}

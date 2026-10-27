@@ -19,6 +19,7 @@ export interface GroupOperationTicket {
   observation: number;
   status?: AccountGroupOperationStatus;
   cancelRequested?: boolean;
+  deleteHistory?: boolean;
 }
 export type GroupOperationOutcome =
   | {
@@ -73,14 +74,32 @@ export interface GroupOperationRequest {
   group: string;
   kind: AccountGroupOperationKind;
   invoke: GroupOperationInvoke;
+  deleteHistory?: boolean;
   /** Link payload ownership after reservation, before native mutation. */
   onReserved?: (id: string) => boolean;
 }
-function isTerminal(status: AccountGroupOperationStatus | undefined): boolean {
+export function isGroupHistoryCleanupPending(
+  status: AccountGroupOperationStatus | undefined,
+): boolean {
+  return (
+    status?.kind === "leave_account" &&
+    status.phase.kind === "committed" &&
+    status.delete_history === true &&
+    status.history_cleanup_complete !== true
+  );
+}
+export function isGroupOperationComplete(
+  status: AccountGroupOperationStatus | undefined,
+): boolean {
   return (
     !!status &&
-    ["committed", "rejected", "cancelled"].includes(status.phase.kind)
+    ["committed", "rejected", "cancelled"].includes(status.phase.kind) &&
+    !isGroupHistoryCleanupPending(status)
   );
+}
+const isTerminal = isGroupOperationComplete;
+function publicCommitted(status: AccountGroupOperationStatus | undefined) {
+  return status?.phase.kind === "committed";
 }
 
 /** Leave is one unresolved account action, even when its dialog is recreated. */
@@ -102,8 +121,9 @@ export function unresolvedGroupLeave(
 function outcome(status: AccountGroupOperationStatus): GroupOperationOutcome {
   const phase = status.phase.kind;
   return {
-    kind:
-      phase === "committed" || phase === "rejected" || phase === "cancelled"
+    kind: isGroupHistoryCleanupPending(status)
+      ? "pending"
+      : phase === "committed" || phase === "rejected" || phase === "cancelled"
         ? phase
         : "pending",
     id: status.id,
@@ -179,7 +199,34 @@ export function createGroupOperationCoordinator(
       if (!ticket.status) context.update({ ...ticket, stage: "unconfirmed" });
       return lease.current() ? currentOutcome(ticket) : { kind: "stale" };
     }
-    if (isTerminal(ticket.status)) {
+    const retainedChoice =
+      ticket.deleteHistory ?? ticket.status?.delete_history;
+    if (status.kind === "leave_account" && retainedChoice != null) {
+      if (
+        status.delete_history != null &&
+        status.delete_history !== retainedChoice
+      ) {
+        context.report("conflicting_terminal");
+        return currentOutcome(ticket);
+      }
+      status = { ...status, delete_history: retainedChoice };
+    }
+    // Public commitment cannot regress while its private cleanup is still pending.
+    if (
+      publicCommitted(ticket.status) &&
+      !sameTerminal(ticket.status!, status)
+    ) {
+      context.report("conflicting_terminal");
+      return currentOutcome(ticket);
+    }
+    // The public result can arrive before the separate private choice document.
+    // Enrich that same immutable result instead of latching unknown as Keep.
+    const cleanupMetadataArrived =
+      publicCommitted(ticket.status) &&
+      status.kind === "leave_account" &&
+      ticket.status?.delete_history == null &&
+      status.delete_history === true;
+    if (isTerminal(ticket.status) && !cleanupMetadataArrived) {
       if (isTerminal(status) && !sameTerminal(ticket.status!, status))
         context.report("conflicting_terminal");
       return lease.current() ? currentOutcome(ticket) : { kind: "stale" };
@@ -209,7 +256,11 @@ export function createGroupOperationCoordinator(
   ): Promise<GroupOperationOutcome> {
     const ticket = ticketFor(lease, id);
     if (!lease.current() || !ticket) return { kind: "stale" };
-    if (isTerminal(ticket.status) || cancelling.has(invocationKey(lease, id)))
+    if (
+      isTerminal(ticket.status) ||
+      publicCommitted(ticket.status) ||
+      cancelling.has(invocationKey(lease, id))
+    )
       return currentOutcome(ticket);
     const key = invocationKey(lease, id);
     cancelling.add(key);
@@ -311,6 +362,9 @@ export function createGroupOperationCoordinator(
         account_id: lease.accountId,
         group: request.group,
         kind: request.kind,
+        ...(request.deleteHistory === undefined
+          ? {}
+          : { deleteHistory: request.deleteHistory }),
         stage: "submitting",
         observation: 0,
       };
@@ -337,7 +391,8 @@ export function createGroupOperationCoordinator(
           id,
           error: new Error("Operation is not tracked"),
         };
-      if (isTerminal(ticket.status)) return currentOutcome(ticket);
+      if (isTerminal(ticket.status) || publicCommitted(ticket.status))
+        return currentOutcome(ticket);
       return invoke(lease, ticket, send, false);
     },
     async cancel(id: string): Promise<GroupOperationOutcome> {
@@ -350,7 +405,8 @@ export function createGroupOperationCoordinator(
           id,
           error: new Error("Operation is not tracked"),
         };
-      if (isTerminal(ticket.status)) return currentOutcome(ticket);
+      if (isTerminal(ticket.status) || publicCommitted(ticket.status))
+        return currentOutcome(ticket);
       context.update({ ...ticket, cancelRequested: true });
       if (!lease.current()) return { kind: "stale" };
       return requestCancellation(lease, id);

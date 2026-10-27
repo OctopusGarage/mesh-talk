@@ -1,10 +1,12 @@
 {
   "contactDeletion": {
     "title": "¿Eliminar contacto?",
-    "description": "Elimina el contacto y su historial de mensajes de forma permanente en este dispositivo. No se puede deshacer. Si vuelve a detectarse en línea, reaparecerá sin recuperar el historial eliminado.",
+    "description": "Elimina este contacto de tus dispositivos vinculados. No lo bloquea ni modifica sus copias. Se aplica a los dispositivos vinculados cuando sincronizan; las apps antiguas pueden necesitar una actualización.",
     "delete": "Eliminar contacto",
     "online": "Este contacto está en línea. Solo se pueden eliminar contactos sin conexión.",
-    "error": "No se pudo completar la eliminación. Es posible que parte del historial local ya se haya eliminado. Comprueba que el contacto siga sin conexión e inténtalo de nuevo."
+    "error": "No se pudo eliminar el contacto. Inténtalo de nuevo.",
+    "clearHistory": "Eliminar también el historial en todos los dispositivos vinculados",
+    "historyHint": "Sin marcar, el historial se conserva para cuando abras el chat. Se conservan Favoritos y los archivos exportados."
   },
   "privacy": {
     "retry": "Reintentar",
@@ -962,11 +964,13 @@
     "transferOwner": "Transferir propiedad",
     "confirmTransfer": "¿Hacer a {{name}} propietario del canal? Podrá gestionar miembros y el nombre.",
     "leave": "Salir del canal",
-    "confirmLeave": "¿Salir de este canal? Dejarás de recibir mensajes nuevos. El historial local permanecerá en este dispositivo.",
+    "confirmLeave": "Tu cuenta saldrá de este grupo en todos los dispositivos vinculados. El historial se conserva salvo que selecciones la opción siguiente.",
     "transferBeforeLeave": "Transfiere la propiedad a otro miembro antes de salir del canal.",
     "referencePartial": "Solo se muestran los miembros conocidos. Esta lista compartida es parcial por los límites de tamaño.",
     "detailsReconciling": "Se están conciliando los datos del grupo. Se muestra la última política confirmada.",
-    "historyUnavailable": "La política del historial del grupo aún no está disponible. Mantén un dispositivo vinculado conectado y vuelve a intentarlo."
+    "historyUnavailable": "La política del historial del grupo aún no está disponible. Mantén un dispositivo vinculado conectado y vuelve a intentarlo.",
+    "deleteLeaveHistory": "Eliminar también el historial y quitarlo de todos los dispositivos vinculados",
+    "savedLeaveOptions": "La salida está en curso. Se aplicarán las opciones guardadas de esta solicitud."
   },
   "createChannel": {
     "trigger": "Nuevo canal",
@@ -1414,6 +1418,13 @@
     "refresh": "Comprobar estado",
     "committed": "La acción de la cuenta se completó.",
     "upgrade": "Actualiza un dispositivo vinculado para continuar esta acción.",
-    "actionRequired": "Revisa el acceso al grupo para continuar esta acción."
+    "actionRequired": "Revisa el acceso al grupo para continuar esta acción.",
+    "cleaningHistory": "Has salido del grupo. Borrando el historial…"
+  },
+  "conversationDeletion": {
+    "title": "¿Eliminar chat?",
+    "description": "Elimina este chat y su historial de todos tus dispositivos vinculados. No se puede deshacer. Se conservan las copias de otros miembros, Favoritos y los archivos exportados. Se aplica a los dispositivos vinculados cuando sincronizan; las apps antiguas pueden necesitar una actualización.",
+    "delete": "Eliminar chat",
+    "error": "No se pudo eliminar el chat. Inténtalo de nuevo."
   }
 }

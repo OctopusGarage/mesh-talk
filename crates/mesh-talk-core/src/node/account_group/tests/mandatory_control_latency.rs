@@ -165,6 +165,10 @@ async fn reference_owner_rename_overtakes_held_mandatory_inventory_over_noise() 
         }
     }));
     owner.publish_group_inventory_for(group);
+    // Bootstrap may already have published this exact Inventory head. Its
+    // unchanged publication correctly emits no wake; schedule the reference's
+    // next ordinary refresh only after the response hook is installed.
+    reference.account_sync_notify.notify_one();
     tokio::time::timeout(Duration::from_secs(8), held)
         .await
         .expect("the reference must reach an authenticated Inventory response")

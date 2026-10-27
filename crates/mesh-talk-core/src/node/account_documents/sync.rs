@@ -81,6 +81,9 @@ pub(in crate::node) struct DocumentSyncCursor {
     // The legacy digest remains access-only, even when the peer ignores the
     // optional operation probe. Its digest and continuation have a separate scope.
     operation_digest: [u8; 32],
+    personal_supported: bool,
+    personal_upgrade: bool,
+    personal_required: bool,
     pub(in crate::node) retry_at: Option<Instant>,
     admission_deferred: bool,
     last_failure_at: Option<Instant>,
@@ -112,6 +115,9 @@ impl Default for DocumentSyncCursor {
             after: None,
             digests: [[0; 32]; 12],
             operation_digest: [0; 32],
+            personal_supported: false,
+            personal_upgrade: false,
+            personal_required: false,
             retry_at: None,
             admission_deferred: false,
             last_failure_at: None,
@@ -304,9 +310,12 @@ impl DocumentSyncCursor {
         if enabled == 0 {
             return (SyncPhase::UpToDate, None, false);
         }
-        let upgrade = self.requires_upgrade
-            && ((policy.history || policy.appearance) && !self.control_upgrade
-                || policy.history && self.control_upgrade)
+        let upgrade = (self.personal_required
+            && self.personal_upgrade
+            && self.scope.mask() & (1 << AccountDocumentDomain::GroupControl as usize) != 0)
+            || self.requires_upgrade
+                && ((policy.history || policy.appearance) && !self.control_upgrade
+                    || policy.history && self.control_upgrade)
             || self.custody_upgrade && policy.history && self.scope.mask() & 64 != 0
             || self.inventory_upgrade && self.scope.mask() & 128 != 0
             || self.group_upgrade
@@ -416,6 +425,7 @@ impl Node {
             return self.serve_group_operation_asset(channel, asset).await;
         }
         let (policy, revision) = self.device_sync_policy_snapshot();
+        let personal_cut = self.capture_personal_history_cut(&self.identity.public());
         let enabled = document_enabled(request.domain, policy);
         let domain = request.domain;
         let operation = request
@@ -423,6 +433,8 @@ impl Node {
             .filter(|probe| domain == AccountDocumentDomain::GroupControl && probe.supported());
         let include_operations = operation.is_some();
         let include_legacy = operation.as_ref().is_some_and(|probe| probe.legacy_leave);
+        let include_personal =
+            request.version == 7 && operation.as_ref().is_some_and(|probe| probe.personal);
         let after = operation
             .as_ref()
             .and_then(|probe| probe.after.as_ref().map(OperationContinuation::key))
@@ -435,24 +447,31 @@ impl Node {
             nonce: probe.nonce,
             supported_kinds: Some(local_operation_capabilities()),
             legacy_leave: probe.legacy_leave,
+            personal: probe.personal,
         });
         let Ok((items, digest)) = self
             .account_blocking(move |node| {
                 let store = node.account_documents.lock().expect("documents mutex");
                 let digest = if enabled {
-                    store.digest_operation_scope(domain, include_operations, include_legacy)
+                    store.digest_exchange_scope(
+                        domain,
+                        include_operations,
+                        include_legacy,
+                        include_personal,
+                    )
                 } else {
                     [0; 32]
                 };
                 let rows = if !enabled || (after.is_none() && known != [0; 32] && known == digest) {
                     Vec::new()
                 } else {
-                    store.list_operation_scope(
+                    store.list_exchange_scope(
                         domain,
                         after.as_ref(),
                         64,
                         include_operations,
                         include_legacy,
+                        include_personal,
                     )
                 };
                 Ok((rows, digest))
@@ -480,7 +499,14 @@ impl Node {
                 .account_documents
                 .lock()
                 .expect("documents mutex")
-                .list_operation_scope(domain, Some(&key), 1, include_operations, include_legacy);
+                .list_exchange_scope(
+                    domain,
+                    Some(&key),
+                    1,
+                    include_operations,
+                    include_legacy,
+                    include_personal,
+                );
             if !more.is_empty() {
                 next = Some(key);
             }
@@ -524,6 +550,12 @@ impl Node {
                     next = last_emitted.clone();
                     break;
                 }
+                if let AccountDocumentKey::Draft { conversation }
+                | AccountDocumentKey::ReadReceipt { conversation, .. } = &meta.key
+                    && !personal_cut.allows(self, conversation)
+                {
+                    continue;
+                }
                 emitted_bytes += meta.content_len as usize;
                 last_emitted = Some(meta.key.clone());
                 let body = serde_json::to_vec(&meta).expect("document metadata serializes");
@@ -541,6 +573,12 @@ impl Node {
                 }
                 if let Some(document) = payload {
                     for chunk in document.payload().chunks(MAX_CHUNK) {
+                        if let AccountDocumentKey::Draft { conversation }
+                        | AccountDocumentKey::ReadReceipt { conversation, .. } = &meta.key
+                            && !personal_cut.allows(self, conversation)
+                        {
+                            return false;
+                        }
                         if self
                             .send_account_frame(
                                 channel,
@@ -823,6 +861,13 @@ impl Node {
         cursor: &mut DocumentSyncCursor,
     ) -> Result<(), NodeError> {
         let domain = DOMAINS[cursor.domain];
+        let personal_cut = self.capture_personal_history_cut(&peer.public);
+        cursor.personal_required = !self
+            .account_documents
+            .lock()
+            .expect("documents mutex")
+            .personal
+            .is_empty();
         let (_, revision) = self.device_sync_policy_snapshot();
         let operation = if domain == AccountDocumentDomain::GroupControl {
             // Retain authenticated support while refreshing it. An in-flight
@@ -857,6 +902,7 @@ impl Node {
                 },
                 known_digest: std::mem::take(&mut cursor.operation_digest),
                 legacy_leave: true,
+                personal: true,
             })
         } else {
             None
@@ -866,7 +912,13 @@ impl Node {
                 AccountDocumentDomain::PublicProfile | AccountDocumentDomain::GroupActivity => 6,
                 AccountDocumentDomain::DeviceHostname => 5,
                 AccountDocumentDomain::GroupInventory => 4,
-                AccountDocumentDomain::GroupControl => 5,
+                AccountDocumentDomain::GroupControl => {
+                    if cursor.personal_supported {
+                        7
+                    } else {
+                        5
+                    }
+                }
                 AccountDocumentDomain::ChannelCustody => 3,
                 AccountDocumentDomain::DmReaction | AccountDocumentDomain::DmRecall => 2,
                 _ => 1,
@@ -895,6 +947,9 @@ impl Node {
         let mut channel = match exchange {
             Ok(channel) => channel,
             Err(error) => {
+                if request.version == 7 {
+                    cursor.personal_supported = false;
+                }
                 if request.version >= 2
                     && matches!(&error,NodeError::Session(super::super::session::SessionError::Transport(TransportError::Io(e))) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe))
                 {
@@ -941,6 +996,9 @@ impl Node {
             let bytes = match received {
                 Ok(bytes) => bytes,
                 Err(error) => {
+                    if request.version == 7 {
+                        cursor.personal_supported = false;
+                    }
                     let pre_reply_close = matches!(&error,TransportError::Io(e) if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::BrokenPipe));
                     if request.version >= 2 && pre_reply_close {
                         if request.version == 6 {
@@ -959,11 +1017,12 @@ impl Node {
                                 if matches!(meta.key, AccountDocumentKey::GroupControl { .. })
                                     && payload.len() == meta.content_len as usize
                                 {
-                                    self.commit_imported_document(
+                                    self.commit_imported_document_at_cut(
                                         meta,
                                         std::mem::take(&mut *payload),
                                         revision,
                                         peer.public.clone(),
+                                        personal_cut.clone(),
                                     )
                                     .await?;
                                 }
@@ -1017,11 +1076,12 @@ impl Node {
                         if domain == AccountDocumentDomain::GroupControl {
                             group_records.push((meta, payload));
                         } else {
-                            self.commit_imported_document(
+                            self.commit_imported_document_at_cut(
                                 meta,
                                 std::mem::take(&mut *payload),
                                 revision,
                                 peer.public.clone(),
+                                personal_cut.clone(),
                             )
                             .await?;
                         }
@@ -1072,11 +1132,12 @@ impl Node {
                             return Err(failure());
                         }
                         let (meta, mut payload) = pending.take().expect("complete role row");
-                        self.commit_imported_document(
+                        self.commit_imported_document_at_cut(
                             meta,
                             std::mem::take(&mut *payload),
                             revision,
                             peer.public.clone(),
+                            personal_cut.clone(),
                         )
                         .await?;
                     }
@@ -1103,11 +1164,12 @@ impl Node {
                         if domain == AccountDocumentDomain::GroupControl {
                             group_records.push((meta, payload));
                         } else {
-                            self.commit_imported_document(
+                            self.commit_imported_document_at_cut(
                                 meta,
                                 std::mem::take(&mut *payload),
                                 revision,
                                 peer.public.clone(),
+                                personal_cut.clone(),
                             )
                             .await?;
                         }
@@ -1136,6 +1198,22 @@ impl Node {
                         (_, Some(_)) => return Err(failure()),
                         _ => false,
                     };
+                    let personal_capability = complete
+                        .operation
+                        .as_ref()
+                        .is_some_and(|capability| capability.personal);
+                    if request.version == 7 && (!include_operations || !personal_capability) {
+                        return Err(failure());
+                    }
+                    let include_personal = request.version == 7 && personal_capability;
+                    let promote_personal = domain == AccountDocumentDomain::GroupControl
+                        && request.version == 5
+                        && include_operations
+                        && personal_capability;
+                    if domain == AccountDocumentDomain::GroupControl {
+                        cursor.personal_supported = include_operations && personal_capability;
+                        cursor.personal_upgrade = !cursor.personal_supported;
+                    }
                     let include_legacy = include_operations
                         && request
                             .operation
@@ -1176,11 +1254,16 @@ impl Node {
                                 channel.peer_announcement(),
                             )
                             || group_records.iter().any(|(meta, _)| {
-                                (!include_operations
+                                (!include_personal
                                     && matches!(
                                         meta.key,
-                                        AccountDocumentKey::GroupOperation { .. }
+                                        AccountDocumentKey::ConversationPersonal { .. }
                                     ))
+                                    || (!include_operations
+                                        && matches!(
+                                            meta.key,
+                                            AccountDocumentKey::GroupOperation { .. }
+                                        ))
                                     || (!include_legacy
                                         && matches!(
                                             meta.key,
@@ -1196,11 +1279,12 @@ impl Node {
                         // Keep the entire bounded control page out of the store
                         // until capability and continuation scope are verified.
                         for (meta, mut payload) in group_records.drain(..) {
-                            self.commit_imported_document(
+                            self.commit_imported_document_at_cut(
                                 meta,
                                 std::mem::take(&mut *payload),
                                 revision,
                                 peer.public.clone(),
+                                personal_cut.clone(),
                             )
                             .await?;
                         }
@@ -1209,7 +1293,12 @@ impl Node {
                         .account_documents
                         .lock()
                         .expect("documents mutex")
-                        .digest_operation_scope(domain, include_operations, include_legacy);
+                        .digest_exchange_scope(
+                            domain,
+                            include_operations,
+                            include_legacy,
+                            include_personal,
+                        );
                     cursor.visited |= 1 << cursor.domain;
                     if complete.enabled {
                         cursor.remotely_disabled &= !(1 << cursor.domain);
@@ -1290,6 +1379,14 @@ impl Node {
                                 );
                         }
                     }
+                    if promote_personal {
+                        cursor.visited &= !(1 << AccountDocumentDomain::GroupControl as usize);
+                        cursor.settled &= !(1 << AccountDocumentDomain::GroupControl as usize);
+                        cursor.domain = AccountDocumentDomain::GroupControl as usize;
+                        cursor.after = None;
+                        cursor.operation_digest = [0; 32];
+                        cursor.digests[cursor.domain] = [0; 32];
+                    }
                     let mut supported_mask = cursor.scope.mask();
                     if cursor.presentation_retry_at.is_some() {
                         supported_mask &= !((1 << AccountDocumentDomain::PublicProfile as usize)
@@ -1315,6 +1412,7 @@ impl Node {
                     cursor.up_to_date = cursor.settled & supported_mask == supported_mask
                         && cursor.remotely_disabled & cursor.scope.mask() == 0
                         && !cursor.requires_upgrade
+                        && (!cursor.personal_required || !cursor.personal_upgrade)
                         && (cursor.scope.mask() & 64 == 0 || !cursor.custody_upgrade)
                         && (cursor.scope.mask() & 128 == 0 || !cursor.inventory_upgrade)
                         && (cursor.scope.mask()
@@ -1341,12 +1439,25 @@ impl Node {
         self.commit_imported_document(meta, payload, revision, peer)
             .await
     }
+    #[cfg(test)]
     async fn commit_imported_document(
         self: &Arc<Self>,
         meta: AccountDocumentMeta,
         payload: Vec<u8>,
         revision: u64,
         peer: crate::identity::device::PublicIdentity,
+    ) -> Result<(), NodeError> {
+        let cut = self.capture_personal_history_cut(&peer);
+        self.commit_imported_document_at_cut(meta, payload, revision, peer, cut)
+            .await
+    }
+    async fn commit_imported_document_at_cut(
+        self: &Arc<Self>,
+        meta: AccountDocumentMeta,
+        payload: Vec<u8>,
+        revision: u64,
+        peer: crate::identity::device::PublicIdentity,
+        personal_cut: personal::PersonalHistoryCut,
     ) -> Result<(), NodeError> {
         self.account_blocking(move |node| {
             let payload = zeroize::Zeroizing::new(payload);
@@ -1359,6 +1470,12 @@ impl Node {
                 return Err(NodeError::Authorization(
                     "account document policy changed".into(),
                 ));
+            }
+            if let AccountDocumentKey::Draft { conversation }
+            | AccountDocumentKey::ReadReceipt { conversation, .. } = &meta.key
+                && !personal_cut.allows(&node, conversation)
+            {
+                return Ok(());
             }
             let public_profile = meta.key.domain() == AccountDocumentDomain::PublicProfile;
             let private_control = meta.key.is_private_control();
@@ -1573,7 +1690,10 @@ mod group_control_tests {
     async fn coalesced_refresh_wakes_cannot_restart_a_partial_mandatory_sweep() {
         let mut fixture = UpgradeFixture::new().await;
         let mut cursor = DocumentSyncCursor::mandatory();
-        for _ in 0..2 {
+        // The first authenticated v5 response negotiates the personal v7 scope;
+        // its extra GroupControl comparison must complete before it can settle.
+        // Later sweeps already know that scope and visit the three domains once.
+        for expected_pages in [4, 3] {
             assert!(cursor.begin_refresh());
             let mut pages = 0;
             loop {
@@ -1596,12 +1716,12 @@ mod group_control_tests {
                 assert_eq!(cursor.visited, visited);
                 assert_eq!(cursor.domain, domain);
                 assert!(
-                    pages < 4,
-                    "all three mandatory domains must progress within one bounded cycle"
+                    pages < expected_pages,
+                    "mandatory domains and the initial negotiated scope must make bounded progress"
                 );
             }
             assert_eq!(cursor.visited & cursor.scope.mask(), cursor.scope.mask());
-            assert_eq!(pages, 3);
+            assert_eq!(pages, expected_pages);
         }
         fixture.servers.shutdown().await;
     }
@@ -2512,6 +2632,7 @@ mod group_control_tests {
                             known_digest: [0; 32],
                             asset: None,
                             legacy_leave: false,
+                            personal: false,
                         }),
                     }
                     .encode(),

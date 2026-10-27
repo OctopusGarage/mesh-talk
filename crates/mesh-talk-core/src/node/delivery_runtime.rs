@@ -790,6 +790,9 @@ impl Node {
         if sibling && !self.device_sync_policy().history {
             return None;
         }
+        if !sibling && let Some(peer_account) = proof.and_then(|proof| proof.account_id()) {
+            self.prepare_live_personal_dm(&peer_account, store).ok()?;
+        }
         store
             .check_capacity(1, event.ciphertext.len() as u64)
             .ok()?;
@@ -926,6 +929,9 @@ impl Node {
             .expect("account sync policy mutex not poisoned");
         if sibling && !policy.current().history {
             return None;
+        }
+        if !sibling && let Some(peer_account) = proof.and_then(|proof| proof.account_id()) {
+            self.reopen_personal_after_live(&peer_account).ok()?;
         }
         store
             .begin(DeliveryTransaction::Incoming {
@@ -1366,6 +1372,13 @@ impl Node {
         conversation: ConversationId,
     ) -> Vec<(EventId, SentEntry)> {
         let store = self.delivery.lock().expect("delivery lock not poisoned");
+        self.raw_sent_history_with_store(conversation, &store)
+    }
+    pub(in crate::node) fn raw_sent_history_with_store(
+        &self,
+        conversation: ConversationId,
+        store: &DeliveryStore,
+    ) -> Vec<(EventId, SentEntry)> {
         let log = self.log.lock().expect("log lock not poisoned");
         let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut ids: std::collections::HashMap<_, _> = log

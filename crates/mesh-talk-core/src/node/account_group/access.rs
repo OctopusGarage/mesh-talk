@@ -187,6 +187,66 @@ fn departed_legacy_source(
     Some((source, departure.id))
 }
 
+/// Recover only terminal cleanup provenance from an authorized dissolution's
+/// dependency-closed parent cut. This never grants current group authority.
+fn dissolved_account_sources(
+    group: ConversationId,
+    log: &PersistentEventLog,
+    projection: &crate::node::channel::ChannelMembershipProjection,
+    proofs: &GroupProofSnapshot,
+    own_proof: &crate::discovery::Announce,
+) -> Vec<AccountGroupSource> {
+    let Some(state) = projection
+        .state
+        .as_ref()
+        .filter(|state| state.is_dissolved())
+    else {
+        return Vec::new();
+    };
+    let Some(dissolution) = log.events(&group).into_iter().find(|event| {
+        event.kind == EventKind::ChannelDissolve && projection.authorized.contains(&event.id)
+    }) else {
+        return Vec::new();
+    };
+    let mut pending = dissolution.parents.clone();
+    let mut ancestors = BTreeMap::new();
+    while let Some(id) = pending.pop() {
+        if ancestors.contains_key(&id) {
+            continue;
+        }
+        let Some(event) = log.get(&id).filter(|event| event.conversation_id == group) else {
+            return Vec::new();
+        };
+        pending.extend(event.parents.iter().copied());
+        ancestors.insert(id, event);
+    }
+    let original = crate::node::channel::ChannelBook::project_membership(
+        group,
+        &ancestors.values().copied().collect::<Vec<_>>(),
+    );
+    let mut sources = BTreeMap::new();
+    for proof in proofs.current.values().chain(std::iter::once(own_proof)) {
+        if !proofs.binding_current(proof) {
+            continue;
+        }
+        if let Some(mut source) =
+            Node::public_account_group_source(group, &original, &proof.public(), proof).filter(
+                |source| {
+                    matches!(
+                        source.role,
+                        AccountGroupRole::Owner | AccountGroupRole::Member
+                    )
+                },
+            )
+        {
+            source.role = AccountGroupRole::Dissolved;
+            source.authority.epoch = state.epoch();
+            sources.insert(source.device.user_id(), source);
+        }
+    }
+    sources.into_values().collect()
+}
+
 /// Recover a terminal modern account observation from validated public grant and
 /// revocation provenance, even when this device never published a private head.
 /// All identity inputs are the already captured pre-log snapshot.
@@ -449,6 +509,20 @@ impl Node {
         &self,
         group: ConversationId,
     ) -> Result<AccountGroupAccess, NodeError> {
+        let mut access = self.account_group_access_with_closed(group)?;
+        // Departed sources are not executable sources in the public role DTO.
+        if matches!(
+            access.role,
+            AccountGroupRole::Left | AccountGroupRole::Dissolved
+        ) {
+            access.sources.clear();
+        }
+        Ok(access)
+    }
+    pub(in crate::node) fn account_group_access_with_closed(
+        &self,
+        group: ConversationId,
+    ) -> Result<AccountGroupAccess, NodeError> {
         let mut access = AccountGroupAccess {
             group,
             account_id: self.account_id(),
@@ -466,6 +540,7 @@ impl Node {
             return Ok(access);
         }
         let own = self.identity.public();
+        let own_proof = self.own_group_proof();
         let own_head = heads.iter().find(|head| head.proof.public() == own);
         let (local, projection, known) = {
             let log = self.log.lock().expect("log mutex");
@@ -477,6 +552,8 @@ impl Node {
                 .is_some_and(|state| state.is_dissolved())
             {
                 access.role = AccountGroupRole::Dissolved;
+                access.sources =
+                    dissolved_account_sources(group, &log, &projection, &proofs, &own_proof);
                 return Ok(access);
             }
             let (_, stamp) = authorization_view(&log, group);
@@ -550,9 +627,15 @@ impl Node {
             return Ok(access);
         }
         let mut sources = BTreeMap::new();
+        let mut closed_sources = BTreeMap::new();
         let mut left = false;
         for (candidate, _, is_local, known_public) in maximal {
             left |= candidate.observation.role == AccountGroupRole::Left;
+            if candidate.observation.role == AccountGroupRole::Left
+                && candidate.source.role == AccountGroupRole::Left
+            {
+                closed_sources.insert(candidate.source.device.user_id(), candidate.source.clone());
+            }
             for bound in &candidate.observation.sources {
                 if !self.account_group_binding_current(&bound.proof) {
                     continue;
@@ -602,6 +685,7 @@ impl Node {
             access.execution = source.execution.clone();
         } else if left {
             access.role = AccountGroupRole::Left;
+            access.sources = closed_sources.into_values().collect();
         }
         Ok(access)
     }

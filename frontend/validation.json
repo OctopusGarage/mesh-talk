@@ -1735,6 +1735,61 @@
       "escalation": [
         "Run e2e/screenshot-shortcuts.spec.ts and relevant screenshot browser scenarios; verify actual OS key delivery, occupied shortcuts, tray/background wakeup, lock/logout and window restoration in packaged apps. Linux global activation requires native X11. Browser events do not certify native behavior."
       ]
+    },
+    {
+      "id": "frontend-personal-chat-deletion",
+      "paths": [
+        "frontend/src/features/chat/DeleteChatDialog.tsx",
+        "frontend/src/features/chat/DeleteContactDialog.tsx",
+        "frontend/src/features/chat/DeleteContactDialog.test.ts",
+        "frontend/src/features/chat/HiddenContactsDialog.tsx",
+        "frontend/src/store/channelActions.ts",
+        "frontend/src/store/channelActions.test.ts",
+        "frontend/src/store/drafts.ts",
+        "frontend/src/store/drafts.test.ts",
+        "frontend/src/lib/api/contacts.ts",
+        "frontend/e2e/delete-contacts.spec.ts",
+        "frontend/e2e/channel-lifecycle.spec.ts",
+        "docs/help/topics/history.md",
+        "frontend/src/store/channelRefresh.ts",
+        "frontend/src/store/channelRefresh.test.ts",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/src/features/chat/HiddenContactsDialog.test.ts",
+        "frontend/src/store/contactPolicy.ts",
+        "frontend/src/store/contactPolicy.test.ts",
+        "frontend/src/store/accountGroupOperations.ts",
+        "frontend/src/store/accountGroupOperations.test.ts"
+      ],
+      "frontend": [
+        "src/features/chat/DeleteContactDialog.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/channelActions.test.ts",
+        "src/store/drafts.test.ts",
+        "src/lib/api.test.ts",
+        "src/store/channelRefresh.test.ts",
+        "src/features/chat/HiddenContactsDialog.test.ts",
+        "src/store/contactPolicy.test.ts",
+        "src/store/accountGroupOperations.test.ts"
+      ],
+      "capability": {
+        "summary": "Remove personal chats and optional history across linked devices without changing other accounts’ membership or copies.",
+        "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
+        "invariants": [
+          {
+            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account’s data.",
+            "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
+          },
+          {
+            "name": "Contact removal supports online contacts, keeps history by default in the dialog and does not act as blocking.",
+            "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
+          },
+          {
+            "name": "Imported personal history floors invalidate owner-scoped history and draft reads before archive refill; stale roster and group responses cannot restore deleted rows.",
+            "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
+          }
+        ]
+      }
     }
   ],
   "prScenarios": [
@@ -2264,6 +2319,21 @@
         "e2e/language-settings.spec.ts",
         "e2e/login-recovery.spec.ts",
         "e2e/ui-audit-shell.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-personal-chat-deletion-acceptance",
+      "paths": [
+        "frontend/src/features/chat/DeleteChatDialog.tsx",
+        "frontend/src/features/chat/DeleteContactDialog.tsx",
+        "frontend/src/features/chat/HiddenContactsDialog.tsx",
+        "frontend/src/store/channelActions.ts",
+        "frontend/e2e/delete-contacts.spec.ts",
+        "frontend/e2e/channel-lifecycle.spec.ts"
+      ],
+      "browser": [
+        "e2e/delete-contacts.spec.ts",
+        "e2e/channel-lifecycle.spec.ts"
       ]
     }
   ]

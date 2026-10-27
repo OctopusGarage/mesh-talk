@@ -6,7 +6,10 @@ import type {
   ChannelMembersInfo,
   PeerInfo,
 } from "@/lib/types";
-import type { GroupOperationOutcome } from "./accountGroupOperations";
+import {
+  isGroupHistoryCleanupPending,
+  type GroupOperationOutcome,
+} from "./accountGroupOperations";
 import { errorMessage } from "@/lib/error";
 import { convKey } from "./conversationState";
 import type { Conversation } from "./conversationModel";
@@ -41,6 +44,7 @@ interface ChannelActionContext {
   refreshRoster(): Promise<void>;
   open(conversation: Conversation): Promise<void>;
   reportError(message: string): void;
+  deleteCommittedHistory?(group: string): void;
 }
 export interface ChannelActions {
   createChannel(name: string, memberAccountIds: string[]): Promise<boolean>;
@@ -48,7 +52,7 @@ export interface ChannelActions {
   removeMember(memberId: string): Promise<GroupOperationOutcome>;
   removeMemberAccount(accountId: string): Promise<GroupOperationOutcome>;
   transferChannelOwner(memberId: string): Promise<GroupOperationOutcome>;
-  leaveChannel(): Promise<GroupOperationOutcome>;
+  leaveChannel(deleteHistory?: boolean): Promise<GroupOperationOutcome>;
   acceptChannelInvite(): Promise<GroupOperationOutcome>;
   declineChannelInvite(): Promise<GroupOperationOutcome>;
   dissolveChannel(channelId: string): Promise<GroupOperationOutcome>;
@@ -97,10 +101,17 @@ export function createChannelActions(
     if (
       !lease.current() ||
       status.phase.kind !== "committed" ||
+      isGroupHistoryCleanupPending(status) ||
       status.account_id !== read().myAccountId
     )
       return;
-    const key = `${status.account_id}:${status.id}`;
+    const effect =
+      status.kind === "leave_account" &&
+      status.delete_history === true &&
+      status.history_cleanup_complete === true
+        ? "history"
+        : "public";
+    const key = `${status.account_id}:${status.id}:${effect}`;
     const known = reconciled.get(key);
     if (known?.current()) return known.work;
     for (const [id, entry] of reconciled)
@@ -146,6 +157,13 @@ export function createChannelActions(
           ),
         }));
       }
+      if (
+        status.kind === "leave_account" &&
+        status.delete_history === true &&
+        status.history_cleanup_complete === true &&
+        lease.current()
+      )
+        context.deleteCommittedHistory?.(group);
       await refreshRoster();
       if (!lease.current()) return;
       if (status.kind === "rename" && current()) {
@@ -253,7 +271,13 @@ export function createChannelActions(
           ? targetId
           : memberAccount(targetId),
       ),
-    leaveChannel: () => submit(activeGroup(), { kind: "leave_account" }),
+    leaveChannel: (deleteHistory) =>
+      submit(activeGroup(), {
+        kind: "leave_account",
+        ...(deleteHistory === undefined
+          ? {}
+          : { delete_history: deleteHistory }),
+      }),
     acceptChannelInvite: () =>
       submit(activeGroup(), { kind: "accept_invitation" }),
     declineChannelInvite: () =>

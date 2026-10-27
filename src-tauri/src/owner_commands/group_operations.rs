@@ -37,7 +37,10 @@ pub enum AccountGroupControlRequest {
     },
     AcceptInvitation,
     DeclineInvitation,
-    LeaveAccount,
+    LeaveAccount {
+        #[serde(default)]
+        delete_history: Option<bool>,
+    },
     Dissolve,
     React {
         target: String,
@@ -68,7 +71,7 @@ impl AccountGroupControlRequest {
             Self::SetHistoryPolicy { policy } => AccountGroupOperation::SetHistoryPolicy { policy },
             Self::AcceptInvitation => AccountGroupOperation::AcceptInvitation,
             Self::DeclineInvitation => AccountGroupOperation::DeclineInvitation,
-            Self::LeaveAccount => AccountGroupOperation::LeaveAccount,
+            Self::LeaveAccount { .. } => AccountGroupOperation::LeaveAccount,
             Self::Dissolve => AccountGroupOperation::Dissolve,
             Self::React {
                 target,
@@ -104,6 +107,10 @@ pub struct AccountGroupOperationInfo {
     executions: Vec<AccountGroupOperationExecutionInfo>,
     committed_events: Vec<String>,
     primary_event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delete_history: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_cleanup_complete: Option<bool>,
 }
 
 impl From<AccountGroupOperationStatus> for AccountGroupOperationInfo {
@@ -133,8 +140,115 @@ impl From<AccountGroupOperationStatus> for AccountGroupOperationInfo {
                 .map(|id| hex::encode(id.as_bytes()))
                 .collect(),
             primary_event: status.primary_event.map(|id| hex::encode(id.as_bytes())),
+            delete_history: None,
+            history_cleanup_complete: None,
         }
     }
+}
+
+impl AccountGroupOperationInfo {
+    fn with_cleanup(
+        node: &mesh_talk_core::node::Node,
+        status: AccountGroupOperationStatus,
+    ) -> Self {
+        if status.kind != AccountGroupOperationKind::LeaveAccount {
+            return Self::from(status);
+        }
+        let delete_history = node.account_group_leave_cleanup(status.id);
+        let history_cleanup_complete = node.account_group_leave_cleanup_complete(status.id);
+        let mut info = Self::from(status);
+        info.delete_history = delete_history;
+        info.history_cleanup_complete = history_cleanup_complete;
+        info
+    }
+}
+
+#[derive(Serialize)]
+pub struct PersonalConversationInfo {
+    conversation: mesh_talk_core::node::DocumentConversation,
+    hidden: bool,
+    history_floor: Option<String>,
+    local_cleanup_complete: bool,
+}
+
+fn personal_history_floor(version: mesh_talk_core::node::DocumentVersion) -> String {
+    format!(
+        "{}:{}:{}",
+        version.revision,
+        version.writer_device,
+        hex::encode(version.content_hash)
+    )
+}
+
+#[tauri::command]
+pub async fn owner_personal_conversation_states(
+    owner: String,
+    expected_account: String,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<Vec<PersonalConversationInfo>, CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    admission
+        .with_runtime(|runtime| {
+            if runtime.account_id() != expected_account {
+                return Err(CommandError::Authorization("account changed".into()));
+            }
+            let handle = runtime.handle();
+            let conversations: std::collections::BTreeSet<_> = handle
+                .personal_account_ids()
+                .into_iter()
+                .map(mesh_talk_core::node::DocumentConversation::Account)
+                .chain(handle.list_channels().into_iter().map(|channel| {
+                    mesh_talk_core::node::DocumentConversation::Channel(hex::encode(
+                        channel.id.as_bytes(),
+                    ))
+                }))
+                .collect();
+            Ok(conversations
+                .into_iter()
+                .filter_map(|conversation| {
+                    let state = handle.conversation_personal_state(&conversation);
+                    state.known.then(|| PersonalConversationInfo {
+                        conversation,
+                        hidden: state.hidden,
+                        history_floor: state.floor.map(personal_history_floor),
+                        local_cleanup_complete: state.local_cleanup_complete,
+                    })
+                })
+                .collect())
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn owner_delete_left_channel(
+    owner: String,
+    expected_account: String,
+    channel_id: String,
+    app: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+) -> Result<(), CommandError> {
+    let admission = RuntimeAdmission::capture(&app, &node, &owner)?;
+    admission
+        .blocking(move |runtime, _admission| {
+            let group = parse_channel_id(&channel_id)?;
+            let handle = runtime.handle();
+            // The tracked blocking port already holds the exact installation and
+            // session authority through this synchronous producer and cleanup.
+            handle
+                .delete_left_group_if(&expected_account, group, |commit| commit())
+                .map_err(CommandError::from)?;
+            let personal = handle.conversation_personal_state(
+                &mesh_talk_core::node::DocumentConversation::Channel(hex::encode(group.as_bytes())),
+            );
+            if !personal.hidden || !personal.local_cleanup_complete {
+                return Err(CommandError::Internal(
+                    "group history cleanup is pending".into(),
+                ));
+            }
+            Ok(())
+        })
+        .await
 }
 
 #[tauri::command]
@@ -203,18 +317,26 @@ pub async fn owner_submit_account_group_control(
             Box::pin(async move {
                 let id = AccountGroupOperationId::from_hex(&operation_id)?;
                 let group = parse_channel_id(&channel_id)?;
-                let operation = operation.into_core()?;
-                runtime
-                    .handle()
-                    .submit_account_group_operation_if(
+                let handle = runtime.handle();
+                let status = match operation {
+                    AccountGroupControlRequest::LeaveAccount { delete_history } => handle
+                        .submit_account_group_leave_if(
+                            &expected_account,
+                            id,
+                            group,
+                            delete_history,
+                            |commit| admission.authorize_accept(runtime, commit),
+                        ),
+                    operation => handle.submit_account_group_operation_if(
                         &expected_account,
                         id,
                         group,
-                        operation,
+                        operation.into_core()?,
                         |commit| admission.authorize_accept(runtime, commit),
-                    )
-                    .map(Into::into)
-                    .map_err(CommandError::from)
+                    ),
+                }
+                .map_err(CommandError::from)?;
+                Ok(AccountGroupOperationInfo::with_cleanup(&handle, status))
             })
         })
         .await
@@ -382,7 +504,11 @@ pub async fn owner_account_group_operation_status(
             runtime
                 .handle()
                 .account_group_operation_status(&expected_account, id)
-                .map(|status| status.map(Into::into))
+                .map(|status| {
+                    status.map(|status| {
+                        AccountGroupOperationInfo::with_cleanup(&runtime.handle(), status)
+                    })
+                })
                 .map_err(CommandError::from)
         })
         .await
@@ -419,7 +545,13 @@ pub async fn owner_list_account_group_operations(
             runtime
                 .handle()
                 .list_account_group_operations(&expected_account, query)
-                .map(|rows| rows.into_iter().map(Into::into).collect())
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|status| {
+                            AccountGroupOperationInfo::with_cleanup(&runtime.handle(), status)
+                        })
+                        .collect()
+                })
                 .map_err(CommandError::from)
         })
         .await
@@ -443,7 +575,9 @@ pub async fn owner_cancel_account_group_operation(
                     .cancel_account_group_operation_if(&expected_account, id, |commit| {
                         admission.authorize_accept(runtime, commit)
                     })
-                    .map(Into::into)
+                    .map(|status| {
+                        AccountGroupOperationInfo::with_cleanup(&runtime.handle(), status)
+                    })
                     .map_err(CommandError::from)
             })
         })
@@ -483,6 +617,48 @@ mod tests {
                 "committed_events":["02".repeat(32)], "primary_event":null,
             })
         );
+    }
+
+    #[test]
+    fn history_floor_identity_includes_writer_and_content_hash() {
+        let version = mesh_talk_core::node::DocumentVersion {
+            revision: 7,
+            writer_device: "ab".repeat(16),
+            content_hash: [1; 32],
+        };
+        let first = personal_history_floor(version.clone());
+        assert_ne!(
+            first,
+            personal_history_floor(mesh_talk_core::node::DocumentVersion {
+                writer_device: "cd".repeat(16),
+                ..version.clone()
+            })
+        );
+        assert_ne!(
+            first,
+            personal_history_floor(mesh_talk_core::node::DocumentVersion {
+                content_hash: [2; 32],
+                ..version
+            })
+        );
+    }
+
+    #[test]
+    fn leave_cleanup_is_optional_and_does_not_change_the_public_operation() {
+        for choice in [None, Some(false), Some(true)] {
+            let mut body = serde_json::json!({"kind":"leave_account"});
+            if let Some(choice) = choice {
+                body["delete_history"] = serde_json::json!(choice);
+            }
+            let request: AccountGroupControlRequest = serde_json::from_value(body).unwrap();
+            assert!(
+                matches!(request, AccountGroupControlRequest::LeaveAccount { delete_history } if delete_history == choice)
+            );
+            assert!(matches!(
+                request.into_core().unwrap(),
+                AccountGroupOperation::LeaveAccount
+            ));
+        }
     }
 
     #[test]

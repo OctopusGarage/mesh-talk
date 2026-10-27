@@ -6,6 +6,7 @@ import type {
 import { captureChatOwner } from "../ownership";
 import {
   createGroupOperationCoordinator,
+  isGroupOperationComplete,
   type GroupOperationOutcome,
   type GroupOperationRequest,
 } from "../accountGroupOperations";
@@ -63,9 +64,7 @@ function coordinator(set: Set, get: Get) {
           const index = entries.findIndex(
             ([id, entry]) =>
               entry.status &&
-              ["committed", "rejected", "cancelled"].includes(
-                entry.status.phase.kind,
-              ) &&
+              isGroupOperationComplete(entry.status) &&
               !current.isInvoking(entry.account_id, id) &&
               !Object.values(state.intents).some(
                 (intent) => intent.operationId === id,
@@ -136,6 +135,10 @@ export async function submitGroupControlIntent(
   return coordinator(set, get).submit({
     group,
     kind: controlKind(operation),
+    ...(operation.kind === "leave_account" &&
+    operation.delete_history !== undefined
+      ? { deleteHistory: operation.delete_history }
+      : {}),
     invoke: (owner, account, id) =>
       chat.submitAccountGroupControl(owner, account, id, group, operation),
   });

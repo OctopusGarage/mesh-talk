@@ -172,6 +172,10 @@ export interface AccountGroupOperationStatus {
   }>;
   committed_events: string[];
   primary_event: string | null;
+  /** Host-owned cleanup choice; absent for older or restored unknown tickets. */
+  delete_history?: boolean | null;
+  /** Private account cleanup acknowledged for this exact leave operation. */
+  history_cleanup_complete?: boolean | null;
 }
 
 export type AccountGroupControlRequest =
@@ -182,12 +186,9 @@ export type AccountGroupControlRequest =
     }
   | { kind: "set_history_policy"; policy: ChannelHistoryPolicy }
   | {
-      kind:
-        | "accept_invitation"
-        | "decline_invitation"
-        | "leave_account"
-        | "dissolve";
+      kind: "accept_invitation" | "decline_invitation" | "dissolve";
     }
+  | { kind: "leave_account"; delete_history?: boolean }
   | { kind: "react"; target: string; emoji: string; remove: boolean }
   | { kind: "recall"; target: string };
 
@@ -226,8 +227,16 @@ export interface HiddenContact {
   name: string;
 }
 
+/** Exact-runtime observations of account-personal conversation controls. */
+export interface PersonalConversationState {
+  conversation: { kind: "account" | "channel"; id: string };
+  hidden: boolean;
+  history_floor: string | null;
+  local_cleanup_complete: boolean;
+}
+
 export interface HiddenContactsSnapshot {
-  /** Device-local contact deletions, cleared by fresh online discovery. */
+  /** Personal contact removals; ordinary presence discovery does not undo them. */
   deleted?: string[];
   owner: string;
   contacts: HiddenContact[];

@@ -3,6 +3,7 @@ import { useAuth } from "@/store/auth";
 import { useChat } from "@/store/chat";
 import {
   unresolvedGroupLeave,
+  isGroupHistoryCleanupPending,
   type GroupOperationOutcome,
 } from "@/store/accountGroupOperations";
 
@@ -60,7 +61,8 @@ export function useGroupControlOperation(group: string | null) {
     status && id
       ? {
           kind:
-            status.phase.kind === "committed"
+            status.phase.kind === "committed" &&
+            !isGroupHistoryCleanupPending(status)
               ? "committed"
               : status.phase.kind === "cancelled"
                 ? "cancelled"

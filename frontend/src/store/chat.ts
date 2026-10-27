@@ -1,3 +1,5 @@
+import type { PersonalConversationState } from "@/lib/types";
+import { useDrafts } from "./drafts";
 import { usePacks } from "./packs";
 import { stickerById } from "@/lib/stickerPacks";
 import { snapshotSticker } from "@/lib/stickerMedia";
@@ -328,6 +330,29 @@ async function pollUntilReady(
   return false;
 }
 
+/** Invalidate every history projection after durable account-personal deletion. */
+function deletedChatState(state: ChatState, key: string): Partial<ChatState> {
+  const without = <T>(values: Record<string, T>): Record<string, T> =>
+    Object.fromEntries(Object.entries(values).filter(([id]) => id !== key));
+  return {
+    ...clearConversationMessages(state, key),
+    reactions: without(state.reactions),
+    unread: without(state.unread),
+    unreadIds: without(state.unreadIds),
+    lateUnreadIds: without(state.lateUnreadIds),
+    overflowUnread: without(state.overflowUnread),
+    ledger: without(state.ledger),
+    reception: without(state.reception),
+    ...(state.accountSeen ? { accountSeen: without(state.accountSeen) } : {}),
+    cacheOrder: state.cacheOrder.filter((id) => id !== key),
+    historyBaselines: state.historyBaselines.filter((id) => id !== key),
+    historyFullBaselines: state.historyFullBaselines.filter((id) => id !== key),
+    historyScanQueue: state.historyScanQueue.filter(
+      (conversation) => convKey(conversation) !== key,
+    ),
+  };
+}
+
 // --- per-conversation API dispatch ----------------------------------------
 
 /** Native account ownership is authoritative; older hosts retain their existing identifier convention. */
@@ -350,6 +375,8 @@ export interface ChatState
   rosterRequest: number;
   favoritesRequest: number;
   ready: boolean;
+  personalConversationStates: Record<string, PersonalConversationState>;
+  personalHistoryFloors: Record<string, string>;
   myAccountId: string;
   expiryNow: number;
   peers: PeerInfo[];
@@ -383,7 +410,8 @@ export interface ChatState
   clearError: () => void;
   refreshRoster: () => Promise<void>;
   refreshChannels: (channelId?: string | null) => Promise<void>;
-  deleteContact: (account: string) => Promise<boolean>;
+  deleteContact: (account: string, clearHistory?: boolean) => Promise<boolean>;
+  deleteLeftChannel: (channelId: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
   applyAccountReadReceipts: (
@@ -439,6 +467,8 @@ export interface ChatState
 function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
   return {
     accountSeen: undefined,
+    personalConversationStates: {},
+    personalHistoryFloors: {},
     ...emptyConversationHistory(),
     historyRevision: state.historyRevision,
     activeRequest: state.activeRequest,
@@ -459,6 +489,8 @@ function invalidateConversationIdentity(state: ChatState): Partial<ChatState> {
 function emptySessionData() {
   return {
     accountSeen: undefined,
+    personalConversationStates: {},
+    personalHistoryFloors: {},
     ...emptyConversationHistory(),
     expiryNow: Date.now(),
     identityEpoch: 0,
@@ -494,7 +526,16 @@ function emptySessionData() {
 const channelRefresh = createChannelRefresh({
   read: () => useChat.getState(),
   write: (patch) => {
-    useChat.setState(patch);
+    useChat.setState((state) => {
+      const next = patch(state);
+      if (next.channels)
+        next.channels = next.channels.filter((channel) => {
+          const personal =
+            state.personalConversationStates[`channel:${channel.channel_id}`];
+          return !(personal?.hidden && personal.local_cleanup_complete);
+        });
+      return next;
+    });
     refreshChannelRecovery(useChat.setState, useChat.getState);
   },
   capture: () => captureChat(useChat.getState),
@@ -507,6 +548,85 @@ const rosterRefresh = createRosterRefresh({
     refreshRosterSnapshot(useChat.setState, useChat.getState, hasPending),
 });
 
+/** Apply explicit local-complete floors before archive work can refill deleted caches. */
+function applyPersonalConversationStates(
+  rawSet: Set,
+  get: Get,
+  lease: ReturnType<typeof captureChat>,
+  rows: PersonalConversationState[] | null,
+): { changed: boolean; reloadActive: boolean } {
+  if (
+    !lease.current() ||
+    !lease.owner ||
+    !Array.isArray(rows) ||
+    rows.some(
+      (row) =>
+        !row ||
+        !["account", "channel"].includes(row.conversation?.kind) ||
+        typeof row.conversation.id !== "string" ||
+        typeof row.hidden !== "boolean" ||
+        typeof row.local_cleanup_complete !== "boolean" ||
+        (row.history_floor !== null && typeof row.history_floor !== "string"),
+    )
+  )
+    return { changed: false, reloadActive: false };
+  const states = Object.fromEntries(
+    rows.map((row) => [convKey({ ...row.conversation, name: "" }), row]),
+  );
+  if (
+    JSON.stringify(states) === JSON.stringify(get().personalConversationStates)
+  )
+    return { changed: false, reloadActive: false };
+  let reloadActive = false;
+  rawSet((state) => {
+    let next = {
+      ...state,
+      personalConversationStates: states,
+      personalHistoryFloors: { ...state.personalHistoryFloors },
+    };
+    for (const [key, personal] of Object.entries(states)) {
+      if (!personal.local_cleanup_complete) continue;
+      if (
+        personal.history_floor &&
+        next.personalHistoryFloors[key] !== personal.history_floor
+      ) {
+        reloadActive ||=
+          !personal.hidden && !!next.active && convKey(next.active) === key;
+        useDrafts.getState().discard(lease.owner!, lease.generation, key);
+        next = { ...next, ...deletedChatState(next, key) };
+        next.personalHistoryFloors[key] = personal.history_floor;
+      }
+      if (personal.hidden) {
+        const { kind, id } = personal.conversation;
+        if (kind === "account")
+          next.accounts = next.accounts.filter(
+            (account) => account.account_id !== id,
+          );
+        else
+          next.channels = next.channels.filter(
+            (channel) => channel.channel_id !== id,
+          );
+        const unread = { ...next.unread };
+        delete unread[key];
+        next.unread = unread;
+        if (next.active && convKey(next.active) === key)
+          next = {
+            ...next,
+            active: null,
+            members: [],
+            channelOwner: "",
+            searchTarget: null,
+            historyError: null,
+            activeRequest: next.activeRequest + 1,
+            loading: false,
+          };
+      }
+    }
+    return next;
+  });
+  return { changed: true, reloadActive };
+}
+
 async function refreshRosterSnapshot(
   rawSet: Set,
   get: Get,
@@ -515,7 +635,7 @@ async function refreshRosterSnapshot(
   const lease = captureChat(get);
   const set = guardedSet(rawSet, lease.current);
   if (!lease.current()) return;
-  if (!get().ready || get().historyScanBusy) return;
+  if (!get().ready) return;
   const request = get().rosterRequest + 1;
   set({ rosterRequest: request });
   try {
@@ -527,7 +647,8 @@ async function refreshRosterSnapshot(
         set({ ready: false });
       return;
     }
-    if (!lease.current() || get().rosterRequest !== request) return;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
     if (
       identity.device_id !== get().myId ||
       identity.account_id !== get().myAccountId
@@ -552,13 +673,30 @@ async function refreshRosterSnapshot(
           ? { ...state.user, display_name: identity.display_name! }
           : null,
       }));
-    const [peers, accounts] = await Promise.all([
+    const [peers, listedAccounts, personal] = await Promise.all([
       readWithDeadline(() => chat.listPeers()),
       readWithDeadline(() => chat.listAccounts()),
+      readWithDeadline(() =>
+        chat.personalConversationStates(lease.owner!, identity.account_id),
+      ).catch(() => null),
     ]);
-    if (!lease.current() || get().rosterRequest !== request) return;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
+    const personalEffects = applyPersonalConversationStates(
+      rawSet,
+      get,
+      lease,
+      personal,
+    );
+    const accounts = listedAccounts.filter((account) => {
+      const personal =
+        get().personalConversationStates[`account:${account.account_id}`];
+      return !(personal?.hidden && personal.local_cleanup_complete);
+    });
     setPushStateSupport(identity.supports_push_state ? lease.owner : null);
-    const channelWork = channelRefresh.ifDue();
+    const channelWork = personalEffects.changed
+      ? channelRefresh.invalidate()
+      : channelRefresh.ifDue();
     // Polling returns fresh arrays even when discovery has not changed. Preserve
     // the previous references so sidebar subscribers do not redraw every tick.
     const previous = get();
@@ -582,9 +720,13 @@ async function refreshRosterSnapshot(
       });
     }
     await channelWork;
-    if (!lease.current() || get().rosterRequest !== request) return;
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
     const channels = get().channels;
     refreshChannelRecovery(rawSet, get);
+    if (personalEffects.reloadActive && get().active) await get().reload();
+    if (!lease.current() || get().rosterRequest !== request || hasPending())
+      return;
     if (identity.history_revision !== undefined) {
       await scanConversationHistory(
         rawSet,
@@ -611,7 +753,8 @@ async function refreshRosterSnapshot(
         identity.history_revision,
         () => lease.current() && get().rosterRequest === request,
       );
-      if (!lease.current() || get().rosterRequest !== request) return;
+      if (!lease.current() || get().rosterRequest !== request || hasPending())
+        return;
     }
   } catch {
     // node may still be starting; ignore
@@ -1045,26 +1188,42 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     };
   },
 
-  deleteContact: async (account) => {
+  deleteContact: async (account, clearHistory = true) => {
     const lease = captureChat(get);
+    const expectedAccount = get().myAccountId;
     if (
       !lease.current() ||
       !lease.owner ||
       !get().ready ||
-      account === get().myAccountId
+      !expectedAccount.trim() ||
+      account === expectedAccount
     )
       return false;
     try {
-      await contactPolicy.delete(lease.owner, account);
-      if (!lease.current()) return false;
+      await contactPolicy.delete(
+        lease.owner,
+        expectedAccount,
+        account,
+        clearHistory,
+      );
+      if (!lease.current() || get().myAccountId !== expectedAccount)
+        return false;
+      if (clearHistory)
+        useDrafts
+          .getState()
+          .discard(lease.owner, lease.generation, `account:${account}`);
       rawSet((state) => {
         const unread = { ...state.unread };
         delete unread[`account:${account}`];
         const closing =
           state.active?.kind === "account" && state.active.id === account;
         return {
-          ...clearConversationMessages(state, `account:${account}`),
-          reactions: { ...state.reactions, [`account:${account}`]: [] },
+          ...(clearHistory
+            ? deletedChatState(state, `account:${account}`)
+            : {}),
+          ...(clearHistory
+            ? { reactions: { ...state.reactions, [`account:${account}`]: [] } }
+            : {}),
           accounts: state.accounts.filter((a) => a.account_id !== account),
           unread,
           rosterRequest: state.rosterRequest + 1,
@@ -1079,6 +1238,47 @@ export const useChat = create<ChatState>((rawSet, get) => ({
             : {}),
         };
       });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  deleteLeftChannel: async (channelId) => {
+    const lease = captureChat(get);
+    const account = get().myAccountId;
+    if (!lease.current() || !lease.owner || !account || !get().ready)
+      return false;
+    try {
+      await chat.deleteLeftChannel(lease.owner, account, channelId);
+      if (!lease.current() || get().myAccountId !== account) return false;
+      const key = `channel:${channelId}`;
+      useDrafts.getState().discard(lease.owner, lease.generation, key);
+      rawSet((state) => {
+        const unread = { ...state.unread };
+        delete unread[key];
+        const closing =
+          state.active?.kind === "channel" && state.active.id === channelId;
+        return {
+          ...deletedChatState(state, key),
+          channels: state.channels.filter((c) => c.channel_id !== channelId),
+          rosterRequest: state.rosterRequest + 1,
+          reactions: { ...state.reactions, [key]: [] },
+          unread,
+          ...(closing
+            ? {
+                active: null,
+                members: [],
+                channelOwner: "",
+                searchTarget: null,
+                historyError: null,
+                activeRequest: state.activeRequest + 1,
+                loading: false,
+              }
+            : {}),
+        };
+      });
+      void channelRefresh.invalidate();
       return true;
     } catch {
       return false;
@@ -1492,6 +1692,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     write: rawSet,
     capture: () => captureChat(get),
     commands: chat,
+    deleteCommittedHistory: (group) => {
+      const lease = captureChat(get);
+      if (!lease.current() || !lease.owner) return;
+      const key = `channel:${group}`;
+      useDrafts.getState().discard(lease.owner, lease.generation, key);
+      rawSet((state) => ({
+        ...deletedChatState(state, key),
+        reactions: { ...state.reactions, [key]: [] },
+        channels: state.channels.filter(
+          (channel) => channel.channel_id !== group,
+        ),
+        rosterRequest: state.rosterRequest + 1,
+      }));
+      void channelRefresh.invalidate();
+    },
     submitControl: (group, operation) =>
       submitGroupControlIntent(rawSet, get, group, operation),
     refreshRoster: async () => {

@@ -98,6 +98,14 @@ pub async fn list_channels(
             Ok(rt
                 .list_channels()
                 .into_iter()
+                .filter(|channel| {
+                    let personal = node.conversation_personal_state(
+                        &mesh_talk_core::node::DocumentConversation::Channel(hex::encode(
+                            channel.id.as_bytes(),
+                        )),
+                    );
+                    !(personal.hidden && personal.local_cleanup_complete)
+                })
                 .map(|c| {
                     let reference = node.channel_shared_reference(c.id);
                     ChannelInfo {

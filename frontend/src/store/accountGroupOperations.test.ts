@@ -491,3 +491,143 @@ it("reissues cancellation once a long submission admits and again during refresh
   );
   expect(f.terminal).not.toHaveBeenCalled();
 });
+
+it("keeps a committed leave pending until its exact private cleanup completes", async () => {
+  const f = fixture();
+  const pending = {
+    ...status({ kind: "committed" }),
+    kind: "leave_account" as const,
+    delete_history: true,
+    history_cleanup_complete: false,
+  };
+  const invoke = vi.fn(async () => pending);
+  expect(
+    (
+      await f.coordinator.submit({
+        group,
+        kind: "leave_account",
+        deleteHistory: true,
+        invoke,
+      })
+    ).kind,
+  ).toBe("pending");
+  expect(f.terminal).not.toHaveBeenCalled();
+  await f.coordinator.cancel(id);
+  expect(f.commands.cancel).not.toHaveBeenCalled();
+  f.commands.status.mockResolvedValue({
+    ...pending,
+    history_cleanup_complete: true,
+  });
+  await f.coordinator.refresh();
+  expect(f.commands.status).toHaveBeenCalledWith("local-owner", account, id);
+  expect(f.terminal).toHaveBeenCalledExactlyOnceWith({
+    ...pending,
+    history_cleanup_complete: true,
+  });
+  expect(invoke).toHaveBeenCalledOnce();
+});
+
+it("recovers and polls an original committed leave whose private cleanup is unknown", async () => {
+  const f = fixture();
+  const pending = {
+    ...status({ kind: "committed" }),
+    kind: "leave_account" as const,
+    delete_history: true,
+  };
+  f.commands.list.mockResolvedValueOnce([pending]);
+  await f.coordinator.refresh();
+  expect(f.tickets.get(id)?.status).toEqual(pending);
+  expect(f.terminal).not.toHaveBeenCalled();
+  f.commands.status.mockResolvedValue({
+    ...pending,
+    history_cleanup_complete: true,
+  });
+  await f.coordinator.refresh();
+  expect(f.commands.mint).not.toHaveBeenCalled();
+  expect(f.commands.status).toHaveBeenCalledWith("local-owner", account, id);
+  expect(f.terminal).toHaveBeenCalledOnce();
+});
+
+it("preserves a requested cleanup requirement when host observations omit its metadata", async () => {
+  const f = fixture();
+  const committed = {
+    ...status({ kind: "committed" }),
+    kind: "leave_account" as const,
+  };
+  const invoke = vi.fn(async () => committed);
+  expect(
+    (
+      await f.coordinator.submit({
+        group,
+        kind: "leave_account",
+        deleteHistory: true,
+        invoke,
+      })
+    ).kind,
+  ).toBe("pending");
+  f.commands.status.mockResolvedValue(committed);
+  await f.coordinator.refresh();
+  expect(f.terminal).not.toHaveBeenCalled();
+  expect(f.tickets.get(id)?.status?.delete_history).toBe(true);
+  f.commands.status.mockResolvedValue({
+    ...committed,
+    history_cleanup_complete: true,
+  });
+  await f.coordinator.refresh();
+  expect(f.terminal).toHaveBeenCalledOnce();
+});
+
+it("adopts delayed private cleanup metadata without changing the committed Leave", async () => {
+  const f = fixture();
+  const committed = {
+    ...status({ kind: "committed" }),
+    kind: "leave_account" as const,
+  };
+  await f.coordinator.submit({
+    group,
+    kind: "leave_account",
+    invoke: async () => committed,
+  });
+  const pending = {
+    ...committed,
+    delete_history: true,
+    history_cleanup_complete: false,
+  };
+  f.commands.list.mockResolvedValueOnce([pending]);
+  await f.coordinator.refresh();
+  expect(f.tickets.get(id)?.status).toEqual(pending);
+  expect((await f.coordinator.cancel(id)).kind).toBe("pending");
+  expect(f.commands.cancel).not.toHaveBeenCalled();
+  const complete = { ...pending, history_cleanup_complete: true };
+  f.commands.status.mockResolvedValue(complete);
+  await f.coordinator.refresh();
+  expect(f.tickets.get(id)?.status).toEqual(complete);
+  expect(f.terminal).toHaveBeenLastCalledWith(complete);
+  await f.coordinator.refresh();
+  expect(f.terminal).toHaveBeenCalledTimes(2);
+});
+
+it("cannot turn an explicitly kept history into a later deletion", async () => {
+  const f = fixture();
+  const committed = {
+    ...status({ kind: "committed" }),
+    kind: "leave_account" as const,
+  };
+  await f.coordinator.submit({
+    group,
+    kind: "leave_account",
+    deleteHistory: false,
+    invoke: async () => committed,
+  });
+  f.commands.list.mockResolvedValueOnce([
+    {
+      ...committed,
+      delete_history: true,
+      history_cleanup_complete: true,
+    },
+  ]);
+  await f.coordinator.refresh();
+  expect(f.tickets.get(id)?.status?.delete_history).toBe(false);
+  expect(f.report).toHaveBeenCalledWith("conflicting_terminal");
+  expect(f.terminal).toHaveBeenCalledOnce();
+});

@@ -79,6 +79,7 @@ function session() {
   const refreshRoster = vi.fn(async () => {});
   const open = vi.fn(async () => {});
   const reportError = vi.fn();
+  const deleteCommittedHistory = vi.fn();
   const actions = createChannelActions({
     read: () => state,
     write: (patch) => {
@@ -96,9 +97,11 @@ function session() {
     refreshRoster,
     open,
     reportError,
+    deleteCommittedHistory,
   });
   return {
     actions,
+    deleteCommittedHistory,
     submitControl,
     commands,
     refreshRoster,
@@ -345,4 +348,72 @@ it("transfers to a verified member account without requiring its representative 
     kind: "transfer_ownership",
     target_account_id: "member-account",
   });
+});
+
+it("retains the leave cleanup choice without deleting before commitment", async () => {
+  const s = session();
+  const pending = {
+    ...status("leave_account", "accepted"),
+    delete_history: true,
+  };
+  s.submitControl.mockResolvedValue({
+    kind: "pending",
+    id: "op",
+    status: pending,
+  });
+  await s.actions.leaveChannel(true);
+  expect(s.submitControl).toHaveBeenCalledWith("team", {
+    kind: "leave_account",
+    delete_history: true,
+  });
+  expect(s.deleteCommittedHistory).not.toHaveBeenCalled();
+  expect(s.read().active?.id).toBe("team");
+  await s.actions.reconcileCommitted({
+    ...pending,
+    phase: { kind: "committed" },
+    history_cleanup_complete: true,
+  });
+  expect(s.deleteCommittedHistory).toHaveBeenCalledExactlyOnceWith("team");
+});
+
+it("retains group history when committed leave has no deletion choice", async () => {
+  const s = session();
+  await s.actions.leaveChannel(false);
+  expect(s.submitControl).toHaveBeenCalledWith("team", {
+    kind: "leave_account",
+    delete_history: false,
+  });
+  expect(s.deleteCommittedHistory).not.toHaveBeenCalled();
+});
+
+it("does not purge a publicly committed leave until private cleanup is complete", async () => {
+  const s = session();
+  const pending = {
+    ...status("leave_account"),
+    delete_history: true,
+    history_cleanup_complete: false,
+  };
+  await s.actions.reconcileCommitted(pending);
+  expect(s.deleteCommittedHistory).not.toHaveBeenCalled();
+  expect(s.read().active?.id).toBe("team");
+  await s.actions.reconcileCommitted({
+    ...pending,
+    history_cleanup_complete: true,
+  });
+  expect(s.deleteCommittedHistory).toHaveBeenCalledExactlyOnceWith("team");
+});
+
+it("reconciles delayed cleanup completion after an earlier public Leave observation", async () => {
+  const s = session();
+  const committed = status("leave_account");
+  await s.actions.reconcileCommitted(committed);
+  expect(s.deleteCommittedHistory).not.toHaveBeenCalled();
+  const completed = {
+    ...committed,
+    delete_history: true,
+    history_cleanup_complete: true,
+  };
+  await s.actions.reconcileCommitted(completed);
+  await s.actions.reconcileCommitted(completed);
+  expect(s.deleteCommittedHistory).toHaveBeenCalledExactlyOnceWith("team");
 });

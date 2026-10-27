@@ -45,21 +45,43 @@ struct LocalPublicationReceipt {
     revision: u64,
     content_hash: [u8; 32],
     frontier_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draft_lifetime: Option<super::super::account_group::MembershipLifetime>,
 }
 impl LocalPublicationReceipt {
     fn matches(&self, meta: &AccountDocumentMeta, source: &PublicIdentity) -> bool {
-        self.version == 1
-            && self.account_public == meta.account_public
+        self.account_public == meta.account_public
             && self.source == *source
             && self.revision == meta.revision
             && self.content_hash == meta.content_hash
             && !meta.tombstone
-            && matches!(&meta.key,
-                AccountDocumentKey::GroupControl { channel, source_device }
-                | AccountDocumentKey::GroupInventory { channel, source_device }
-                if *channel == hex::encode(self.group) && *source_device == source.user_id()
-                    && meta.writer_device == *source_device)
+            && match &meta.key {
+                AccountDocumentKey::Draft {
+                    conversation: DocumentConversation::Channel(channel),
+                } => {
+                    self.version == 2
+                        && self.draft_lifetime.is_some()
+                        && *channel == hex::encode(self.group)
+                        && meta.writer_device == source.user_id()
+                }
+                AccountDocumentKey::GroupControl {
+                    channel,
+                    source_device,
+                }
+                | AccountDocumentKey::GroupInventory {
+                    channel,
+                    source_device,
+                } => {
+                    self.version == 1
+                        && self.draft_lifetime.is_none()
+                        && *channel == hex::encode(self.group)
+                        && *source_device == source.user_id()
+                        && meta.writer_device == *source_device
+                }
+                _ => false,
+            }
     }
+
     fn frontier(&self) -> Option<Vec<EventId>> {
         if self.frontier_hex.is_empty()
             || !self.frontier_hex.len().is_multiple_of(64)
@@ -124,6 +146,13 @@ pub(in crate::node) struct AccountDocumentStore {
     file: EncryptedRecordLog<Vec<u8>>,
     media: MediaStore,
     current: BTreeMap<AccountDocumentKey, AccountDocumentMeta>,
+    pub(super) personal_pending: BTreeSet<DocumentConversation>,
+    pub(super) personal_floors:
+        BTreeMap<DocumentConversation, (AccountDocumentMeta, super::personal::PersonalControl)>,
+    pub(super) personal_applied: BTreeSet<super::personal::AppliedKey>,
+    pub(super) personal_archive_digest: [u8; 32],
+    pub(super) personal:
+        BTreeMap<AccountDocumentKey, (AccountDocumentMeta, super::personal::PersonalControl)>,
     account: [u8; 32],
     records: usize,
     journal_bytes: usize,
@@ -154,9 +183,11 @@ fn scope_contains(
     domain: AccountDocumentDomain,
     operations: bool,
     legacy: bool,
+    personal: bool,
 ) -> bool {
     key.domain() == domain
         && match key {
+            AccountDocumentKey::ConversationPersonal { .. } => personal,
             AccountDocumentKey::GroupOperation { .. } => operations,
             AccountDocumentKey::GroupLegacyOperation { .. } => operations && legacy,
             _ => true,
@@ -226,6 +257,11 @@ impl AccountDocumentStore {
             file,
             media,
             current: BTreeMap::new(),
+            personal: BTreeMap::new(),
+            personal_pending: BTreeSet::new(),
+            personal_floors: BTreeMap::new(),
+            personal_applied: BTreeSet::new(),
+            personal_archive_digest: [0; 32],
             account: *account,
             records: rows.len(),
             journal_bytes,
@@ -262,7 +298,8 @@ impl AccountDocumentStore {
                 .receipt
                 .and_then(|value| serde_json::from_value::<LocalPublicationReceipt>(value).ok())
                 .filter(|receipt| {
-                    receipt.matches(&row.meta, &receipt.source) && receipt.frontier().is_some()
+                    receipt.matches(&row.meta, &receipt.source)
+                        && (receipt.version == 2 || receipt.frontier().is_some())
                 });
             if row.source_authenticated
                 && !matches!(row.meta.key, AccountDocumentKey::GroupInventory { .. })
@@ -300,6 +337,19 @@ impl AccountDocumentStore {
                 store.incomplete.insert(key.clone());
             }
         }
+        let personal_keys: Vec<_> = store
+            .current
+            .keys()
+            .filter(|key| matches!(key, AccountDocumentKey::ConversationPersonal { .. }))
+            .cloned()
+            .collect();
+        for key in personal_keys {
+            if let Some(doc) = store.get(&key)?
+                && let Some(control) = super::personal::decode(&doc.meta, doc.payload())
+            {
+                store.index_personal_control(doc.meta.clone(), control);
+            }
+        }
         store
             .media
             .prune_unreferenced(&store.live())
@@ -331,7 +381,7 @@ impl AccountDocumentStore {
         after: Option<&AccountDocumentKey>,
         limit: usize,
     ) -> Vec<AccountDocumentMeta> {
-        self.list_operation_scope(domain, after, limit, true, true)
+        self.list_exchange_scope(domain, after, limit, true, true, true)
     }
     #[cfg(test)]
     pub(super) fn list_scope(
@@ -343,6 +393,7 @@ impl AccountDocumentStore {
     ) -> Vec<AccountDocumentMeta> {
         self.list_operation_scope(domain, after, limit, include_operations, false)
     }
+    #[cfg(test)]
     pub(super) fn list_operation_scope(
         &self,
         domain: AccountDocumentDomain,
@@ -351,11 +402,34 @@ impl AccountDocumentStore {
         include_operations: bool,
         include_legacy: bool,
     ) -> Vec<AccountDocumentMeta> {
+        self.list_exchange_scope(
+            domain,
+            after,
+            limit,
+            include_operations,
+            include_legacy,
+            false,
+        )
+    }
+    pub(super) fn list_exchange_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        after: Option<&AccountDocumentKey>,
+        limit: usize,
+        include_operations: bool,
+        include_legacy: bool,
+        include_personal: bool,
+    ) -> Vec<AccountDocumentMeta> {
         self.current
             .values()
             .filter(|meta| {
-                scope_contains(&meta.key, domain, include_operations, include_legacy)
-                    && after.is_none_or(|after| &meta.key > after)
+                scope_contains(
+                    &meta.key,
+                    domain,
+                    include_operations,
+                    include_legacy,
+                    include_personal,
+                ) && after.is_none_or(|after| &meta.key > after)
             })
             .take(limit.min(64))
             .cloned()
@@ -386,23 +460,42 @@ impl AccountDocumentStore {
         include_operations: bool,
         include_legacy: bool,
     ) -> [u8; 32] {
-        if domain != AccountDocumentDomain::GroupControl || (include_operations && include_legacy) {
+        self.digest_exchange_scope(domain, include_operations, include_legacy, false)
+    }
+    pub(super) fn digest_exchange_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        include_operations: bool,
+        include_legacy: bool,
+        include_personal: bool,
+    ) -> [u8; 32] {
+        if domain != AccountDocumentDomain::GroupControl
+            || (include_operations && include_legacy && include_personal)
+        {
             return self.digest(domain);
         }
-        if self
-            .incomplete
-            .iter()
-            .any(|key| scope_contains(key, domain, include_operations, include_legacy))
-        {
+        if self.incomplete.iter().any(|key| {
+            scope_contains(
+                key,
+                domain,
+                include_operations,
+                include_legacy,
+                include_personal,
+            )
+        }) {
             return [0; 32];
         }
         let mut xor = [0; 32];
         let mut count = 0u64;
-        for meta in self
-            .current
-            .values()
-            .filter(|meta| scope_contains(&meta.key, domain, include_operations, include_legacy))
-        {
+        for meta in self.current.values().filter(|meta| {
+            scope_contains(
+                &meta.key,
+                domain,
+                include_operations,
+                include_legacy,
+                include_personal,
+            )
+        }) {
             count += 1;
             for (byte, part) in xor.iter_mut().zip(metadata_hash(meta)) {
                 *byte ^= part;
@@ -603,6 +696,41 @@ impl AccountDocumentStore {
         expected: Option<&DocumentVersion>,
         removed: bool,
     ) -> Result<AccountDocumentMeta, NodeError> {
+        self.put_with_local_draft(account, writer, key, payload, expected, removed, None)
+    }
+    pub(super) fn put_local_group_draft(
+        &mut self,
+        account: &Account,
+        source: &PublicIdentity,
+        key: AccountDocumentKey,
+        payload: &[u8],
+        expected: Option<&DocumentVersion>,
+        lifetime: &super::super::account_group::MembershipLifetime,
+    ) -> Result<AccountDocumentMeta, NodeError> {
+        self.put_with_local_draft(
+            account,
+            source.user_id(),
+            key,
+            payload,
+            expected,
+            false,
+            Some((source, lifetime)),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn put_with_local_draft(
+        &mut self,
+        account: &Account,
+        writer: String,
+        key: AccountDocumentKey,
+        payload: &[u8],
+        expected: Option<&DocumentVersion>,
+        removed: bool,
+        local_draft: Option<(
+            &PublicIdentity,
+            &super::super::account_group::MembershipLifetime,
+        )>,
+    ) -> Result<AccountDocumentMeta, NodeError> {
         if account.public().ed25519_pub != self.account
             || key.is_private_control()
             || !key.valid()
@@ -622,8 +750,47 @@ impl AccountDocumentStore {
             .ok_or_else(invalid)?
             .max(super::super::node::now_millis());
         let meta = AccountDocumentMeta::new(account, writer, key, revision, payload, removed);
-        self.merge(meta.clone(), payload).map_err(NodeError::Log)?;
+        let receipt = if let Some((source, lifetime)) = local_draft {
+            let AccountDocumentKey::Draft {
+                conversation: DocumentConversation::Channel(channel),
+            } = &meta.key
+            else {
+                return Err(invalid());
+            };
+            let group: [u8; 32] = hex::decode(channel)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(invalid)?;
+            let receipt = LocalPublicationReceipt {
+                version: 2,
+                account_public: self.account,
+                source: source.clone(),
+                group,
+                revision: meta.revision,
+                content_hash: meta.content_hash,
+                frontier_hex: String::new(),
+                draft_lifetime: Some(lifetime.clone()),
+            };
+            if !receipt.matches(&meta, source) {
+                return Err(invalid());
+            }
+            Some(receipt)
+        } else {
+            None
+        };
+        self.merge_record(meta.clone(), payload, receipt)
+            .map_err(NodeError::Log)?;
         Ok(meta)
+    }
+    pub(super) fn local_draft_lifetime(
+        &self,
+        meta: &AccountDocumentMeta,
+        source: &PublicIdentity,
+    ) -> Option<super::super::account_group::MembershipLifetime> {
+        let receipt = &self.local_receipts.get(&meta.key)?.receipt;
+        (receipt.version == 2 && receipt.matches(meta, source))
+            .then(|| receipt.draft_lifetime.clone())
+            .flatten()
     }
     pub(super) fn group_control_payload_fits(
         &self,
@@ -714,6 +881,7 @@ impl AccountDocumentStore {
             }
             let receipt = LocalPublicationReceipt {
                 version: 1,
+                draft_lifetime: None,
                 account_public: self.account,
                 source: source.clone(),
                 group,
@@ -747,8 +915,16 @@ impl AccountDocumentStore {
         receipt: Option<LocalPublicationReceipt>,
     ) -> Result<bool, LogError> {
         self.validate(&meta)?;
+        if matches!(meta.key, AccountDocumentKey::ConversationPersonal { .. })
+            && self.current.get(&meta.key).is_some_and(|old| old != &meta)
+        {
+            return Err(corrupt());
+        }
         if meta.key.is_private_control()
             && !match meta.key {
+                AccountDocumentKey::ConversationPersonal { .. } => {
+                    super::personal::decode(&meta, payload).is_some()
+                }
                 AccountDocumentKey::PublicProfile { .. } => {
                     super::public_profile::valid_payload(&meta, payload)
                 }
@@ -934,6 +1110,27 @@ impl AccountDocumentStore {
         }
         self.journal_bytes += bytes.len() + INDEX_FRAME;
         self.records += 1;
+        if let Some(control) = super::personal::decode(&meta, payload) {
+            self.index_personal_control(meta.clone(), control);
+        }
+        if let AccountDocumentKey::GroupOperation { channel, .. }
+        | AccountDocumentKey::GroupControl { channel, .. }
+        | AccountDocumentKey::GroupLegacyOperation { channel, .. } = &meta.key
+        {
+            let conversation = DocumentConversation::Channel(channel.clone());
+            let first = AccountDocumentKey::ConversationPersonal {
+                conversation: conversation.clone(),
+                action_id: String::new(),
+            };
+            if self
+                .personal
+                .range(first..)
+                .next()
+                .is_some_and(|(_, (_, c))| c.conversation == conversation)
+            {
+                self.personal_pending.insert(conversation);
+            }
+        }
         self.install_record(meta, receipt, source_authenticated);
         if let Some(old_hash) = old_hash
             && !self.live().contains(&ConversationId::new(old_hash))
@@ -958,7 +1155,11 @@ impl AccountDocumentStore {
             AccountDocumentKey::GroupOperation { .. }
                 | AccountDocumentKey::GroupLegacyOperation { .. }
         );
-        let group_control = matches!(meta.key, AccountDocumentKey::GroupControl { .. });
+        let group_control = matches!(
+            meta.key,
+            AccountDocumentKey::GroupControl { .. }
+                | AccountDocumentKey::ConversationPersonal { .. }
+        );
         let count = if presentation {
             self.counts[meta.key.domain() as usize]
         } else if operation {
@@ -1309,6 +1510,7 @@ mod tests {
         );
         let receipt = LocalPublicationReceipt {
             version: 1,
+            draft_lifetime: None,
             account_public: meta.account_public,
             source: device.clone(),
             group: [1; 32],

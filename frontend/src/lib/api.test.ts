@@ -348,11 +348,41 @@ describe("chat command mapping", () => {
   });
 });
 
-it("deletes an offline contact under the expected owner", async () => {
-  await contactPolicy.delete("owner", "account");
-  expect(invoke).toHaveBeenCalledWith("delete_contact", {
+it("binds contact reopening to the supplied full account", async () => {
+  await contactPolicy.set("owner", "account", false, "Name", "own-account");
+  expect(invoke).toHaveBeenCalledWith("set_contact_hidden", {
     owner: "owner",
     account: "account",
+    hidden: false,
+    name: "Name",
+    expectedAccount: "own-account",
+  });
+});
+
+it("deletes a contact under the expected owner and full account", async () => {
+  await contactPolicy.delete("owner", "own-account", "account");
+  expect(invoke).toHaveBeenCalledWith("delete_contact", {
+    owner: "owner",
+    expectedAccount: "own-account",
+    account: "account",
+    clearHistory: true,
+  });
+});
+it("keeps contact history when explicitly requested", async () => {
+  await contactPolicy.delete("owner", "own-account", "account", false);
+  expect(invoke).toHaveBeenCalledWith("delete_contact", {
+    owner: "owner",
+    expectedAccount: "own-account",
+    account: "account",
+    clearHistory: false,
+  });
+});
+it("deletes an exited group chat under its exact account and owner", async () => {
+  await chat.deleteLeftChannel("owner", "account", "group");
+  expect(invoke).toHaveBeenCalledWith("owner_delete_left_channel", {
+    owner: "owner",
+    expectedAccount: "account",
+    channelId: "group",
   });
 });
 
@@ -817,5 +847,13 @@ it("submits raw File account operation arguments without discarding pending life
     progressKey: "client",
     expiresAtMs: 123,
     protection: "authenticate",
+  });
+});
+
+it("reads personal conversation controls under the exact owner and account", async () => {
+  await chat.personalConversationStates("owner", "account");
+  expect(invoke).toHaveBeenCalledWith("owner_personal_conversation_states", {
+    owner: "owner",
+    expectedAccount: "account",
   });
 });

@@ -59,6 +59,8 @@ pub(in crate::node) struct OperationProbe {
     pub asset: Option<GroupFileAssetRequest>,
     #[serde(default, skip_serializing_if = "legacy_disabled")]
     pub legacy_leave: bool,
+    #[serde(default, skip_serializing_if = "legacy_disabled")]
+    pub personal: bool,
 }
 impl OperationProbe {
     pub(super) fn supported(&self) -> bool {
@@ -80,6 +82,8 @@ pub(in crate::node) struct OperationCapability {
     pub supported_kinds: Option<u16>,
     #[serde(default, skip_serializing_if = "legacy_disabled")]
     pub legacy_leave: bool,
+    #[serde(default, skip_serializing_if = "legacy_disabled")]
+    pub personal: bool,
 }
 impl OperationCapability {
     fn valid(&self) -> bool {
@@ -117,7 +121,7 @@ impl DocumentRequest {
             AccountDocumentDomain::PublicProfile | AccountDocumentDomain::GroupActivity => {
                 request.version == 6
             }
-            AccountDocumentDomain::GroupControl => request.version == 5,
+            AccountDocumentDomain::GroupControl => request.version == 5 || request.version == 7,
             AccountDocumentDomain::DeviceHostname => request.version == 5,
             AccountDocumentDomain::GroupInventory => request.version == 4,
             AccountDocumentDomain::ChannelCustody => request.version == 3,
@@ -125,9 +129,16 @@ impl DocumentRequest {
                 request.version == 2
             }
             _ => request.version == 1 || request.version == 2,
-        }) && hex(&request.account_id, 32)
+        }) && (request.version != 7
+            || request
+                .operation
+                .as_ref()
+                .is_some_and(|probe| probe.personal && probe.supported()))
+            && hex(&request.account_id, 32)
             && request.after.as_ref().is_none_or(|k| {
                 k.valid()
+                    && (request.version == 7
+                        || !matches!(k, AccountDocumentKey::ConversationPersonal { .. }))
                     && k.domain() == request.domain
                     && !matches!(
                         k,
@@ -207,6 +218,7 @@ mod tests {
             nonce: [7; 32],
             supported_kinds: Some(1 << 13),
             legacy_leave: true,
+            personal: false,
         };
         let bytes = serde_json::to_vec(&capability).unwrap();
         let old: OldCapability = serde_json::from_slice(&bytes).unwrap();
@@ -237,6 +249,7 @@ mod tests {
                 nonce: [7; 32],
                 supported_kinds: Some(8192),
                 legacy_leave: false,
+                personal: false,
             }),
         };
         assert!(!valid_complete(&serde_json::to_vec(&completion).unwrap()));
@@ -253,6 +266,7 @@ mod tests {
             known_digest: [0; 32],
             asset: None,
             legacy_leave: false,
+            personal: false,
         };
         assert!(!probe.supported());
         probe.legacy_leave = true;

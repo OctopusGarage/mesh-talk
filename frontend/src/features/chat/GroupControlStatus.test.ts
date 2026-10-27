@@ -204,3 +204,21 @@ it.each([undefined, "accepted", "cancelled", "committed", "rejected"] as const)(
     } else expect(html).toBe("");
   },
 );
+
+it("shows private leave cleanup without offering cancellation of a committed leave", () => {
+  const pending = {
+    ...status({ kind: "committed" }),
+    kind: "leave_account" as const,
+    delete_history: true,
+    history_cleanup_complete: false,
+  };
+  const html = renderToStaticMarkup(
+    createElement(GroupControlStatus, {
+      outcome: { kind: "pending", id: pending.id, status: pending },
+    }),
+  );
+  expect(html).toContain("Left group. Cleaning up history");
+  expect(html).toContain("Check status");
+  expect(html).not.toContain("Request cancellation");
+  expect(html).not.toContain("The account action completed");
+});

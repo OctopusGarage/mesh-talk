@@ -345,6 +345,8 @@ pub fn run_tauri_configured(
                 owner_commands::owner_node_identity,
                 owner_commands::owner_startup_identity,
                 owner_commands::owner_create_channel,
+                owner_commands::owner_personal_conversation_states,
+                owner_commands::owner_delete_left_channel,
                 owner_commands::owner_new_account_group_operation_id,
                 owner_commands::owner_submit_account_group_control,
                 owner_commands::owner_submit_account_group_text,
