@@ -476,6 +476,7 @@
     {
       "id": "core-channel-account-membership",
       "paths": [
+        "crates/mesh-talk-core/src/node/channel.rs",
         "crates/mesh-talk-core/src/node/channel_account_authority.rs",
         "crates/mesh-talk-core/src/node/channel_account_bootstrap.rs",
         "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
@@ -485,6 +486,7 @@
         {
           "package": "mesh-talk-core",
           "filters": [
+            "node::channel::tests::content_events_preserve_membership_without_rebuilding_account_proofs",
             "node::channel_account_authority::tests::",
             "node::channel_account_bootstrap::tests::",
             "node::channel_account_maintenance::tests::",

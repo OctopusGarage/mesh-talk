@@ -624,6 +624,9 @@ including a device absent from a legacy physical roster. A member account can
 leave from any certified device; an owner account must transfer ownership first
 on every device. Public signer validation remains authoritative for actual
 protocol effects. An inventory row or display name cannot establish authority.
+The canonical channel reducer retains every event in its authorized causal DAG.
+It reconstructs account membership proofs only after channel membership controls;
+content events cannot change those immutable proofs or bypass control validation.
 
 | Account-owned state or action | Device-owned execution or state |
 | --- | --- |

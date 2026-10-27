@@ -51,7 +51,30 @@ struct RoleBootstrapDiagnostics {
     // and decoded exact-source role failures. All fields are body-free.
     rejected: [usize; 6],
     captured_source_revision: Option<u64>,
+    source_floor: Option<crate::node::AccountDocumentMeta>,
     observed_revisions: std::collections::VecDeque<(Option<u64>, Option<u64>)>,
+}
+
+impl RoleBootstrapDiagnostics {
+    fn pin_first_source(&mut self, meta: Option<&crate::node::AccountDocumentMeta>) {
+        if self.source_floor.is_none()
+            && let Some(meta) = meta.filter(|meta| !meta.tombstone)
+        {
+            self.captured_source_revision = Some(meta.revision);
+            self.source_floor = Some(meta.clone());
+        }
+    }
+}
+
+fn role_metadata_reaches_snapshot(
+    actual: &crate::node::AccountDocumentMeta,
+    floor: &crate::node::AccountDocumentMeta,
+) -> bool {
+    !actual.tombstone
+        && actual.key == floor.key
+        && actual.account_public == floor.account_public
+        && actual.writer_device == floor.writer_device
+        && (actual == floor || actual.revision > floor.revision)
 }
 
 fn authenticated_source_role_ready(
@@ -69,6 +92,7 @@ fn authenticated_source_role_ready(
         .account_document_meta(&key)
         .filter(|meta| !meta.tombstone);
     let actual = target.account_document_meta(&key);
+    diagnosis.pin_first_source(expected.as_ref());
     let revisions = (
         expected.as_ref().map(|meta| meta.revision),
         actual.as_ref().map(|meta| meta.revision),
@@ -97,9 +121,13 @@ fn authenticated_source_role_ready(
         .is_some_and(|support| support.public == public)
     {
         Some(2)
-    } else if expected.is_none() {
+    } else if diagnosis.source_floor.is_none() {
         Some(3)
-    } else if actual != expected {
+    } else if !actual
+        .as_ref()
+        .zip(diagnosis.source_floor.as_ref())
+        .is_some_and(|(actual, floor)| role_metadata_reaches_snapshot(actual, floor))
+    {
         Some(4)
     } else if !target
         .account_document(&key)
@@ -157,10 +185,8 @@ pub(super) async fn pull_reference_action_control(
         channel: hex::encode(group.as_bytes()),
         source_device: source.user_id(),
     };
-    let mut diagnosis = RoleBootstrapDiagnostics {
-        captured_source_revision: source.account_document_meta(&key).map(|meta| meta.revision),
-        ..Default::default()
-    };
+    let mut diagnosis = RoleBootstrapDiagnostics::default();
+    diagnosis.pin_first_source(source.account_document_meta(&key).as_ref());
     if authenticated_source_role_ready(target, source, group, &mut diagnosis) {
         return;
     }
@@ -1126,4 +1152,210 @@ async fn role_bootstrap_refreshes_the_requested_group_after_a_real_owner_transfe
         AccountGroupRole::Member,
         "bootstrap must import the current signed head for the requested group"
     );
+}
+
+#[tokio::test]
+async fn role_bootstrap_keeps_its_entry_snapshot_when_source_publication_advances_over_noise() {
+    use crate::node::AccountDocumentKey;
+    use crate::node::account_documents::sync::DocumentSyncCursor;
+    use crate::node::account_sync_wire::AccountHistoryFrame;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let first = node(&dir.path().join("first"), &account);
+    let second = node(&dir.path().join("second"), &account);
+    // The wanted source row precedes the unrelated signed member row in the
+    // existing key order, so the held tail cannot hide a missing wanted body.
+    let (source, member) = if first.user_id() < second.user_id() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let target = node(&dir.path().join("target"), &account);
+    for left in [&source, &member, &target] {
+        for right in [&source, &member, &target] {
+            if left.user_id() != right.user_id() {
+                link(left, right);
+            }
+        }
+    }
+    let mut servers = Vec::new();
+    let mut addresses = Vec::new();
+    for (name, node) in [("source-privacy", &source), ("member-privacy", &member)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        std::fs::create_dir_all(dir.path().join(name)).unwrap();
+        configure(node, &dir.path().join(name), address.port());
+        addresses.push(address);
+        servers.push(inbound_server(node.clone(), listener));
+    }
+    for (left, right, address) in [
+        (&target, &source, addresses[0]),
+        (&source, &member, addresses[1]),
+    ] {
+        left.roster.lock().unwrap().update(
+            &right.signed_announce("Snapshot bootstrap", address.port()),
+            address.ip(),
+            &left.user_id(),
+        );
+    }
+    let peer = target.routing_peer(&source.user_id()).unwrap();
+    target
+        .pull_account_documents_page(&peer, &mut DocumentSyncCursor::control())
+        .await
+        .unwrap();
+    let genesis = legacy_group(&source, &member);
+    let group = genesis.conversation_id;
+    install(&source, &genesis);
+    install(&member, &genesis);
+    source.publish_account_group_access_for(group);
+    member.publish_account_group_access_for(group);
+    let key = AccountDocumentKey::GroupControl {
+        channel: hex::encode(group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let entry = source.account_document_meta(&key).unwrap();
+    let member_peer = source.routing_peer(&member.user_id()).unwrap();
+    // Newly learned, real source knowledge will legitimately grow the owner's
+    // signed head; it is not claimed to be an ACK-only publication.
+    source
+        .pull_account_documents_page(&member_peer, &mut DocumentSyncCursor::control())
+        .await
+        .unwrap();
+    assert_eq!(source.account_document_meta(&key).as_ref(), Some(&entry));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (arrived, held) = tokio::sync::oneshot::channel();
+    let arrived = Arc::new(Mutex::new(Some(arrived)));
+    let advanced = Arc::new(AtomicBool::new(false));
+    *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let source = source.clone();
+        let release = release.clone();
+        let target_public = target.identity.public();
+        let advanced = advanced.clone();
+        move |peer, frame| {
+            let source = source.clone();
+            let release = release.clone();
+            let arrived = arrived.clone();
+            let advanced = advanced.clone();
+            let target_public = target_public.clone();
+            Box::pin(async move {
+                if peer != target_public {
+                    return;
+                }
+                let AccountHistoryFrame::DocumentHeader { body } = frame else {
+                    return;
+                };
+                let meta: crate::node::AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                let AccountDocumentKey::GroupControl { source_device, .. } = meta.key else {
+                    return;
+                };
+                if source_device == source.user_id() && !advanced.swap(true, Ordering::SeqCst) {
+                    // Metadata and its matching signed body were selected before
+                    // this hook; advance the live publisher after helper entry.
+                    source.publish_account_group_access_for(group);
+                } else if source_device != source.user_id() {
+                    let signal = arrived.lock().unwrap().take();
+                    if let Some(signal) = signal {
+                        let _ = signal.send(());
+                        let _ = release.acquire().await;
+                    }
+                }
+            })
+        }
+    }));
+    let pulling = {
+        let source = source.clone();
+        let target = target.clone();
+        let address = addresses[0];
+        tokio::spawn(async move {
+            pull_reference_action_control(&target, &source, address, group).await;
+        })
+    };
+    let tail_held = tokio::time::timeout(std::time::Duration::from_secs(3), held).await;
+    let completed = pulling.await;
+    let current = source.account_document_meta(&key).unwrap();
+    let imported = target.account_document_meta(&key);
+    release.close();
+    *source.account_session_test_hook.lock().unwrap() = None;
+    for server in servers {
+        server.abort();
+        let _ = server.await;
+    }
+    for node in [&source, &member, &target] {
+        node.runtime_work.close();
+        node.runtime_work.drain().await;
+    }
+    assert!(
+        tail_held.is_ok(),
+        "the newer publication must remain behind a real authenticated held tail"
+    );
+    assert!(advanced.load(Ordering::SeqCst));
+    assert!(
+        current.revision > entry.revision,
+        "the real publisher must advance after helper entry"
+    );
+    assert_eq!(
+        imported.as_ref(),
+        Some(&entry),
+        "the exact entry snapshot is already durable"
+    );
+    assert!(
+        completed.is_ok(),
+        "a future publication cannot move an already satisfied source snapshot barrier"
+    );
+}
+
+#[test]
+fn role_snapshot_floor_pins_first_live_head_and_rejects_conflicting_metadata() {
+    use crate::node::AccountDocumentKey;
+    let dir = tempfile::tempdir().unwrap();
+    let source = node(&dir.path().join("source"), &Account::generate());
+    let member = node(&dir.path().join("member"), &Account::generate());
+    let genesis = legacy_group(&source, &member);
+    install(&source, &genesis);
+    source.publish_account_group_access_for(genesis.conversation_id);
+    let writer = source.user_id();
+    let key = AccountDocumentKey::GroupControl {
+        channel: hex::encode(genesis.conversation_id.as_bytes()),
+        source_device: writer.clone(),
+    };
+    let initial = source.account_document_meta(&key).unwrap();
+    // This pure ordering guard never admits records. Real signed-body and
+    // current-binding validation remains exercised by the Noise fixtures.
+    let meta = |revision, payload: &[u8], tombstone| {
+        let mut value = initial.clone();
+        value.revision = revision;
+        value.content_hash = crate::node::account_documents::content_hash(payload);
+        value.content_len = payload.len() as u32;
+        value.tombstone = tombstone;
+        value
+    };
+    let newer = meta(2, b"later signed role", false);
+    let mut diagnosis = RoleBootstrapDiagnostics::default();
+    diagnosis.pin_first_source(None);
+    diagnosis.pin_first_source(Some(&meta(1, b"", true)));
+    assert!(diagnosis.source_floor.is_none());
+    diagnosis.pin_first_source(Some(&initial));
+    diagnosis.pin_first_source(Some(&newer));
+    assert_eq!(diagnosis.source_floor.as_ref(), Some(&initial));
+    assert!(role_metadata_reaches_snapshot(&initial, &initial));
+    assert!(role_metadata_reaches_snapshot(&newer, &initial));
+    assert!(!role_metadata_reaches_snapshot(
+        &meta(0, b"old", false),
+        &initial
+    ));
+    assert!(!role_metadata_reaches_snapshot(
+        &meta(1, b"same revision fork", false),
+        &initial
+    ));
+    assert!(!role_metadata_reaches_snapshot(
+        &meta(2, b"", true),
+        &initial
+    ));
+    let mut wrong_group = newer.clone();
+    wrong_group.key = AccountDocumentKey::GroupControl {
+        channel: hex::encode(new_channel_id().as_bytes()),
+        source_device: writer,
+    };
+    assert!(!role_metadata_reaches_snapshot(&wrong_group, &initial));
 }

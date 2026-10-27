@@ -2546,55 +2546,90 @@ mod tests {
 
     #[test]
     fn registered_search_caps_hits_and_context_serialized_bytes() {
+        let started = std::time::Instant::now();
+        struct SearchFixtureFinished(std::time::Instant);
+        impl Drop for SearchFixtureFinished {
+            fn drop(&mut self) {
+                eprintln!(
+                    "search cap fixture phase=finished elapsed_ms={}",
+                    self.0.elapsed().as_millis()
+                );
+            }
+        }
+        // Declared before Fixture so this observes its unchanged natural teardown.
+        let _finished = SearchFixtureFinished(started);
+        let phase = |phase: &str, corpus_rows: usize| {
+            eprintln!(
+                "search cap fixture phase={phase} corpus_rows={corpus_rows} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+        };
+        phase("start", 0);
         let fixture = Fixture::new();
+        phase("init", 0);
         let channel = fixture
             .invoke(
                 "create_channel",
                 serde_json::json!({"name":"Caps", "memberAccountIds":[]}),
             )
             .unwrap();
-        for _ in 0..201 {
+        phase("create", 0);
+        for index in 0..201 {
             fixture
                 .invoke(
                     "send_channel_message",
                     serde_json::json!({"channelId":channel,"text":"cap token"}),
                 )
                 .unwrap();
+            if matches!(index + 1, 1 | 50 | 100 | 150 | 201) {
+                phase("small_send", index + 1);
+            }
         }
+        phase("search1_begin", 201);
         let results = fixture
             .invoke(
                 "owner_search_recent",
                 serde_json::json!({"owner":"alice","query":"cap token"}),
             )
             .unwrap();
+        phase("search1_returned", 201);
         assert_eq!(results["hits"].as_array().unwrap().len(), 200);
         assert_eq!(results["coverage"]["truncated"], true);
         let text = "oversize token ".to_owned() + &"x".repeat(60_000);
-        for _ in 0..20 {
+        phase("large_sends_begin", 201);
+        for index in 0..20 {
             fixture
                 .invoke(
                     "send_channel_message",
                     serde_json::json!({"channelId":channel,"text":text}),
                 )
                 .unwrap();
+            if (index + 1) % 5 == 0 {
+                phase("large_send", 201 + index + 1);
+            }
         }
+        phase("search2_begin", 221);
         let results = fixture
             .invoke(
                 "owner_search_recent",
                 serde_json::json!({"owner":"alice","query":"oversize token"}),
             )
             .unwrap();
+        phase("search2_returned", 221);
         let reference = results["hits"][0]["reference"].clone();
+        phase("context_begin", 221);
         let response = fixture
             .invoke(
                 "owner_search_context",
                 serde_json::json!({"owner":"alice","reference":reference}),
             )
             .unwrap();
+        phase("context_returned", 221);
         assert_eq!(
             response,
             serde_json::json!({"status":"unavailable","reference":reference,"messages":[],"newer_entries":null})
         );
+        phase("assert_complete", 221);
     }
 
     #[test]
