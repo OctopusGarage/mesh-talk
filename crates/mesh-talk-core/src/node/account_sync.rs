@@ -188,11 +188,12 @@ impl DocumentPeer {
     }
 }
 
-// Incoming wake hints affect scheduling only; locally selected operation sources
-// still take precedence. A foreground or resumed turn gets one uninterrupted
-// comparison before another hint can claim the same bounded Control slot.
-fn control_turn_protected(resumed: bool, foreground: bool, hinted: bool) -> bool {
-    resumed || foreground || hinted
+// Hints order ordinary first turns but confer no authority or reservation. One
+// owned-preemption replacement and its resumed checkpoint are protected, so a
+// newer sender can interrupt a natural hint turn once without a cancellation
+// storm or starving the interrupted comparison. Local explicit sources win.
+fn control_turn_protected(resumed: bool, replacement: bool) -> bool {
+    resumed || replacement
 }
 
 fn control_wake_preempts(
@@ -2681,11 +2682,15 @@ impl Node {
                     return;
                 };
                 let owner = key.clone();
+                #[cfg(test)]
+                let control_origin = (
+                    document_resumes.contains(&key),
+                    foreground_next == Some(key.identity()),
+                );
                 let protected = key.lane == DocumentLane::Control
                     && control_turn_protected(
                         document_resumes.remove(&key),
                         foreground_next == Some(key.identity()),
-                        hints.iter().any(|hint| hint.public == key.public()),
                     );
                 if key.lane == DocumentLane::Control {
                     if foreground_next == Some(key.identity()) {
@@ -2697,6 +2702,12 @@ impl Node {
                 }
                 #[cfg(test)]
                 if key.lane == DocumentLane::Control {
+                    self.trace_account_client(&key.public(), || {
+                        format!(
+                            "control_turn_origin resumed={} replacement={}",
+                            control_origin.0, control_origin.1
+                        )
+                    });
                     self.trace_account_client(&key.public(), || {
                         format!(
                             "control_dispatch protected={} hint={}",
@@ -3277,26 +3288,35 @@ mod tests {
     use crate::identity::account::Account;
 
     #[test]
-    fn incoming_wake_protects_idle_foreground_and_resumes_background_before_more_hints() {
+    fn incoming_wake_yields_one_natural_turn_but_protects_replacement_and_resume() {
         let first = ([1; 32], [2; 32]);
         let later = ([3; 32], [4; 32]);
-        // A hint dispatched into an idle lane has no foreground_next marker.
-        // Consuming that hint must not make its active read passive again.
-        let protected = control_turn_protected(false, false, true);
-        assert!(protected);
-        assert!(!control_wake_preempts(first, protected, Some(later)));
-        assert!(!control_wake_preempts(first, false, Some(first)));
-        assert!(control_wake_preempts(first, false, Some(later)));
-        assert!(!control_wake_preempts(first, false, None));
-        // Exactly one foreground comparison precedes the saved background turn;
-        // additional sender hints cannot starve its restored partial cursor.
-        let foreground = control_queue_priority(false, true, false, Some(1));
-        let resumed = control_queue_priority(false, false, true, None);
+        let natural = control_turn_protected(false, false);
+        assert!(
+            !natural,
+            "a natural publication hint does not reserve a foreground turn"
+        );
+        assert!(control_wake_preempts(first, natural, Some(later)));
+        assert!(!control_wake_preempts(first, natural, Some(first)));
+        assert!(!control_wake_preempts(first, natural, None));
+        let replacement = control_turn_protected(false, true);
+        let resumed = control_turn_protected(true, false);
+        for value in 3..=66 {
+            let fresh = Some(([value; 32], [value + 1; 32]));
+            assert!(
+                !control_wake_preempts(first, replacement, fresh),
+                "a hint storm cannot interrupt the owned replacement"
+            );
+            assert!(
+                !control_wake_preempts(first, resumed, fresh),
+                "a hint storm cannot prevent repayment of the saved comparison"
+            );
+        }
+        let foreground_rank = control_queue_priority(false, true, false, Some(1));
+        let resumed_rank = control_queue_priority(false, false, true, None);
         let later_hint = control_queue_priority(false, false, false, Some(0));
-        assert!(foreground < resumed && resumed < later_hint);
-        assert!(control_turn_protected(true, false, false));
-        assert!(!control_turn_protected(false, false, false));
-        assert!(control_queue_priority(true, false, false, None) < foreground);
+        assert!(foreground_rank < resumed_rank && resumed_rank < later_hint);
+        assert!(control_queue_priority(true, false, false, None) < foreground_rank);
     }
 
     #[test]

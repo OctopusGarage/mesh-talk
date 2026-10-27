@@ -13,6 +13,15 @@ impl Drop for ReleaseDirectoryOnDrop {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise() {
+    incoming_request_over_held_control(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn incoming_request_overtakes_a_naturally_hinted_control_and_repays_its_background_turn() {
+    incoming_request_over_held_control(true).await;
+}
+
+async fn incoming_request_over_held_control(naturally_hinted: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let owner = node(&dir.path().join("owner"), &account);
@@ -104,8 +113,15 @@ async fn incoming_selected_source_request_overtakes_another_siblings_held_contro
         }
     }
     let mut servers = tokio::task::JoinSet::new();
+    let mut inbound_servers = Vec::new();
     for (target, listener) in listeners {
-        servers.spawn(target.run_accept_loop(listener));
+        if naturally_hinted {
+            // Receive authenticated setup exchanges without starting a control
+            // producer. A real Wake is queued before the owner's first turn.
+            inbound_servers.push(super::inbound_server(target, listener));
+        } else {
+            servers.spawn(target.run_accept_loop(listener));
+        }
     }
     owner.publish_account_group_access(&mut None);
     super::message_action_reference::pull_reference_action_control(
@@ -115,6 +131,16 @@ async fn incoming_selected_source_request_overtakes_another_siblings_held_contro
         group,
     )
     .await;
+    if naturally_hinted {
+        let peer = owner.routing_peer(&reference.user_id()).unwrap();
+        owner
+            .pull_account_documents_page(
+                &peer,
+                &mut crate::node::account_documents::sync::DocumentSyncCursor::control(),
+            )
+            .await
+            .unwrap();
+    }
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let ready = [&owner, &reference].into_iter().all(|node| {
@@ -150,6 +176,7 @@ async fn incoming_selected_source_request_overtakes_another_siblings_held_contro
     let received_wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let passive_dispatch = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let held_passive = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let natural_origin = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sender = reference.identity.public();
     *owner.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let received = received_wakes.clone();
@@ -163,12 +190,25 @@ async fn incoming_selected_source_request_overtakes_another_siblings_held_contro
     *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let passive = passive_dispatch.clone();
         let other_public = other.identity.public();
+        let natural_origin = natural_origin.clone();
         move |peer, event| {
-            if peer == other_public && event.starts_with("control_dispatch") {
-                passive.store(
-                    event == "control_dispatch protected=false hint=false",
+            if peer != other_public {
+                return;
+            }
+            if event.starts_with("control_turn_origin") {
+                natural_origin.store(
+                    event == "control_turn_origin resumed=false replacement=false",
                     std::sync::atomic::Ordering::SeqCst,
                 );
+            }
+            if event.starts_with("control_dispatch") {
+                let eligible = if naturally_hinted {
+                    natural_origin.load(std::sync::atomic::Ordering::SeqCst)
+                        && event.ends_with("hint=true")
+                } else {
+                    event == "control_dispatch protected=false hint=false"
+                };
+                passive.store(eligible, std::sync::atomic::Ordering::SeqCst);
             }
         }
     }));
@@ -222,6 +262,37 @@ async fn incoming_selected_source_request_overtakes_another_siblings_held_contro
             })
         }
     }));
+    if naturally_hinted {
+        other
+            .set_device_hostname(Some("natural-control-hint"))
+            .unwrap();
+        let peer = other.routing_peer(&owner.user_id()).unwrap();
+        let mut wake = other
+            .begin_account_exchange(
+                &peer,
+                crate::node::account_sync_wire::AccountSyncVersion::V2,
+                AccountHistoryFrame::Wake {
+                    account_id: account.account_id(),
+                    epoch: [7; 16],
+                    revision: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let reply = wake.recv().await.unwrap();
+        assert!(matches!(
+            AccountHistoryFrame::decode_versioned(&reply),
+            Some((
+                crate::node::account_sync_wire::AccountSyncVersion::V2,
+                AccountHistoryFrame::WakeAck {
+                    epoch,
+                    revision: 1
+                }
+            )) if epoch == [7; 16]
+        ));
+        wake.recycle(&other);
+        servers.spawn(owner.clone().run_account_history_loop());
+    }
     owner.publish_group_inventory_for(group);
     // Bootstrap may already have published this exact Inventory head. Its
     // unchanged publication correctly emits no wake; schedule the reference's
@@ -234,8 +305,16 @@ async fn incoming_selected_source_request_overtakes_another_siblings_held_contro
 
     assert!(
         held_passive.load(std::sync::atomic::Ordering::SeqCst),
-        "only a real passive Control turn may be preempted by the incoming wake"
+        "the held Control must have the exact requested passive or natural-hint origin"
     );
+    if naturally_hinted {
+        for node in [&reference, &other, &external] {
+            servers.spawn(node.clone().run_account_history_loop());
+        }
+        for node in [&owner, &reference, &other, &external] {
+            servers.spawn(node.clone().run_account_wake_loop());
+        }
+    }
     let wakes_before = received_wakes.load(std::sync::atomic::Ordering::SeqCst);
     let id = reference
         .new_account_group_operation_id(&account.account_id())
@@ -322,6 +401,10 @@ async fn incoming_selected_source_request_overtakes_another_siblings_held_contro
         node.runtime_work.close();
     }
     servers.shutdown().await;
+    for server in inbound_servers {
+        server.abort();
+        let _ = server.await;
+    }
     for node in [&owner, &reference, &external, &other] {
         tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
             .await

@@ -1319,11 +1319,13 @@ are never cancelled by this scheduling rule, and worker/TCP limits do not increa
 
 The same Control owner retains at most 64 authenticated Wake sender tokens, keyed
 by full Ed25519/X25519 identity and current account binding. Fresh tokens coalesce
-in sender FIFO order. A waiting sender may preempt only an unrelated passive
-metadata read; it cannot displace an active selected executor, foreground hint
-comparison or resumed background comparison. One foreground comparison is
-followed by the interrupted background checkpoint before more sender hints.
-Repeated hints do not restart protected reads, retry deadlines remain in force,
+in sender FIFO order. A waiting sender may preempt an unrelated ordinary metadata read, including a
+natural first turn ordered by a publication hint. A hint alone is not an explicit
+operation or a reservation. The owned replacement foreground turn, its resumed
+background checkpoint and an active locally selected executor remain protected.
+One replacement comparison is followed by the interrupted background checkpoint
+before more sender hints; a hint storm cannot repeatedly cancel either turn.
+Retry deadlines remain in force,
 and policy/identity changes retire stale tokens. Hints confer no read or mutation
 authority; every replacement exchange performs normal session admission.
 

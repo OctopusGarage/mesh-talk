@@ -95,7 +95,8 @@
             "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route",
             "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
             "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
-            "incoming_wake_protects_idle_foreground_and_resumes_background_before_more_hints",
+            "incoming_request_overtakes_a_naturally_hinted_control_and_repays_its_background_turn",
+            "incoming_wake_yields_one_natural_turn_but_protects_replacement_and_resume",
             "node::account_sync::wake::tests::control_wake_fifo_coalesces_and_consumes_only_the_captured_generation",
             "node::account_sync::wake::tests::control_wakes_bound_full_identities_and_prune_changed_bindings"
           ]

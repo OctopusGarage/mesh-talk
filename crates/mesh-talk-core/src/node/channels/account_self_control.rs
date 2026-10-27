@@ -1021,14 +1021,21 @@ pub(in crate::node) mod tests {
             );
         }
     }
-    async fn wait_self_control_noise(mut ready: impl FnMut() -> bool, message: &str) {
+    async fn wait_self_control_noise(ready: impl FnMut() -> bool, message: &str) {
+        wait_self_control_noise_diagnosed(ready, || message.to_owned()).await;
+    }
+
+    async fn wait_self_control_noise_diagnosed(
+        mut ready: impl FnMut() -> bool,
+        diagnosis: impl Fn() -> String,
+    ) {
         tokio::time::timeout(std::time::Duration::from_secs(8), async {
             while !ready() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect(message);
+        .unwrap_or_else(|_| panic!("{}", diagnosis()));
     }
     async fn reference_self_control_over_noise(input: AccountSelfControlInput) {
         let pending = input != AccountSelfControlInput::Leave;
@@ -1279,13 +1286,54 @@ pub(in crate::node) mod tests {
         let offline = offline_index.map(|index| nodes[index].1.clone());
         let offline_public = offline.as_ref().map(|node| node.identity.public());
         let kind = input.operation().kind();
-        wait_self_control_noise(|| {
-            let role_ready = reference.account_group_access(group).unwrap().role == if pending { AccountGroupRole::Invited } else { AccountGroupRole::Member };
-            let capability_ready = reference.group_operation_versions.lock().unwrap().get(&online.user_id()).is_some_and(|support| support.public == online.identity.public() && support.kinds & kind.capability_bit() != 0);
-            let reverse_ready = online.group_operation_versions.lock().unwrap().get(&reference.user_id()).is_some_and(|support| support.public == reference.identity.public());
-            let old_head_ready = offline_public.as_ref().is_none_or(|public| [&reference, &online].iter().all(|node| node.group_control_heads(group).iter().any(|head| head.proof.public() == *public && head.access.observation.role == AccountGroupRole::Member)));
-            role_ready && capability_ready && reverse_ready && old_head_ready
-        }, "real private role/capability and old Member provenance must arrive before self-control admission").await;
+        let readiness = || {
+            let role_ready = reference.account_group_access(group).unwrap().role
+                == if pending {
+                    AccountGroupRole::Invited
+                } else {
+                    AccountGroupRole::Member
+                };
+            let capability_ready = reference
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .get(&online.user_id())
+                .is_some_and(|support| {
+                    support.public == online.identity.public()
+                        && support.kinds & kind.capability_bit() != 0
+                });
+            let reverse_ready = online
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .get(&reference.user_id())
+                .is_some_and(|support| support.public == reference.identity.public());
+            let old_head_ready = offline_public.as_ref().is_none_or(|public| {
+                [&reference, &online].iter().all(|node| {
+                    node.group_control_heads(group).iter().any(|head| {
+                        head.proof.public() == *public
+                            && head.access.observation.role == AccountGroupRole::Member
+                    })
+                })
+            });
+            [role_ready, capability_ready, reverse_ready, old_head_ready]
+        };
+        wait_self_control_noise_diagnosed(|| readiness().into_iter().all(|ready| ready), || {
+            let forward = reference.group_operation_versions.lock().unwrap().get(&online.user_id()).map(|support| (
+                support.public == online.identity.public(), support.kinds & kind.capability_bit() != 0,
+            ));
+            let reverse = online.group_operation_versions.lock().unwrap().get(&reference.user_id())
+                .map(|support| support.public == reference.identity.public());
+            let old_heads = offline_public.as_ref().map(|public| [&reference, &online].map(|node| {
+                node.group_control_heads(group).iter().any(|head| head.proof.public() == *public
+                    && head.access.observation.role == AccountGroupRole::Member)
+            }));
+            format!("real private role/capability and old Member provenance must arrive before self-control admission: ready_role_forward_reverse_old={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}",
+                readiness(), forward, reverse, old_heads,
+                [reference.certified_sibling(&online.identity.public()), online.certified_sibling(&reference.identity.public())],
+                [reference.routing_peer(&online.user_id()).is_some_and(|peer| peer.public == online.identity.public()),
+                 online.routing_peer(&reference.user_id()).is_some_and(|peer| peer.public == reference.identity.public())])
+        }).await;
         if let Some(index) = offline_index {
             let offline = offline.as_ref().unwrap();
             offline.runtime_work.close();
