@@ -1320,6 +1320,16 @@ adoption; foreign-key enforcement is enabled and verified by the connection
 owner. Existing unsigned 64-bit sequence and clock values use ordered eight-byte
 big-endian blobs, preserving their full range.
 
+Large retained-event payloads use an ordinary integer-rowid table with an
+explicit non-null composite event key; signed identities and foreign-key targets
+remain unchanged. Small key indexes locate the payload row, and every scalar
+metadata column precedes its final body column. GC obtains admission order from
+the covering commit index. This avoids whole overflowing index-record comparison
+and trailing-payload traversal during metadata reads. The choice follows
+[SQLite's table-layout guidance](https://www.sqlite.org/withoutrowid.html#when_to_use_without_rowid);
+engine plans and cold SQLite page-cache regressions enforce the access pattern.
+Small key-only tables retain their separate layout decisions.
+
 Indexed individual lookups return complete owned events. Metadata headers omit
 bodies and expose parent counts; parent edges have separate bounded pages.
 Keyset pages enforce row and byte budgets before selecting bodies, and bind their
@@ -1362,6 +1372,33 @@ rows transactionally;
 an empty revision tombstone prevents an old cursor becoming valid when that
 conversation is recreated. Empty tombstones are excluded from discovery.
 
+Repository conversation retirement provides a separate bounded-reclamation
+lifecycle. Beginning retirement atomically hides the whole scope and advances
+its revision and destructive generation; physical charge remains until rows are
+removed. Scope-known ordinary reads and mutations return a local availability
+error, while earlier page, order and network views become stale. ID-only reads
+can return absence after the physical ID has been removed. Active conversation
+listing uses a partial index that excludes retiring scopes, avoiding a scan of
+hidden rows before applying a page limit.
+
+Retirement tokens retain the profile lease and bind the database, domain,
+conversation, generation and logical revision. Transaction helpers verify the
+actual connection identity. Completion is idempotent for the unchanged empty
+tombstone; recreation makes the old token stale. Derived order and profile work
+cannot republish a retiring scope. Persisted cleanup phases remove auxiliary
+rows and individual edges before deleting vertices in reverse admission order,
+preserving foreign keys. Partially erased graphs remain inaccessible until
+finalization. Each committed step updates physical count and cost exactly once.
+
+Reclamation budgets distinguish auxiliary work, edges, vertex work and estimated
+work bytes from reclaimed event cost and deleted serialized bytes. They do not
+promise an equivalent reduction in filesystem size. A single oversized stored
+row is an explicit atomic-work exception; it is reported separately and consumes
+the step. Ordinary reclamation does not decode event bodies or collect history
+IDs. Only a transaction-owning wrapper measures commit latency; helpers within a
+caller's transaction cannot claim that timing. These primitives still require
+relay expiry, capacity and scheduler integration before runtime adoption.
+
 The internal indexed relay state retains the existing shared profile connection
 and owns first-arrival time, touch ticks and role readiness. Validated event
 admission and arrival/touch changes commit in one transaction through the event
@@ -1369,9 +1406,12 @@ repository's existing admission implementation. Signed duplicates do not add
 charge or advance touch; a valid trusted federation origin may lower their
 first-arrival time. Watch notifications follow successful commit only. Ordinary
 open and constructing additional role facades do not materialize mailbox history
-or open another database connection. An exact physically retained event read is
+or open another database connection. During retirement its narrow physical
+metadata exposes charge and lifecycle without interpreting unavailable author
+or capability summaries. The role owner must remove arrival metadata with final
+reclamation in the same transaction. An exact physically retained event read is
 not an expiry-safe custody qualification: expiry visibility, capacity policy and
-bounded reclamation must be integrated before this state serves the runtime.
+the maintenance scheduler must be integrated before this state serves the runtime.
 
 Profile maintenance records pending conversations on disk and examines candidates
 in bounded steps. Its snapshot keeps the newest two unreferenced Profile leaves

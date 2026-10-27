@@ -36,6 +36,8 @@ pub enum LogError {
     SequenceExhausted,
     /// Cursor belongs to another store, query, or mutation revision.
     StaleCursor,
+    /// The local scope is logically retired while physical reclamation continues.
+    ConversationRetiring,
     /// Page limits cannot make progress.
     InvalidPageBudget,
     /// The first selected row exceeds the requested allocation budget.
@@ -85,6 +87,7 @@ impl std::fmt::Display for LogError {
             LogError::NonCanonical => write!(f, "event parents are not in canonical form"),
             LogError::ClockExhausted => write!(f, "event clock exhausted"),
             LogError::SequenceExhausted => write!(f, "event author sequence exhausted"),
+            LogError::ConversationRetiring => write!(f, "conversation retirement is in progress"),
             LogError::StaleCursor => write!(f, "stale event page cursor"),
             LogError::InvalidPageBudget => write!(f, "invalid event page budget"),
             LogError::PageBudgetTooSmall { required } => {

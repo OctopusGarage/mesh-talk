@@ -53,6 +53,12 @@ impl EventRepository {
         {
             return Err(LogError::StaleCursor);
         }
+        if self
+            .scope_on(c, &view.binding.conversation)?
+            .is_some_and(|s| s.lifecycle == 1)
+        {
+            return Err(LogError::StaleCursor);
+        }
         // A source cutoff freezes membership, not the minimum supported wire
         // protocol. A newly required control invalidates an older capability
         // binding before even its cached fingerprint or Have can be handed off.

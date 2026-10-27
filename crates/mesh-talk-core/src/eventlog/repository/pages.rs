@@ -128,7 +128,7 @@ impl EventRepository {
     ) -> Result<Builder<T>, LogError> {
         sql_limit(budget)?;
         let revision = if let Some(conv) = conv {
-            self.metadata_on(c, &conv)?.map_or(0, |m| m.revision)
+            self.scope_revision_on(c, &conv)?
         } else {
             nonnegative(c.query_row(
                 "SELECT source_revision FROM event_domains WHERE domain=?1",
@@ -144,6 +144,9 @@ impl EventRepository {
                 || cursor.revision != revision)
         {
             return Err(LogError::StaleCursor);
+        }
+        if let Some(conv) = conv {
+            self.require_active_on(c, &conv)?;
         }
         Ok(Builder {
             page: Page {
@@ -344,9 +347,10 @@ impl EventRepository {
         self.database.read(|c| {
             let mut builder=self.builder(c,None,PageOrder::Conversations,cursor,budget)?;
             let after=if cursor.is_some(){"AND conversation>?2"}else{""};
-            let mut stmt=c.prepare(&format!("SELECT {} FROM event_conversations INDEXED BY event_conversations_active WHERE domain=?1 AND event_count>0 {after} ORDER BY conversation LIMIT ?3",metadata::METADATA_COLUMNS))?;
+            let mut stmt=c.prepare(&format!("SELECT {} FROM event_conversations INDEXED BY event_conversations_active WHERE domain=?1 AND lifecycle=0 AND event_count>0 {after} ORDER BY conversation LIMIT ?3",metadata::METADATA_COLUMNS))?;
             let mut rows=stmt.query(params![self.domain.0.as_slice(),cursor.map_or([0;32],|c|c.last_key).as_slice(),sql_limit(budget)?])?;
             while let Some(row)=rows.next()? {
+                self.require_active_on(c, &ConversationId::new(blob(row, 0)?))?;
                 let metadata=metadata::read_metadata(row)?;
                 let cost=std::mem::size_of::<ConversationMetadata>();
                 if !builder.accepts(cost)? {return Ok(builder.finish(true));}

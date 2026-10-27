@@ -52,7 +52,7 @@ fn require_schema(tx: &Connection, initialize: bool) -> Result<(), LogError> {
         if !initialize {
             return Err(LogError::IncompatibleEventSchema);
         }
-        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('event_domains','event_conversations','retained_events','retained_event_parents','event_heads','event_author_max','event_order_jobs','event_order_work','event_order_rows','event_order_current','event_profile_requests','event_profile_jobs','event_profile_candidates','event_profile_leaves'))", [], |r| r.get(0))?;
+        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('event_domains','event_conversations','event_retirement_jobs','retained_events','retained_event_parents','event_heads','event_author_max','event_order_jobs','event_order_work','event_order_rows','event_order_current','event_profile_requests','event_profile_jobs','event_profile_candidates','event_profile_leaves'))", [], |r| r.get(0))?;
         if existing {
             return Err(LogError::IncompatibleEventSchema);
         }
@@ -73,6 +73,9 @@ fn require_schema(tx: &Connection, initialize: bool) -> Result<(), LogError> {
     Ok(())
 }
 
+// Large retained payloads use an integer-rowid table: WITHOUT ROWID seeks may
+// materialize whole overflow records. Keep every scalar before the final BLOB;
+// exact composite-PK and covering indexes contain only bounded metadata.
 pub(super) const SCHEMA: &str = "
 CREATE TABLE event_repository_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);
 INSERT INTO event_repository_schema VALUES(1,1);
@@ -86,6 +89,7 @@ CREATE TABLE event_domains(
 CREATE TABLE event_conversations(
  domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
  conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ lifecycle INTEGER NOT NULL DEFAULT 0 CHECK(typeof(lifecycle)='integer' AND lifecycle IN (0,1)),
  destructive_epoch INTEGER NOT NULL DEFAULT 0 CHECK(typeof(destructive_epoch)='integer' AND destructive_epoch>=0),
  revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>=0),
  event_count INTEGER NOT NULL CHECK(typeof(event_count)='integer' AND event_count>=0),
@@ -99,7 +103,27 @@ CREATE TABLE event_conversations(
  fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32)),
  PRIMARY KEY(domain,conversation), FOREIGN KEY(domain) REFERENCES event_domains(domain)
 ) WITHOUT ROWID;
-CREATE INDEX event_conversations_active ON event_conversations(domain,conversation) WHERE event_count>0;
+CREATE INDEX event_conversations_active ON event_conversations(domain,conversation) WHERE lifecycle=0 AND event_count>0;
+CREATE TABLE event_retirement_jobs(
+ domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
+ conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ store_uuid BLOB NOT NULL CHECK(typeof(store_uuid)='blob' AND length(store_uuid)=16),
+ epoch INTEGER NOT NULL CHECK(typeof(epoch)='integer' AND epoch>=0),
+ revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>=0),
+ phase INTEGER NOT NULL DEFAULT 0 CHECK(typeof(phase)='integer' AND phase BETWEEN 0 AND 7),
+ vertex BLOB CHECK(vertex IS NULL OR (typeof(vertex)='blob' AND length(vertex)=32)),
+ vertex_commit INTEGER CHECK(vertex_commit IS NULL OR (typeof(vertex_commit)='integer' AND vertex_commit>=0)),
+ auxiliary INTEGER NOT NULL DEFAULT 0 CHECK(typeof(auxiliary)='integer' AND auxiliary>=0),
+ edges INTEGER NOT NULL DEFAULT 0 CHECK(typeof(edges)='integer' AND edges>=0),
+ vertices INTEGER NOT NULL DEFAULT 0 CHECK(typeof(vertices)='integer' AND vertices>=0),
+ work_bytes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(work_bytes)='integer' AND work_bytes>=0),
+ reclaimed_estimate INTEGER NOT NULL DEFAULT 0 CHECK(typeof(reclaimed_estimate)='integer' AND reclaimed_estimate>=0),
+ deleted_body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(deleted_body_bytes)='integer' AND deleted_body_bytes>=0),
+ deleted_auxiliary INTEGER NOT NULL DEFAULT 0 CHECK(typeof(deleted_auxiliary)='integer' AND deleted_auxiliary>=0),
+ deleted_vertices INTEGER NOT NULL DEFAULT 0 CHECK(typeof(deleted_vertices)='integer' AND deleted_vertices>=0),
+ CHECK((vertex IS NULL AND vertex_commit IS NULL AND phase NOT IN (5,6)) OR (vertex IS NOT NULL AND vertex_commit IS NOT NULL AND phase IN (5,6))),
+ PRIMARY KEY(domain,conversation), FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
+) WITHOUT ROWID;
 CREATE TABLE retained_events(
  domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
  id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=32),
@@ -114,11 +138,11 @@ CREATE TABLE retained_events(
  ciphertext_bytes INTEGER NOT NULL CHECK(typeof(ciphertext_bytes)='integer' AND ciphertext_bytes>=0),
  signature_bytes INTEGER NOT NULL CHECK(typeof(signature_bytes)='integer' AND signature_bytes>=0),
  stored_bytes INTEGER NOT NULL CHECK(typeof(stored_bytes)='integer' AND stored_bytes>=0),
- body BLOB NOT NULL CHECK(typeof(body)='blob' AND length(body)=stored_bytes),
  commit_ordinal INTEGER NOT NULL CHECK(typeof(commit_ordinal)='integer' AND commit_ordinal>=0),
+ body BLOB NOT NULL CHECK(typeof(body)='blob' AND length(body)=stored_bytes),
  PRIMARY KEY(domain,id), UNIQUE(domain,conversation,author,seq), UNIQUE(domain,commit_ordinal),
  FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
-) WITHOUT ROWID;
+);
 CREATE INDEX retained_events_clock ON retained_events(domain,conversation,lamport,id);
 CREATE INDEX retained_events_commit ON retained_events(domain,conversation,commit_ordinal,id);
 CREATE INDEX retained_events_ids ON retained_events(domain,conversation,id);
@@ -243,6 +267,7 @@ fn validate_objects(c: &Connection) -> Result<(), LogError> {
         ("event_repository_schema", &["singleton"][..]),
         ("event_domains", &["domain"][..]),
         ("event_conversations", &["domain", "conversation"][..]),
+        ("event_retirement_jobs", &["domain", "conversation"][..]),
         ("retained_events", &["domain", "id"][..]),
         ("retained_event_parents", &["domain", "child", "parent"][..]),
         ("event_order_jobs", &["job"][..]),

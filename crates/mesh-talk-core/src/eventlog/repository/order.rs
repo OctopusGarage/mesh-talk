@@ -234,6 +234,7 @@ impl EventRepository {
         revision: i64,
         count: i64,
     ) -> Result<(), LogError> {
+        self.require_active_on(c, &e.conversation_id)?;
         for kind in [CausalOrder::Logical, CausalOrder::WallClock] {
             let Some(job) = self.order_job(c, &e.conversation_id, kind)? else {
                 continue;

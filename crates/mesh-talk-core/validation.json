@@ -795,6 +795,18 @@
           {
             "name": "Indexed event-domain physical count and estimated cost remain authoritative and change together through append, whole-conversation drop and profile-leaf removal; relay bookkeeping reuses those fixed-key scalars rather than duplicating charge counters.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Repository conversation retirement atomically hides all ordinary access and invalidates prior views while retaining physical charge; indexed active selection skips hidden scopes, and lease-bound tokens reject stale generations, revisions and foreign connection identities.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Persisted reclamation phases bound auxiliary, edge and vertex work, preserve foreign keys and exact physical charge through interruption, never decode hidden bodies or republish stale derived work, and make completion idempotent only for the unchanged empty tombstone.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Retained-event payloads use integer-rowid storage with metadata before the final body column; small composite-key and covering indexes keep header and GC metadata reads independent of overflowing payload size, verified by engine plans and SQLite page-cache miss counters.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
@@ -903,6 +915,10 @@
           },
           {
             "name": "Internal indexed relay state validates opaque admission and signed duplicates, atomically commits event and first-arrival/touch changes on the shared connection, and emits watch changes only after commit; retained physical rows alone do not qualify expiry-safe custody.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed relay metadata reads narrow physical charge and lifecycle during retirement without exposing unavailable graph summaries; ordinary hidden reads remain local availability errors, and arrival removal belongs in the same outer transaction as repository finalization.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

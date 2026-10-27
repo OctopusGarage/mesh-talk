@@ -14,8 +14,10 @@ mod metadata;
 pub(crate) mod network;
 pub(crate) mod order;
 pub(crate) mod pages;
+pub(crate) mod retirement;
 mod schema;
 pub(crate) use metadata::{ConversationMetadata, DomainChargeMetadata};
+pub(crate) use retirement::ConversationChargeMetadata;
 #[cfg(test)]
 mod tests;
 
@@ -134,6 +136,7 @@ impl EventRepository {
         c: &Connection,
         event: &Event,
     ) -> Result<AppendOutcome, LogError> {
+        self.require_active_on(c, &event.conversation_id)?;
         // Match the pure EventLog validation order, including invalid duplicates.
         if !event.is_canonical() {
             return Err(LogError::NonCanonical);
@@ -246,6 +249,7 @@ impl EventRepository {
     }
 
     fn has_on(&self, c: &Connection, id: &EventId) -> Result<bool, LogError> {
+        self.require_visible_id_on(c, id)?;
         Ok(c.query_row(
             "SELECT EXISTS(SELECT 1 FROM retained_events WHERE domain=?1 AND id=?2)",
             params![self.domain.0.as_slice(), id.as_bytes().as_slice()],
@@ -262,6 +266,7 @@ impl EventRepository {
         self.database.read(|c| self.get_on(c, id))
     }
     pub(crate) fn get_on(&self, c: &Connection, id: &EventId) -> Result<Option<Event>, LogError> {
+        self.require_visible_id_on(c, id)?;
         // End both SQL result lifetimes before deserializing. During the BLOB
         // copy SQLite and Rust each own encoded bytes; during decode only Rust
         // owns them. This keeps the documented three-copy estimate meaningful.
@@ -316,6 +321,7 @@ impl EventRepository {
     }
     pub(crate) fn header(&self, id: &EventId) -> Result<Option<EventHeader>, LogError> {
         self.database.read(|c| {
+            self.require_visible_id_on(c, id)?;
             let mut stmt = c.prepare(&format!(
                 "SELECT {HEADER_COLUMNS} FROM retained_events WHERE domain=?1 AND id=?2"
             ))?;

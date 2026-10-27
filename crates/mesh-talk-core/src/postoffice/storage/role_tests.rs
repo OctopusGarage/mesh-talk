@@ -445,3 +445,62 @@ fn duplicate_origin_correction_failure_rolls_back_and_read_errors_propagate() {
     assert!(state.record(&e, 110, None).is_err());
     assert_eq!(*changes.borrow(), generation);
 }
+
+#[test]
+fn retirement_keeps_honest_physical_mailbox_metadata_and_token_holds_profile_lease() {
+    use crate::eventlog::repository::retirement::{RetirementBegin, RetirementBudget};
+    let root = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let profile = open(&root, &identity);
+    let state = relay(profile.clone());
+    let e = event(&identity, 1, vec![]);
+    state.record(&e, 100, None).unwrap();
+    let repo = profile.events().unwrap();
+    let token = match profile
+        .database()
+        .transaction(|c| repo.begin_retirement_on(c, &e.conversation_id))
+        .unwrap()
+    {
+        RetirementBegin::Started(t) => t,
+        _ => panic!(),
+    };
+    let m = state.mailbox_metadata(&e.conversation_id).unwrap().unwrap();
+    assert!(m.retained.retiring);
+    assert_eq!(m.retained.count, 1);
+    assert_eq!(state.physical_charge().unwrap().event_count, 1);
+    assert!(matches!(
+        state.retained_event(&e.id),
+        Err(LogError::ConversationRetiring)
+    ));
+    assert!(matches!(
+        state.record(&e, 110, None),
+        Err(LogError::ConversationRetiring)
+    ));
+    let b = RetirementBudget {
+        auxiliary: 1,
+        edges: 1,
+        vertices: 1,
+        bytes: 256,
+    };
+    for _ in 0..100 {
+        let p = profile
+            .database()
+            .transaction(|c| repo.reclaim_retirement_on(c, &token, b))
+            .unwrap();
+        assert!(p.transaction_latency.is_none());
+        if p.phase == 7 && !p.complete {
+            let m = state.mailbox_metadata(&e.conversation_id).unwrap().unwrap();
+            assert!(m.retained.retiring);
+            assert_eq!(m.retained.count, 0);
+            assert_eq!(state.physical_charge().unwrap().event_count, 0);
+            break;
+        }
+        assert!(!p.complete);
+    }
+    drop(state);
+    drop(repo);
+    drop(profile);
+    assert!(ProfileStorageLease::acquire(root.path()).is_err());
+    drop(token);
+    drop(ProfileStorageLease::acquire(root.path()).unwrap());
+}

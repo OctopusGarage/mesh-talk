@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     eventlog::{
         AppendOutcome, ConversationId, Event, EventId,
-        repository::{ConversationMetadata, DomainChargeMetadata},
+        repository::{ConversationChargeMetadata, DomainChargeMetadata},
     },
     storage::profile::context::ProfileStorage,
 };
@@ -22,7 +22,7 @@ pub(crate) struct MailboxMetadata {
     pub first_seen: u64,
     pub touched: u64,
     /// Physical row count/charge, preserved by future logical retirement until GC.
-    pub retained: ConversationMetadata,
+    pub retained: ConversationChargeMetadata,
 }
 impl MailboxMetadata {
     pub(crate) fn expiry_deadline(&self) -> Option<u64> {
@@ -82,8 +82,8 @@ impl IndexedRelayState {
             params![RELAY_ARRIVALS.as_slice(),conversation.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         let retained = self
             .repository
-            .metadata_on(c, conversation)?
-            .filter(|m| m.count > 0);
+            .conversation_charge_on(c, conversation)?
+            .filter(|m| m.count > 0 || m.retiring);
         match (arrival, retained) {
             (None, None) => Ok(None),
             (Some((first_seen, touched)), Some(retained)) => Ok(Some(MailboxMetadata {

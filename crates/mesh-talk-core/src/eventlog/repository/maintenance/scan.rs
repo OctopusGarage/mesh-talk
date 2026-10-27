@@ -142,6 +142,7 @@ impl EventRepository {
                 progress.candidate_bytes = job.bytes as u64;
                 return Ok(progress);
             } else if let Some(conv) = job.conversation {
+                self.require_active_on(c, &ConversationId::new(conv))?;
                 let after = if job.author.is_some() {
                     "AND (author,lamport,id)>(?3,?4,?5)"
                 } else {

@@ -103,11 +103,13 @@ their distinct authorization contracts.
 ### Coordinated state owners
 
 `core/eventlog/repository/` owns physical event counts and record-cost estimates,
-including their append and removal updates. `core/postoffice/storage/` owns relay
+including their append and removal updates, conversation retirement authority,
+and bounded graph reclamation. `core/postoffice/storage/` owns relay
 first-arrival time, touch and role readiness on the same profile connection.
 Relay transactions reuse the repository's admission and metadata operations;
 they do not maintain a parallel charge index or treat physical retention as
-expiry-safe custody. See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
+expiry-safe custody. The role owner coordinates arrival removal with repository
+finalization through one outer transaction. See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
 
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary

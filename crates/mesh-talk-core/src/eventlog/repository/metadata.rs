@@ -62,6 +62,7 @@ impl EventRepository {
         c: &Connection,
         conv: &ConversationId,
     ) -> Result<Option<ConversationMetadata>, LogError> {
+        self.require_active_on(c, conv)?;
         let mut stmt = c.prepare(&format!(
             "SELECT {METADATA_COLUMNS} FROM event_conversations WHERE domain=?1 AND conversation=?2"
         ))?;
@@ -86,6 +87,7 @@ impl EventRepository {
         author: &Author,
     ) -> Result<Option<u64>, LogError> {
         self.database.read(|c| {
+            self.require_active_on(c, conv)?;
             let mut stmt=c.prepare("SELECT max_seq FROM event_author_max WHERE domain=?1 AND conversation=?2 AND author=?3")?;
             let mut rows=stmt.query(params![self.domain.0.as_slice(),conv.as_bytes().as_slice(),author.ed25519_pub().as_slice()])?;
             rows.next()?.map(|row|Ok(u64::from_be_bytes(blob(row,0)?))).transpose()
@@ -108,6 +110,7 @@ impl EventRepository {
         seq: u64,
     ) -> Result<Option<Event>, LogError> {
         self.database.read(|c| {
+            self.require_active_on(c, conv)?;
             let mut stmt=c.prepare("SELECT id FROM retained_events WHERE domain=?1 AND conversation=?2 AND author=?3 AND seq=?4")?;
             let mut rows=stmt.query(params![self.domain.0.as_slice(),conv.as_bytes().as_slice(),author.ed25519_pub().as_slice(),seq.to_be_bytes().as_slice()])?;
             let id=rows.next()?.map(|row|blob(row,0).map(EventId::new)).transpose()?;
@@ -120,6 +123,7 @@ impl EventRepository {
         self.database.read(|c| self.heads_on(c, conv))
     }
     fn heads_on(&self, c: &Connection, conv: &ConversationId) -> Result<Vec<EventId>, LogError> {
+        self.require_active_on(c, conv)?;
         let mut stmt = c.prepare(
             "SELECT id FROM event_heads WHERE domain=?1 AND conversation=?2 ORDER BY id",
         )?;

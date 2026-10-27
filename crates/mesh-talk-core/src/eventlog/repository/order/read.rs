@@ -41,8 +41,7 @@ impl EventRepository {
             .and_then(|n| n.checked_add(1))
             .filter(|_| budget.rows > 0 && budget.bytes > 0)
             .ok_or(LogError::InvalidPageBudget)?;
-        let metadata = self.metadata_on(c, conv)?;
-        let revision = metadata.map_or(0, |m| m.revision);
+        let revision = self.scope_revision_on(c, conv)?;
         // Check context before readiness so an old bound cursor cannot become a
         // successful empty page or Pending in another store/conversation/order.
         if let Some(cur) = cursor
@@ -55,6 +54,7 @@ impl EventRepository {
         {
             return Err(LogError::StaleCursor);
         }
+        let metadata = self.metadata_on(c, conv)?;
         let mut page = OrderPage {
             items: Vec::new(),
             next: None,

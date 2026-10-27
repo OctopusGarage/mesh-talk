@@ -470,7 +470,7 @@ fn maintenance_active_conversation_and_profile_keysets_seek_owned_indexes() {
     let _repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
     db.read(|c| {
         for (sql,index,args) in [
-            ("EXPLAIN QUERY PLAN SELECT conversation,revision,event_count,stored_bytes,max_lamport,v2_count,v3_count,v4_count,estimated_bytes FROM event_conversations INDEXED BY event_conversations_active WHERE domain=?1 AND event_count>0 AND conversation>?2 ORDER BY conversation LIMIT ?3", "event_conversations_active", vec![rusqlite::types::Value::Blob(vec![1;16]),rusqlite::types::Value::Blob(vec![1;32]),rusqlite::types::Value::Integer(2)]),
+            ("EXPLAIN QUERY PLAN SELECT conversation,revision,event_count,stored_bytes,max_lamport,v2_count,v3_count,v4_count,estimated_bytes FROM event_conversations INDEXED BY event_conversations_active WHERE domain=?1 AND lifecycle=0 AND event_count>0 AND conversation>?2 ORDER BY conversation LIMIT ?3", "event_conversations_active", vec![rusqlite::types::Value::Blob(vec![1;16]),rusqlite::types::Value::Blob(vec![1;32]),rusqlite::types::Value::Integer(2)]),
             ("EXPLAIN QUERY PLAN SELECT id,author,lamport,ciphertext_bytes,parent_count FROM retained_events WHERE domain=?1 AND conversation=?2 AND kind=8 AND (author,lamport,id)>(?3,?4,?5) ORDER BY author,lamport,id LIMIT 1", "retained_events_kind_author",vec![rusqlite::types::Value::Blob(vec![1;16]),rusqlite::types::Value::Blob(vec![1;32]),rusqlite::types::Value::Blob(vec![1;32]),rusqlite::types::Value::Blob(vec![1;8]),rusqlite::types::Value::Blob(vec![1;32])]),
         ] {
             let mut stmt=c.prepare(sql)?;

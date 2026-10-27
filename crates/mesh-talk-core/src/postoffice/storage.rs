@@ -132,7 +132,7 @@ pub(crate) fn publish(
     let mut estimated = 0u64;
     loop {
         let next:Option<PublishedMailbox>=c.query_row(
-            "SELECT e.conversation,a.first_seen,e.event_count,e.estimated_bytes FROM event_conversations e INDEXED BY event_conversations_active LEFT JOIN relay_arrival_stage a ON a.conversation=e.conversation WHERE e.domain=?1 AND e.event_count>0 AND e.conversation>?2 ORDER BY e.conversation LIMIT 1",
+            "SELECT e.conversation,a.first_seen,e.event_count,e.estimated_bytes FROM event_conversations e INDEXED BY event_conversations_active LEFT JOIN relay_arrival_stage a ON a.conversation=e.conversation WHERE e.domain=?1 AND e.lifecycle=0 AND e.event_count>0 AND e.conversation>?2 ORDER BY e.conversation LIMIT 1",
             params![RELAY_EVENTS.0.as_slice(),after],|r|Ok(PublishedMailbox{conversation:r.get(0)?,first_seen:r.get(1)?,events:r.get(2)?,bytes:r.get(3)?})
         ).optional()?;
         let Some(PublishedMailbox {

@@ -1362,3 +1362,57 @@ fn physical_domain_charge_tracks_append_duplicate_and_drop() {
     repo.drop_conversation(&e.conversation_id).unwrap();
     assert_eq!(charge().unwrap(), (0, 0));
 }
+
+#[test]
+fn retirement_schema_has_explicit_lifecycle_and_durable_job_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let _repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    db.read(|c| {
+        let lifecycle: i64 = c.query_row(
+            "SELECT count(*) FROM pragma_table_info('event_conversations') WHERE name='lifecycle'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(
+            lifecycle, 1,
+            "retirement must have an explicit indexed lifecycle"
+        );
+        let jobs: i64 = c.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='event_retirement_jobs'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(jobs, 1, "retirement progress must survive reopen");
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn retirement_logical_visibility_precedes_physical_reclamation() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let e = event(
+        &DeviceIdentity::generate(),
+        1,
+        vec![],
+        1,
+        EventKind::Message,
+    );
+    repo.append(&e).unwrap();
+    repo.database.transaction(|c| {
+        c.execute("UPDATE event_conversations SET lifecycle=1,destructive_epoch=1,revision=2 WHERE domain=?1 AND conversation=?2", params![repo.domain.0.as_slice(),e.conversation_id.as_bytes().as_slice()])?;
+        c.execute("INSERT INTO event_retirement_jobs(domain,conversation,store_uuid,epoch,revision) VALUES(?1,?2,?3,1,2)",params![repo.domain.0.as_slice(),e.conversation_id.as_bytes().as_slice(),repo.store_uuid.as_slice()])?;
+        Ok(())
+    }).unwrap();
+    assert!(
+        repo.get(&e.id).is_err(),
+        "hidden bodies must be unavailable before physical deletion"
+    );
+    assert!(
+        repo.append(&e).is_err(),
+        "hidden duplicate must not qualify"
+    );
+    assert!(repo.metadata(&e.conversation_id).is_err());
+}

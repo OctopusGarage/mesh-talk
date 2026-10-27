@@ -363,7 +363,7 @@ fn covering_commit_selector_work_and_active_page_stay_bounded_at_10k_and_100k() 
         // This measures the actual selector without 100k redundant crypto operations.
         let mut known = HashSet::from([root.id]);
         repository.database.transaction(|c|{
-            let mut stmt=c.prepare("INSERT INTO retained_events SELECT domain,?1,conversation,author,?2,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes,body,?3 FROM retained_events WHERE domain=?4 AND id=?5")?;
+            let mut stmt=c.prepare("INSERT INTO retained_events(domain,id,conversation,author,seq,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes,body,commit_ordinal) SELECT domain,?1,conversation,author,?2,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes,body,?3 FROM retained_events WHERE domain=?4 AND id=?5")?;
             for ordinal in 1..count {
                 let mut id=[0;32];id[..8].copy_from_slice(&ordinal.to_be_bytes());
                 stmt.execute(params![id.as_slice(),(ordinal as u64).to_be_bytes().as_slice(),ordinal,repository.domain.0.as_slice(),root.id.as_bytes().as_slice()])?;known.insert(EventId::new(id));
