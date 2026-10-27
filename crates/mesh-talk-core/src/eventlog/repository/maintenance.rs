@@ -119,6 +119,8 @@ impl EventRepository {
         )?;
         let domain = self.domain.0.as_slice();
         let conversation = conv.as_bytes().as_slice();
+        let epoch = advance(self.network_epoch_on(c, conv)?)?;
+        c.execute("UPDATE event_conversations SET destructive_epoch=?3 WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),(conv).as_bytes().as_slice(),epoch])?;
         self.invalidate_conversation_order(c, conv)?;
         // First remove every selected child's edges before deleting any
         // vertex: ID order need not put descendants before their parents.

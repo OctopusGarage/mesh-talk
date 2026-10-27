@@ -11,6 +11,7 @@ mod decode;
 pub(crate) mod import;
 pub(crate) mod maintenance;
 mod metadata;
+pub(crate) mod network;
 pub(crate) mod order;
 pub(crate) mod pages;
 mod schema;
@@ -47,8 +48,15 @@ pub(crate) struct EventRepository {
     body_decodes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     fingerprint_ids: std::sync::atomic::AtomicUsize,
+    // Candidate-selection header queries only. Selected get_on reads revalidate
+    // the header independently before the counted single BLOB fetch.
+    #[cfg(test)]
+    network_header_fetches: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    body_fetches: std::sync::atomic::AtomicUsize,
 }
 
+#[derive(Clone)]
 enum RepositoryOwner {
     Profile(Arc<crate::storage::profile::context::ProfileStorage>),
     #[cfg(test)]
@@ -110,6 +118,10 @@ impl EventRepository {
             body_decodes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             fingerprint_ids: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            network_header_fetches: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            body_fetches: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -261,6 +273,9 @@ impl EventRepository {
             if size(row, 12)? != header.stored_bytes {
                 return Err(corrupt("stored event length disagrees with body"));
             }
+            #[cfg(test)]
+            self.body_fetches
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let bytes: Vec<u8> = c.query_row(
                 "SELECT body FROM retained_events WHERE domain=?1 AND id=?2",
                 params![self.domain.0.as_slice(), id.as_bytes().as_slice()],

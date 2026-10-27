@@ -787,6 +787,10 @@
           {
             "name": "Indexed maintenance selects profile leaves through bounded metadata snapshots, preserves the newest pair and referenced ancestors, retains amortization and pending work, and atomically updates counters and ordering without unrelated body reads; drop and recreate cannot revive stale cursors",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Paged unfiltered sync uses finite commit-cutoff views with destructive-generation binding, skips peer-known IDs through a covering index before header or body reads, and preserves topological prefixes without changing canonical timeline ordering.",
+            "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
           }
         ]
       }
@@ -1165,6 +1169,10 @@
       "capability": {
         "summary": "Retry immutable delivery work across routed latency with bounded independent control lanes and cancellation-owned tasks.",
         "invariants": [
+          {
+            "name": "Paged network exchanges retain bounded chunks and frames, tolerate post-cutoff appends, invalidate destructive or authority changes, and propagate local read failures without terminal empty success or custody claims; collecting legacy adapters remain explicit.",
+            "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
+          },
           {
             "name": "Accepted channel files retain one durable event identity and their protected manifest across failed sidecar projection, lock transitions and restart; recovery never requests send authorization again",
             "reference": "docs/ARCHITECTURE.md#protected-messages"

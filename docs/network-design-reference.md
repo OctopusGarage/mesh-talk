@@ -1882,6 +1882,31 @@ existing frame and burst budgets before cloning ciphertext; unrelated tail
 payloads remain borrowed. Custom policy projections retain their admission rules
 through the default bounded-export adapter.
 
+The paged network-store contract separates those collecting SDK operations from
+bounded ID and event pages. Its unfiltered SQL path reads a covering commit index,
+skips peer-known IDs, and fetches headers and bodies only for selected unknown
+events. Examined rows and selected bytes have separate budgets. Empty scanning
+pages with continuations mean progress, not an empty history. Existing participant
+policy projections use an explicit legacy adapter until their own owners adopt
+the paged contract.
+
+Durable admission assigns a commit ordinal only after every same-conversation
+parent exists. Commit-order export therefore supplies the required topological
+prefix even when signed clocks are inverted. Deterministic timeline ordering is
+a separate contract. A sync view captures a finite exclusive commit cutoff plus
+store, domain, conversation and destructive-generation binding; later appends
+belong to a later exchange. Destructive or authorization changes invalidate the
+view. No database transaction or mutex spans network I/O.
+
+Paged exchanges retain one ID chunk and bounded event frames rather than all
+local IDs. Existing peer Have chunk and aggregate limits remain enforced.
+An unavailable current fingerprint bypasses the optional probe; it cannot become
+a fabricated digest or an empty-set match. Availability, fingerprints and view
+completion never replace a fresh durable custody qualification. Local page or
+decode failures abort the exchange while preserving any committed received prefix.
+Store and runtime owners must adopt the direct paged path before claiming bounded
+production startup or serving.
+
 An opaque mailbox exchange retains IDs of wrappers whose inner events cannot yet
 be admitted, so a rejected page cannot repeatedly occupy every response while
 later valid events wait. These hints belong only to that mailbox operation and

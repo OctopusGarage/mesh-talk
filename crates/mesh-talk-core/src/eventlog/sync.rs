@@ -4,6 +4,10 @@
 //! are validated through [`SyncStore::ingest`] (the store's normal `append`
 //! gate), so sync can never inject forged or out-of-order history.
 //!
+//! The public helpers in this module are collecting SDK operations, including
+//! payload-bounded helpers: they may collect all IDs or traverse complete history.
+//! The network-specific mandatory paging seam lives in [`network`].
+//!
 //! Reconciliation is id-set based, not version-vector based: the store does not
 //! guarantee dense per-author sequences, so a version-vector diff would miss a
 //! gap. See the module plan for the rationale.
@@ -11,6 +15,8 @@
 //! [`SyncStore::events_excluding`] traverses signed parent edges before filtering
 //! known ids. Lamport values only break ties between causally independent events,
 //! so even signed events with inverted clocks make progress across bounded frames.
+
+pub mod network;
 
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
@@ -22,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 
 /// Bytes reserved per sync frame for the message's non-event framing (enum tag,
 /// conversation id, bincode wrappers) on top of the event/id payload.
-const SYNC_MARGIN: usize = 256;
+pub(crate) const SYNC_MARGIN: usize = 256;
 
 /// `cap_events` guarantees progress by always emitting at least the first event — which is
 /// only safe if a single event fits one sync frame, else the responder emits an oversized
@@ -115,6 +121,8 @@ pub struct ApplyReport {
     pub rejected: Vec<(EventId, String)>,
 }
 
+/// Collecting compatibility operations for the in-process SDK. Network stores
+/// use the independent [`network::NetworkSyncStore`] seam.
 /// The data operations sync needs from an event store. Implemented by both the
 /// in-memory [`EventLog`] and the durable `PersistentEventLog`.
 pub trait SyncStore {
@@ -409,22 +417,7 @@ pub(crate) const MAX_REJECTED_DETAIL: usize = 64;
 /// ([`MAX_REJECTED_DETAIL`]) so a malicious batch can't inflate the report's memory.
 /// Local failures abort immediately; already committed events remain stored.
 fn ingest_all(store: &mut impl SyncStore, events: &[Event]) -> Result<ApplyReport, LogError> {
-    let mut report = ApplyReport::default();
-    for event in events {
-        match store.ingest(event.clone()) {
-            Ok(AppendOutcome::Appended) => report.applied += 1,
-            Ok(AppendOutcome::Duplicate) => report.duplicates += 1,
-            Err(e) => {
-                if !e.is_peer_rejection() {
-                    return Err(e);
-                }
-                if report.rejected.len() < MAX_REJECTED_DETAIL {
-                    report.rejected.push((event.id, e.to_string()));
-                }
-            }
-        }
-    }
-    Ok(report)
+    network::apply_received_events(events, |event| store.ingest(event))
 }
 
 /// Apply a responder's reply and build a (bounded) follow-up of events the
@@ -458,6 +451,18 @@ pub fn handle_response_bounded_burst(
     let budget = frame_budget.saturating_sub(SYNC_MARGIN);
     let all_missing =
         store.events_excluding_bounded(&response.conversation, &remote_have, budget, max_frames)?;
+    let frames = followup_frames(response.conversation, all_missing, budget, max_frames);
+    Ok((report, frames))
+}
+
+/// Shared legacy greedy packing policy; payload bounds do not imply a bounded
+/// source traversal. Preserve the SDK's oversized-first-event progress behavior.
+pub(crate) fn followup_frames(
+    conversation: ConversationId,
+    all_missing: Vec<Event>,
+    budget: usize,
+    max_frames: usize,
+) -> Vec<SyncFollowup> {
     let mut frames = Vec::new();
     let mut events = Vec::new();
     let mut used = 0usize;
@@ -465,7 +470,7 @@ pub fn handle_response_bounded_burst(
         let size = encoded_event_size(&event);
         if !events.is_empty() && used.saturating_add(size) > budget {
             frames.push(SyncFollowup {
-                conversation: response.conversation,
+                conversation,
                 events: std::mem::take(&mut events),
             });
             if frames.len() == max_frames {
@@ -478,11 +483,11 @@ pub fn handle_response_bounded_burst(
     }
     if !events.is_empty() && frames.len() < max_frames {
         frames.push(SyncFollowup {
-            conversation: response.conversation,
+            conversation,
             events,
         });
     }
-    Ok((report, frames))
+    frames
 }
 
 /// Apply a responder's reply: ingest the events it sent, then compute the
