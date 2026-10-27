@@ -761,7 +761,7 @@
         "core-storage"
       ],
       "capability": {
-        "summary": "Preserve encrypted causal history, bounded indexed event queries and amortized legacy profile maintenance.",
+        "summary": "Preserve encrypted causal history, bounded indexed event queries and metadata-driven profile maintenance.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
@@ -782,6 +782,10 @@
           },
           {
             "name": "Canonical signed-event generations use bounded encrypted Kahn work, atomic child-drain progress and source-bound publication; safe monotonic appends preserve progress while unsafe insertions invalidate stale order without exposing empty successful history",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed maintenance selects profile leaves through bounded metadata snapshots, preserves the newest pair and referenced ancestors, retains amortization and pending work, and atomically updates counters and ordering without unrelated body reads; drop and recreate cannot revive stale cursors",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

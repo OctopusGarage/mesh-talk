@@ -7,13 +7,13 @@ pub(crate) struct ConversationMetadata {
     pub revision: i64,
     pub count: u64,
     pub stored_bytes: u64,
+    pub estimated_bytes: u64,
     pub max_lamport: u64,
     pub channel_v2: bool,
     pub channel_v3: bool,
     pub channel_v4: bool,
 }
-pub(super) const METADATA_COLUMNS: &str =
-    "conversation,revision,event_count,stored_bytes,max_lamport,v2_count,v3_count,v4_count";
+pub(super) const METADATA_COLUMNS: &str = "conversation,revision,event_count,stored_bytes,max_lamport,v2_count,v3_count,v4_count,estimated_bytes";
 pub(super) fn read_metadata(row: &Row<'_>) -> Result<ConversationMetadata, LogError> {
     let count = nonnegative(row.get(2)?)?;
     let v2 = nonnegative(row.get(5)?)?;
@@ -27,6 +27,7 @@ pub(super) fn read_metadata(row: &Row<'_>) -> Result<ConversationMetadata, LogEr
         revision: nonnegative(row.get(1)?)?,
         count: count as u64,
         stored_bytes: nonnegative(row.get(3)?)? as u64,
+        estimated_bytes: nonnegative(row.get(8)?)? as u64,
         max_lamport: u64::from_be_bytes(blob(row, 4)?),
         channel_v2: v2 != 0,
         channel_v3: v3 != 0,
@@ -165,7 +166,10 @@ impl EventRepository {
             return Ok(());
         };
         self.database.transaction(|tx| {
-            if self.metadata_on(tx, &first.conversation_id)?.is_some() {
+            if self
+                .metadata_on(tx, &first.conversation_id)?
+                .is_some_and(|m| m.count > 0)
+            {
                 return Err(LogError::AdmissionRejected("channel already exists".into()));
             }
             for event in events {

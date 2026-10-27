@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::sync::Arc;
 
 mod decode;
+pub(crate) mod maintenance;
 mod metadata;
 pub(crate) mod order;
 pub(crate) mod pages;
@@ -130,13 +131,22 @@ impl EventRepository {
             |r| r.get(0),
         )?;
         let next_commit = advance(commit)?;
+        let (source_revision, domain_estimate): (i64, i64) = c.query_row(
+            "SELECT source_revision,estimated_bytes FROM event_domains WHERE domain=?1",
+            [domain],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let source_revision = advance(source_revision)?;
+        let estimate = estimated_cost(event.ciphertext.len(), event.parents.len())?;
+        let domain_estimate = checked_total(domain_estimate, estimate)?;
         c.execute("INSERT INTO event_conversations(domain,conversation,revision,event_count,stored_bytes,max_lamport,v2_count,v3_count,v4_count) VALUES(?1,?2,0,0,0,?3,0,0,0) ON CONFLICT(domain,conversation) DO NOTHING",params![domain,conv,0_u64.to_be_bytes().as_slice()])?;
-        let (revision,count,stored,v2,v3,v4,max): (i64,i64,i64,i64,i64,i64,Vec<u8>) = c.query_row("SELECT revision,event_count,stored_bytes,v2_count,v3_count,v4_count,max_lamport FROM event_conversations WHERE domain=?1 AND conversation=?2", params![domain,conv], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+        let (revision,count,stored,v2,v3,v4,max,estimated): (i64,i64,i64,i64,i64,i64,Vec<u8>,i64) = c.query_row("SELECT revision,event_count,stored_bytes,v2_count,v3_count,v4_count,max_lamport,estimated_bytes FROM event_conversations WHERE domain=?1 AND conversation=?2", params![domain,conv], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)))?;
         let max = u64::from_be_bytes(
             max.try_into()
                 .map_err(|_| corrupt("invalid maximum clock"))?,
         );
         let revision = advance(revision)?;
+        let estimated = checked_total(estimated, estimate)?;
         let count = advance(count)?;
         let stored = nonnegative(stored)?
             .checked_add(integer(body.len())?)
@@ -170,10 +180,10 @@ impl EventRepository {
             )?;
         }
         c.execute("INSERT INTO event_author_max VALUES(?1,?2,?3,?4) ON CONFLICT(domain,conversation,author) DO UPDATE SET max_seq=max(max_seq,excluded.max_seq)",params![domain,conv,event.author.ed25519_pub().as_slice(),event.seq.to_be_bytes().as_slice()])?;
-        c.execute("UPDATE event_conversations SET revision=?3,event_count=?4,stored_bytes=?5,max_lamport=?6,v2_count=?7,v3_count=?8,v4_count=?9 WHERE domain=?1 AND conversation=?2",params![domain,conv,revision,count,stored,max.max(event.lamport).to_be_bytes().as_slice(),v2,v3,v4])?;
+        c.execute("UPDATE event_conversations SET revision=?3,event_count=?4,stored_bytes=?5,max_lamport=?6,v2_count=?7,v3_count=?8,v4_count=?9,estimated_bytes=?10 WHERE domain=?1 AND conversation=?2",params![domain,conv,revision,count,stored,max.max(event.lamport).to_be_bytes().as_slice(),v2,v3,v4,estimated])?;
         c.execute(
-            "UPDATE event_domains SET next_commit=?2 WHERE domain=?1",
-            params![domain, next_commit],
+            "UPDATE event_domains SET next_commit=?2,source_revision=?3,estimated_bytes=?4 WHERE domain=?1",
+            params![domain, next_commit,source_revision,domain_estimate],
         )?;
         self.order_appended(c, event, revision, count)?;
         Ok(AppendOutcome::Appended)
@@ -359,4 +369,20 @@ fn read_header(row: &Row<'_>) -> Result<EventHeader, LogError> {
         signature_bytes: size(row, 10)?,
         stored_bytes: size(row, 11)?,
     })
+}
+
+fn checked_total(value: i64, delta: i64) -> Result<i64, LogError> {
+    nonnegative(value)?
+        .checked_add(nonnegative(delta)?)
+        .ok_or(LogError::RepositoryCounterExhausted)
+}
+fn estimated_cost(ciphertext: usize, parents: usize) -> Result<i64, LogError> {
+    integer(ciphertext)?
+        .checked_add(
+            integer(parents)?
+                .checked_mul(32)
+                .ok_or(LogError::RepositoryCounterExhausted)?,
+        )
+        .and_then(|n| n.checked_add(256))
+        .ok_or(LogError::RepositoryCounterExhausted)
 }

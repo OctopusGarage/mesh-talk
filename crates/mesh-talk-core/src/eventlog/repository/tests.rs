@@ -1255,3 +1255,82 @@ fn causal_order_work_is_persisted_in_encrypted_ordinary_tables() {
         Ok(())
     }).unwrap();
 }
+
+#[test]
+fn maintenance_estimates_are_persisted_separately_from_stored_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    db.read(|c| {
+        let columns: i64 = c.query_row("SELECT count(*) FROM pragma_table_info('event_domains') WHERE name IN ('estimated_bytes','source_revision')", [], |r|r.get(0))?;
+        assert_eq!(columns,2,"maintenance requires durable estimated bytes and mutation revision");
+        Ok(())
+    }).unwrap();
+    let identity = DeviceIdentity::generate();
+    let root = event(&identity, 1, vec![], 1, EventKind::Message);
+    let child = event(&identity, 2, vec![root.id], 2, EventKind::Profile);
+    repository.append(&root).unwrap();
+    repository.append(&child).unwrap();
+    repository.append(&child).unwrap();
+    db.read(|c| {
+        let totals:(i64,i64,i64)=c.query_row("SELECT d.estimated_bytes,c.estimated_bytes,d.source_revision FROM event_domains d JOIN event_conversations c USING(domain) WHERE domain=?1", [[1u8;16].as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        assert_eq!(totals,(800,800,2));
+        Ok(())
+    }).unwrap();
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+
+#[test]
+fn maintenance_drop_is_scoped_atomic_and_recreate_cannot_reuse_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let other = EventRepository::new(db.clone(), EventDomainId([2; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let first = event(&identity, 1, vec![], 1, EventKind::Message);
+    let second = event(&identity, 2, vec![first.id], 2, EventKind::Message);
+    repository.append(&first).unwrap();
+    repository.append(&second).unwrap();
+    other.append(&first).unwrap();
+    let cursor = repository
+        .headers_page(
+            &first.conversation_id,
+            None,
+            PageBudget {
+                rows: 1,
+                bytes: 4096,
+            },
+        )
+        .unwrap()
+        .next
+        .unwrap();
+    assert_eq!(
+        repository
+            .drop_conversation(&first.conversation_id)
+            .unwrap(),
+        2
+    );
+    assert_eq!(repository.count(&first.conversation_id).unwrap(), 0);
+    assert_eq!(other.count(&first.conversation_id).unwrap(), 1);
+    assert!(matches!(
+        repository.headers_page(&first.conversation_id, Some(&cursor), PageBudget::default()),
+        Err(LogError::StaleCursor)
+    ));
+    repository.append(&first).unwrap();
+    repository.append(&second).unwrap();
+    assert!(matches!(
+        repository.headers_page(&first.conversation_id, Some(&cursor), PageBudget::default()),
+        Err(LogError::StaleCursor)
+    ));
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}

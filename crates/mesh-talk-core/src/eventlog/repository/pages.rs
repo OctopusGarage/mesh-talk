@@ -131,7 +131,7 @@ impl EventRepository {
             self.metadata_on(c, &conv)?.map_or(0, |m| m.revision)
         } else {
             nonnegative(c.query_row(
-                "SELECT next_commit FROM event_domains WHERE domain=?1",
+                "SELECT source_revision FROM event_domains WHERE domain=?1",
                 [self.domain.0.as_slice()],
                 |r| r.get(0),
             )?)?
@@ -344,7 +344,7 @@ impl EventRepository {
         self.database.read(|c| {
             let mut builder=self.builder(c,None,PageOrder::Conversations,cursor,budget)?;
             let after=if cursor.is_some(){"AND conversation>?2"}else{""};
-            let mut stmt=c.prepare(&format!("SELECT {} FROM event_conversations WHERE domain=?1 {after} ORDER BY conversation LIMIT ?3",metadata::METADATA_COLUMNS))?;
+            let mut stmt=c.prepare(&format!("SELECT {} FROM event_conversations INDEXED BY event_conversations_active WHERE domain=?1 AND event_count>0 {after} ORDER BY conversation LIMIT ?3",metadata::METADATA_COLUMNS))?;
             let mut rows=stmt.query(params![self.domain.0.as_slice(),cursor.map_or([0;32],|c|c.last_key).as_slice(),sql_limit(budget)?])?;
             while let Some(row)=rows.next()? {
                 let metadata=metadata::read_metadata(row)?;

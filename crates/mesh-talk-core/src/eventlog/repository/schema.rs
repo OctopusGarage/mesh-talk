@@ -27,7 +27,7 @@ pub(super) fn register(
             return Err(LogError::IncompatibleEventSchema);
         }
     } else {
-        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('event_domains','event_conversations','retained_events','retained_event_parents','event_heads','event_author_max','event_order_jobs','event_order_work','event_order_rows','event_order_current'))", [], |r| r.get(0))?;
+        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('event_domains','event_conversations','retained_events','retained_event_parents','event_heads','event_author_max','event_order_jobs','event_order_work','event_order_rows','event_order_current','event_profile_requests','event_profile_jobs','event_profile_candidates','event_profile_leaves'))", [], |r| r.get(0))?;
         if existing {
             return Err(LogError::IncompatibleEventSchema);
         }
@@ -57,7 +57,9 @@ CREATE TABLE event_repository_schema(singleton INTEGER PRIMARY KEY CHECK(singlet
 INSERT INTO event_repository_schema VALUES(1,1);
 CREATE TABLE event_domains(
  domain BLOB PRIMARY KEY CHECK(typeof(domain)='blob' AND length(domain)=16),
- next_commit INTEGER NOT NULL CHECK(typeof(next_commit)='integer' AND next_commit>=0)
+ next_commit INTEGER NOT NULL CHECK(typeof(next_commit)='integer' AND next_commit>=0),
+ source_revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(source_revision)='integer' AND source_revision>=0),
+ estimated_bytes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(estimated_bytes)='integer' AND estimated_bytes>=0)
 ) WITHOUT ROWID;
 CREATE TABLE event_conversations(
  domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
@@ -65,6 +67,7 @@ CREATE TABLE event_conversations(
  revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>=0),
  event_count INTEGER NOT NULL CHECK(typeof(event_count)='integer' AND event_count>=0),
  stored_bytes INTEGER NOT NULL CHECK(typeof(stored_bytes)='integer' AND stored_bytes>=0),
+ estimated_bytes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(estimated_bytes)='integer' AND estimated_bytes>=0),
  max_lamport BLOB NOT NULL CHECK(typeof(max_lamport)='blob' AND length(max_lamport)=8),
  v2_count INTEGER NOT NULL CHECK(typeof(v2_count)='integer' AND v2_count>=0),
  v3_count INTEGER NOT NULL CHECK(typeof(v3_count)='integer' AND v3_count>=0),
@@ -73,6 +76,7 @@ CREATE TABLE event_conversations(
  fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32)),
  PRIMARY KEY(domain,conversation), FOREIGN KEY(domain) REFERENCES event_domains(domain)
 ) WITHOUT ROWID;
+CREATE INDEX event_conversations_active ON event_conversations(domain,conversation) WHERE event_count>0;
 CREATE TABLE retained_events(
  domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
  id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=32),
@@ -117,6 +121,7 @@ CREATE TABLE event_heads(
  FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation),
  FOREIGN KEY(domain,id) REFERENCES retained_events(domain,id)
 ) WITHOUT ROWID;
+CREATE INDEX event_heads_retained ON event_heads(domain,id);
 CREATE TABLE event_author_max(
  domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
  conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
@@ -169,6 +174,42 @@ CREATE TABLE event_order_current(
  FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
 ) WITHOUT ROWID;
 CREATE INDEX event_order_current_job ON event_order_current(job);
+CREATE TABLE event_profile_requests(
+ domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
+ conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ PRIMARY KEY(domain,conversation),
+ FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
+) WITHOUT ROWID;
+CREATE TABLE event_profile_jobs(
+ job BLOB PRIMARY KEY CHECK(typeof(job)='blob' AND length(job)=16),
+ domain BLOB NOT NULL UNIQUE CHECK(typeof(domain)='blob' AND length(domain)=16),
+ source_revision INTEGER NOT NULL CHECK(typeof(source_revision)='integer' AND source_revision>=0),
+ conversation BLOB CHECK(conversation IS NULL OR (typeof(conversation)='blob' AND length(conversation)=32)),
+ after_author BLOB CHECK(after_author IS NULL OR (typeof(after_author)='blob' AND length(after_author)=32)),
+ after_clock BLOB CHECK(after_clock IS NULL OR (typeof(after_clock)='blob' AND length(after_clock)=8)),
+ after_id BLOB CHECK(after_id IS NULL OR (typeof(after_id)='blob' AND length(after_id)=32)),
+ candidate_count INTEGER NOT NULL CHECK(typeof(candidate_count)='integer' AND candidate_count>=0),
+ candidate_bytes INTEGER NOT NULL CHECK(typeof(candidate_bytes)='integer' AND candidate_bytes>=0),
+ complete INTEGER NOT NULL CHECK(typeof(complete)='integer' AND complete IN (0,1)),
+ CHECK((after_author IS NULL AND after_clock IS NULL AND after_id IS NULL) OR (conversation IS NOT NULL AND after_author IS NOT NULL AND after_clock IS NOT NULL AND after_id IS NOT NULL)),
+ FOREIGN KEY(domain) REFERENCES event_domains(domain)
+) WITHOUT ROWID;
+CREATE TABLE event_profile_candidates(
+ job BLOB NOT NULL CHECK(typeof(job)='blob' AND length(job)=16),
+ conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=32),
+ author BLOB NOT NULL CHECK(typeof(author)='blob' AND length(author)=32),
+ estimated_bytes INTEGER NOT NULL CHECK(typeof(estimated_bytes)='integer' AND estimated_bytes>=0),
+ PRIMARY KEY(job,conversation,id), FOREIGN KEY(job) REFERENCES event_profile_jobs(job)
+) WITHOUT ROWID;
+CREATE TABLE event_profile_leaves(
+ job BLOB NOT NULL CHECK(typeof(job)='blob' AND length(job)=16),
+ lamport BLOB NOT NULL CHECK(typeof(lamport)='blob' AND length(lamport)=8),
+ id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=32),
+ estimated_bytes INTEGER NOT NULL CHECK(typeof(estimated_bytes)='integer' AND estimated_bytes>=0),
+ PRIMARY KEY(job,lamport,id), FOREIGN KEY(job) REFERENCES event_profile_jobs(job)
+) WITHOUT ROWID;
+
 
 ";
 
@@ -182,6 +223,13 @@ fn validate_objects(c: &Connection) -> Result<(), LogError> {
         ("retained_events", &["domain", "id"][..]),
         ("retained_event_parents", &["domain", "child", "parent"][..]),
         ("event_order_jobs", &["job"][..]),
+        ("event_profile_requests", &["domain", "conversation"][..]),
+        ("event_profile_jobs", &["job"][..]),
+        (
+            "event_profile_candidates",
+            &["job", "conversation", "id"][..],
+        ),
+        ("event_profile_leaves", &["job", "lamport", "id"][..]),
         ("event_order_work", &["job", "id"][..]),
         ("event_order_rows", &["job", "rank"][..]),
         (
@@ -220,6 +268,12 @@ fn validate_objects(c: &Connection) -> Result<(), LogError> {
         }
     }
     for (name, table, columns) in [
+        (
+            "event_conversations_active",
+            "event_conversations",
+            &["domain", "conversation"][..],
+        ),
+        ("event_heads_retained", "event_heads", &["domain", "id"][..]),
         (
             "event_order_current_job",
             "event_order_current",
@@ -290,7 +344,7 @@ fn validate_objects(c: &Connection) -> Result<(), LogError> {
             params![table, name],
             |r| r.get(0),
         )?;
-        if partial != 0 {
+        if partial != i64::from(name == "event_conversations_active") {
             return Err(LogError::IncompatibleEventSchema);
         }
         let mut stmt = c.prepare(

@@ -1307,6 +1307,24 @@ steps. These signed-event generations do not include archive-only transcript
 roots or provide channel-state checkpoints; their owners must integrate those
 sources before runtime history/replay cutover.
 
+Indexed maintenance uses metadata rather than loading retained bodies. Domain
+and conversation counters track the legacy record-cost estimate separately from
+encoded byte lengths. A conversation drop removes its own rows transactionally;
+an empty revision tombstone prevents an old cursor becoming valid when that
+conversation is recreated. Empty tombstones are excluded from discovery.
+
+Profile maintenance records pending conversations on disk and examines candidates
+in bounded steps. Its snapshot keeps the newest two unreferenced Profile leaves
+per author and every referenced ancestor. Deleting a child does not make its
+parent eligible in the same snapshot. The existing minimum of eight candidates
+and reclaimed-cost threshold of one eighth of the domain estimate remain in
+force. Source changes invalidate an unfinished selection without losing pending
+requests. Applying a complete selection is atomic and updates metadata,
+fingerprints and ordering authority together; it may perform disk work
+proportional to the removed rows, without rewriting unrelated event bodies.
+These backend operations do not replace the runtime maintenance scheduler or
+its existing retry pacing before the persistence cutover.
+
 Owned individual event reads copy only the selected event from the current
 resident index. They establish the fallible ownership boundary needed for disk
 queries, but do not bound the existing index or whole-conversation replay.
