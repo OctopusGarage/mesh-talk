@@ -45,6 +45,47 @@ async fn wait_action_fixture_diagnosed(
     .unwrap_or_else(|_| panic!("{}", diagnosis()));
 }
 
+fn authenticated_source_role_ready(target: &Node, source: &Node) -> bool {
+    let public = source.identity.public();
+    if !target.certified_sibling(&public)
+        || !target
+            .account_group_versions
+            .lock()
+            .unwrap()
+            .get(&source.user_id())
+            .is_some_and(|support| support.public == public)
+    {
+        return false;
+    }
+    target
+        .account_documents(AccountDocumentDomain::GroupControl, None, 64)
+        .unwrap()
+        .items
+        .iter()
+        .filter(|meta| {
+            meta.writer_device == source.user_id()
+                && matches!(
+                    meta.key,
+                    crate::node::AccountDocumentKey::GroupControl { .. }
+                )
+        })
+        .any(|meta| {
+            target
+                .account_document(&meta.key)
+                .unwrap()
+                .is_some_and(|document| {
+                    crate::node::account_group::wire::GroupControlHead::decode(
+                        document.payload(),
+                        &target.account.public().ed25519_pub,
+                    )
+                    .is_some_and(|head| {
+                        head.proof.public() == public
+                            && target.account_group_binding_current(&head.proof)
+                    })
+                })
+        })
+}
+
 /// Role-page publication can invalidate the authenticated page mid-transfer.
 /// Retain the cursor and retry only that precise transport interruption; other
 /// errors remain fixture failures, and operation execution keeps its own budget.
@@ -68,23 +109,33 @@ pub(super) async fn pull_reference_action_control(
     assert!(target.certified_sibling(&peer.public));
     let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::control();
     let mut interruptions = 0;
+    let mut updates = target.subscribe_account_documents();
+    if authenticated_source_role_ready(target, source) {
+        return;
+    }
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            match target.pull_account_documents_page(&peer, &mut cursor).await {
+            let result = {
+                let pull = target.pull_account_documents_page(&peer, &mut cursor);
+                tokio::pin!(pull);
+                loop {
+                    tokio::select! {
+                        biased;
+                        result = &mut pull => break result,
+                        changed = updates.changed() => {
+                            assert!(changed.is_ok(), "the local document observer must remain live");
+                            if authenticated_source_role_ready(target,source) {return;}
+                        }
+                    }
+                }
+            };
+            match result {
                 Ok(()) => {
                     assert!(
                         cursor.error.is_none() && !cursor.requires_upgrade,
                         "control bootstrap must not hide a protocol error or capability rejection"
                     );
-                    if target
-                        .account_documents(AccountDocumentDomain::GroupControl, None, 64)
-                        .unwrap()
-                        .items
-                        .iter()
-                        .any(|meta| meta.writer_device == source.user_id())
-                    {
-                        break;
-                    }
+                    if authenticated_source_role_ready(target,source) { break; }
                     // A GroupControl interruption may leave a private 100ms
                     // domain cooldown while another mandatory domain succeeds.
                     // That success does not prove this source's role row arrived.
@@ -542,24 +593,23 @@ async fn reference_message_action(recall: bool) {
                     .unwrap()
                     .is_some_and(|status| {
                         status.phase == AccountGroupOperationPhase::Committed
-                            && status.primary_event.is_some_and(|event| {
-                                external.log.lock().unwrap().get(&event).is_some()
-                            })
+                            && status.primary_event.is_some()
+                            && (if recall || turn == 0 { &source } else { &sibling })
+                                .account_group_operation_status(&account.account_id(), id).unwrap()
+                                .is_some_and(|original| original.phase == AccountGroupOperationPhase::Committed
+                                    && original.primary_event == status.primary_event
+                                    && original.committed_events == status.committed_events)
                     })
             },
             || {
                 eprintln!("action propagation trace (before-write frame hooks; durable events are committed): {:?}", trace.lock().unwrap());
-                super::messages::panic_account_send_timeout(
-                    if recall || turn == 0 {
-                        &source
-                    } else {
-                        &sibling
-                    },
-                    &reference,
-                    &external,
-                    &account,
-                    id,
-                )
+                let selected = if recall || turn == 0 { &source } else { &sibling };
+                if selected.account_group_operation_status(&account.account_id(), id).unwrap()
+                    .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed) {
+                    "private action receipt: committed source result has not reached the requester"
+                } else {
+                    "private action receipt: selected source has not committed the original intent"
+                }
             },
         )
         .await;
@@ -592,6 +642,71 @@ async fn reference_message_action(recall: bool) {
             .unwrap()
             .unwrap();
         let effect_id = status.primary_event.unwrap();
+        let selected = if recall || turn == 0 {
+            &source
+        } else {
+            &sibling
+        };
+        let private_effect = reference
+            .account_group_operation_inputs()
+            .into_iter()
+            .flat_map(|(_, _, frame)| frame.projection.results)
+            .find(|result| result.reference.id == id)
+            .and_then(|result| result.message_event)
+            .expect("private Committed must retain its exact signed original effect");
+        assert_eq!(private_effect.id, effect_id);
+        assert!(private_effect.verify_integrity() && private_effect.verify_signature());
+        assert_eq!(
+            private_effect.author.ed25519_pub(),
+            &selected.identity.public().ed25519_pub
+        );
+        if recall {
+            assert!(
+                reference
+                    .recalls
+                    .lock()
+                    .unwrap()
+                    .targets(&group)
+                    .contains(&target),
+                "private Recall must be durable before any explicit public sync"
+            );
+            assert!(
+                reference
+                    .history(group, 20)
+                    .iter()
+                    .any(|row| row.id == target && row.recalled)
+            );
+        } else {
+            assert!(
+                reference
+                    .my_dm_reactions
+                    .lock()
+                    .unwrap()
+                    .channel_entries(group)
+                    .iter()
+                    .any(
+                        |(author, saved, _, _)| *author == selected.identity.public()
+                            && *saved == effect_id
+                    ),
+                "private reaction provenance must be durable before any explicit public sync"
+            );
+        }
+        // Private commitment is independent of optional history and background
+        // public fanout. Exercise authenticated public receipt as its own seam;
+        // never install the source event or plaintext directly in the receiver.
+        let peer = external.routing_peer(&selected.user_id()).unwrap();
+        assert_eq!(peer.public, selected.identity.public());
+        let mut connection = external
+            .privacy_sync_dial(peer.addr, &peer.public)
+            .await
+            .expect("the accepted external member must authenticate the original executor");
+        let store = external.pull_sync_store(connection.peer_identity());
+        super::super::super::session::request_round(&mut connection, &store, group)
+            .await
+            .expect("the normal authorized public sync must deliver the original event");
+        drop(store);
+        external.recycle_sync_channel(connection);
+        external.emit_new_messages(group);
         effect_ids.push(effect_id);
         assert_eq!(status.id, id);
         assert_eq!(status.committed_events, vec![effect_id]);
@@ -761,4 +876,125 @@ async fn reference_member_reacts_over_noise_with_private_projection_and_history_
 #[tokio::test]
 async fn reference_member_recall_pins_original_author_over_ready_sibling_with_history_off() {
     reference_message_action(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn role_bootstrap_returns_when_the_authenticated_source_row_is_durable_before_a_held_tail() {
+    use crate::node::{AccountDocumentKey, account_documents::sync::DocumentSyncCursor};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    link(&source, &target);
+    link(&target, &source);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(&source, &dir.path().join("source"), address.port());
+    target.roster.lock().unwrap().update(
+        &source.signed_announce("Role bootstrap", address.port()),
+        address.ip(),
+        &target.user_id(),
+    );
+    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    let peer = target.routing_peer(&source.user_id()).unwrap();
+    // A prior complete, authenticated page proves this exact source's protocol.
+    // A first-ever incomplete capability response must never qualify instead.
+    target
+        .pull_account_documents_page(&peer, &mut DocumentSyncCursor::control())
+        .await
+        .unwrap();
+    assert!(
+        target
+            .account_group_versions
+            .lock()
+            .unwrap()
+            .get(&source.user_id())
+            .is_some_and(|support| support.public == source.identity.public())
+    );
+    source
+        .create_channel("First valid role", vec![])
+        .await
+        .unwrap();
+    source
+        .create_channel("Unrelated page tail", vec![])
+        .await
+        .unwrap();
+    source.publish_account_group_access(&mut None);
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (arrived, held) = tokio::sync::oneshot::channel();
+    let arrived = Arc::new(Mutex::new(Some(arrived)));
+    let headers = Arc::new(AtomicUsize::new(0));
+    let expected = target.identity.public();
+    *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let release = release.clone();
+        move |peer, frame| {
+            let release = release.clone();
+            let arrived = arrived.clone();
+            let headers = headers.clone();
+            let expected = expected.clone();
+            Box::pin(async move {
+                if peer != expected {
+                    return;
+                }
+                let crate::node::account_sync_wire::AccountHistoryFrame::DocumentHeader { body } =
+                    frame
+                else {
+                    return;
+                };
+                let meta: crate::node::AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                if matches!(meta.key, AccountDocumentKey::GroupControl { .. })
+                    && headers.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    if let Some(signal) = arrived.lock().unwrap().take() {
+                        let _ = signal.send(());
+                    }
+                    let _ = release.acquire().await;
+                }
+            })
+        }
+    }));
+    let pulling = {
+        let source = source.clone();
+        let target = target.clone();
+        tokio::spawn(async move {
+            pull_reference_action_control(&target, &source, address).await;
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), held)
+        .await
+        .unwrap()
+        .unwrap();
+    let wanted = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if target
+                .account_documents(AccountDocumentDomain::GroupControl, None, 64)
+                .unwrap()
+                .items
+                .iter()
+                .any(|meta| {
+                    meta.writer_device == source.user_id()
+                        && matches!(meta.key, AccountDocumentKey::GroupControl { .. })
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let completed_while_tail_held = pulling.await;
+    release.close();
+    source.runtime_work.close();
+    server.abort();
+    let _ = server.await;
+    source.runtime_work.drain().await;
+    assert!(
+        wanted.is_ok(),
+        "the exact signed source role must already be durable"
+    );
+    assert!(
+        completed_while_tail_held.is_ok(),
+        "an unrelated page tail must not hide an already durable authenticated source role"
+    );
 }
