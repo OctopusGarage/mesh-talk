@@ -489,10 +489,15 @@ fn link(left: &Node, right: &Node) {
         .unwrap();
 }
 
-async fn pull_group_control(target: &Arc<Node>, source: &Node, address: std::net::SocketAddr) {
+async fn pull_group_control(
+    target: &Arc<Node>,
+    source: &Node,
+    address: std::net::SocketAddr,
+    group: crate::eventlog::ConversationId,
+) {
     // Reuse the bounded role-page bootstrap, including exact local capacity
     // backpressure. Authentication and protocol failures still fail the fixture.
-    message_action_reference::pull_reference_action_control(target, source, address).await;
+    message_action_reference::pull_reference_action_control(target, source, address, group).await;
 }
 
 fn inbound_server(node: Arc<Node>, listener: TcpListener) -> tokio::task::JoinHandle<()> {
@@ -789,7 +794,7 @@ async fn owner_binding_relay_scenario(owner_online: bool, certificate_only: bool
         "relaying owner facts must not change the publisher's physical role"
     );
     let member_server = inbound_server(member.clone(), member_listener);
-    pull_group_control(&reference, &member, member_address).await;
+    pull_group_control(&reference, &member, member_address, genesis.conversation_id).await;
     let access = reference
         .account_group_access(genesis.conversation_id)
         .unwrap();
@@ -828,7 +833,7 @@ async fn owner_binding_relay_scenario(owner_online: bool, certificate_only: bool
                 "a live upgraded peer without an authenticated v5 probe is not known to require an upgrade"
             );
             owner.publish_account_group_access(&mut None);
-            pull_group_control(&reference, &owner, owner_address).await;
+            pull_group_control(&reference, &owner, owner_address, genesis.conversation_id).await;
             assert_eq!(
                 reference
                     .account_group_access(genesis.conversation_id)
@@ -848,7 +853,7 @@ async fn owner_binding_relay_scenario(owner_online: bool, certificate_only: bool
                 TcpListener::bind(owner_address).await.unwrap(),
             ));
         }
-        pull_group_control(&member, &owner, owner_address).await;
+        pull_group_control(&member, &owner, owner_address, genesis.conversation_id).await;
         if restore_offline {
             let server = owner_server.take().unwrap();
             server.abort();
@@ -878,7 +883,7 @@ async fn owner_binding_relay_scenario(owner_online: bool, certificate_only: bool
             .clone();
         install(&member, &transfer);
         member.publish_account_group_access(&mut None);
-        pull_group_control(&reference, &member, member_address).await;
+        pull_group_control(&reference, &member, member_address, genesis.conversation_id).await;
         assert_eq!(
             reference
                 .account_group_access(genesis.conversation_id)
@@ -898,7 +903,7 @@ async fn owner_binding_relay_scenario(owner_online: bool, certificate_only: bool
                 TcpListener::bind(owner_address).await.unwrap(),
             ));
         }
-        pull_group_control(&reference, &owner, owner_address).await;
+        pull_group_control(&reference, &owner, owner_address, genesis.conversation_id).await;
         assert_eq!(
             reference
                 .account_group_access(genesis.conversation_id)
@@ -984,7 +989,7 @@ async fn legacy_owner_account_has_the_same_owner_role_on_member_and_reference_si
     owner.publish_account_group_access(&mut None);
     let server = tokio::spawn(owner.clone().run_accept_loop(listener));
     for target in [&member, &reference] {
-        pull_group_control(target, &owner, address).await;
+        pull_group_control(target, &owner, address, genesis.conversation_id).await;
         let access = target
             .account_group_access(genesis.conversation_id)
             .unwrap();
@@ -1083,7 +1088,7 @@ async fn a_newer_validated_owner_transfer_prevents_old_source_evidence_restoring
     );
     owner.publish_account_group_access(&mut None);
     let server = tokio::spawn(owner.clone().run_accept_loop(listener));
-    pull_group_control(&member, &owner, address).await;
+    pull_group_control(&member, &owner, address, genesis.conversation_id).await;
     assert_eq!(
         member
             .account_group_access(genesis.conversation_id)
@@ -1192,7 +1197,7 @@ async fn a_newer_source_member_observation_wins_before_its_public_transfer_arriv
     );
     owner.publish_account_group_access(&mut None);
     let server = tokio::spawn(owner.clone().run_accept_loop(listener));
-    pull_group_control(&member, &owner, address).await;
+    pull_group_control(&member, &owner, address, genesis.conversation_id).await;
     server.abort();
     let _ = server.await;
     let access = member
@@ -1395,8 +1400,8 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
         servers.spawn(target.clone().run_accept_loop(listener));
     }
     owner.publish_account_group_access(&mut None);
-    pull_group_control(&reference, &owner, addresses[0]).await;
-    pull_group_control(&member, &owner, addresses[0]).await;
+    pull_group_control(&reference, &owner, addresses[0], genesis.conversation_id).await;
+    pull_group_control(&member, &owner, addresses[0], genesis.conversation_id).await;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner
@@ -1708,3 +1713,6 @@ mod legacy_leave_reference;
 
 #[path = "tests/selected_source_control_latency.rs"]
 mod selected_source_control_latency;
+
+#[path = "tests/selected_source_request_latency.rs"]
+mod selected_source_request_latency;

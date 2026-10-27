@@ -322,7 +322,7 @@ async fn assert_reference_controls(modern: bool) {
         trace_started,
     );
     owner.publish_account_group_access(&mut None);
-    pull_group_control(&reference, &owner, addresses[0]).await;
+    pull_group_control(&reference, &owner, addresses[0], group).await;
     // Establish the real reverse capability exchange before measuring an action.
     // A reference may have no physical source head, so this page need not import one.
     let peer = owner.routing_peer(&reference.user_id()).unwrap();

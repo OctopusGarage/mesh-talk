@@ -39,7 +39,7 @@ async fn reference_only_legacy_account_leave_uses_original_source_over_noise_wit
         tasks.spawn(node.clone().run_accept_loop(listener));
     }
     source.publish_account_group_access(&mut None);
-    pull_group_control(&reference, &source, addresses[0]).await;
+    pull_group_control(&reference, &source, addresses[0], group).await;
     assert!(reference.legacy_group_leave_ready(&source.identity.public()));
     assert_eq!(
         reference.account_group_access(group).unwrap().role,

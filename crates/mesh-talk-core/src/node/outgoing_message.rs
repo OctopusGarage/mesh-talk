@@ -352,6 +352,15 @@ impl Node {
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
+            // A signed account departure can reach this device before its public
+            // control cut. It is a terminal negative, never a replacement for
+            // the physical membership and full-identity checks below.
+            if matches!(
+                self.account_group_access(channel)?.role,
+                super::AccountGroupRole::Left | super::AccountGroupRole::Dissolved
+            ) {
+                return Err(NodeError::Channel("not an active channel member".into()));
+            }
             let mut store = self.delivery.lock().expect("delivery lock");
             let wrapped = wrapped
                 .take()

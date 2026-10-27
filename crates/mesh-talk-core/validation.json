@@ -45,6 +45,7 @@
             "node::reaction_store::",
             "node::message_actions::",
             "node::account_documents::store::tests::",
+            "node::account_documents::tests::canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restores_it",
             "node::account_documents::tests::group_control_signed_heads_and_metadata_reject_forged_or_malformed_records",
             "node::account_documents::tests::group_control_terminal_sources_keep_other_members_but_dissolution_overrides_stale_roles",
             "node::account_documents::tests::group_control_current_account_binding_replacement_revokes_old_owner_observation",
@@ -92,7 +93,10 @@
             "node::channel::tests::modern_account_departure_retains_only_the_original_sources_retry_route_on_replay",
             "node::channel::tests::modern_owner_or_unregistered_leave_never_creates_a_departure_route",
             "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route",
-            "selected_source_receipt_overtakes_another_siblings_held_control_over_noise"
+            "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
+            "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
+            "incoming_wake_protects_idle_foreground_and_resumes_background_before_more_hints",
+            "node::account_sync::wake::tests::control_wake"
           ]
         }
       ],

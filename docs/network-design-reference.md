@@ -1317,6 +1317,16 @@ executor is not restarted by repeated status polling. Terminal operations retire
 that priority, allowing unrelated sibling metadata to resume. Accepted mutations
 are never cancelled by this scheduling rule, and worker/TCP limits do not increase.
 
+The same Control owner retains at most 64 authenticated Wake sender tokens, keyed
+by full Ed25519/X25519 identity and current account binding. Fresh tokens coalesce
+in sender FIFO order. A waiting sender may preempt only an unrelated passive
+metadata read; it cannot displace an active selected executor, foreground hint
+comparison or resumed background comparison. One foreground comparison is
+followed by the interrupted background checkpoint before more sender hints.
+Repeated hints do not restart protected reads, retry deadlines remain in force,
+and policy/identity changes retire stale tokens. Hints confer no read or mutation
+authority; every replacement exchange performs normal session admission.
+
 The other two synchronization slots reserve one worker for optional private
 documents and one for history/favorites. Authorized custody and preference
 documents therefore do not wait for history/favorite responses. Each keeps its

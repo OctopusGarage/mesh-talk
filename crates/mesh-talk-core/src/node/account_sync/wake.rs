@@ -13,12 +13,72 @@ const DEBOUNCE: Duration = Duration::from_millis(100);
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 
+pub(super) type WakeIdentity = ([u8; 32], [u8; 32]);
+pub(super) fn wake_identity(public: &PublicIdentity) -> WakeIdentity {
+    (public.ed25519_pub, public.x25519_pub)
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ControlWakeHint {
+    pub public: PublicIdentity,
+    epoch: [u8; 16],
+    revision: u64,
+}
+#[derive(Default)]
+struct ReceivedWakes {
+    seen: HashMap<WakeIdentity, ([u8; 16], u64)>,
+    pending: VecDeque<ControlWakeHint>,
+}
+impl ReceivedWakes {
+    fn retain(&mut self, certified: &HashSet<WakeIdentity>) {
+        self.seen.retain(|key, _| certified.contains(key));
+        self.pending
+            .retain(|hint| certified.contains(&wake_identity(&hint.public)));
+    }
+    fn record(&mut self, public: PublicIdentity, epoch: [u8; 16], revision: u64) -> bool {
+        let key = wake_identity(&public);
+        if self
+            .seen
+            .get(&key)
+            .is_some_and(|(old_epoch, old_revision)| {
+                *old_epoch == epoch && *old_revision >= revision
+            })
+        {
+            return false;
+        }
+        if self.seen.get(&key).is_some_and(|(old, _)| *old != epoch) {
+            self.pending.retain(|hint| hint.public != public);
+        }
+        if !self.seen.contains_key(&key) && self.seen.len() >= 64 {
+            return false;
+        }
+        self.seen.insert(key, (epoch, revision));
+        let hint = ControlWakeHint {
+            public,
+            epoch,
+            revision,
+        };
+        if let Some(old) = self
+            .pending
+            .iter_mut()
+            .find(|old| old.public == hint.public)
+        {
+            *old = hint;
+        } else {
+            self.pending.push_back(hint);
+        }
+        true
+    }
+    fn consume(&mut self, hint: &ControlWakeHint) {
+        self.pending.retain(|current| current != hint);
+    }
+}
+
 pub(in crate::node) struct AccountWake {
     epoch: [u8; 16],
     revision: AtomicU64,
     changed: tokio::sync::Notify,
     // Only exact certified siblings enter this map (the registry is capped at64).
-    received: Mutex<HashMap<String, ([u8; 16], u64)>>,
+    received: Mutex<ReceivedWakes>,
 }
 impl Default for AccountWake {
     fn default() -> Self {
@@ -30,12 +90,51 @@ impl Default for AccountWake {
             epoch,
             revision: AtomicU64::new(1),
             changed: tokio::sync::Notify::new(),
-            received: Mutex::new(HashMap::new()),
+            received: Mutex::new(ReceivedWakes::default()),
         }
     }
 }
 
 impl Node {
+    pub(super) fn pending_control_wakes(&self) -> Vec<ControlWakeHint> {
+        let own = self.account_id();
+        let devices = self.linked_devices();
+        let state = self.privacy.state.read().expect("privacy state lock");
+        let certified = devices
+            .iter()
+            .filter(|device| {
+                state.as_ref().is_none_or(|state| {
+                    state
+                        .proofs
+                        .account_for(&device.public)
+                        .is_none_or(|account| account == own)
+                })
+            })
+            .map(|device| wake_identity(&device.public))
+            .collect();
+        let mut received = self
+            .account_wake
+            .received
+            .lock()
+            .expect("account wake mutex");
+        received.retain(&certified);
+        received.pending.iter().cloned().collect()
+    }
+    pub(super) fn consume_control_wake(&self, hint: &ControlWakeHint) {
+        self.account_wake
+            .received
+            .lock()
+            .expect("account wake mutex")
+            .consume(hint);
+    }
+    pub(super) fn clear_control_wakes(&self) {
+        *self
+            .account_wake
+            .received
+            .lock()
+            .expect("account wake mutex") = ReceivedWakes::default();
+    }
+
     /// Local durable publication only. Incoming sibling imports and ordinary pulls
     /// must not call this: doing so would turn a wake/pull into a feedback loop.
     pub(in crate::node) fn note_account_local_change(&self) {
@@ -79,21 +178,16 @@ impl Node {
             }
             let certified: HashSet<_> = self
                 .linked_devices()
-                .into_iter()
-                .map(|device| device.public.user_id())
+                .iter()
+                .map(|device| wake_identity(&device.public))
                 .collect();
             let mut received = self
                 .account_wake
                 .received
                 .lock()
-                .expect("account wake mutex not poisoned");
-            received.retain(|id, _| certified.contains(id));
-            let id = channel.peer_identity().user_id();
-            let fresh = received.get(&id).is_none_or(|(old_epoch, old_revision)| {
-                *old_epoch != epoch || *old_revision < revision
-            });
-            if fresh {
-                received.insert(id, (epoch, revision));
+                .expect("account wake mutex");
+            received.retain(&certified);
+            if received.record(channel.peer_identity().clone(), epoch, revision) {
                 self.account_sync_notify.notify_one();
             }
         }
@@ -284,6 +378,54 @@ fn wake_routes(peer: &PeerRecord) -> Vec<std::net::SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_wake_fifo_coalesces_and_consumes_only_the_captured_generation() {
+        use crate::identity::device::DeviceIdentity;
+        let a = DeviceIdentity::generate().public();
+        let b = DeviceIdentity::generate().public();
+        let mut queue = ReceivedWakes::default();
+        assert!(queue.record(a.clone(), [1; 16], 1));
+        let old = queue.pending[0].clone();
+        assert!(queue.record(b.clone(), [1; 16], 1));
+        assert!(queue.record(a.clone(), [1; 16], 2));
+        queue.consume(&old);
+        assert_eq!(queue.pending[0].public, a);
+        assert_eq!(queue.pending[0].revision, 2);
+        let current = queue.pending[0].clone();
+        queue.consume(&current);
+        assert_eq!(queue.pending[0].public, b);
+        assert!(!queue.record(a.clone(), [1; 16], 2));
+        assert!(!queue.record(a.clone(), [1; 16], 1));
+        assert_eq!(queue.pending.len(), 1);
+        assert!(queue.record(a.clone(), [2; 16], 1));
+        queue.consume(&current);
+        assert_eq!(queue.pending.back().unwrap().epoch, [2; 16]);
+    }
+
+    #[test]
+    fn control_wakes_bound_full_identities_and_prune_changed_bindings() {
+        use crate::identity::device::DeviceIdentity;
+        let a = DeviceIdentity::generate().public();
+        let wrong = PublicIdentity {
+            ed25519_pub: a.ed25519_pub,
+            x25519_pub: DeviceIdentity::generate().public().x25519_pub,
+        };
+        let mut queue = ReceivedWakes::default();
+        assert!(queue.record(a.clone(), [1; 16], 1));
+        assert!(queue.record(wrong, [1; 16], 100));
+        queue.retain(&HashSet::from([wake_identity(&a)]));
+        assert_eq!(queue.pending.len(), 1);
+        assert_eq!(queue.pending[0].public, a);
+        assert!(queue.record(a, [1; 16], 2));
+        for _ in 1..64 {
+            assert!(queue.record(DeviceIdentity::generate().public(), [1; 16], 1));
+        }
+        assert!(!queue.record(DeviceIdentity::generate().public(), [1; 16], 1));
+        assert_eq!(queue.pending.len(), 64);
+        queue.retain(&HashSet::new());
+        assert!(queue.pending.is_empty() && queue.seen.is_empty());
+    }
 
     #[tokio::test]
     async fn imported_signed_sibling_document_notifies_locally_without_originating_wake() {

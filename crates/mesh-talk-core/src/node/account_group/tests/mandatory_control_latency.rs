@@ -99,6 +99,7 @@ async fn reference_owner_rename_overtakes_held_mandatory_inventory_over_noise() 
         &reference,
         &owner,
         addresses[0],
+        group,
     )
     .await;
     tokio::time::timeout(Duration::from_secs(8), async {

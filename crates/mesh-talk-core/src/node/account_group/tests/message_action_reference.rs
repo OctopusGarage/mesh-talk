@@ -45,7 +45,11 @@ async fn wait_action_fixture_diagnosed(
     .unwrap_or_else(|_| panic!("{}", diagnosis()));
 }
 
-fn authenticated_source_role_ready(target: &Node, source: &Node) -> bool {
+fn authenticated_source_role_ready(
+    target: &Node,
+    source: &Node,
+    group: crate::eventlog::ConversationId,
+) -> bool {
     let public = source.identity.public();
     if !target.certified_sibling(&public)
         || !target
@@ -54,35 +58,41 @@ fn authenticated_source_role_ready(target: &Node, source: &Node) -> bool {
             .unwrap()
             .get(&source.user_id())
             .is_some_and(|support| support.public == public)
+        || !target
+            .group_operation_versions
+            .lock()
+            .unwrap()
+            .get(&source.user_id())
+            .is_some_and(|support| support.public == public)
     {
         return false;
     }
+    let key = crate::node::AccountDocumentKey::GroupControl {
+        channel: hex::encode(group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let Some(expected) = source
+        .account_document_meta(&key)
+        .filter(|meta| !meta.tombstone)
+    else {
+        return false;
+    };
+    if target.account_document_meta(&key).as_ref() != Some(&expected) {
+        return false;
+    }
     target
-        .account_documents(AccountDocumentDomain::GroupControl, None, 64)
+        .account_document(&key)
         .unwrap()
-        .items
-        .iter()
-        .filter(|meta| {
-            meta.writer_device == source.user_id()
-                && matches!(
-                    meta.key,
-                    crate::node::AccountDocumentKey::GroupControl { .. }
-                )
-        })
-        .any(|meta| {
-            target
-                .account_document(&meta.key)
-                .unwrap()
-                .is_some_and(|document| {
-                    crate::node::account_group::wire::GroupControlHead::decode(
-                        document.payload(),
-                        &target.account.public().ed25519_pub,
-                    )
-                    .is_some_and(|head| {
-                        head.proof.public() == public
-                            && target.account_group_binding_current(&head.proof)
-                    })
-                })
+        .is_some_and(|document| {
+            crate::node::account_group::wire::GroupControlHead::decode(
+                document.payload(),
+                &target.account.public().ed25519_pub,
+            )
+            .is_some_and(|head| {
+                head.group == group
+                    && head.proof.public() == public
+                    && target.account_group_binding_current(&head.proof)
+            })
         })
 }
 
@@ -93,6 +103,7 @@ pub(super) async fn pull_reference_action_control(
     target: &Arc<Node>,
     source: &Node,
     address: std::net::SocketAddr,
+    group: crate::eventlog::ConversationId,
 ) {
     target.roster.lock().unwrap().update(
         &Announce::new_with_account(
@@ -110,7 +121,7 @@ pub(super) async fn pull_reference_action_control(
     let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::control();
     let mut interruptions = 0;
     let mut updates = target.subscribe_account_documents();
-    if authenticated_source_role_ready(target, source) {
+    if authenticated_source_role_ready(target, source, group) {
         return;
     }
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -124,7 +135,7 @@ pub(super) async fn pull_reference_action_control(
                         result = &mut pull => break result,
                         changed = updates.changed() => {
                             assert!(changed.is_ok(), "the local document observer must remain live");
-                            if authenticated_source_role_ready(target,source) {return;}
+                            if authenticated_source_role_ready(target,source,group) {return;}
                         }
                     }
                 }
@@ -135,7 +146,7 @@ pub(super) async fn pull_reference_action_control(
                         cursor.error.is_none() && !cursor.requires_upgrade,
                         "control bootstrap must not hide a protocol error or capability rejection"
                     );
-                    if authenticated_source_role_ready(target,source) { break; }
+                    if authenticated_source_role_ready(target,source,group) { break; }
                     // A GroupControl interruption may leave a private 100ms
                     // domain cooldown while another mandatory domain succeeds.
                     // That success does not prove this source's role row arrived.
@@ -376,7 +387,7 @@ async fn reference_message_action(recall: bool) {
         tasks.spawn(target.clone().run_accept_loop(listener));
     }
     source.publish_account_group_access(&mut None);
-    pull_reference_action_control(&reference, &source, addresses[0]).await;
+    pull_reference_action_control(&reference, &source, addresses[0], group).await;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
@@ -482,7 +493,7 @@ async fn reference_message_action(recall: bool) {
         }
     }
     sibling.publish_account_group_access(&mut None);
-    pull_reference_action_control(&reference, &sibling, addresses[3]).await;
+    pull_reference_action_control(&reference, &sibling, addresses[3], group).await;
     let kind = if recall {
         AccountGroupOperationKind::Recall
     } else {
@@ -896,7 +907,9 @@ async fn role_bootstrap_returns_when_the_authenticated_source_row_is_durable_bef
         address.ip(),
         &target.user_id(),
     );
-    let server = tokio::spawn(source.clone().run_accept_loop(listener));
+    // This fixture isolates one immutable authenticated page, not autonomous
+    // account publication while the page is deliberately held.
+    let server = inbound_server(source.clone(), listener);
     let peer = target.routing_peer(&source.user_id()).unwrap();
     // A prior complete, authenticated page proves this exact source's protocol.
     // A first-ever incomplete capability response must never qualify instead.
@@ -912,14 +925,20 @@ async fn role_bootstrap_returns_when_the_authenticated_source_row_is_durable_bef
             .get(&source.user_id())
             .is_some_and(|support| support.public == source.identity.public())
     );
-    source
+    let first = source
         .create_channel("First valid role", vec![])
         .await
         .unwrap();
-    source
+    let second = source
         .create_channel("Unrelated page tail", vec![])
         .await
         .unwrap();
+    // The requested role is emitted first; only an unrelated tail is held.
+    let group = if first.as_bytes() < second.as_bytes() {
+        first
+    } else {
+        second
+    };
     source.publish_account_group_access(&mut None);
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let (arrived, held) = tokio::sync::oneshot::channel();
@@ -958,7 +977,7 @@ async fn role_bootstrap_returns_when_the_authenticated_source_row_is_durable_bef
         let source = source.clone();
         let target = target.clone();
         tokio::spawn(async move {
-            pull_reference_action_control(&target, &source, address).await;
+            pull_reference_action_control(&target, &source, address, group).await;
         })
     };
     tokio::time::timeout(std::time::Duration::from_secs(3), held)
@@ -973,8 +992,12 @@ async fn role_bootstrap_returns_when_the_authenticated_source_row_is_durable_bef
                 .items
                 .iter()
                 .any(|meta| {
-                    meta.writer_device == source.user_id()
-                        && matches!(meta.key, AccountDocumentKey::GroupControl { .. })
+                    meta.key
+                        == AccountDocumentKey::GroupControl {
+                            channel: hex::encode(group.as_bytes()),
+                            source_device: source.user_id(),
+                        }
+                        && source.account_document_meta(&meta.key).as_ref() == Some(meta)
                 })
             {
                 break;
@@ -996,5 +1019,70 @@ async fn role_bootstrap_returns_when_the_authenticated_source_row_is_durable_bef
     assert!(
         completed_while_tail_held.is_ok(),
         "an unrelated page tail must not hide an already durable authenticated source role"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn role_bootstrap_refreshes_the_requested_group_after_a_real_owner_transfer() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    let external = node(&dir.path().join("external"), &Account::generate());
+    link(&source, &target);
+    link(&target, &source);
+    let desired = legacy_group(&source, &external);
+    let unrelated = legacy_group(&source, &external);
+    for genesis in [&desired, &unrelated] {
+        install(&source, genesis);
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(&source, &dir.path().join("source"), address.port());
+    source.publish_account_group_access(&mut None);
+    let server = inbound_server(source.clone(), listener);
+    let group = desired.conversation_id;
+    pull_reference_action_control(&target, &source, address, group).await;
+    assert_eq!(
+        target.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+    let other_key = crate::node::AccountDocumentKey::GroupControl {
+        channel: hex::encode(unrelated.conversation_id.as_bytes()),
+        source_device: source.user_id(),
+    };
+    assert_eq!(
+        target.account_document_meta(&other_key),
+        source.account_document_meta(&other_key)
+    );
+    source
+        .append_event(
+            group,
+            EventKind::ChannelOwnerTransfer,
+            external.user_id().into_bytes(),
+        )
+        .unwrap();
+    source.process_channel(group);
+    source.publish_account_group_access_for(group);
+    assert_eq!(
+        source.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+    // This other group remains fresh. It must not make the stale desired group
+    // qualify, nor can the previously authenticated Owner row qualify itself.
+    assert_eq!(
+        target.account_document_meta(&other_key),
+        source.account_document_meta(&other_key)
+    );
+    pull_reference_action_control(&target, &source, address, group).await;
+    let role = target.account_group_access(group).unwrap().role;
+    source.runtime_work.close();
+    server.abort();
+    let _ = server.await;
+    source.runtime_work.drain().await;
+    assert_eq!(
+        role,
+        AccountGroupRole::Member,
+        "bootstrap must import the current signed head for the requested group"
     );
 }

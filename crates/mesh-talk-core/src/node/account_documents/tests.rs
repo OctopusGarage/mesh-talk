@@ -5877,3 +5877,231 @@ async fn device_hostnames_use_encrypted_sibling_sync_with_optional_categories_of
     );
     server.abort();
 }
+#[tokio::test]
+async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restores_it() {
+    use crate::{
+        channel::ChannelMeta,
+        eventlog::{Event, EventKind},
+        node::{AccountGroupRole, channel_account_authority::AccountAuthorityControl},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let f = crate::node::channels::account_self_control::tests::fixture(false);
+    let source = node_with_identity(
+        &dir.path().join("source"),
+        &f.account,
+        DeviceIdentity::from_secret_bytes(f.member.secret_bytes().0, f.member.secret_bytes().1),
+    );
+    let stale = node(&dir.path().join("stale"), &f.account);
+    let authority = f.events.last().unwrap().id;
+    let grant = f.witness().grant;
+    let inherited = crate::node::channel_account_bootstrap::DeviceControl::Inherit {
+        authority,
+        grant,
+        device: stale.own_group_proof(),
+        account_signature: f
+            .account
+            .sign(
+                &crate::node::channel_account_bootstrap::inheritance_account_message(
+                    f.group,
+                    authority,
+                    grant,
+                    &stale.identity.public(),
+                ),
+            )
+            .to_vec(),
+    };
+    let inheritance = Event::new(
+        &stale.identity,
+        f.group,
+        1,
+        vec![authority],
+        3,
+        3,
+        EventKind::ChannelDeviceInheritance,
+        inherited.encode(),
+    );
+    for target in [&source, &stale] {
+        for event in f.events.iter().chain(std::iter::once(&inheritance)) {
+            target
+                .log
+                .lock()
+                .unwrap()
+                .append_durable(event.clone())
+                .unwrap();
+        }
+        target.process_channel(f.group);
+        assert_eq!(
+            target.account_group_access(f.group).unwrap().role,
+            AccountGroupRole::Member
+        );
+    }
+    source.publish_account_group_access_for(f.group);
+    let key = AccountDocumentKey::GroupControl {
+        channel: hex::encode(f.group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let member_head = source.account_document(&key).unwrap().unwrap();
+    stale
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(member_head.meta.clone(), member_head.payload())
+        .unwrap();
+    let leave = Event::new(
+        &source.identity,
+        f.group,
+        1,
+        vec![inheritance.id],
+        4,
+        4,
+        EventKind::ChannelLeave,
+        vec![],
+    );
+    source
+        .log
+        .lock()
+        .unwrap()
+        .append_durable(leave.clone())
+        .unwrap();
+    source.process_channel(f.group);
+    source.publish_account_group_access_for(f.group);
+    assert_eq!(
+        source.account_group_access(f.group).unwrap().role,
+        AccountGroupRole::Left
+    );
+    let left_head = source.account_document(&key).unwrap().unwrap();
+    stale
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(left_head.meta.clone(), left_head.payload())
+        .unwrap();
+    assert_eq!(
+        stale.account_group_access(f.group).unwrap().role,
+        AccountGroupRole::Left
+    );
+    assert!(
+        stale
+            .account_group_projection(f.group)
+            .authority
+            .is_member(&stale.identity.public(), &stale.own_group_proof()),
+        "the real physical public cut deliberately still grants this device"
+    );
+    let snapshot = || {
+        [
+            "events.log",
+            "sent.log",
+            "delivery-transactions.log",
+            "delivery-outbox.log",
+            "channel.senders",
+        ]
+        .map(|name| std::fs::read(dir.path().join("stale").join(name)).ok())
+    };
+    let before = snapshot();
+    let sender_before = stale
+        .channels
+        .lock()
+        .unwrap()
+        .state(&f.group)
+        .unwrap()
+        .export_my_senders();
+    assert!(
+        stale
+            .enqueue_channel_message_reply_expiring_if(
+                f.group,
+                b"forbidden after account departure",
+                None,
+                None,
+                |commit| commit()
+            )
+            .is_err(),
+        "canonical Left must deny before allocating a Message or sender key"
+    );
+    assert_eq!(snapshot(), before);
+    assert_eq!(
+        stale
+            .channels
+            .lock()
+            .unwrap()
+            .state(&f.group)
+            .unwrap()
+            .export_my_senders(),
+        sender_before
+    );
+    assert!(
+        stale
+            .delivery
+            .lock()
+            .unwrap()
+            .pending_transactions()
+            .is_empty()
+    );
+
+    // A real owner-authorized new lifetime supersedes the old terminal head.
+    let fresh_root = Event::new(
+        &f.owner,
+        f.group,
+        3,
+        vec![leave.id],
+        5,
+        5,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Fresh accepted membership".into(),
+            members: vec![f.owner.public(), stale.identity.public()],
+            epoch: 2,
+            owner: f.owner.public().user_id(),
+        }
+        .encode(),
+    );
+    let mut fresh = AccountAuthorityControl::decode(&f.events[1].ciphertext).unwrap();
+    fresh.previous = Some(authority);
+    fresh.legacy_bindings.clear();
+    let member = fresh
+        .grants
+        .iter_mut()
+        .find(|entry| entry.id() == Some(grant))
+        .unwrap();
+    member.incarnation = [99; 16];
+    member.original = stale.own_group_proof();
+    member.membership_event = fresh_root.id;
+    member.acceptance_event = None;
+    let fresh_authority = Event::new(
+        &f.owner,
+        f.group,
+        4,
+        vec![fresh_root.id],
+        6,
+        6,
+        EventKind::ChannelAccountAuthority,
+        fresh.signed_encode(f.group, &f.owner_account),
+    );
+    for event in [&leave, &fresh_root, &fresh_authority] {
+        stale
+            .log
+            .lock()
+            .unwrap()
+            .append_durable(event.clone())
+            .unwrap();
+    }
+    stale.process_channel(f.group);
+    stale.publish_account_group_access_for(f.group);
+    let current = stale.account_group_access(f.group).unwrap();
+    assert_eq!(current.role, AccountGroupRole::Member);
+    assert!(
+        current
+            .sources
+            .iter()
+            .any(|source| source.device == stale.identity.public()
+                && source.lifetime.membership == fresh_root.id)
+    );
+    stale
+        .enqueue_channel_message_reply_expiring_if(
+            f.group,
+            b"allowed after a genuine new lifetime",
+            None,
+            None,
+            |commit| commit(),
+        )
+        .unwrap();
+}

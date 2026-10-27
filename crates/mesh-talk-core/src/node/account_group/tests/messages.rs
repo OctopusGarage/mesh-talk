@@ -425,7 +425,7 @@ async fn reference_member_send_fixture(fail_receive: bool) {
         tasks.spawn(target.clone().run_accept_loop(listener));
     }
     source.publish_account_group_access(&mut None);
-    pull_group_control(&reference, &source, addresses[0]).await;
+    pull_group_control(&reference, &source, addresses[0], group).await;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
@@ -652,7 +652,7 @@ async fn old_operation_source_never_receives_an_unsupported_send_body() {
     configure(&reference, &dir.path().join("reference"), 9);
     source.publish_account_group_access(&mut None);
     let server = inbound_server(source.clone(), listener);
-    pull_group_control(&reference, &source, address).await;
+    pull_group_control(&reference, &source, address, group).await;
     reference.group_operation_versions.lock().unwrap().insert(
         source.user_id(),
         crate::node::account_documents::sync::GroupOperationSupport {

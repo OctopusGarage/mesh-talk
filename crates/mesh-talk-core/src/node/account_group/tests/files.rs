@@ -677,7 +677,7 @@ async fn file_result_roundtrip(mode: u8) {
         tasks.spawn(target.clone().run_accept_loop(listener));
     }
     source.publish_account_group_access(&mut None);
-    pull_group_control(&origin, &source, addresses[0]).await;
+    pull_group_control(&origin, &source, addresses[0], group).await;
     assert_eq!(
         origin.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
@@ -893,7 +893,7 @@ async fn file_result_roundtrip(mode: u8) {
     // Document installation wakes account work before the exchange finishes
     // installing its authenticated capability receipt. Establish this fixture
     // prerequisite before starting the worker, rather than racing its retry.
-    pull_group_control(&fresh, &source, addresses[0]).await;
+    pull_group_control(&fresh, &source, addresses[0], group).await;
     assert!(
         fresh.account_group_operation_ready_for(
             &source.identity.public(),

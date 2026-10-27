@@ -112,6 +112,7 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
         &reference,
         &owner,
         addresses[0],
+        group,
     )
     .await;
     tokio::time::timeout(Duration::from_secs(8), async {

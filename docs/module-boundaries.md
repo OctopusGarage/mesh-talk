@@ -647,6 +647,10 @@ adoption of the account requires that owner's independently signed binding.
 A member device may relay that binding while retaining its own member role.
 Execution always revalidates the actual public membership, lifetime, authority
 and signer through the owning channel implementation.
+Canonical authenticated `Left` or `Dissolved` observations deny direct enqueue
+before WAL or sender-key allocation, even when the local physical public cut is
+stale. A fresh verified membership lifetime can supersede an older departure;
+positive signer authority still requires the existing public channel checks.
 
 Cross-source reconciliation names exact signed heads by full source identity,
 revision and hash. A source attests supersession only after its full public view
