@@ -62,13 +62,15 @@ fn decode(bytes: Vec<u8>) -> Result<PathBuf, LogError> {
     #[cfg(windows)]
     let value = {
         use std::os::windows::ffi::OsStringExt;
-        if bytes.len() % 2 != 0 {
+        let (pairs, remainder) = bytes.as_chunks::<2>();
+        if !remainder.is_empty() {
             return Err(invalid("invalid Windows source locator"));
         }
         OsString::from_wide(
-            &bytes
-                .chunks_exact(2)
-                .map(|v| u16::from_le_bytes([v[0], v[1]]))
+            &pairs
+                .iter()
+                .copied()
+                .map(u16::from_le_bytes)
                 .collect::<Vec<_>>(),
         )
     };
@@ -175,4 +177,31 @@ pub(super) fn phase(db: &EncryptedDatabase, source: i64, phase: i64) -> Result<(
         )?;
         Ok(())
     })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::os::windows::ffi::OsStringExt;
+
+    #[test]
+    fn windows_locator_preserves_non_bmp_and_unpaired_utf16() {
+        // A non-BMP character followed by separated lone high/low surrogates.
+        let path = PathBuf::from(OsString::from_wide(&[
+            0x0061, 0xd83d, 0xde80, 0x0062, 0xd800, 0x0063, 0xdc00,
+        ]));
+        let bytes = vec![
+            0x61, 0x00, 0x3d, 0xd8, 0x80, 0xde, 0x62, 0x00, 0x00, 0xd8, 0x63, 0x00, 0x00, 0xdc,
+        ];
+        assert_eq!(encode(&path), bytes);
+        assert_eq!(decode(bytes).unwrap(), path);
+    }
+
+    #[test]
+    fn windows_locator_rejects_trailing_partial_utf16_unit() {
+        assert!(matches!(
+            decode(vec![0x61, 0x00, 0x62]),
+            Err(LogError::CorruptFile(_))
+        ));
+    }
 }

@@ -169,6 +169,8 @@ pub(super) fn matches_stub(path: &Path, stub: &[u8]) -> Result<bool, LogError> {
 pub(super) fn sync_parent(path: &Path) -> Result<(), LogError> {
     #[cfg(unix)]
     File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     // Windows has no equivalent directory-fsync guarantee in this publication
     // helper. Native rename/kill and power-loss acceptance remains required.
     Ok(())

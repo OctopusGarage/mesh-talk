@@ -464,37 +464,35 @@ fn interrupted_import_restarts_with_bounded_live_records_and_batches() {
     assert!(MAX_EDGES.with(|v| v.get()) <= 128);
 }
 
+#[cfg(unix)]
 #[test]
 fn artifact_directory_redirection_is_rejected_before_work_or_cleanup() {
     use super::publication::tests::CUT;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        let dir = tempfile::tempdir().unwrap();
-        let (device, path, _) = fixture(dir.path());
-        CUT.with(|v| v.replace(Some("prepared")));
-        assert!(open(dir.path(), &device, &path).is_err());
-        let artifact = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with(".relay-publication-")
-            })
-            .unwrap();
-        let elsewhere = tempfile::tempdir().unwrap();
-        for entry in std::fs::read_dir(&artifact).unwrap() {
-            let entry = entry.unwrap();
-            std::fs::rename(entry.path(), elsewhere.path().join(entry.file_name())).unwrap();
-        }
-        std::fs::remove_dir(&artifact).unwrap();
-        symlink(elsewhere.path(), &artifact).unwrap();
-        assert!(open(dir.path(), &device, &path).is_err());
-        assert!(std::fs::read(&path).unwrap().starts_with(b"MTLOG1"));
-        assert!(elsewhere.path().join("source-0.raw").exists());
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let (device, path, _) = fixture(dir.path());
+    CUT.with(|v| v.replace(Some("prepared")));
+    assert!(open(dir.path(), &device, &path).is_err());
+    let artifact = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".relay-publication-")
+        })
+        .unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    for entry in std::fs::read_dir(&artifact).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::rename(entry.path(), elsewhere.path().join(entry.file_name())).unwrap();
     }
+    std::fs::remove_dir(&artifact).unwrap();
+    symlink(elsewhere.path(), &artifact).unwrap();
+    assert!(open(dir.path(), &device, &path).is_err());
+    assert!(std::fs::read(&path).unwrap().starts_with(b"MTLOG1"));
+    assert!(elsewhere.path().join("source-0.raw").exists());
 }
 
 #[test]
