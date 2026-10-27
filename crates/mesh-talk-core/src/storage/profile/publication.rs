@@ -169,7 +169,12 @@ fn bootstrap(
     EventRepository::initialize_unpublished_domain(&db, RELAY_EVENTS)?;
     db.checkpoint_and_close()?;
     cut("closed-candidate")?;
-    File::open(&candidate)?.sync_all()?;
+    // Windows FlushFileBuffers requires a handle opened with write access.
+    File::options()
+        .read(true)
+        .write(true)
+        .open(&candidate)?
+        .sync_all()?;
     // Reopen and authenticate the closed self-contained candidate before moving.
     EncryptedDatabase::open(&candidate, password, binding)?.checkpoint_and_close()?;
     publish_absent(&candidate, &root.join("profile.db"))?;
