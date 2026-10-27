@@ -130,7 +130,9 @@ The headless participant and post office acquire an exclusive OS lock on
 message stores. Keep each independent node in its own data directory. Cooperating
 updated CLI processes refuse a second owner, including while the first process
 is still starting. The PID written to `node.lock` is diagnostic information;
-file contents alone do not establish ownership.
+file contents alone do not establish ownership. The CLI uses the shared core
+`ProfileStorageLease` primitive; its acquired guard is transferable to the
+storage owner without reacquiring the same lock.
 
 The file remains after a normal stop or crash. The OS releases ownership when
 the process's lock handle closes, including on termination. Restart the node

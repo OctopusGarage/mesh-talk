@@ -978,6 +978,10 @@
           {
             "name": "Streaming import visits only authenticated records without retaining prior decoded bodies, and callback errors preserve source bytes before any tail repair.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "The shared profile lease excludes cooperating writers before CLI keystore initialization without unlinking node.lock; database relocation requires checked WAL checkpoint and connection close, and busy or faulted retirement cannot authorize publication.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -1376,7 +1380,7 @@
       ],
       "escalation": [
         "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
-        "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --features fast-test-kdf --bin mesh-talk-node tests::profile_lock and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart."
+        "CLI data-directory ownership changes additionally require the shared core storage profile-lock subprocess tests and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart."
       ],
       "capability": {
         "summary": "Exclude cooperating CLI writers before opening participant or post-office stores, retaining the OS lock through the process lifetime.",

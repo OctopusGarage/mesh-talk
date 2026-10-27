@@ -177,6 +177,44 @@ impl EncryptedDatabase {
             faulted: AtomicBool::new(false),
         })
     }
+    /// Retire the connection before relocating its main file. A successful
+    /// TRUNCATE checkpoint has no retained frames; neither busy nor incomplete
+    /// results authorize publishing the main file without its WAL.
+    pub(crate) fn checkpoint_and_close(self) -> Result<(), LogError> {
+        if self.faulted.load(Ordering::Acquire) {
+            return Err(invalid("database connection faulted; reopen required"));
+        }
+        let connection = self
+            .connection
+            .into_inner()
+            .map_err(|_| invalid("database connection mutex poisoned"))?;
+        let (busy, log, checkpointed): (i64, i64, i64) = connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|error| context("truncate database WAL", error))?;
+        if busy != 0 {
+            // SQLite reports checkpoint contention as a result row, not an
+            // execution error. Preserve its typed busy meaning for callers.
+            return Err(context(
+                "truncate database WAL",
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    Some(format!(
+                        "checkpoint busy={busy}, log={log}, checkpointed={checkpointed}"
+                    )),
+                ),
+            ));
+        }
+        if log != 0 || checkpointed != 0 {
+            return Err(invalid(
+                "truncate database WAL returned incomplete frame counts",
+            ));
+        }
+        connection
+            .close()
+            .map_err(|(_connection, error)| context("close encrypted connection", error))
+    }
     fn checked_operation<T>(&self, result: Result<T, LogError>) -> Result<T, LogError> {
         if result.as_ref().err().is_some_and(fatal_database_error) {
             self.faulted.store(true, Ordering::Release);
@@ -328,6 +366,121 @@ mod tests {
                 .unwrap())
         })
         .unwrap()
+    }
+    #[test]
+    fn checked_close_preserves_encrypted_wal_rows_after_relocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.db");
+        let db = create(&path);
+        assert!(
+            fs::metadata(dir.path().join("profile.db-wal"))
+                .unwrap()
+                .len()
+                > 0
+        );
+        db.checkpoint_and_close().unwrap();
+        let relocated = dir.path().join("relocated.db");
+        fs::rename(&path, &relocated).unwrap();
+        let reopened = EncryptedDatabase::open(&relocated, PASSWORD, BINDING).unwrap();
+        assert_eq!(body(&reopened), SECRET);
+        reopened.checkpoint_and_close().unwrap();
+    }
+    #[test]
+    fn checked_close_refuses_reader_snapshot_and_preserves_sqlite_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.db");
+        let db = create(&path);
+        let reader = EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap();
+        reader
+            .read(|c| {
+                c.execute_batch("BEGIN")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(body(&reader), SECRET);
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO messages VALUES ('new committed row')", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.read(|c| {
+            c.busy_timeout(Duration::ZERO)?;
+            Ok(())
+        })
+        .unwrap();
+        let error = db.checkpoint_and_close().unwrap_err();
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        let mut busy = false;
+        while let Some(error) = source {
+            if let Some(error) = error.downcast_ref::<rusqlite::Error>() {
+                busy = error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy);
+            }
+            source = error.source();
+        }
+        assert!(
+            busy,
+            "checkpoint must retain a typed SQLite busy source: {error}"
+        );
+        assert!(path.exists());
+        assert!(dir.path().join("profile.db-wal").exists());
+        reader
+            .read(|c| {
+                c.execute_batch("ROLLBACK")?;
+                Ok(())
+            })
+            .unwrap();
+        reader.checkpoint_and_close().unwrap();
+        let reopened = EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap();
+        assert_eq!(
+            reopened
+                .read(|c| Ok(
+                    c.query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, i64>(0))?
+                ))
+                .unwrap(),
+            2
+        );
+    }
+    #[test]
+    fn checked_close_preserves_checkpoint_driver_error_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.db");
+        let db = create(&path);
+        db.read(|c| {
+            c.execute_batch("BEGIN IMMEDIATE; UPDATE messages SET body = body")?;
+            Ok(())
+        })
+        .unwrap();
+        let error = db.checkpoint_and_close().unwrap_err();
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        let mut locked = false;
+        while let Some(error) = source {
+            if let Some(error) = error.downcast_ref::<rusqlite::Error>() {
+                locked = error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseLocked);
+            }
+            source = error.source();
+        }
+        assert!(
+            locked,
+            "checkpoint must retain its actual driver error: {error}"
+        );
+        assert_eq!(
+            body(&EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap()),
+            SECRET
+        );
+    }
+
+    #[test]
+    fn checked_close_refuses_faulted_and_poisoned_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = create(&dir.path().join("faulted.db"));
+        db.faulted.store(true, Ordering::Release);
+        assert!(db.checkpoint_and_close().is_err());
+        let db = create(&dir.path().join("poisoned.db"));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = db.connection.lock().unwrap();
+            panic!("poison connection");
+        }));
+        assert!(db.checkpoint_and_close().is_err());
     }
     #[test]
     fn encrypted_roundtrip_cipher_and_wal() {

@@ -1267,6 +1267,20 @@ and fatal storage errors invalidate the handle until reopening. Read failures
 remain errors rather than missing records. The connection owner does not by
 itself convert legacy event or transcript stores to demand loading.
 
+The shared core profile lease retains the operating-system lock on persistent
+`node.lock`. The CLI acquires it before opening keystores and retains it through
+participant or relay retirement. Acquisition rejects unsafe lock entries and
+live legacy PID holders; release clears the PID while holding the lock and never
+unlinks its path. Canonical root aliases cannot create a second cooperating
+writer. This primitive does not by itself add cross-process ownership to hosts
+that have not yet adopted it.
+
+Database relocation requires explicit checked retirement: truncate-checkpoint
+the WAL, reject busy or incomplete results, and check connection close before
+moving files. Failure preserves the database for recovery rather than allowing
+publication of a main file without committed WAL data. Ordinary append and
+normal open do not perform this retirement checkpoint.
+
 The domain-owned indexed event repository keeps immutable signed event bytes,
 parent edges, author sequences, frontier and conversation metadata in the same
 encrypted database transaction. Explicit domain IDs isolate stores sharing a

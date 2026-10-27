@@ -7,3 +7,5 @@ pub mod serialization;
 
 #[cfg(test)]
 mod tests;
+
+pub mod profile;
