@@ -80,6 +80,17 @@ let node = Node::open_with_account(
 The crate is async and built on Tokio. `NodeRuntime` starts discovery, the accept
 loop, and delivery tasks when a host runs the node.
 
+Custom `eventlog::SyncStore` implementations return `Result<_, LogError>` from
+storage reads, including capability, fingerprint, consent, custody and event export
+queries. Reconciliation constructors and handlers also return `Result`; propagate
+local storage failures rather than replacing them with empty history or a negative
+lookup. Network sessions expose these failures as `SessionError::Store` with their
+source chain. Use `LogError::AdmissionRejected` for explicit incoming-event policy
+denials; ordinary I/O errors abort the exchange. A failed batch may have committed
+a prefix, so retries must retain content-addressed duplicate handling. Event IDs
+and wire serialization are unchanged. See the [protocol guide](../../docs/ARCHITECTURE.md)
+for reconciliation and durability contracts.
+
 ## CLI: `mesh-talk-node`
 
 A headless node ships with the crate as a reference consumer:

@@ -1,6 +1,6 @@
 use super::*;
 use crate::discovery::Announce;
-use crate::eventlog::{ConversationId, EventId};
+use crate::eventlog::{ConversationId, EventId, LogError};
 use crate::identity::{account::Account, device::DeviceIdentity};
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -597,7 +597,8 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
         a.sync_store(&new_proof.public())
             .lock()
             .unwrap()
-            .event_ids(&control),
+            .event_ids(&control)
+            .unwrap(),
         vec![receipt.id]
     );
     assert!(
@@ -605,6 +606,7 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
             .lock()
             .unwrap()
             .event_ids(&control)
+            .unwrap()
             .is_empty()
     );
     assert!(
@@ -612,6 +614,7 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
             .lock()
             .unwrap()
             .durable_have(&control, &receipt.id)
+            .unwrap()
     );
     let (aio, bio) = tokio::io::duplex(65536);
     let responder = b.clone();
@@ -650,6 +653,7 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
             .lock()
             .unwrap()
             .durable_have(&control, &receipt.id)
+            .unwrap()
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     assert_eq!(a.delivery_status(pending), Some(DeliveryStatus::Awaiting));
@@ -916,10 +920,10 @@ impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
         &self,
         file: &ConversationId,
         manifest: &EventId,
-    ) -> crate::eventlog::sync::FileConsentStatus {
+    ) -> Result<crate::eventlog::sync::FileConsentStatus, LogError> {
         self.inner.file_consent(file, manifest)
     }
-    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
         if *conversation != self.file {
             return self.inner.durable_have(conversation, id);
         }
@@ -936,28 +940,28 @@ impl<S: crate::eventlog::sync::SyncStore> crate::eventlog::sync::SyncStore
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.observation.changed.notify_waiters();
         }
-        false
+        Ok(false)
     }
     fn admission_denied(&self) -> bool {
         self.inner.admission_denied()
     }
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
-        if *conversation == self.file || *conversation == self.dm {
-            self.inner.event_ids(conversation)
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
+        Ok(if *conversation == self.file || *conversation == self.dm {
+            self.inner.event_ids(conversation)?
         } else {
             Vec::new()
-        }
+        })
     }
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &std::collections::HashSet<EventId>,
-    ) -> Vec<crate::eventlog::Event> {
-        if *conversation == self.file || *conversation == self.dm {
-            self.inner.events_excluding(conversation, have)
+    ) -> Result<Vec<crate::eventlog::Event>, LogError> {
+        Ok(if *conversation == self.file || *conversation == self.dm {
+            self.inner.events_excluding(conversation, have)?
         } else {
             Vec::new()
-        }
+        })
     }
     fn ingest(
         &mut self,
@@ -1015,9 +1019,18 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
     )
     .await
     .expect("file setup sync completes");
-    let ids = a.sync_store(&bp.public()).lock().unwrap().event_ids(&file);
+    let ids = a
+        .sync_store(&bp.public())
+        .lock()
+        .unwrap()
+        .event_ids(&file)
+        .unwrap();
     assert_eq!(
-        b.sync_store(&ap.public()).lock().unwrap().event_ids(&file),
+        b.sync_store(&ap.public())
+            .lock()
+            .unwrap()
+            .event_ids(&file)
+            .unwrap(),
         ids
     );
     assert_eq!(b.read_file(file).unwrap(), bytes);
@@ -1097,7 +1110,11 @@ async fn file_terminal_negative_custody_retries_on_cadence_without_empty_cache_s
             .is_some()
     );
     assert_eq!(
-        a.sync_store(&bp.public()).lock().unwrap().event_ids(&file),
+        a.sync_store(&bp.public())
+            .lock()
+            .unwrap()
+            .event_ids(&file)
+            .unwrap(),
         ids
     );
 }
@@ -1477,13 +1494,21 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         ids
     );
     assert_eq!(
-        a.sync_store(&bp.public()).lock().unwrap().event_ids(&file),
+        a.sync_store(&bp.public())
+            .lock()
+            .unwrap()
+            .event_ids(&file)
+            .unwrap(),
         ids,
         "restart restores the original authorized chunk projection"
     );
     for (_, file, ids) in &originals {
         assert_eq!(
-            a.sync_store(&bp.public()).lock().unwrap().event_ids(file),
+            a.sync_store(&bp.public())
+                .lock()
+                .unwrap()
+                .event_ids(file)
+                .unwrap(),
             *ids
         );
     }
@@ -1600,7 +1625,8 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .sync_store(&ap.public())
             .lock()
             .unwrap()
-            .durable_have(&file, &final_chunk);
+            .durable_have(&file, &final_chunk)
+            .unwrap();
         let pending = a
             .delivery
             .lock()
@@ -1677,6 +1703,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                 .lock()
                 .unwrap()
                 .durable_have(file, ids.last().unwrap())
+                .unwrap()
         );
     }
     if delay == FilePeerDelay::PartialChunk {
@@ -3917,7 +3944,8 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
         p.sync_store(&bob.public())
             .lock()
             .unwrap()
-            .event_ids(&control),
+            .event_ids(&control)
+            .unwrap(),
         vec![ack.id]
     );
     assert!(
@@ -3925,6 +3953,7 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .lock()
             .unwrap()
             .durable_have(&control, &ack.id)
+            .unwrap()
     );
     let outsider = DeviceIdentity::generate();
     let forged = Event::new(
@@ -3952,6 +3981,7 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .lock()
             .unwrap()
             .event_ids(&control)
+            .unwrap()
             .is_empty()
     );
     assert!(
@@ -3959,6 +3989,7 @@ async fn private_post_office_projects_authorized_other_peer_receipt_pairs_only()
             .lock()
             .unwrap()
             .durable_have(&control, &ack.id)
+            .unwrap()
     );
 }
 
@@ -4112,7 +4143,8 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                 b.sync_store(&ap.public())
                     .lock()
                     .unwrap()
-                    .event_ids(&control),
+                    .event_ids(&control)
+                    .unwrap(),
                 vec![receipt.destination.event.id]
             );
             if clear {
@@ -4140,6 +4172,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .event_ids(&control)
+                        .unwrap()
                         .is_empty()
                 );
                 drop(b);
@@ -4161,6 +4194,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .event_ids(&control)
+                        .unwrap()
                         .is_empty()
                 );
             } else {
@@ -4171,6 +4205,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                             .lock()
                             .unwrap()
                             .event_ids(&control)
+                            .unwrap()
                             .is_empty()
                     );
                     b.set_allowed(&own, true).await.unwrap();
@@ -4193,6 +4228,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .event_ids(&control)
+                        .unwrap()
                         .is_empty()
                 );
                 assert!(
@@ -4200,6 +4236,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .durable_have(&control, &receipt.destination.event.id)
+                        .unwrap()
                 );
                 let substituted = Announce::new_with_account(
                     &DeviceIdentity::from_secret_bytes(akeys.0, [77; 32]),
@@ -4218,6 +4255,7 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .lock()
                         .unwrap()
                         .event_ids(&control)
+                        .unwrap()
                         .is_empty()
                 );
             }
@@ -6683,22 +6721,26 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
         confirmations: Arc<AtomicUsize>,
     }
     impl SyncStore for ObservedRelay {
-        fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
-            let held = self.inner.durable_have(conversation, id);
+        fn durable_have(
+            &self,
+            conversation: &ConversationId,
+            id: &EventId,
+        ) -> Result<bool, LogError> {
+            let held = self.inner.durable_have(conversation, id)?;
             if held && let Some(file) = self.final_chunks.lock().unwrap().get(id) {
                 self.confirmed_files.lock().unwrap().insert(*file);
                 self.confirmations.fetch_add(1, Ordering::SeqCst);
             }
-            held
+            Ok(held)
         }
-        fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+        fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
             self.inner.event_ids(conversation)
         }
         fn events_excluding(
             &self,
             conversation: &ConversationId,
             have: &std::collections::HashSet<EventId>,
-        ) -> Vec<crate::eventlog::Event> {
+        ) -> Result<Vec<crate::eventlog::Event>, LogError> {
             self.inner.events_excluding(conversation, have)
         }
         fn ingest(

@@ -1025,7 +1025,8 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                 .sync_store(&device.public())
                 .lock()
                 .unwrap()
-                .event_ids(&file),
+                .event_ids(&file)
+                .unwrap(),
             expected
         );
     }
@@ -1076,7 +1077,8 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                 .sync_store(&device.public())
                 .lock()
                 .unwrap()
-                .event_ids(&file),
+                .event_ids(&file)
+                .unwrap(),
             expected,
             "every recipient must retain its own manifest scope after sender restart"
         );
@@ -1098,7 +1100,7 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
         })
         .await
         .expect("restarted sender must actually serve chunks to every device");
-        assert_eq!(store.lock().unwrap().event_ids(&file), expected);
+        assert_eq!(store.lock().unwrap().event_ids(&file).unwrap(), expected);
     }
     let second = reopened
         .send_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
@@ -1165,6 +1167,7 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                 .lock()
                 .unwrap()
                 .event_ids(&file)
+                .unwrap()
                 .is_empty(),
             "durable file scope must not bypass account revocation"
         );
@@ -1339,7 +1342,7 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
             plaintext: manifest.encode(),
         })
         .unwrap();
-    let expected = alice.log.lock().unwrap().event_ids(&file);
+    let expected = alice.log.lock().unwrap().event_ids(&file).unwrap();
     let keys = alice.identity.secret_bytes();
     let own = crate::identity::account::Account::from_secret_bytes(alice.account.secret_bytes());
     drop(alice);
@@ -1381,7 +1384,8 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
                 .sync_store(&device.public())
                 .lock()
                 .unwrap()
-                .event_ids(&file),
+                .event_ids(&file)
+                .unwrap(),
             expected
         );
     }
@@ -1425,7 +1429,7 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
         })
         .await
         .unwrap();
-        assert_eq!(store.lock().unwrap().event_ids(&file), expected);
+        assert_eq!(store.lock().unwrap().event_ids(&file).unwrap(), expected);
     }
     server.abort();
     let _ = server.await;
@@ -1987,8 +1991,14 @@ async fn invisible_sync_discards_uninvited_history_and_unowned_invitation() {
     for event in [genesis.clone(), message, forged_invite] {
         store.lock().unwrap().ingest(event).unwrap();
     }
-    assert_eq!(store.lock().unwrap().event_ids(&channel).len(), 3);
-    assert!(!store.lock().unwrap().durable_have(&channel, &genesis.id));
+    assert_eq!(store.lock().unwrap().event_ids(&channel).unwrap().len(), 3);
+    assert!(
+        !store
+            .lock()
+            .unwrap()
+            .durable_have(&channel, &genesis.id)
+            .unwrap()
+    );
     assert!(carol.log.lock().unwrap().events(&channel).is_empty());
     drop(store);
     assert!(
@@ -1997,6 +2007,7 @@ async fn invisible_sync_discards_uninvited_history_and_unowned_invitation() {
             .lock()
             .unwrap()
             .event_ids(&channel)
+            .unwrap()
             .is_empty()
     );
 }
@@ -2046,6 +2057,7 @@ async fn projected_group_removal_takes_effect_before_channel_book_refresh() {
             .lock()
             .unwrap()
             .event_ids(&group)
+            .unwrap()
             .is_empty()
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2115,7 +2127,8 @@ async fn invisible_sync_stops_projecting_events_after_channel_dissolution() {
         .sync_store(&member.identity.public())
         .lock()
         .unwrap()
-        .event_ids(&group);
+        .event_ids(&group)
+        .unwrap();
     assert!(visible.contains(&terminal.id));
     assert!(!visible.contains(&late.id));
 }
@@ -2152,6 +2165,7 @@ async fn concurrent_channel_snapshot_does_not_restore_departed_peer_sync() {
             .lock()
             .unwrap()
             .event_ids(&group)
+            .unwrap()
             .is_empty(),
         "the peer must be able to sync before leaving"
     );
@@ -2207,7 +2221,8 @@ async fn concurrent_channel_snapshot_does_not_restore_departed_peer_sync() {
         .sync_store(&bob.identity.public())
         .lock()
         .unwrap()
-        .event_ids(&group);
+        .event_ids(&group)
+        .unwrap();
     assert!(visible.contains(&snapshot_id));
     assert!(visible.contains(&leave_id));
     assert!(
@@ -2300,6 +2315,7 @@ async fn departed_peer_can_sync_transfer_needed_for_causal_reinvitation() {
             .lock()
             .unwrap()
             .event_ids(&group)
+            .unwrap()
             .contains(&invite_id),
         "the departed peer needs the valid transfer to verify a later invitation"
     );
@@ -2350,7 +2366,10 @@ async fn manually_trusted_relay_only_delivers_cached_verified_dm_authors() {
     );
     let store = bob.sync_store(&relay.identity.public());
     assert!(store.lock().unwrap().ingest(allowed.clone()).is_ok());
-    assert_eq!(store.lock().unwrap().event_ids(&conv), vec![allowed.id]);
+    assert_eq!(
+        store.lock().unwrap().event_ids(&conv).unwrap(),
+        vec![allowed.id]
+    );
     let denied = crate::eventlog::Event::new(
         &stranger,
         conv,
@@ -2364,7 +2383,7 @@ async fn manually_trusted_relay_only_delivers_cached_verified_dm_authors() {
     assert!(store.lock().unwrap().ingest(denied).is_err());
     assert_eq!(bob.log.lock().unwrap().events(&conv).len(), 1);
     bob.set_allowed(&alice.account_id(), false).await.unwrap();
-    assert!(store.lock().unwrap().event_ids(&conv).is_empty());
+    assert!(store.lock().unwrap().event_ids(&conv).unwrap().is_empty());
     assert_eq!(
         bob.log.lock().unwrap().events(&conv).len(),
         1,

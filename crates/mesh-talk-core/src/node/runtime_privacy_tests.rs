@@ -559,6 +559,7 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
             .lock()
             .unwrap()
             .event_ids(&unrelated)
+            .unwrap()
             .is_empty()
     );
     alice.set_allowed(bob.account_id(), false).await.unwrap();

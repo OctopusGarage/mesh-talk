@@ -89,32 +89,32 @@ impl SyncStore for OpaqueRoundStore<'_> {
     // Both legacy and federated mailboxes wrap every inner kind as Message.
     // Capability checks must not materialize and seal an upload page merely
     // to rediscover that invariant on every fingerprint probe and sync step.
-    fn requires_channel_v2(&self, _conversation: &ConversationId) -> bool {
-        false
+    fn requires_channel_v2(&self, _conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
     }
 
-    fn requires_channel_v3(&self, _conversation: &ConversationId) -> bool {
-        false
+    fn requires_channel_v3(&self, _conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
     }
 
-    fn requires_channel_v4(&self, _conversation: &ConversationId) -> bool {
-        false
+    fn requires_channel_v4(&self, _conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
     }
 
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
         let mut ids = self.seen.clone();
-        ids.extend(SyncStore::event_ids(&self.log, conversation));
+        ids.extend(SyncStore::event_ids(&self.log, conversation)?);
         ids.extend(self.outgoing.iter().map(|(_, outer)| *outer));
-        ids.into_iter().collect()
+        Ok(ids.into_iter().collect())
     }
 
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         if !self.node.relay_send_allowed(&self.relay) || !(self.authorize_upload)() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let wanted: HashSet<_> = self
             .outgoing
@@ -158,7 +158,7 @@ impl SyncStore for OpaqueRoundStore<'_> {
         // Incoming wrappers already belong to the remote peer. Only locally
         // projected wrappers need to be returned as reciprocal uploads.
         let _ = conversation;
-        page
+        Ok(page)
     }
 
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
@@ -560,23 +560,23 @@ mod permission_tests {
             exported: std::cell::Cell<usize>,
         }
         impl SyncStore for ObservedRelay {
-            fn requires_channel_v2(&self, _: &ConversationId) -> bool {
-                false
+            fn requires_channel_v2(&self, _: &ConversationId) -> Result<bool, LogError> {
+                Ok(false)
             }
-            fn requires_channel_v3(&self, _: &ConversationId) -> bool {
-                false
+            fn requires_channel_v3(&self, _: &ConversationId) -> Result<bool, LogError> {
+                Ok(false)
             }
-            fn requires_channel_v4(&self, _: &ConversationId) -> bool {
-                false
+            fn requires_channel_v4(&self, _: &ConversationId) -> Result<bool, LogError> {
+                Ok(false)
             }
-            fn event_ids(&self, conv: &ConversationId) -> Vec<EventId> {
+            fn event_ids(&self, conv: &ConversationId) -> Result<Vec<EventId>, LogError> {
                 SyncStore::event_ids(&self.log, conv)
             }
             fn events_excluding(
                 &self,
                 conv: &ConversationId,
                 have: &HashSet<EventId>,
-            ) -> Vec<Event> {
+            ) -> Result<Vec<Event>, LogError> {
                 self.log.events_excluding(conv, have)
             }
             fn events_excluding_bounded(
@@ -585,10 +585,12 @@ mod permission_tests {
                 have: &HashSet<EventId>,
                 bytes: usize,
                 frames: usize,
-            ) -> Vec<Event> {
-                let events = self.log.events_excluding_bounded(conv, have, bytes, frames);
+            ) -> Result<Vec<Event>, LogError> {
+                let events = self
+                    .log
+                    .events_excluding_bounded(conv, have, bytes, frames)?;
                 self.exported.set(self.exported.get() + events.len());
-                events
+                Ok(events)
             }
             fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
                 self.log.append(event)
@@ -788,9 +790,9 @@ mod permission_tests {
             controls: &controls,
             wrappers: &wrappers,
         };
-        assert!(!store.requires_channel_v2(&mailbox.id()));
-        assert!(!store.requires_channel_v3(&mailbox.id()));
-        assert!(!store.requires_channel_v4(&mailbox.id()));
+        assert!(!store.requires_channel_v2(&mailbox.id()).unwrap());
+        assert!(!store.requires_channel_v3(&mailbox.id()).unwrap());
+        assert!(!store.requires_channel_v4(&mailbox.id()).unwrap());
         assert_eq!(
             wrappers.lock().unwrap().generated,
             0,

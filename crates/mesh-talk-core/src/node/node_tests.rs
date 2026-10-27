@@ -9897,6 +9897,7 @@ async fn sibling_history_policy_retains_ciphertext_and_replays_without_network()
                 &destination.event.conversation_id,
                 &std::collections::HashSet::new()
             )
+            .unwrap()
             .is_empty(),
         "ordinary sync must not bypass source history policy"
     );

@@ -20,6 +20,8 @@ pub use sync::{ApplyReport, SyncFollowup, SyncRequest, SyncResponse, SyncStore};
 /// Errors from the event log.
 #[derive(Debug)]
 pub enum LogError {
+    /// Explicit admission-policy rejection of an incoming event.
+    AdmissionRejected(String),
     /// `event.id` does not equal the hash of its content (tampered or corrupt).
     CorruptId,
     /// The author's Ed25519 signature over the event id did not verify.
@@ -46,9 +48,26 @@ pub enum LogError {
     CorruptFile(String),
 }
 
+impl LogError {
+    /// Incoming validation/policy failures may be reported without aborting a batch.
+    /// Local storage and resource errors must terminate reconciliation.
+    pub(crate) fn is_peer_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::AdmissionRejected(_)
+                | Self::NonCanonical
+                | Self::CorruptId
+                | Self::BadSignature
+                | Self::MissingParents(_)
+                | Self::AuthorEquivocation { .. }
+        )
+    }
+}
+
 impl std::fmt::Display for LogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            LogError::AdmissionRejected(reason) => write!(f, "event admission rejected: {reason}"),
             LogError::CorruptId => write!(f, "event id does not match its content"),
             LogError::BadSignature => write!(f, "event signature did not verify"),
             LogError::NonCanonical => write!(f, "event parents are not in canonical form"),

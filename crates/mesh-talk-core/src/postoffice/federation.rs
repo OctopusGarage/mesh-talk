@@ -61,42 +61,45 @@ impl FederationStore {
 }
 
 impl SyncStore for FederationStore {
-    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
             .requires_channel_v2(conversation)
     }
 
-    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
             .requires_channel_v3(conversation)
     }
 
-    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
             .requires_channel_v4(conversation)
     }
 
-    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
+    fn fingerprint_and_len(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<([u8; 32], usize), LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
             .fingerprint_and_len(conversation)
     }
 
-    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
             .durable_have(conversation, id)
     }
 
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
@@ -107,7 +110,7 @@ impl SyncStore for FederationStore {
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
@@ -120,7 +123,7 @@ impl SyncStore for FederationStore {
         have: &HashSet<EventId>,
         event_budget: usize,
         max_frames: usize,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
@@ -130,10 +133,9 @@ impl SyncStore for FederationStore {
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         let mut office = self.store.lock().expect("post office lock not poisoned");
         if office.opaque_only && !crate::postoffice::opaque::envelope_shape(&event) {
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "post office requires an opaque envelope",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "post office requires an opaque envelope".into(),
+            ));
         }
         let origin = self.arrivals.get(&event.conversation_id).copied();
         let now = SystemTime::now();
@@ -814,8 +816,9 @@ mod tests {
         let session = FederationStore::new(&store, vec![]);
         let have = HashSet::from([expected.remove(0)]);
         for max_frames in [0, 1, 2, 4] {
-            let page =
-                session.events_excluding_bounded(&conversation, &have, MAX_PLAINTEXT, max_frames);
+            let page = session
+                .events_excluding_bounded(&conversation, &have, MAX_PLAINTEXT, max_frames)
+                .unwrap();
             assert_eq!(
                 page.iter().map(|event| event.id).collect::<Vec<_>>(),
                 expected[..max_frames]

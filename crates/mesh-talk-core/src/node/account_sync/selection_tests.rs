@@ -970,6 +970,7 @@ async fn account_sync_legacy_sibling_raw_file_export_respects_attachment_categor
             .lock()
             .unwrap()
             .events_excluding(&event.conversation_id, &HashSet::new())
+            .unwrap()
     };
     assert!(
         visible().is_empty(),

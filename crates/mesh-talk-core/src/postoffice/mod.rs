@@ -239,10 +239,9 @@ impl PostOffice {
             seen <= unix_seconds(now).saturating_sub(MAX_RELAY_AGE.as_secs())
                 || seen > unix_seconds(now).saturating_add(300)
         }) {
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "federated mailbox arrival is expired or invalid",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "federated mailbox arrival is expired or invalid".into(),
+            ));
         }
         if self
             .next_expiry_secs
@@ -543,32 +542,40 @@ impl PostOffice {
 impl SyncStore for PostOffice {
     // Metadata probes must use the durable log's indexes/cache. Trait defaults
     // export every ciphertext body just to discover supported event kinds.
-    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
-        self.log.requires_channel_v2(conversation)
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self.log.requires_channel_v2(conversation))
     }
-    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
-        self.log.requires_channel_v3(conversation)
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self.log.requires_channel_v3(conversation))
     }
-    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
-        self.log.requires_channel_v4(conversation)
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self.log.requires_channel_v4(conversation))
     }
-    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
-        self.log.fingerprint_and_len(conversation)
+    fn fingerprint_and_len(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<([u8; 32], usize), LogError> {
+        Ok(self.log.fingerprint_and_len(conversation))
     }
-    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
-        self.log
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
+        if !self
+            .log
             .get(id)
-            .is_some_and(|e| e.conversation_id == *conversation)
-            && self.log.sync().is_ok()
+            .is_some_and(|event| event.conversation_id == *conversation)
+        {
+            return Ok(false);
+        }
+        self.log.sync()?;
+        Ok(true)
     }
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
         SyncStore::event_ids(&self.log, conversation)
     }
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         SyncStore::events_excluding(&self.log, conversation, have)
     }
     fn events_excluding_bounded(
@@ -577,16 +584,15 @@ impl SyncStore for PostOffice {
         have: &HashSet<EventId>,
         event_budget: usize,
         max_frames: usize,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         self.log
             .events_excluding_bounded(conversation, have, event_budget, max_frames)
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         if self.opaque_only && !opaque::envelope_shape(&event) {
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "post office requires an opaque envelope",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "post office requires an opaque envelope".into(),
+            ));
         }
         // Route through `record` so the relay-receive path is also retention-bounded.
         self.record(event)
@@ -643,12 +649,14 @@ mod tests {
         }
         let have = HashSet::from([expected.remove(0)]);
         for max_frames in [0, 1, 2, 4] {
-            let page = office.events_excluding_bounded(
-                &conv(),
-                &have,
-                crate::transport::MAX_PLAINTEXT,
-                max_frames,
-            );
+            let page = office
+                .events_excluding_bounded(
+                    &conv(),
+                    &have,
+                    crate::transport::MAX_PLAINTEXT,
+                    max_frames,
+                )
+                .unwrap();
             assert_eq!(
                 page.iter().map(|event| event.id).collect::<Vec<_>>(),
                 expected[..max_frames]
@@ -676,7 +684,7 @@ mod tests {
             bytes[..8].copy_from_slice(&index.to_le_bytes());
             let conversation = ConversationId::new(bytes);
             assert_eq!(
-                SyncStore::fingerprint_and_len(&office, &conversation),
+                SyncStore::fingerprint_and_len(&office, &conversation).unwrap(),
                 (empty, 0)
             );
             assert_eq!(
@@ -712,10 +720,13 @@ mod tests {
         .unwrap();
         assert_eq!(office.log.sync_metadata_observations(&conv()), (None, 0));
         for _ in 0..8 {
-            assert!(!SyncStore::requires_channel_v2(&office, &conv()));
-            assert!(!SyncStore::requires_channel_v3(&office, &conv()));
-            assert!(!SyncStore::requires_channel_v4(&office, &conv()));
-            assert_eq!(SyncStore::fingerprint_and_len(&office, &conv()), expected);
+            assert!(!SyncStore::requires_channel_v2(&office, &conv()).unwrap());
+            assert!(!SyncStore::requires_channel_v3(&office, &conv()).unwrap());
+            assert!(!SyncStore::requires_channel_v4(&office, &conv()).unwrap());
+            assert_eq!(
+                SyncStore::fingerprint_and_len(&office, &conv()).unwrap(),
+                expected
+            );
         }
         assert_eq!(
             office.log.sync_metadata_observations(&conv()),
@@ -733,7 +744,7 @@ mod tests {
         let author = DeviceIdentity::generate();
         let start = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let mut office = PostOffice::open_at(&path, "pw", identity, start).unwrap();
-        let empty = SyncStore::fingerprint_and_len(&office, &conv());
+        let empty = SyncStore::fingerprint_and_len(&office, &conv()).unwrap();
         assert_eq!(empty.1, 0);
         for (index, kind) in [
             EventKind::ChannelReplica,
@@ -755,11 +766,20 @@ mod tests {
             );
             office.record_at(event.clone(), start).unwrap();
             assert!(office.log.sync_metadata_observations(&conv()).0.is_none());
-            assert!(SyncStore::requires_channel_v2(&office, &conv()));
-            assert_eq!(SyncStore::requires_channel_v3(&office, &conv()), index >= 1);
-            assert_eq!(SyncStore::requires_channel_v4(&office, &conv()), index >= 2);
+            assert!(SyncStore::requires_channel_v2(&office, &conv()).unwrap());
+            assert_eq!(
+                SyncStore::requires_channel_v3(&office, &conv()).unwrap(),
+                index >= 1
+            );
+            assert_eq!(
+                SyncStore::requires_channel_v4(&office, &conv()).unwrap(),
+                index >= 2
+            );
             let expected = office.log.fingerprint_and_len(&conv());
-            assert_eq!(SyncStore::fingerprint_and_len(&office, &conv()), expected);
+            assert_eq!(
+                SyncStore::fingerprint_and_len(&office, &conv()).unwrap(),
+                expected
+            );
             assert_eq!(expected.1, index + 1);
             assert_ne!(expected.0, empty.0);
             assert_eq!(
@@ -771,21 +791,27 @@ mod tests {
                 Some(expected)
             );
         }
-        let retained = SyncStore::fingerprint_and_len(&office, &conv());
+        let retained = SyncStore::fingerprint_and_len(&office, &conv()).unwrap();
         drop(office);
         let mut reopened =
             PostOffice::open_at(&path, "pw", DeviceIdentity::from_secret_bytes(ed, x), start)
                 .unwrap();
-        assert!(SyncStore::requires_channel_v2(&reopened, &conv()));
-        assert!(SyncStore::requires_channel_v3(&reopened, &conv()));
-        assert!(SyncStore::requires_channel_v4(&reopened, &conv()));
-        assert_eq!(SyncStore::fingerprint_and_len(&reopened, &conv()), retained);
+        assert!(SyncStore::requires_channel_v2(&reopened, &conv()).unwrap());
+        assert!(SyncStore::requires_channel_v3(&reopened, &conv()).unwrap());
+        assert!(SyncStore::requires_channel_v4(&reopened, &conv()).unwrap());
+        assert_eq!(
+            SyncStore::fingerprint_and_len(&reopened, &conv()).unwrap(),
+            retained
+        );
         reopened.prune_expired_at(start + MAX_RELAY_AGE).unwrap();
         assert!(reopened.log.sync_metadata_observations(&conv()).0.is_none());
-        assert_eq!(SyncStore::fingerprint_and_len(&reopened, &conv()), empty);
-        assert!(!SyncStore::requires_channel_v2(&reopened, &conv()));
-        assert!(!SyncStore::requires_channel_v3(&reopened, &conv()));
-        assert!(!SyncStore::requires_channel_v4(&reopened, &conv()));
+        assert_eq!(
+            SyncStore::fingerprint_and_len(&reopened, &conv()).unwrap(),
+            empty
+        );
+        assert!(!SyncStore::requires_channel_v2(&reopened, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v3(&reopened, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v4(&reopened, &conv()).unwrap());
         drop(reopened);
         let expired = PostOffice::open_at(
             &path,
@@ -794,10 +820,13 @@ mod tests {
             start + MAX_RELAY_AGE,
         )
         .unwrap();
-        assert_eq!(SyncStore::fingerprint_and_len(&expired, &conv()), empty);
-        assert!(!SyncStore::requires_channel_v2(&expired, &conv()));
-        assert!(!SyncStore::requires_channel_v3(&expired, &conv()));
-        assert!(!SyncStore::requires_channel_v4(&expired, &conv()));
+        assert_eq!(
+            SyncStore::fingerprint_and_len(&expired, &conv()).unwrap(),
+            empty
+        );
+        assert!(!SyncStore::requires_channel_v2(&expired, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v3(&expired, &conv()).unwrap());
+        assert!(!SyncStore::requires_channel_v4(&expired, &conv()).unwrap());
     }
 
     #[test]
@@ -1276,7 +1305,7 @@ mod tests {
         let mut po =
             PostOffice::open(&dir.path().join("po.log"), "pw", DeviceIdentity::generate()).unwrap();
         // The post office is just another SyncStore.
-        reconcile(&mut alice_log, &mut po, conv());
+        reconcile(&mut alice_log, &mut po, conv()).unwrap();
         assert!(po.has(&ev.id));
     }
 
@@ -1326,12 +1355,12 @@ mod tests {
         let mut alice_log = EventLog::default();
         alice_log.append(dm_event.clone()).unwrap();
         let mut po = PostOffice::open(&dir.path().join("po.log"), "pw", po_identity).unwrap();
-        reconcile(&mut alice_log, &mut po, conv());
+        reconcile(&mut alice_log, &mut po, conv()).unwrap();
         assert!(po.has(&dm_event.id));
 
         // Bob comes online and syncs from the post office (Alice may now be offline).
         let mut bob_log = EventLog::default();
-        reconcile(&mut bob_log, &mut po, conv());
+        reconcile(&mut bob_log, &mut po, conv()).unwrap();
         let received = bob_log.get(&dm_event.id).expect("bob received the event");
 
         // Bob opens it; the post office's own identity cannot. (That `open`
@@ -1382,7 +1411,7 @@ mod tests {
         assert!(po1.has(&x.id) && !po1.has(&y.id));
         assert!(po2.has(&y.id) && !po2.has(&x.id));
 
-        reconcile(&mut po1, &mut po2, conv());
+        reconcile(&mut po1, &mut po2, conv()).unwrap();
         assert_eq!(po1.held_ids(&conv()), po2.held_ids(&conv()));
         assert!(po1.has(&x.id) && po1.has(&y.id));
         assert!(po2.has(&x.id) && po2.has(&y.id));

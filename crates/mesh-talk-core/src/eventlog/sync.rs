@@ -110,8 +110,8 @@ pub struct ApplyReport {
     /// Events already present (content-addressed duplicates).
     pub duplicates: usize,
     /// Events rejected by validation, with a human-readable reason. (id, message)
-    /// Phase-0 keeps the reason as a `String` (diagnostics only); a structured
-    /// `LogError` would be needed before sync branches on the failure kind.
+    /// Typed validation/admission errors are classified before formatting these
+    /// bounded diagnostics. Local store failures abort sync instead.
     pub rejected: Vec<(EventId, String)>,
 }
 
@@ -120,54 +120,72 @@ pub struct ApplyReport {
 pub trait SyncStore {
     /// True if the visible log can contain event kinds introduced with channel v2.
     /// Custom stores take the safe scanning path unless they provide an index.
-    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
-        self.events_excluding(conversation, &HashSet::new())
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self
+            .events_excluding(conversation, &HashSet::new())?
             .iter()
-            .any(|event| event.kind == EventKind::ChannelReplica)
+            .any(|event| event.kind == EventKind::ChannelReplica))
     }
     /// True when visible history controls require kinds 15/16 support.
-    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
-        self.events_excluding(conversation, &HashSet::new())
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self
+            .events_excluding(conversation, &HashSet::new())?
             .iter()
             .any(|event| {
                 matches!(
                     event.kind,
                     EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory
                 )
-            })
+            }))
     }
     /// Account grants and certified-device inheritance require kinds 17/18.
-    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
-        self.events_excluding(conversation, &HashSet::new())
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self
+            .events_excluding(conversation, &HashSet::new())?
             .iter()
             .any(|event| {
                 matches!(
                     event.kind,
                     EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
                 )
-            })
+            }))
     }
     /// Digest and size of the currently visible event set. Implementations with
     /// unfiltered durable logs may cache this across idle recovery ticks.
-    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
-        let ids = self.event_ids(conversation);
+    fn fingerprint_and_len(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<([u8; 32], usize), LogError> {
+        let ids = self.event_ids(conversation)?;
         let len = ids.len();
-        (fingerprint(ids), len)
+        Ok((fingerprint(ids), len))
     }
     /// The authenticated peer may transfer chunks of this exact offered file.
     /// Stores without an attachment policy fail closed for this optional query.
-    fn file_consent(&self, _file: &ConversationId, _manifest: &EventId) -> FileConsentStatus {
-        FileConsentStatus::Pending
+    fn file_consent(
+        &self,
+        _file: &ConversationId,
+        _manifest: &EventId,
+    ) -> Result<FileConsentStatus, LogError> {
+        Ok(FileConsentStatus::Pending)
     }
     /// Optional ordered consent for modern endpoints. The signed answer shares
     /// the mailbox revision space; legacy stores can retain their existing query.
-    fn signed_file_consent(&self, _file: &ConversationId, _manifest: &EventId) -> Option<Event> {
-        None
+    fn signed_file_consent(
+        &self,
+        _file: &ConversationId,
+        _manifest: &EventId,
+    ) -> Result<Option<Event>, LogError> {
+        Ok(None)
     }
     /// Optional custody qualification. Memory/legacy stores cannot promise
     /// durability; durable hosts synchronize and check current visibility.
-    fn durable_have(&self, _conversation: &ConversationId, _id: &EventId) -> bool {
-        false
+    fn durable_have(
+        &self,
+        _conversation: &ConversationId,
+        _id: &EventId,
+    ) -> Result<bool, LogError> {
+        Ok(false)
     }
     /// A host admission denial stops the wire session before further disclosure.
     /// Ordinary stores preserve the protocol's existing validation behavior.
@@ -175,7 +193,7 @@ pub trait SyncStore {
         false
     }
     /// All event ids this store holds for the conversation.
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId>;
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError>;
     /// The conversation's events whose id is NOT in `have`, cloned, in
     /// **topological order**: every event's parents must precede it in the
     /// returned slice or already be in `have`, so a requester can ingest them
@@ -185,7 +203,7 @@ pub trait SyncStore {
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event>;
+    ) -> Result<Vec<Event>, LogError>;
     /// Export only the causal prefix needed for at most `max_frames` greedy
     /// frames, each with `event_budget` bytes. The first event of each frame
     /// is retained even when oversized, matching ordinary sync's progress rule.
@@ -197,12 +215,12 @@ pub trait SyncStore {
         have: &HashSet<EventId>,
         event_budget: usize,
         max_frames: usize,
-    ) -> Vec<Event> {
-        cap_event_frames(
-            self.events_excluding(conversation, have),
+    ) -> Result<Vec<Event>, LogError> {
+        Ok(cap_event_frames(
+            self.events_excluding(conversation, have)?,
             event_budget,
             max_frames,
-        )
+        ))
     }
     /// Validate and store a received event (the store's normal append gate).
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError>;
@@ -218,30 +236,30 @@ pub enum FileConsentStatus {
 // NOTE: this impl is structurally identical to `impl SyncStore for
 // PersistentEventLog` in persist.rs — keep the two in sync.
 impl SyncStore for EventLog {
-    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
-        EventLog::requires_channel_v3(self, conversation)
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(EventLog::requires_channel_v3(self, conversation))
     }
-    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
-        EventLog::requires_channel_v4(self, conversation)
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(EventLog::requires_channel_v4(self, conversation))
     }
-    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
-        EventLog::requires_channel_v2(self, conversation)
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(EventLog::requires_channel_v2(self, conversation))
     }
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
-        self.events(conversation).iter().map(|e| e.id).collect()
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
+        Ok(self.events(conversation).iter().map(|e| e.id).collect())
     }
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         #[cfg(test)]
         UNBOUNDED_EXPORTS.with(|count| count.set(count.get() + 1));
-        causal_events(self.events(conversation))
+        Ok(causal_events(self.events(conversation))
             .into_iter()
             .filter(|e| !have.contains(&e.id))
             .cloned()
-            .collect()
+            .collect())
     }
     fn events_excluding_bounded(
         &self,
@@ -249,14 +267,14 @@ impl SyncStore for EventLog {
         have: &HashSet<EventId>,
         event_budget: usize,
         max_frames: usize,
-    ) -> Vec<Event> {
-        bounded_events(
+    ) -> Result<Vec<Event>, LogError> {
+        Ok(bounded_events(
             causal_events(self.events(conversation))
                 .into_iter()
                 .filter(|event| !have.contains(&event.id)),
             event_budget,
             max_frames,
-        )
+        ))
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         self.append(event)
@@ -338,11 +356,14 @@ pub(crate) fn bounded_events<'a>(
 }
 
 /// Build the opening request: the ids this store holds for `conversation`.
-pub fn build_request(store: &impl SyncStore, conversation: ConversationId) -> SyncRequest {
-    SyncRequest {
+pub fn build_request(
+    store: &impl SyncStore,
+    conversation: ConversationId,
+) -> Result<SyncRequest, LogError> {
+    Ok(SyncRequest {
         conversation,
-        have: store.event_ids(&conversation),
-    }
+        have: store.event_ids(&conversation)?,
+    })
 }
 
 /// Answer a request, bounding the returned events so the encoded `SyncResponse`
@@ -353,24 +374,27 @@ pub fn handle_request_bounded(
     store: &impl SyncStore,
     request: &SyncRequest,
     frame_budget: usize,
-) -> SyncResponse {
+) -> Result<SyncResponse, LogError> {
     let requester_have: HashSet<EventId> = request.have.iter().copied().collect();
-    let responder_have = store.event_ids(&request.conversation);
+    let responder_have = store.event_ids(&request.conversation)?;
     // The responder's `have` is streamed in its own frames (node::session), so it no
     // longer competes with events for this frame's budget — events get the whole frame.
     let event_budget = frame_budget.saturating_sub(SYNC_MARGIN);
     let events =
-        store.events_excluding_bounded(&request.conversation, &requester_have, event_budget, 1);
-    SyncResponse {
+        store.events_excluding_bounded(&request.conversation, &requester_have, event_budget, 1)?;
+    Ok(SyncResponse {
         conversation: request.conversation,
         events,
         have: responder_have,
-    }
+    })
 }
 
 /// Unbounded answer (in-process / single-round callers). Equivalent to
 /// [`handle_request_bounded`] with no frame limit.
-pub fn handle_request(store: &impl SyncStore, request: &SyncRequest) -> SyncResponse {
+pub fn handle_request(
+    store: &impl SyncStore,
+    request: &SyncRequest,
+) -> Result<SyncResponse, LogError> {
     handle_request_bounded(store, request, usize::MAX)
 }
 
@@ -383,20 +407,24 @@ pub(crate) const MAX_REJECTED_DETAIL: usize = 64;
 /// tallying outcomes. An invalid event is rejected and recorded, not fatal —
 /// the rest of the batch still applies. The recorded detail is capped
 /// ([`MAX_REJECTED_DETAIL`]) so a malicious batch can't inflate the report's memory.
-fn ingest_all(store: &mut impl SyncStore, events: &[Event]) -> ApplyReport {
+/// Local failures abort immediately; already committed events remain stored.
+fn ingest_all(store: &mut impl SyncStore, events: &[Event]) -> Result<ApplyReport, LogError> {
     let mut report = ApplyReport::default();
     for event in events {
         match store.ingest(event.clone()) {
             Ok(AppendOutcome::Appended) => report.applied += 1,
             Ok(AppendOutcome::Duplicate) => report.duplicates += 1,
             Err(e) => {
+                if !e.is_peer_rejection() {
+                    return Err(e);
+                }
                 if report.rejected.len() < MAX_REJECTED_DETAIL {
                     report.rejected.push((event.id, e.to_string()));
                 }
             }
         }
     }
-    report
+    Ok(report)
 }
 
 /// Apply a responder's reply and build a (bounded) follow-up of events the
@@ -405,15 +433,15 @@ pub fn handle_response_bounded(
     store: &mut impl SyncStore,
     response: &SyncResponse,
     frame_budget: usize,
-) -> (ApplyReport, SyncFollowup) {
-    let (report, mut frames) = handle_response_bounded_burst(store, response, frame_budget, 1);
-    (
+) -> Result<(ApplyReport, SyncFollowup), LogError> {
+    let (report, mut frames) = handle_response_bounded_burst(store, response, frame_budget, 1)?;
+    Ok((
         report,
         frames.pop().unwrap_or(SyncFollowup {
             conversation: response.conversation,
             events: Vec::new(),
         }),
-    )
+    ))
 }
 
 /// Pack several ordinary Followup frames from one reconciliation. A file transfer
@@ -424,12 +452,12 @@ pub fn handle_response_bounded_burst(
     response: &SyncResponse,
     frame_budget: usize,
     max_frames: usize,
-) -> (ApplyReport, Vec<SyncFollowup>) {
-    let report = ingest_all(store, &response.events);
+) -> Result<(ApplyReport, Vec<SyncFollowup>), LogError> {
+    let report = ingest_all(store, &response.events)?;
     let remote_have: HashSet<EventId> = response.have.iter().copied().collect();
     let budget = frame_budget.saturating_sub(SYNC_MARGIN);
     let all_missing =
-        store.events_excluding_bounded(&response.conversation, &remote_have, budget, max_frames);
+        store.events_excluding_bounded(&response.conversation, &remote_have, budget, max_frames)?;
     let mut frames = Vec::new();
     let mut events = Vec::new();
     let mut used = 0usize;
@@ -454,7 +482,7 @@ pub fn handle_response_bounded_burst(
             events,
         });
     }
-    (report, frames)
+    Ok((report, frames))
 }
 
 /// Apply a responder's reply: ingest the events it sent, then compute the
@@ -462,12 +490,15 @@ pub fn handle_response_bounded_burst(
 pub fn handle_response(
     store: &mut impl SyncStore,
     response: &SyncResponse,
-) -> (ApplyReport, SyncFollowup) {
+) -> Result<(ApplyReport, SyncFollowup), LogError> {
     handle_response_bounded(store, response, usize::MAX)
 }
 
 /// Apply the requester's follow-up: ingest the events it sent.
-pub fn handle_followup(store: &mut impl SyncStore, followup: &SyncFollowup) -> ApplyReport {
+pub fn handle_followup(
+    store: &mut impl SyncStore,
+    followup: &SyncFollowup,
+) -> Result<ApplyReport, LogError> {
     ingest_all(store, &followup.events)
 }
 
@@ -476,6 +507,7 @@ pub fn handle_followup(store: &mut impl SyncStore, followup: &SyncFollowup) -> A
 /// **valid** events each can accept: events that fail [`SyncStore::ingest`] (bad
 /// signature, missing parent, equivocation) are skipped on both sides and listed
 /// in the returned [`ApplyReport`]s. Returns `(report_a, report_b)`.
+/// A local read/write failure returns `Err` and preserves any committed prefix.
 ///
 /// This is the reference in-process driver (over a network the three messages
 /// travel across a channel). It is PAIRWISE: transitive propagation across three
@@ -484,12 +516,12 @@ pub fn reconcile<A: SyncStore, B: SyncStore>(
     a: &mut A,
     b: &mut B,
     conversation: ConversationId,
-) -> (ApplyReport, ApplyReport) {
-    let request = build_request(a, conversation);
-    let response = handle_request(b, &request);
-    let (report_a, followup) = handle_response(a, &response);
-    let report_b = handle_followup(b, &followup);
-    (report_a, report_b)
+) -> Result<(ApplyReport, ApplyReport), LogError> {
+    let request = build_request(a, conversation)?;
+    let response = handle_request(b, &request)?;
+    let (report_a, followup) = handle_response(a, &response)?;
+    let report_b = handle_followup(b, &followup)?;
+    Ok((report_a, report_b))
 }
 
 #[cfg(test)]
@@ -500,6 +532,220 @@ mod tests {
 
     fn conv() -> ConversationId {
         ConversationId::new([1u8; 32])
+    }
+
+    #[derive(Clone, Copy)]
+    enum Fault {
+        Ids,
+        Export,
+        Metadata,
+        Durable,
+        Ingest(usize),
+    }
+
+    struct FailingStore {
+        log: EventLog,
+        fault: Fault,
+        ingested: usize,
+    }
+    impl FailingStore {
+        fn new(fault: Fault) -> Self {
+            Self {
+                log: EventLog::default(),
+                fault,
+                ingested: 0,
+            }
+        }
+        fn failure() -> LogError {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected local disk failure",
+            )
+            .into()
+        }
+    }
+    impl SyncStore for FailingStore {
+        fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
+            if matches!(self.fault, Fault::Ids) {
+                return Err(Self::failure());
+            }
+            SyncStore::event_ids(&self.log, conversation)
+        }
+        fn events_excluding(
+            &self,
+            conversation: &ConversationId,
+            have: &HashSet<EventId>,
+        ) -> Result<Vec<Event>, LogError> {
+            if matches!(self.fault, Fault::Export) {
+                return Err(Self::failure());
+            }
+            SyncStore::events_excluding(&self.log, conversation, have)
+        }
+        fn fingerprint_and_len(
+            &self,
+            conversation: &ConversationId,
+        ) -> Result<([u8; 32], usize), LogError> {
+            if matches!(self.fault, Fault::Metadata) {
+                return Err(Self::failure());
+            }
+            let ids = self.event_ids(conversation)?;
+            let len = ids.len();
+            Ok((fingerprint(ids), len))
+        }
+        fn durable_have(
+            &self,
+            _conversation: &ConversationId,
+            _id: &EventId,
+        ) -> Result<bool, LogError> {
+            if matches!(self.fault, Fault::Durable) {
+                return Err(Self::failure());
+            }
+            Ok(false)
+        }
+        fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+            if matches!(self.fault, Fault::Ingest(n) if n == self.ingested) {
+                return Err(Self::failure());
+            }
+            self.ingested += 1;
+            self.log.append(event)
+        }
+    }
+
+    #[test]
+    fn local_ingest_failure_is_not_peer_rejection() {
+        let identity = DeviceIdentity::generate();
+        let event = ev(&identity, 0, vec![], 1, b"hello");
+        let result = handle_followup(
+            &mut FailingStore::new(Fault::Ingest(0)),
+            &SyncFollowup {
+                conversation: conv(),
+                events: vec![event],
+            },
+        );
+        assert!(
+            matches!(result, Err(LogError::Io(_))),
+            "local disk failure must abort sync, not reject a peer event"
+        );
+    }
+
+    #[test]
+    fn failed_reads_never_produce_successful_empty_sync() {
+        let request = SyncRequest {
+            conversation: conv(),
+            have: vec![],
+        };
+        assert!(matches!(
+            build_request(&FailingStore::new(Fault::Ids), conv()),
+            Err(LogError::Io(_))
+        ));
+        assert!(matches!(
+            handle_request(&FailingStore::new(Fault::Ids), &request),
+            Err(LogError::Io(_))
+        ));
+        assert!(matches!(
+            handle_request(&FailingStore::new(Fault::Export), &request),
+            Err(LogError::Io(_))
+        ));
+        assert!(matches!(
+            FailingStore::new(Fault::Export).requires_channel_v4(&conv()),
+            Err(LogError::Io(_))
+        ));
+        assert!(matches!(
+            FailingStore::new(Fault::Metadata).fingerprint_and_len(&conv()),
+            Err(LogError::Io(_))
+        ));
+        assert!(matches!(
+            FailingStore::new(Fault::Durable).durable_have(&conv(), &EventId::new([0; 32])),
+            Err(LogError::Io(_))
+        ));
+        let response = SyncResponse {
+            conversation: conv(),
+            events: vec![],
+            have: vec![],
+        };
+        assert!(matches!(
+            handle_response(&mut FailingStore::new(Fault::Export), &response),
+            Err(LogError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn midbatch_local_failure_preserves_durable_prefix_after_reopen() {
+        use crate::eventlog::PersistentEventLog;
+        struct FailSecondAppend {
+            log: PersistentEventLog,
+            ingested: usize,
+            failure_path: std::path::PathBuf,
+        }
+        impl SyncStore for FailSecondAppend {
+            fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
+                SyncStore::event_ids(&self.log, conversation)
+            }
+            fn events_excluding(
+                &self,
+                conversation: &ConversationId,
+                have: &HashSet<EventId>,
+            ) -> Result<Vec<Event>, LogError> {
+                SyncStore::events_excluding(&self.log, conversation, have)
+            }
+            fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
+                if self.ingested == 1 {
+                    return Err(std::fs::File::open(&self.failure_path).unwrap_err().into());
+                }
+                self.ingested += 1;
+                self.log.append_durable(event)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prefix.log");
+        let identity = DeviceIdentity::generate();
+        let first = ev(&identity, 0, vec![], 1, b"first");
+        let second = ev(&identity, 1, vec![first.id], 2, b"second");
+        let mut store = FailSecondAppend {
+            log: PersistentEventLog::open(&path, "pw").unwrap(),
+            ingested: 0,
+            failure_path: directory.path().join("missing-local-file"),
+        };
+        let result = handle_followup(
+            &mut store,
+            &SyncFollowup {
+                conversation: conv(),
+                events: vec![first.clone(), second.clone()],
+            },
+        );
+        assert!(matches!(result, Err(LogError::Io(_))));
+        drop(store);
+        let reopened = PersistentEventLog::open(&path, "pw").unwrap();
+        assert!(reopened.has(&first.id));
+        assert!(!reopened.has(&second.id));
+    }
+
+    #[test]
+    fn validation_rejections_continue_while_every_local_error_aborts() {
+        let identity = DeviceIdentity::generate();
+        let event = ev(&identity, 0, vec![], 1, b"valid");
+        let mut invalid = event.clone();
+        invalid.sig[0] ^= 1;
+        let report = handle_followup(
+            &mut EventLog::default(),
+            &SyncFollowup {
+                conversation: conv(),
+                events: vec![invalid, event],
+            },
+        )
+        .unwrap();
+        assert_eq!(report.applied, 1);
+        assert_eq!(report.rejected.len(), 1);
+        for error in [
+            LogError::ClockExhausted,
+            LogError::SequenceExhausted,
+            LogError::Serialization("failed".into()),
+            LogError::CorruptFile("failed".into()),
+            FailingStore::failure(),
+        ] {
+            assert!(!error.is_peer_rejection(), "{error}");
+        }
+        assert!(LogError::AdmissionRejected("denied".into()).is_peer_rejection());
     }
 
     #[test]
@@ -575,7 +821,7 @@ mod tests {
         b.append(root.clone()).unwrap();
         b.append(b_ev.clone()).unwrap();
 
-        let (report_a, report_b) = reconcile(&mut a, &mut b, conv());
+        let (report_a, report_b) = reconcile(&mut a, &mut b, conv()).unwrap();
         assert_eq!(report_a.applied, 1); // a receives b_ev
         assert_eq!(report_b.applied, 1); // b receives a_ev
         assert!(report_a.rejected.is_empty() && report_b.rejected.is_empty());
@@ -601,7 +847,7 @@ mod tests {
         let mut partial = EventLog::default();
         partial.append(root.clone()).unwrap();
 
-        let (report_partial, report_full) = reconcile(&mut partial, &mut full, conv());
+        let (report_partial, report_full) = reconcile(&mut partial, &mut full, conv()).unwrap();
         assert_eq!(report_partial.applied, 2); // partial receives a_ev + b_ev
         assert_eq!(report_full.applied, 0); // full already had everything
         assert_converged(&partial, &full);
@@ -618,7 +864,7 @@ mod tests {
         let mut b = EventLog::default();
         b.append(root.clone()).unwrap();
 
-        let (report_a, report_b) = reconcile(&mut a, &mut b, conv());
+        let (report_a, report_b) = reconcile(&mut a, &mut b, conv()).unwrap();
         assert_eq!(report_a.applied, 0);
         assert_eq!(report_b.applied, 0);
         assert_converged(&a, &b);
@@ -638,9 +884,9 @@ mod tests {
         b.append(root.clone()).unwrap();
         b.append(b_ev.clone()).unwrap();
 
-        reconcile(&mut a, &mut b, conv());
+        reconcile(&mut a, &mut b, conv()).unwrap();
         // A second pass applies nothing new.
-        let (report_a, report_b) = reconcile(&mut a, &mut b, conv());
+        let (report_a, report_b) = reconcile(&mut a, &mut b, conv()).unwrap();
         assert_eq!(report_a.applied, 0);
         assert_eq!(report_b.applied, 0);
         assert_converged(&a, &b);
@@ -675,12 +921,12 @@ mod tests {
         b.append(b1.clone()).unwrap();
 
         // First reconcile so both have {root, a1, b1}, then Alice can author the merge.
-        reconcile(&mut a, &mut b, conv());
+        reconcile(&mut a, &mut b, conv()).unwrap();
         assert_converged(&a, &b);
         a.append(merge.clone()).unwrap();
 
         // Sync again; B catches the merge.
-        reconcile(&mut b, &mut a, conv());
+        reconcile(&mut b, &mut a, conv()).unwrap();
         assert_converged(&a, &b);
         assert!(b.has(&merge.id));
     }
@@ -694,13 +940,13 @@ mod tests {
         log.append(a.clone()).unwrap();
         log.append(b.clone()).unwrap();
 
-        let ids = log.event_ids(&conv());
+        let ids = log.event_ids(&conv()).unwrap();
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&a.id) && ids.contains(&b.id));
 
         // Excluding `a` leaves only `b`.
         let have: HashSet<EventId> = std::iter::once(a.id).collect();
-        let missing = log.events_excluding(&conv(), &have);
+        let missing = log.events_excluding(&conv(), &have).unwrap();
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].id, b.id);
     }
@@ -739,7 +985,7 @@ mod tests {
 
         // Exclude the MIDDLE event; the remainder must stay in topo order.
         let have: HashSet<EventId> = std::iter::once(mid.id).collect();
-        let remaining = log.events_excluding(&conv(), &have);
+        let remaining = log.events_excluding(&conv(), &have).unwrap();
         assert_eq!(remaining.len(), 2);
         assert_eq!(remaining[0].id, root.id); // root before tip
         assert_eq!(remaining[1].id, tip.id);
@@ -748,9 +994,9 @@ mod tests {
     #[test]
     fn event_ids_is_empty_for_unknown_conversation() {
         let log = EventLog::default();
-        assert!(log.event_ids(&conv()).is_empty());
+        assert!(log.event_ids(&conv()).unwrap().is_empty());
         let all: HashSet<EventId> = HashSet::new();
-        assert!(log.events_excluding(&conv(), &all).is_empty());
+        assert!(log.events_excluding(&conv(), &all).unwrap().is_empty());
     }
 
     #[test]
@@ -776,7 +1022,7 @@ mod tests {
         log.append(a.clone()).unwrap();
         log.append(b.clone()).unwrap();
 
-        let req = build_request(&log, conv());
+        let req = build_request(&log, conv()).unwrap();
         assert_eq!(req.conversation, conv());
         assert_eq!(req.have.len(), 2);
         assert!(req.have.contains(&a.id) && req.have.contains(&b.id));
@@ -798,7 +1044,7 @@ mod tests {
             conversation: conv(),
             have: vec![root.id],
         };
-        let resp = handle_request(&responder, &req);
+        let resp = handle_request(&responder, &req).unwrap();
 
         // Missing = {a, b}, in topological order (a before b).
         assert_eq!(resp.events.len(), 2);
@@ -819,7 +1065,7 @@ mod tests {
             conversation: conv(),
             have: vec![root.id],
         };
-        let resp = handle_request(&responder, &req);
+        let resp = handle_request(&responder, &req).unwrap();
         assert!(resp.events.is_empty());
     }
 
@@ -840,7 +1086,7 @@ mod tests {
             conversation: conv(),
             have: vec![root.id, a.id],
         };
-        let resp = handle_request(&responder, &req);
+        let resp = handle_request(&responder, &req).unwrap();
         // Responder only has root + b; requester is missing b (and has root already).
         assert_eq!(resp.events.len(), 1);
         assert_eq!(resp.events[0].id, b.id);
@@ -862,7 +1108,7 @@ mod tests {
             conversation: conv(),
             have: vec![root.id, a.id, b.id],
         };
-        let resp = handle_request(&responder, &req);
+        let resp = handle_request(&responder, &req).unwrap();
         assert!(resp.events.is_empty());
         assert_eq!(resp.have, vec![root.id]); // responder advertises only what it holds
     }
@@ -876,7 +1122,7 @@ mod tests {
             conversation: conv(),
             have: vec![root.id],
         };
-        let resp = handle_request(&empty, &req);
+        let resp = handle_request(&empty, &req).unwrap();
         assert!(resp.events.is_empty());
         assert!(resp.have.is_empty());
     }
@@ -901,7 +1147,7 @@ mod tests {
             events: vec![a.clone(), b.clone()],
             have: vec![root.id, a.id, b.id],
         };
-        let (report, followup) = handle_response(&mut requester, &response);
+        let (report, followup) = handle_response(&mut requester, &response).unwrap();
 
         assert_eq!(report.applied, 2);
         assert!(report.rejected.is_empty());
@@ -928,7 +1174,7 @@ mod tests {
             events: vec![a.clone(), forged.clone()],
             have: vec![],
         };
-        let (report, _followup) = handle_response(&mut requester, &response);
+        let (report, _followup) = handle_response(&mut requester, &response).unwrap();
 
         assert_eq!(report.applied, 1); // only `a`
         assert_eq!(report.rejected.len(), 1);
@@ -949,7 +1195,7 @@ mod tests {
             events: vec![root.clone()], // requester already has root
             have: vec![root.id],
         };
-        let (report, _followup) = handle_response(&mut requester, &response);
+        let (report, _followup) = handle_response(&mut requester, &response).unwrap();
         assert_eq!(report.applied, 0);
         assert_eq!(report.duplicates, 1);
     }
@@ -966,7 +1212,7 @@ mod tests {
             conversation: conv(),
             events: vec![c.clone()],
         };
-        let report = handle_followup(&mut responder, &followup);
+        let report = handle_followup(&mut responder, &followup).unwrap();
         assert_eq!(report.applied, 1);
         assert!(responder.has(&c.id));
     }
@@ -991,7 +1237,7 @@ mod tests {
             events: vec![a.clone(), forged.clone(), child.clone()],
             have: vec![],
         };
-        let (report, _followup) = handle_response(&mut store, &response);
+        let (report, _followup) = handle_response(&mut store, &response).unwrap();
 
         assert_eq!(report.applied, 1); // only `a`
         assert_eq!(report.rejected.len(), 2); // forged (bad sig) + child (missing parent)
@@ -1021,7 +1267,7 @@ mod tests {
         let mut returning = EventLog::default();
         returning.append(root.clone()).unwrap();
 
-        let (report, _) = reconcile(&mut returning, &mut online, conv());
+        let (report, _) = reconcile(&mut returning, &mut online, conv()).unwrap();
         assert_eq!(report.applied, 5);
         assert_converged(&returning, &online);
         for e in &chain {
@@ -1079,7 +1325,7 @@ mod tests {
                 }
             }
 
-            reconcile(&mut a, &mut b, conv());
+            reconcile(&mut a, &mut b, conv()).unwrap();
 
             // Both converge to exactly the union of the two partitions.
             let mut got: Vec<EventId> = a.events(&conv()).iter().map(|e| e.id).collect();
@@ -1114,11 +1360,11 @@ mod tests {
             events: vec![x.clone(), y.clone()],
             have: vec![],
         };
-        let (report, _followup) = handle_response(&mut store, &response);
+        let (report, _followup) = handle_response(&mut store, &response).unwrap();
 
         assert_eq!(report.applied, 0);
         assert_eq!(report.rejected.len(), 2);
-        assert_eq!(store.event_ids(&conv()).len(), 1); // still just root
+        assert_eq!(store.event_ids(&conv()).unwrap().len(), 1); // still just root
     }
 
     #[test]
@@ -1150,7 +1396,7 @@ mod tests {
         b.append(root.clone()).unwrap();
 
         // B is the requester (behind); A is the responder (holds the merge).
-        let (report_b, report_a) = reconcile(&mut b, &mut a, conv());
+        let (report_b, report_a) = reconcile(&mut b, &mut a, conv()).unwrap();
         assert_eq!(report_b.applied, 3); // a1, b1, merge
         assert_eq!(report_a.applied, 0);
         assert_converged(&a, &b);
@@ -1175,7 +1421,7 @@ mod tests {
             events: vec![a.clone()],
             have: vec![root.id, a.id],
         };
-        let (report, followup) = handle_response(&mut requester, &response);
+        let (report, followup) = handle_response(&mut requester, &response).unwrap();
         assert_eq!(report.applied, 1); // `a` ingested
         // Even though the requester now holds `a`, the followup must not echo it
         // back (it is in the responder's `have`).
@@ -1215,11 +1461,15 @@ mod tests {
         source.append(child.clone()).unwrap();
         let mut target = EventLog::default();
         for expected in [parent.id, child.id] {
-            let response =
-                handle_request_bounded(&source, &build_request(&target, conv()), SYNC_MARGIN + 1);
+            let response = handle_request_bounded(
+                &source,
+                &build_request(&target, conv()).unwrap(),
+                SYNC_MARGIN + 1,
+            )
+            .unwrap();
             assert_eq!(response.events.len(), 1);
             assert_eq!(response.events[0].id, expected);
-            let (report, _) = handle_response(&mut target, &response);
+            let (report, _) = handle_response(&mut target, &response).unwrap();
             assert_eq!(report.applied, 1);
             assert!(report.rejected.is_empty());
         }
@@ -1229,7 +1479,7 @@ mod tests {
     #[test]
     fn cap_events_returns_prefix_within_budget_but_always_one() {
         let (store, c) = build_store_with_events(5);
-        let all = store.events_excluding(&c, &HashSet::new());
+        let all = store.events_excluding(&c, &HashSet::new()).unwrap();
         assert_eq!(all.len(), 5);
         let one = encoded_event_size(&all[0]);
         // A budget below one event still yields exactly one (progress guarantee).
@@ -1248,14 +1498,14 @@ mod tests {
             conversation: c,
             have: vec![],
         };
-        let one = encoded_event_size(&store.events_excluding(&c, &HashSet::new())[0]);
+        let one = encoded_event_size(&store.events_excluding(&c, &HashSet::new()).unwrap()[0]);
         // A small frame budget returns fewer events than the full set...
-        let resp = handle_request_bounded(&store, &request, one + 8 + 300);
+        let resp = handle_request_bounded(&store, &request, one + 8 + 300).unwrap();
         assert!(resp.events.len() < 5);
         // ...but always the FULL have id-set, so the requester knows to come back.
         assert_eq!(resp.have.len(), 5);
         // Unbounded returns everything.
-        assert_eq!(handle_request(&store, &request).events.len(), 5);
+        assert_eq!(handle_request(&store, &request).unwrap().events.len(), 5);
     }
 
     #[test]
@@ -1264,7 +1514,9 @@ mod tests {
         let ordered = causal_events(store.events(&conversation));
         let budget = encoded_event_size(ordered[0]);
         UNBOUNDED_EXPORTS.with(|count| count.set(0));
-        let page = store.events_excluding_bounded(&conversation, &HashSet::new(), budget, 1);
+        let page = store
+            .events_excluding_bounded(&conversation, &HashSet::new(), budget, 1)
+            .unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].id, ordered[0].id);
         assert_eq!(
@@ -1276,7 +1528,7 @@ mod tests {
             conversation,
             have: vec![],
         };
-        let response = handle_request_bounded(&store, &request, budget + SYNC_MARGIN);
+        let response = handle_request_bounded(&store, &request, budget + SYNC_MARGIN).unwrap();
         assert_eq!(response.events.len(), 1);
         let empty = SyncResponse {
             conversation,
@@ -1284,7 +1536,7 @@ mod tests {
             have: vec![],
         };
         let (_, frames) =
-            handle_response_bounded_burst(&mut store, &empty, budget + SYNC_MARGIN, 3);
+            handle_response_bounded_burst(&mut store, &empty, budget + SYNC_MARGIN, 3).unwrap();
         assert_eq!(frames.len(), 3);
         assert!(frames.iter().all(|frame| frame.events.len() == 1));
         assert_eq!(
@@ -1322,19 +1574,19 @@ mod tests {
         let frame_budget = encoded_event_size(source.events(&conversation)[0]) + SYNC_MARGIN;
         UNBOUNDED_EXPORTS.with(|count| count.set(0));
         for _ in 0..40 {
-            let request = build_request(&source, conversation);
-            let response = handle_request_bounded(&target, &request, frame_budget);
+            let request = build_request(&source, conversation).unwrap();
+            let response = handle_request_bounded(&target, &request, frame_budget).unwrap();
             let (report, frames) =
-                handle_response_bounded_burst(&mut source, &response, frame_budget, 3);
+                handle_response_bounded_burst(&mut source, &response, frame_budget, 3).unwrap();
             assert!(report.rejected.is_empty());
             assert!(frames.len() <= 3);
             for frame in frames {
                 assert_eq!(frame.events.len(), 1);
-                let report = handle_followup(&mut target, &frame);
+                let report = handle_followup(&mut target, &frame).unwrap();
                 assert_eq!(report.applied, 1);
                 assert!(report.rejected.is_empty());
             }
-            if target.event_ids(&conversation).len() == 40 {
+            if target.event_ids(&conversation).unwrap().len() == 40 {
                 break;
             }
         }

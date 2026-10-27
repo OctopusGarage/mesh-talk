@@ -1780,7 +1780,7 @@ mod tests {
 
         // Bob reconciles + processes → learns the channel, records Alice's chain, reads it.
         let mut bob_log = EventLog::default();
-        reconcile(&mut bob_log, &mut alice_log, channel);
+        reconcile(&mut bob_log, &mut alice_log, channel).unwrap();
         let mut bob_book = ChannelBook::new();
         let got = bob_book.process(&bob, channel, &collect(&bob_log, &channel));
         assert_eq!(got.len(), 1);
@@ -1822,14 +1822,14 @@ mod tests {
 
         // Carol reconciles fresh → gets epoch-1 SKD only → reads "welcome carol".
         let mut carol_log = EventLog::default();
-        reconcile(&mut carol_log, &mut alice_log, channel);
+        reconcile(&mut carol_log, &mut alice_log, channel).unwrap();
         let mut carol_book = ChannelBook::new();
         let carol_got = carol_book.process(&carol, channel, &collect(&carol_log, &channel));
         assert!(carol_got.iter().any(|m| m.text == b"welcome carol"));
         assert_eq!(carol_book.state(&channel).unwrap().epoch(), 1);
 
         // Bob reconciles the new events and reads the epoch-1 message.
-        reconcile(&mut bob_log, &mut alice_log, channel);
+        reconcile(&mut bob_log, &mut alice_log, channel).unwrap();
         let bob_got2 = bob_book.process(&bob, channel, &collect(&bob_log, &channel));
         assert!(bob_got2.iter().any(|m| m.text == b"welcome carol"));
         assert_eq!(bob_book.state(&channel).unwrap().epoch(), 1);
@@ -1910,7 +1910,7 @@ mod tests {
 
         // Carol syncs the FULL log (incl. the epoch-0 message) and processes it.
         let mut carol_log = EventLog::default();
-        reconcile(&mut carol_log, &mut alice_log, channel);
+        reconcile(&mut carol_log, &mut alice_log, channel).unwrap();
         let mut carol_book = ChannelBook::new();
         let got = carol_book.process(&carol, channel, &collect(&carol_log, &channel));
         let texts: Vec<&[u8]> = got.iter().map(|m| m.text.as_slice()).collect();
@@ -1966,7 +1966,7 @@ mod tests {
 
         // Bob is up to date and reads the epoch-0 message.
         let mut bob_log = EventLog::default();
-        reconcile(&mut bob_log, &mut alice_log, channel);
+        reconcile(&mut bob_log, &mut alice_log, channel).unwrap();
         let mut bob_book = ChannelBook::new();
         assert!(
             bob_book
@@ -2009,7 +2009,7 @@ mod tests {
 
         // Bob syncs everything and processes — he must NOT be able to read the epoch-1
         // message (the re-key excluded him; he holds no epoch-1 chain).
-        reconcile(&mut bob_log, &mut alice_log, channel);
+        reconcile(&mut bob_log, &mut alice_log, channel).unwrap();
         let got = bob_book.process(&bob, channel, &collect(&bob_log, &channel));
         assert!(
             !got.iter().any(|m| m.text == b"after removal"),
@@ -2258,7 +2258,7 @@ mod tests {
             .encode(),
         );
         let mut bob_log = EventLog::default();
-        reconcile(&mut bob_log, &mut owner_log, channel);
+        reconcile(&mut bob_log, &mut owner_log, channel).unwrap();
         // Alice's unrelated rename raises her next event's Lamport time, but she
         // still has not observed Bob's concurrently signed leave.
         append(
@@ -2282,7 +2282,7 @@ mod tests {
             .encode_invitation(),
         );
         append(&mut bob_log, &bob, channel, EventKind::ChannelLeave, vec![]);
-        reconcile(&mut owner_log, &mut bob_log, channel);
+        reconcile(&mut owner_log, &mut bob_log, channel).unwrap();
 
         let mut book = ChannelBook::new();
         let events = collect(&owner_log, &channel);
@@ -2341,7 +2341,7 @@ mod tests {
             .encode_invitation(),
         );
         let mut bob_log = EventLog::default();
-        reconcile(&mut bob_log, &mut owner_log, channel);
+        reconcile(&mut bob_log, &mut owner_log, channel).unwrap();
         append(
             &mut owner_log,
             &alice,
@@ -2363,7 +2363,7 @@ mod tests {
             .encode_invitation(),
         );
         append(&mut bob_log, &bob, channel, EventKind::ChannelLeave, vec![]);
-        reconcile(&mut owner_log, &mut bob_log, channel);
+        reconcile(&mut owner_log, &mut bob_log, channel).unwrap();
 
         let mut book = ChannelBook::new();
         book.process(&carol, channel, &collect(&owner_log, &channel));
@@ -2400,7 +2400,7 @@ mod tests {
             .encode(),
         );
         let mut bob_log = EventLog::default();
-        reconcile(&mut bob_log, &mut owner_log, channel);
+        reconcile(&mut bob_log, &mut owner_log, channel).unwrap();
         append(
             &mut owner_log,
             &alice,
@@ -2422,7 +2422,7 @@ mod tests {
             .encode(),
         );
         append(&mut bob_log, &bob, channel, EventKind::ChannelLeave, vec![]);
-        reconcile(&mut owner_log, &mut bob_log, channel);
+        reconcile(&mut owner_log, &mut bob_log, channel).unwrap();
 
         let mut book = ChannelBook::new();
         book.process(&alice, channel, &collect(&owner_log, &channel));
@@ -2585,7 +2585,7 @@ mod tests {
             sealed.encode(),
         );
         let mut bob_log = EventLog::default();
-        reconcile(&mut bob_log, &mut alice_log, channel);
+        reconcile(&mut bob_log, &mut alice_log, channel).unwrap();
         append(
             &mut bob_log,
             &bob,
@@ -2606,7 +2606,7 @@ mod tests {
                     .unwrap(),
             );
         }
-        reconcile(&mut bob_log, &mut alice_log, channel);
+        reconcile(&mut bob_log, &mut alice_log, channel).unwrap();
         append(
             &mut alice_log,
             &alice,
@@ -2614,7 +2614,7 @@ mod tests {
             EventKind::Message,
             sender.seal_sender_message(b"causally after").unwrap(),
         );
-        reconcile(&mut bob_log, &mut alice_log, channel);
+        reconcile(&mut bob_log, &mut alice_log, channel).unwrap();
         let mut book = ChannelBook::new();
         let received = book.process(&bob, channel, &collect(&bob_log, &channel));
         assert_eq!(

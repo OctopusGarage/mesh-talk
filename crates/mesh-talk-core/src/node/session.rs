@@ -185,6 +185,8 @@ struct HaveChunk {
 /// Errors from a sync session.
 #[derive(Debug)]
 pub enum SessionError {
+    /// Local event-store operation failed.
+    Store(crate::eventlog::LogError),
     /// Channel send/recv failure.
     Transport(TransportError),
     /// (De)serialization of a wire message failed.
@@ -198,6 +200,7 @@ pub enum SessionError {
 impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SessionError::Store(e) => write!(f, "sync store error: {e}"),
             SessionError::Transport(e) => write!(f, "sync transport error: {e}"),
             SessionError::Serialization(m) => write!(f, "sync serialization error: {m}"),
             SessionError::UnexpectedMessage => write!(f, "unexpected sync message"),
@@ -206,7 +209,20 @@ impl std::fmt::Display for SessionError {
     }
 }
 
-impl std::error::Error for SessionError {}
+impl std::error::Error for SessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Transport(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl From<crate::eventlog::LogError> for SessionError {
+    fn from(error: crate::eventlog::LogError) -> Self {
+        Self::Store(error)
+    }
+}
 
 impl From<TransportError> for SessionError {
     fn from(e: TransportError) -> Self {
@@ -485,13 +501,13 @@ impl SyncProgress {
             self.started = true;
             let (fp, local_count, local_v2, local_v3, local_v4) = {
                 let store = store.lock().expect("store mutex not poisoned");
-                let (fp, count) = store.fingerprint_and_len(&conversation);
+                let (fp, count) = store.fingerprint_and_len(&conversation)?;
                 (
                     fp,
                     count,
-                    store.requires_channel_v2(&conversation),
-                    store.requires_channel_v3(&conversation),
-                    store.requires_channel_v4(&conversation),
+                    store.requires_channel_v2(&conversation)?,
+                    store.requires_channel_v3(&conversation)?,
+                    store.requires_channel_v4(&conversation)?,
                 )
             };
             self.v2 |= local_v2 || local_v3 || local_v4;
@@ -545,7 +561,7 @@ impl SyncProgress {
         let round = self.rounds;
         let have = {
             let store = store.lock().expect("store mutex not poisoned");
-            build_request(&*store, conversation).have
+            build_request(&*store, conversation)?.have
         };
         if round == 0 {
             self.first_have = have.len();
@@ -602,8 +618,12 @@ impl SyncProgress {
 
         let (report, mut followups) = {
             let mut store = store.lock().expect("store mutex not poisoned");
-            let result =
-                handle_response_bounded_burst(&mut *store, &response, MAX_PLAINTEXT, max_followups);
+            let result = handle_response_bounded_burst(
+                &mut *store,
+                &response,
+                MAX_PLAINTEXT,
+                max_followups,
+            )?;
             if store.admission_denied() {
                 return Err(SessionError::UnexpectedMessage);
             }
@@ -752,7 +772,7 @@ where
             let control = store
                 .lock()
                 .expect("store mutex not poisoned")
-                .signed_file_consent(&file, &manifest);
+                .signed_file_consent(&file, &manifest)?;
             channel
                 .send(&encode(&SyncWire::SignedFileConsentResponse {
                     file,
@@ -766,7 +786,7 @@ where
             let status = store
                 .lock()
                 .expect("store mutex not poisoned")
-                .file_consent(&file, &manifest);
+                .file_consent(&file, &manifest)?;
             channel
                 .send(&encode(&SyncWire::FileConsentResponse {
                     file,
@@ -783,7 +803,7 @@ where
             let stored = store
                 .lock()
                 .expect("store mutex not poisoned")
-                .durable_have(&conversation, &event_id);
+                .durable_have(&conversation, &event_id)?;
             channel
                 .send(&encode(&SyncWire::DurableHaveResponse {
                     conversation,
@@ -807,13 +827,13 @@ where
             let full = SyncRequest { conversation, have };
             let response = {
                 let store = store.lock().expect("store mutex not poisoned");
-                if (!v2 && store.requires_channel_v2(&conversation))
-                    || (!v3 && store.requires_channel_v3(&conversation))
-                    || (!v4 && store.requires_channel_v4(&conversation))
+                if (!v2 && store.requires_channel_v2(&conversation)?)
+                    || (!v3 && store.requires_channel_v3(&conversation)?)
+                    || (!v4 && store.requires_channel_v4(&conversation)?)
                 {
                     None
                 } else {
-                    let response = handle_request_bounded(&*store, &full, MAX_PLAINTEXT);
+                    let response = handle_request_bounded(&*store, &full, MAX_PLAINTEXT)?;
                     response
                         .events
                         .iter()
@@ -854,7 +874,7 @@ where
             }
             {
                 let mut store = store.lock().expect("store mutex not poisoned");
-                handle_followup(&mut *store, &followup);
+                handle_followup(&mut *store, &followup)?;
                 if store.admission_denied() {
                     return Err(SessionError::UnexpectedMessage);
                 }
@@ -873,13 +893,13 @@ where
             let v2 = v3 || matches!(decode(bytes)?, SyncWire::FpRequestV2(_));
             let matched = {
                 let store = store.lock().expect("store mutex not poisoned");
-                if (!v2 && store.requires_channel_v2(&conversation))
-                    || (!v3 && store.requires_channel_v3(&conversation))
-                    || (!v4 && store.requires_channel_v4(&conversation))
+                if (!v2 && store.requires_channel_v2(&conversation)?)
+                    || (!v3 && store.requires_channel_v3(&conversation)?)
+                    || (!v4 && store.requires_channel_v4(&conversation)?)
                 {
                     None
                 } else {
-                    Some(store.fingerprint_and_len(&conversation).0 == req.fingerprint)
+                    Some(store.fingerprint_and_len(&conversation)?.0 == req.fingerprint)
                 }
             };
             let Some(matched) = matched else {
@@ -911,6 +931,172 @@ mod tests {
     use crate::eventlog::event::{Event, EventKind};
     use crate::eventlog::store::EventLog;
     use crate::identity::device::DeviceIdentity;
+
+    #[derive(Clone, Copy)]
+    enum ReadFault {
+        Fingerprint,
+        Capabilities,
+        Ids,
+        Body,
+        Ingest,
+        Durable,
+        Consent,
+        SignedConsent,
+    }
+    struct FailedReadStore(ReadFault);
+    impl FailedReadStore {
+        fn error() -> crate::eventlog::LogError {
+            std::io::Error::other("injected local read failure").into()
+        }
+    }
+    impl SyncStore for FailedReadStore {
+        fn event_ids(&self, _: &ConversationId) -> Result<Vec<EventId>, crate::eventlog::LogError> {
+            if matches!(self.0, ReadFault::Ids) {
+                Err(Self::error())
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn events_excluding(
+            &self,
+            _: &ConversationId,
+            _: &std::collections::HashSet<EventId>,
+        ) -> Result<Vec<Event>, crate::eventlog::LogError> {
+            if matches!(self.0, ReadFault::Body | ReadFault::Capabilities) {
+                Err(Self::error())
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn fingerprint_and_len(
+            &self,
+            _: &ConversationId,
+        ) -> Result<([u8; 32], usize), crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn durable_have(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<bool, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn file_consent(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<FileConsentStatus, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn signed_file_consent(
+            &self,
+            _: &ConversationId,
+            _: &EventId,
+        ) -> Result<Option<Event>, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+        fn ingest(
+            &mut self,
+            _: Event,
+        ) -> Result<crate::eventlog::AppendOutcome, crate::eventlog::LogError> {
+            Err(Self::error())
+        }
+    }
+
+    #[tokio::test]
+    async fn store_read_failures_over_loopback_emit_no_success_reply() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            for fault in [
+                ReadFault::Fingerprint,
+                ReadFault::Capabilities,
+                ReadFault::Ids,
+                ReadFault::Body,
+                ReadFault::Ingest,
+                ReadFault::Durable,
+                ReadFault::Consent,
+                ReadFault::SignedConsent,
+            ] {
+                let alice = DeviceIdentity::generate();
+                let bob = DeviceIdentity::generate();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut channel = SecureChannel::accept(stream, &bob).await.unwrap();
+                    let result = serve_one(&mut channel, &Mutex::new(FailedReadStore(fault))).await;
+                    assert!(matches!(
+                        result,
+                        Err(SessionError::Store(crate::eventlog::LogError::Io(_)))
+                    ));
+                    let error = result.unwrap_err();
+                    let source = std::error::Error::source(&error).unwrap();
+                    assert!(source.downcast_ref::<crate::eventlog::LogError>().is_some());
+                    assert!(
+                        source
+                            .source()
+                            .unwrap()
+                            .downcast_ref::<std::io::Error>()
+                            .is_some()
+                    );
+                });
+                let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+                let mut channel = SecureChannel::connect(stream, &alice, None).await.unwrap();
+                let event_id = EventId::new([3; 32]);
+                let wire = match fault {
+                    ReadFault::Fingerprint => SyncWire::FpRequestV4(FpRequest {
+                        conversation: conv(),
+                        fingerprint: crate::eventlog::sync::fingerprint(vec![]),
+                    }),
+                    ReadFault::Capabilities => SyncWire::FpRequest(FpRequest {
+                        conversation: conv(),
+                        fingerprint: crate::eventlog::sync::fingerprint(vec![]),
+                    }),
+                    ReadFault::Ingest => SyncWire::FollowupV4(SyncFollowup {
+                        conversation: conv(),
+                        events: vec![Event::new(
+                            &alice,
+                            conv(),
+                            0,
+                            vec![],
+                            1,
+                            0,
+                            EventKind::Message,
+                            vec![1],
+                        )],
+                    }),
+                    ReadFault::Ids | ReadFault::Body => SyncWire::RequestV4(SyncRequest {
+                        conversation: conv(),
+                        have: vec![],
+                    }),
+                    ReadFault::Durable => SyncWire::DurableHaveRequest {
+                        conversation: conv(),
+                        event_id,
+                    },
+                    ReadFault::Consent => SyncWire::FileConsentRequest {
+                        file: conv(),
+                        manifest: event_id,
+                    },
+                    ReadFault::SignedConsent => SyncWire::SignedFileConsentRequest {
+                        file: conv(),
+                        manifest: event_id,
+                    },
+                };
+                channel.send(&encode(&wire).unwrap()).await.unwrap();
+                if matches!(fault, ReadFault::Ids | ReadFault::Body) {
+                    send_have(&mut channel, conv(), &[], SyncWire::ReqHave)
+                        .await
+                        .unwrap();
+                }
+                assert!(
+                    channel.recv().await.is_err(),
+                    "a failed local read must not emit an empty, matched or custody response"
+                );
+                server.await.unwrap();
+            }
+        })
+        .await
+        .expect("loopback store-failure test timed out");
+    }
 
     #[tokio::test]
     async fn rejected_relay_upload_over_loopback_preserves_retention_and_valid_delivery() {
@@ -2215,7 +2401,7 @@ mod tests {
         let bob = DeviceIdentity::generate();
         let (aio, bio) = tokio::io::duplex(512 * 1024);
         let log = build_large_responder_store(&alice, conv(), 10, 20 * 1024);
-        let ids = log.event_ids(&conv());
+        let ids = log.event_ids(&conv()).unwrap();
         let server = tokio::spawn(async move {
             let mut channel = SecureChannel::accept(bio, &bob).await.unwrap();
             let store = Mutex::new(EventLog::default());
@@ -2261,7 +2447,7 @@ mod tests {
             handled > 9,
             "transfer requires more rounds than the stall diagnostic cutoff"
         );
-        assert_eq!(remote.event_ids(&conv()), ids);
+        assert_eq!(remote.event_ids(&conv()).unwrap(), ids);
         for event in store.lock().unwrap().events(&conv()) {
             assert_eq!(remote.get(&event.id), Some(event));
         }
@@ -2273,7 +2459,7 @@ mod tests {
         let bob = DeviceIdentity::generate();
         let (aio, bio) = tokio::io::duplex(512 * 1024);
         let log = build_large_responder_store(&alice, conv(), 10, 20 * 1024);
-        let ids = log.event_ids(&conv());
+        let ids = log.event_ids(&conv()).unwrap();
         let server = tokio::spawn(async move {
             let mut channel = SecureChannel::accept(bio, &bob).await.unwrap();
             let store = Mutex::new(EventLog::default());
@@ -2298,7 +2484,7 @@ mod tests {
             "burst must avoid per-chunk reconciliation"
         );
         drop(channel);
-        assert_eq!(server.await.unwrap().event_ids(&conv()), ids);
+        assert_eq!(server.await.unwrap().event_ids(&conv()).unwrap(), ids);
     }
 
     #[tokio::test]
@@ -2315,7 +2501,7 @@ mod tests {
         const NUM_EVENTS: usize = 4;
 
         let b_log = build_large_responder_store(&b_id, conv_id, NUM_EVENTS, EVENT_PAYLOAD);
-        let responder_event_count = b_log.event_ids(&conv_id).len();
+        let responder_event_count = b_log.event_ids(&conv_id).unwrap().len();
         assert_eq!(responder_event_count, NUM_EVENTS);
 
         let server = tokio::spawn(async move {
@@ -2339,13 +2525,16 @@ mod tests {
         drop(a_ch);
 
         let b_final = server.await.unwrap();
-        let requester_count = a_store.lock().unwrap().event_ids(&conv_id).len();
+        let requester_count = a_store.lock().unwrap().event_ids(&conv_id).unwrap().len();
         assert_eq!(
             requester_count, responder_event_count,
             "requester should have all {responder_event_count} events after multi-round sync"
         );
         // Responder also still has all events.
-        assert_eq!(b_final.event_ids(&conv_id).len(), responder_event_count);
+        assert_eq!(
+            b_final.event_ids(&conv_id).unwrap().len(),
+            responder_event_count
+        );
     }
 
     #[tokio::test]
@@ -2360,7 +2549,7 @@ mod tests {
         const NUM_EVENTS: usize = 2500;
 
         let b_log = build_large_responder_store(&b_id, conv_id, NUM_EVENTS, 8);
-        assert_eq!(b_log.event_ids(&conv_id).len(), NUM_EVENTS);
+        assert_eq!(b_log.event_ids(&conv_id).unwrap().len(), NUM_EVENTS);
 
         let server = tokio::spawn(async move {
             let mut b_ch = SecureChannel::accept(b_io, &b_id).await.unwrap();
@@ -2380,7 +2569,7 @@ mod tests {
         server.await.unwrap();
 
         assert_eq!(
-            a_store.lock().unwrap().event_ids(&conv_id).len(),
+            a_store.lock().unwrap().event_ids(&conv_id).unwrap().len(),
             NUM_EVENTS,
             "requester pulled all events despite a >1-frame have id-set",
         );

@@ -383,6 +383,15 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   `Response(missing + responder have)` → `Followup(what responder lacks)`, bounded by
   frame budget (`MAX_PLAINTEXT`), multiple rounds (≤ `MAX_SYNC_ROUNDS`). Every event is
   re-verified (hash + signature) on ingest.
+  Storage reads and reconciliation handlers return `Result`; a local read,
+  synchronization or persistence failure terminates the exchange through
+  `SessionError::Store`, preserving its error source. It must not become an empty
+  event set, a matching fingerprint or a positive custody claim. Invalid incoming
+  events remain bounded per-event rejections; explicit policy denials use
+  `LogError::AdmissionRejected`. I/O error kinds do not identify policy denials.
+  A failed batch can retain its already committed prefix; retry uses the existing
+  content-addressed duplicate check rather than assuming the batch rolled back.
+  This changes the Rust storage interface, not event IDs or the wire encoding.
   Channel recovery asks up to three online members per turn and continues past a
   reachable but stale member. A completed generic channel attachment remains available from a
   receiver after local save; complete attachment chunk conversations are retained
@@ -1252,6 +1261,12 @@ and historical data require their own bounds. Failed commits, failed rollbacks
 and fatal storage errors invalidate the handle until reopening. Read failures
 remain errors rather than missing records. The connection owner does not by
 itself convert legacy event or transcript stores to demand loading.
+
+Sync storage reads and handlers propagate local failures as errors before sending
+a successful empty history, fingerprint match or custody claim. Explicit invalid
+input and policy rejection remain separate from local persistence failures. A
+batch failure preserves its already committed prefix for idempotent retry; it
+does not imply transaction rollback across independently committed events.
 
 Encrypted record logs replay one framed record at a time instead of retaining a
 second buffer containing the complete encrypted file. The loader validates a

@@ -565,34 +565,37 @@ const COMPACT_PROFILE_MIN: usize = 8;
 // NOTE: this impl is structurally identical to `impl SyncStore for EventLog`
 // in sync.rs — keep the two in sync.
 impl SyncStore for PersistentEventLog {
-    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
-        PersistentEventLog::requires_channel_v3(self, conversation)
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(PersistentEventLog::requires_channel_v3(self, conversation))
     }
-    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
-        PersistentEventLog::requires_channel_v4(self, conversation)
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(PersistentEventLog::requires_channel_v4(self, conversation))
     }
-    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
-        PersistentEventLog::requires_channel_v2(self, conversation)
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(PersistentEventLog::requires_channel_v2(self, conversation))
     }
-    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
-        PersistentEventLog::fingerprint_and_len(self, conversation)
+    fn fingerprint_and_len(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<([u8; 32], usize), LogError> {
+        Ok(PersistentEventLog::fingerprint_and_len(self, conversation))
     }
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
-        self.events(conversation).iter().map(|e| e.id).collect()
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
+        Ok(self.events(conversation).iter().map(|e| e.id).collect())
     }
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         #[cfg(test)]
         self.sync_event_exports
             .set(self.sync_event_exports.get() + 1);
-        super::sync::causal_events(self.events(conversation))
+        Ok(super::sync::causal_events(self.events(conversation))
             .into_iter()
             .filter(|e| !have.contains(&e.id))
             .cloned()
-            .collect()
+            .collect())
     }
     fn events_excluding_bounded(
         &self,
@@ -600,14 +603,14 @@ impl SyncStore for PersistentEventLog {
         have: &HashSet<EventId>,
         event_budget: usize,
         max_frames: usize,
-    ) -> Vec<Event> {
-        super::sync::bounded_events(
+    ) -> Result<Vec<Event>, LogError> {
+        Ok(super::sync::bounded_events(
             super::sync::causal_events(self.events(conversation))
                 .into_iter()
                 .filter(|event| !have.contains(&event.id)),
             event_budget,
             max_frames,
-        )
+        ))
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         self.append(event)
@@ -655,11 +658,11 @@ mod tests {
                 assert!(log.append_durable(invalid).is_err());
                 assert!(!log.requires_channel_v4(&conversation));
                 log.append_durable(event).unwrap();
-                assert!(SyncStore::requires_channel_v4(&log, &conversation));
+                assert!(SyncStore::requires_channel_v4(&log, &conversation).unwrap());
                 assert!(!log.requires_channel_v4(&unrelated));
             }
             let reopened = PersistentEventLog::open(&path, "pw").unwrap();
-            assert!(SyncStore::requires_channel_v4(&reopened, &conversation));
+            assert!(SyncStore::requires_channel_v4(&reopened, &conversation).unwrap());
             assert!(!reopened.requires_channel_v4(&unrelated));
         }
     }
@@ -689,11 +692,15 @@ mod tests {
         let source = PersistentEventLog::open(&path, "pw").unwrap();
         let mut target = EventLog::default();
         for expected in [parent.id, child.id] {
-            let response =
-                handle_request_bounded(&source, &build_request(&target, parent.conversation_id), 1);
+            let response = handle_request_bounded(
+                &source,
+                &build_request(&target, parent.conversation_id).unwrap(),
+                1,
+            )
+            .unwrap();
             assert_eq!(response.events.len(), 1);
             assert_eq!(response.events[0].id, expected);
-            let (report, _) = handle_response(&mut target, &response);
+            let (report, _) = handle_response(&mut target, &response).unwrap();
             assert_eq!(report.applied, 1);
             assert!(report.rejected.is_empty());
         }
@@ -1634,10 +1641,10 @@ eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
         let dst_path = dir.path().join("dst.log");
         {
             let mut dest = PersistentEventLog::open(&dst_path, "pw").unwrap();
-            reconcile(&mut dest, &mut source, conv);
+            reconcile(&mut dest, &mut source, conv).unwrap();
             assert!(dest.has(&root.id) && dest.has(&child.id));
             // Sanity: the SyncStore view agrees.
-            assert_eq!(SyncStore::event_ids(&dest, &conv).len(), 2);
+            assert_eq!(SyncStore::event_ids(&dest, &conv).unwrap().len(), 2);
         }
 
         // Received events were persisted — they survive reopen.

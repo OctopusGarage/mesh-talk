@@ -301,7 +301,7 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
     let peer = chain.nodes[2].identity.public();
     let inbound = holder.serve_sync_store(&peer);
     let outbound = holder.sync_store(&peer);
-    assert!(!inbound.lock().unwrap().event_ids(&file).is_empty());
+    assert!(!inbound.lock().unwrap().event_ids(&file).unwrap().is_empty());
 
     holder.set_network_cost(NetworkCost::Restricted);
     for store in [&inbound, &outbound] {
@@ -309,6 +309,7 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
         assert_eq!(
             store
                 .event_ids(&file)
+                .unwrap()
                 .into_iter()
                 .collect::<std::collections::HashSet<_>>(),
             chunk_ids,
@@ -317,6 +318,7 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
         assert!(
             store
                 .events_excluding(&file, &Default::default())
+                .unwrap()
                 .is_empty()
         );
         assert!(store.authorized_event_ids(&file).is_empty());
@@ -326,7 +328,7 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
                 .is_empty()
         );
         assert!(
-            !store.event_ids(&group).is_empty(),
+            !store.event_ids(&group).unwrap().is_empty(),
             "text and offers remain available"
         );
     }
@@ -351,6 +353,7 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
             .lock()
             .unwrap()
             .event_ids(&file)
+            .unwrap()
             .is_empty()
     );
 
@@ -378,6 +381,7 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
             .lock()
             .unwrap()
             .events_excluding(&file, &Default::default())
+            .unwrap()
             .is_empty()
     );
     holder
@@ -390,13 +394,21 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
                 .lock()
                 .unwrap()
                 .events_excluding(&file, &Default::default())
+                .unwrap()
                 .is_empty(),
             "a temporary network exception must not override the saved sharing preference"
         );
     }
     assert_eq!(holder.log.lock().unwrap().events(&file).len(), retained);
     let outsider = holder.serve_sync_store(&chain.nodes[6].identity.public());
-    assert!(outsider.lock().unwrap().event_ids(&group).is_empty());
+    assert!(
+        outsider
+            .lock()
+            .unwrap()
+            .event_ids(&group)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -500,20 +512,25 @@ async fn unprocessed_durable_group_never_exposes_events_to_nonmember() {
     let store = chain.nodes[5].serve_sync_store(&chain.nodes[6].identity.public());
     let store = store.lock().unwrap();
     assert_eq!(
-        store.fingerprint_and_len(&group),
+        store.fingerprint_and_len(&group).unwrap(),
         (crate::eventlog::sync::fingerprint(Vec::new()), 0)
     );
-    assert!(!store.requires_channel_v2(&group));
-    assert!(store.event_ids(&group).is_empty());
+    assert!(!store.requires_channel_v2(&group).unwrap());
+    assert!(store.event_ids(&group).unwrap().is_empty());
     assert!(
         store
             .events_excluding(&group, &Default::default())
+            .unwrap()
             .is_empty()
     );
     drop(store);
     let peer = chain.nodes[4].identity.public();
     let member_store = chain.nodes[5].serve_sync_store(&peer);
-    let before = member_store.lock().unwrap().fingerprint_and_len(&group);
+    let before = member_store
+        .lock()
+        .unwrap()
+        .fingerprint_and_len(&group)
+        .unwrap();
     assert!(
         before.1 > 0,
         "authorized invitation ancestry still bootstraps before book refresh"
@@ -523,7 +540,11 @@ async fn unprocessed_durable_group_never_exposes_events_to_nonmember() {
         .channel_projection_replays
         .load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
-        member_store.lock().unwrap().fingerprint_and_len(&group),
+        member_store
+            .lock()
+            .unwrap()
+            .fingerprint_and_len(&group)
+            .unwrap(),
         before
     );
     assert_eq!(
@@ -549,10 +570,13 @@ async fn public_group_idle_metadata_is_reused_across_fresh_peer_scoped_stores() 
     let node = &chain.nodes[0];
     let before = node.channel_projection_replays.load(Ordering::Relaxed);
     let first = node.serve_sync_store(&chain.nodes[2].identity.public());
-    let fp = first.lock().unwrap().fingerprint_and_len(&group);
-    assert!(first.lock().unwrap().requires_channel_v2(&group));
+    let fp = first.lock().unwrap().fingerprint_and_len(&group).unwrap();
+    assert!(first.lock().unwrap().requires_channel_v2(&group).unwrap());
     let fresh = node.serve_sync_store(&chain.nodes[2].identity.public());
-    assert_eq!(fresh.lock().unwrap().fingerprint_and_len(&group), fp);
+    assert_eq!(
+        fresh.lock().unwrap().fingerprint_and_len(&group).unwrap(),
+        fp
+    );
     assert_eq!(
         node.channel_projection_replays.load(Ordering::Relaxed) - before,
         1,
@@ -573,7 +597,8 @@ async fn public_group_history_capability_metadata_is_cached_and_principal_scoped
         .serve_sync_store(&member)
         .lock()
         .unwrap()
-        .fingerprint_and_len(&group);
+        .fingerprint_and_len(&group)
+        .unwrap();
     node.set_channel_history_policy(group, HistoryPolicy::LastTen)
         .await
         .unwrap();
@@ -581,9 +606,9 @@ async fn public_group_history_capability_metadata_is_cached_and_principal_scoped
     for _ in 0..2 {
         let store = node.serve_sync_store(&member);
         let store = store.lock().unwrap();
-        assert!(store.requires_channel_v3(&group));
-        assert!(!store.requires_channel_v2(&group));
-        assert_ne!(store.fingerprint_and_len(&group), original);
+        assert!(store.requires_channel_v3(&group).unwrap());
+        assert!(!store.requires_channel_v2(&group).unwrap());
+        assert_ne!(store.fingerprint_and_len(&group).unwrap(), original);
     }
     assert_eq!(
         node.channel_projection_replays.load(Ordering::Relaxed) - before,
@@ -591,8 +616,8 @@ async fn public_group_history_capability_metadata_is_cached_and_principal_scoped
     );
     let outsider = node.serve_sync_store(&chain.nodes[6].identity.public());
     let outsider = outsider.lock().unwrap();
-    assert!(!outsider.requires_channel_v3(&group));
-    assert!(outsider.event_ids(&group).is_empty());
+    assert!(!outsider.requires_channel_v3(&group).unwrap());
+    assert!(outsider.event_ids(&group).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -611,8 +636,8 @@ async fn public_group_metadata_invalidates_for_authority_history_and_privacy_cha
         let store = node.serve_sync_store(peer);
         let store = store.lock().unwrap();
         (
-            store.fingerprint_and_len(&group),
-            store.requires_channel_v2(&group),
+            store.fingerprint_and_len(&group).unwrap(),
+            store.requires_channel_v2(&group).unwrap(),
         )
     }
     let chain = Chain::new().await;
@@ -730,7 +755,10 @@ async fn public_group_metadata_cache_is_bounded_under_distinct_authenticated_pri
     for _ in 0..160 {
         let outsider = DeviceIdentity::generate().public();
         let store = chain.nodes[0].serve_sync_store(&outsider);
-        assert_eq!(store.lock().unwrap().fingerprint_and_len(&group).1, 0);
+        assert_eq!(
+            store.lock().unwrap().fingerprint_and_len(&group).unwrap().1,
+            0
+        );
     }
     assert_eq!(
         chain.nodes[0]
@@ -743,7 +771,7 @@ async fn public_group_metadata_cache_is_bounded_under_distinct_authenticated_pri
     let member = chain.nodes[1].identity.public();
     let store = chain.nodes[0].serve_sync_store(&member);
     assert!(
-        store.lock().unwrap().fingerprint_and_len(&group).1 > 0,
+        store.lock().unwrap().fingerprint_and_len(&group).unwrap().1 > 0,
         "eviction cannot change member authority"
     );
     assert!(
@@ -796,7 +824,7 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
     let forged_id = forged.id;
     chain.nodes[0].log.lock().unwrap().append(forged).unwrap();
     let authorized = chain.nodes[0].serve_sync_store(&chain.nodes[2].identity.public());
-    let ids = authorized.lock().unwrap().event_ids(&group);
+    let ids = authorized.lock().unwrap().event_ids(&group).unwrap();
     assert!(
         !ids.contains(&forged_id),
         "a competing root cannot replace established channel authority"
@@ -807,7 +835,12 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
     );
     let unauthorized = chain.nodes[0].serve_sync_store(&attacker.identity.public());
     assert_eq!(
-        unauthorized.lock().unwrap().fingerprint_and_len(&group).1,
+        unauthorized
+            .lock()
+            .unwrap()
+            .fingerprint_and_len(&group)
+            .unwrap()
+            .1,
         0
     );
     assert!(
@@ -815,6 +848,7 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
             .lock()
             .unwrap()
             .events_excluding(&group, &Default::default())
+            .unwrap()
             .is_empty()
     );
     // Manual account permission in Invisible mode still cannot grant the
@@ -842,7 +876,7 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
         .unwrap();
     owner.set_invisible(true).await.unwrap();
     let private_member = owner.serve_sync_store(&chain.nodes[2].identity.public());
-    let ids = private_member.lock().unwrap().event_ids(&group);
+    let ids = private_member.lock().unwrap().event_ids(&group).unwrap();
     assert!(ids.contains(&original));
     assert!(!ids.contains(&forged_id));
     let private_attacker = owner.serve_sync_store(&attacker.identity.public());
@@ -851,6 +885,7 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
             .lock()
             .unwrap()
             .event_ids(&group)
+            .unwrap()
             .is_empty()
     );
 }

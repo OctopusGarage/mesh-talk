@@ -175,10 +175,9 @@ impl GuardedSyncStore<'_> {
             > MAX_PENDING_CHANNEL_BYTES
         {
             self.denied = true;
-            return Some(Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::OutOfMemory,
-                "uninvited channel staging limit exceeded",
-            ))));
+            return Some(Err(LogError::AdmissionRejected(
+                "uninvited channel staging limit exceeded".into(),
+            )));
         }
         match pending.log.append(event.clone()) {
             Ok(AppendOutcome::Duplicate) => {
@@ -246,10 +245,9 @@ impl GuardedSyncStore<'_> {
                 });
             if !still_allowed {
                 self.denied = true;
-                return Some(Err(LogError::Io(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "channel invitation permission changed",
-                ))));
+                return Some(Err(LogError::AdmissionRejected(
+                    "channel invitation permission changed".into(),
+                )));
             }
             let accepted: Vec<_> = pending
                 .events
@@ -1205,9 +1203,9 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
-    fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
         if let Some(metadata) = self.public_projection_metadata(conversation) {
-            return metadata.requires_v4;
+            return Ok(metadata.requires_v4);
         }
         if !self
             .node
@@ -1216,20 +1214,22 @@ impl SyncStore for GuardedSyncStore<'_> {
             .expect("log lock not poisoned")
             .requires_channel_v4(conversation)
         {
-            return false;
+            return Ok(false);
         }
-        // A private/rejected control must not reveal itself to this principal.
-        self.visible(conversation).iter().any(|event| {
-            matches!(
-                event.kind,
-                EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
-            )
-        })
+        Ok(
+            // A private/rejected control must not reveal itself to this principal.
+            self.visible(conversation).iter().any(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
+                )
+            }),
+        )
     }
 
-    fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
         if let Some(metadata) = self.public_projection_metadata(conversation) {
-            return metadata.requires_v3;
+            return Ok(metadata.requires_v3);
         }
         if !self
             .node
@@ -1238,19 +1238,19 @@ impl SyncStore for GuardedSyncStore<'_> {
             .expect("log lock not poisoned")
             .requires_channel_v3(conversation)
         {
-            return false;
+            return Ok(false);
         }
-        self.visible(conversation).iter().any(|event| {
+        Ok(self.visible(conversation).iter().any(|event| {
             matches!(
                 event.kind,
                 EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory
             )
-        })
+        }))
     }
 
-    fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
         if let Some(metadata) = self.public_projection_metadata(conversation) {
-            return metadata.requires_v2;
+            return Ok(metadata.requires_v2);
         }
         // Inspect the peer's projection: a hidden event must not affect the
         // compatibility response or reveal that it exists.
@@ -1261,75 +1261,79 @@ impl SyncStore for GuardedSyncStore<'_> {
             .expect("log lock not poisoned")
             .requires_channel_v2(conversation)
         {
-            return false;
+            return Ok(false);
         }
-        self.visible(conversation)
+        Ok(self
+            .visible(conversation)
             .iter()
-            .any(|event| event.kind == EventKind::ChannelReplica)
+            .any(|event| event.kind == EventKind::ChannelReplica))
     }
-    fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
+    fn fingerprint_and_len(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<([u8; 32], usize), LogError> {
         if let Some(metadata) = self.public_projection_metadata(conversation) {
-            return (metadata.fingerprint, metadata.len);
+            return Ok((metadata.fingerprint, metadata.len));
         }
-        let ids = self.event_ids(conversation);
+        let ids = self.event_ids(conversation)?;
         let len = ids.len();
-        (crate::eventlog::sync::fingerprint(ids), len)
+        Ok((crate::eventlog::sync::fingerprint(ids), len))
     }
     fn file_consent(
         &self,
         file: &ConversationId,
         manifest: &EventId,
-    ) -> crate::eventlog::sync::FileConsentStatus {
+    ) -> Result<crate::eventlog::sync::FileConsentStatus, LogError> {
         use crate::eventlog::sync::FileConsentStatus;
-        match self
-            .node
-            .attachment_consent_for_peer(*file, *manifest, &self.peer)
-        {
-            super::attachment_consent::ReceiveDecision::Pending => FileConsentStatus::Pending,
-            super::attachment_consent::ReceiveDecision::Accepted => FileConsentStatus::Accepted,
-            super::attachment_consent::ReceiveDecision::Declined => FileConsentStatus::Declined,
-        }
+        Ok(
+            match self
+                .node
+                .attachment_consent_for_peer(*file, *manifest, &self.peer)
+            {
+                super::attachment_consent::ReceiveDecision::Pending => FileConsentStatus::Pending,
+                super::attachment_consent::ReceiveDecision::Accepted => FileConsentStatus::Accepted,
+                super::attachment_consent::ReceiveDecision::Declined => FileConsentStatus::Declined,
+            },
+        )
     }
     fn signed_file_consent(
         &self,
         file: &ConversationId,
         manifest: &EventId,
-    ) -> Option<crate::eventlog::Event> {
+    ) -> Result<Option<crate::eventlog::Event>, LogError> {
         self.node
             .direct_file_consent_control(&self.peer, *file, *manifest)
-            .ok()
-            .flatten()
     }
-    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
         if !self.visible(conversation).iter().any(|e| e.id == *id) {
-            return !self.denied
+            return Ok(!self.denied
                 && self
                     .node
-                    .historical_file_completion(*conversation, *id, &self.peer);
+                    .historical_file_completion(*conversation, *id, &self.peer));
         }
         self.node
             .log
             .lock()
             .expect("log lock not poisoned")
-            .sync()
-            .is_ok()
+            .sync()?;
+        Ok(true)
     }
     fn admission_denied(&self) -> bool {
         self.denied
     }
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
         let mut ids: Vec<_> = self.visible(conversation).iter().map(|e| e.id).collect();
         if let Some(pending) = self.pending_channels.get(conversation) {
             ids.extend(pending.events.iter().map(|event| event.id));
         }
-        ids
+        Ok(ids)
     }
     fn events_excluding(
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
-        self.outgoing_projection(conversation, have, true)
+    ) -> Result<Vec<Event>, LogError> {
+        Ok(self.outgoing_projection(conversation, have, true))
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         let node = self.node;
@@ -1397,10 +1401,9 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .is_some_and(|state| state.own.post_office);
             if !direct && !channel && !relay && event.author.ed25519_pub() != &own.ed25519_pub {
                 self.denied = true;
-                return Err(LogError::Io(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "unknown attachment conversation",
-                )));
+                return Err(LogError::AdmissionRejected(
+                    "unknown attachment conversation".into(),
+                ));
             }
         }
         // A legacy peer can skip the optional consent query and push chunks through
@@ -1412,10 +1415,9 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .attachment_chunk_author_allowed(event.conversation_id, event.author.ed25519_pub())
         {
             self.denied = true;
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "attachment awaiting recipient approval",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "attachment awaiting recipient approval".into(),
+            ));
         }
         if event.kind == EventKind::Message && known_file {
             let manifest = self
@@ -1435,10 +1437,9 @@ impl SyncStore for GuardedSyncStore<'_> {
                     .is_empty();
                 if first_chunk && (event.seq != 1 || !event.parents.is_empty()) {
                     self.denied = true;
-                    return Err(LogError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "automatic image must start at chunk one",
-                    )));
+                    return Err(LogError::AdmissionRejected(
+                        "automatic image must start at chunk one".into(),
+                    ));
                 }
                 if event.seq == 1 {
                     let valid = crate::file::open_chunk_for(&manifest, 0, &event.ciphertext)
@@ -1448,10 +1449,9 @@ impl SyncStore for GuardedSyncStore<'_> {
                         });
                     if !valid {
                         self.denied = true;
-                        return Err(LogError::Io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "automatic image has invalid image signature",
-                        )));
+                        return Err(LogError::AdmissionRejected(
+                            "automatic image has invalid image signature".into(),
+                        ));
                     }
                 }
             }
@@ -1495,10 +1495,7 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .contains(&event.id)
             {
                 self.denied = true;
-                return Err(LogError::Io(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "event admission denied",
-                )));
+                return Err(LogError::AdmissionRejected("event admission denied".into()));
             }
         }
         let mut log = self.node.log.lock().expect("log lock not poisoned");
@@ -1510,10 +1507,9 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .any(|chunk| chunk.author != event.author)
         {
             self.denied = true;
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "attachment chunk stream already belongs to another sender",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "attachment chunk stream already belongs to another sender".into(),
+            ));
         }
         if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
             log.append_durable(event)
@@ -1599,13 +1595,13 @@ mod causal_export_tests {
             }
             let guarded = node.sync_store(&peer.public());
             let store = guarded.lock().unwrap();
-            assert_eq!(store.event_ids(&channel), vec![initial.id]);
-            assert!(!store.requires_channel_v4(&channel));
+            assert_eq!(store.event_ids(&channel).unwrap(), vec![initial.id]);
+            assert!(!store.requires_channel_v4(&channel).unwrap());
             assert!(
-                !store.requires_channel_v4(&channel),
+                !store.requires_channel_v4(&channel).unwrap(),
                 "cached projection must stay principal-scoped"
             );
-            assert!(!store.event_ids(&channel).contains(&rejected.id));
+            assert!(!store.event_ids(&channel).unwrap().contains(&rejected.id));
         }
     }
     #[tokio::test]
@@ -1657,7 +1653,7 @@ mod causal_export_tests {
         let store = guarded.lock().unwrap();
         assert_eq!(
             store.authorized_event_ids(&conversation),
-            store.event_ids(&conversation)
+            store.event_ids(&conversation).unwrap()
         );
         let wanted = HashSet::from([parent.id, child.id]);
         assert_eq!(
@@ -1805,12 +1801,13 @@ mod causal_export_tests {
         for expected in [parent.id, child.id] {
             let response = handle_request_bounded(
                 &*guarded.lock().unwrap(),
-                &build_request(&target, conversation),
+                &build_request(&target, conversation).unwrap(),
                 1,
-            );
+            )
+            .unwrap();
             assert_eq!(response.events.len(), 1);
             assert_eq!(response.events[0].id, expected);
-            let (report, _) = handle_response(&mut target, &response);
+            let (report, _) = handle_response(&mut target, &response).unwrap();
             assert_eq!(report.applied, 1);
             assert!(report.rejected.is_empty());
         }
