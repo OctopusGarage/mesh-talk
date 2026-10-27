@@ -1576,8 +1576,12 @@ fn retired_session_cannot_admit_an_account_group_operation_for_the_same_account(
     );
 }
 
+#[path = "tests/mandatory_control_latency.rs"]
+mod mandatory_control_latency;
 #[path = "tests/mandatory_latency.rs"]
 mod mandatory_latency;
+#[path = "tests/optional_custody_latency.rs"]
+mod optional_custody_latency;
 
 #[tokio::test]
 async fn modern_inherited_owner_executes_rename_through_the_account_facade() {

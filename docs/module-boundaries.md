@@ -829,10 +829,25 @@ slow member.
 Authenticated body-free sibling invalidations remain active independently of
 optional content categories. Mandatory control requests and results reuse that
 bounded wake and account-document channel; content transfer still applies its
-own category, sharing and read-entitlement checks. The
+own category, sharing and read-entitlement checks. The existing two mandatory
+workers reserve one slot for GroupControl and one for group inventory/device
+names. Each lane retains its own full-peer-identity cursor, partial page, refresh
+and retry state. A held directory response cannot delay an explicit operation
+request or result; control traffic cannot consume the directory's reserved slot.
+Combined progress is up to date only when both lanes have settled, and an error
+or required upgrade in either lane remains visible. The shared TCP budget and
+authentication, category and authority checks remain unchanged. The
 [network contract](network-design-reference.md#g-linking-and-ongoing-account-synchronization)
 owns the distinction between an accepted account's private copy and public
 physical membership.
+
+The other two existing synchronization slots are partitioned between optional
+private documents and history/favorites. A held history response cannot delay an
+authorized custody confirmation, profile or preference document. History and
+favorites preserve their own continuations and coalesced refreshes; their errors
+do not replace document progress. Optional document category and entitlement
+checks still apply. Together with control and directory work, these remain four
+workers in the same shared session pool, not additional network capacity.
 
 ### Account profiles and private trust
 

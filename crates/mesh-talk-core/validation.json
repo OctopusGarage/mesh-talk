@@ -144,7 +144,7 @@
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick.",
+        "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick or a held mandatory directory response. Control, directory, optional document and history/favorites work retain independent cursors and one reserved worker each within the existing four-worker and shared TCP budgets; optional document progress preserves its category and entitlement checks independently of held archive responses.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {

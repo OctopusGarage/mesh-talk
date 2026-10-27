@@ -64,20 +64,20 @@ const MAX_UNAVAILABLE_ATTACHMENTS: usize = 256;
 
 /// Mandatory document admission respects its retained page retry deadline.
 /// Optional workers also own history/favorites and keep their independent scheduling.
-pub(in crate::node) fn take_ready_mandatory_peer(
-    queue: &mut std::collections::VecDeque<(String, PeerRecord)>,
-    retry_at: impl Fn(&str) -> Option<std::time::Instant>,
+pub(in crate::node) fn take_ready_mandatory_peer<K>(
+    queue: &mut std::collections::VecDeque<(K, PeerRecord)>,
+    retry_at: impl Fn(&K) -> Option<std::time::Instant>,
     now: std::time::Instant,
-) -> Option<(String, PeerRecord)> {
+) -> Option<(K, PeerRecord)> {
     let ready = queue
         .iter()
         .position(|(id, _)| retry_at(id).is_none_or(|at| at <= now))?;
     queue.remove(ready)
 }
 
-pub(in crate::node) fn mandatory_retry_deadline(
-    queue: &std::collections::VecDeque<(String, PeerRecord)>,
-    retry_at: impl Fn(&str) -> Option<std::time::Instant>,
+pub(in crate::node) fn mandatory_retry_deadline<K>(
+    queue: &std::collections::VecDeque<(K, PeerRecord)>,
+    retry_at: impl Fn(&K) -> Option<std::time::Instant>,
 ) -> Option<std::time::Instant> {
     queue.iter().filter_map(|(id, _)| retry_at(id)).min()
 }
@@ -107,7 +107,6 @@ pub struct DeviceSyncStatus {
 
 #[derive(Default)]
 struct PeerCursor {
-    documents: super::account_documents::sync::DocumentSyncCursor,
     history_retry_at: Option<std::time::Instant>,
     favorite_next: Option<String>,
     favorite_digest: [u8; 32],
@@ -135,6 +134,66 @@ fn initial_sync_status(device_id: String) -> DeviceSyncStatus {
 }
 
 type DocumentStatus = (SyncPhase, Option<String>, bool);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum DocumentLane {
+    Control,
+    Directory,
+    Optional,
+}
+impl DocumentLane {
+    const ALL: [Self; 3] = [Self::Control, Self::Directory, Self::Optional];
+    fn index(self) -> usize {
+        match self {
+            Self::Control => 0,
+            Self::Directory => 1,
+            Self::Optional => 2,
+        }
+    }
+    fn cursor(self) -> super::account_documents::sync::DocumentSyncCursor {
+        match self {
+            Self::Control => super::account_documents::sync::DocumentSyncCursor::control(),
+            Self::Directory => super::account_documents::sync::DocumentSyncCursor::directory(),
+            Self::Optional => super::account_documents::sync::DocumentSyncCursor::optional(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DocumentPeer {
+    device_id: String,
+    ed25519_pub: [u8; 32],
+    x25519_pub: [u8; 32],
+    lane: DocumentLane,
+}
+impl DocumentPeer {
+    fn new(public: &PublicIdentity, lane: DocumentLane) -> Self {
+        Self {
+            device_id: public.user_id(),
+            ed25519_pub: public.ed25519_pub,
+            x25519_pub: public.x25519_pub,
+            lane,
+        }
+    }
+    fn public(&self) -> PublicIdentity {
+        PublicIdentity {
+            ed25519_pub: self.ed25519_pub,
+            x25519_pub: self.x25519_pub,
+        }
+    }
+    fn identity(&self) -> ([u8; 32], [u8; 32]) {
+        (self.ed25519_pub, self.x25519_pub)
+    }
+}
+
+fn document_sync_status(
+    statuses: &HashMap<DocumentPeer, DocumentStatus>,
+    public: &PublicIdentity,
+) -> DocumentStatus {
+    let lanes = DocumentLane::ALL.map(|lane| statuses.get(&DocumentPeer::new(public, lane)));
+    let mandatory = combined_document_status(lanes[0], lanes[1]);
+    combined_document_status(lanes[2], Some(&mandatory))
+}
 
 fn combined_document_status(
     optional: Option<&DocumentStatus>,
@@ -2189,11 +2248,11 @@ impl Node {
 
     pub(in crate::node) async fn run_account_history_loop(self: Arc<Self>) {
         use std::collections::VecDeque;
-        // Partition the existing four history slots. A slow optional response
-        // retains its own page while mandatory directory/control work progresses
-        // through the same authenticated, globally admitted session pool.
-        const HISTORY_WORKERS: usize = 2;
-        const MANDATORY_WORKERS: usize = 2;
+        // Partition the existing four slots: one each for control, directory,
+        // optional documents, and history/favorites. Each lane retains its page
+        // independently through the same globally admitted account session pool.
+        const HISTORY_WORKERS: usize = 1;
+        const DOCUMENT_WORKERS: usize = DocumentLane::ALL.len();
         const ATTACHMENT_WORKERS: usize = 2;
         let mut tick = tokio::time::interval(RETRY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2205,17 +2264,17 @@ impl Node {
         let mut pending_refresh = HashSet::new();
         let mut history = tokio::task::JoinSet::new();
         let mut history_owners: HashMap<tokio::task::Id, String> = HashMap::new();
-        let mut mandatory = tokio::task::JoinSet::new();
-        let mut mandatory_owners: HashMap<tokio::task::Id, String> = HashMap::new();
-        let mut mandatory_cursors = HashMap::new();
-        let mut mandatory_queue: VecDeque<(String, PeerRecord)> = VecDeque::new();
-        let mut mandatory_active = HashSet::new();
-        let mut mandatory_refresh = HashSet::new();
+        let mut documents = tokio::task::JoinSet::new();
+        let mut document_owners: HashMap<tokio::task::Id, DocumentPeer> = HashMap::new();
+        let mut document_cursors = HashMap::new();
+        let mut document_queues: [VecDeque<(DocumentPeer, PeerRecord)>; DOCUMENT_WORKERS] =
+            std::array::from_fn(|_| VecDeque::new());
+        let mut document_active: HashSet<DocumentPeer> = HashSet::new();
+        let mut document_refresh: HashSet<DocumentPeer> = HashSet::new();
         // Cached projections survive while each independently owned cursor is
-        // inside a network task; a completed mandatory pull cannot erase an
-        // optional failure or falsely declare an unfinished optional page done.
-        let mut optional_statuses: HashMap<String, DocumentStatus> = HashMap::new();
-        let mut mandatory_statuses: HashMap<String, DocumentStatus> = HashMap::new();
+        // inside a network task; one completed lane cannot erase another
+        // lane's failure or falsely declare its unfinished page done.
+        let mut document_statuses: HashMap<DocumentPeer, DocumentStatus> = HashMap::new();
         let mut attachment_owners: HashMap<tokio::task::Id, String> = HashMap::new();
         let mut attachments = tokio::task::JoinSet::new();
         let mut operation_work_cursor: Option<super::AccountGroupOperationId> = None;
@@ -2313,11 +2372,19 @@ impl Node {
                     attachment_owners.insert(task.id(), owner);
                 }
             }
-            while mandatory_active.len() < MANDATORY_WORKERS {
-                let Some((id, peer)) = take_ready_mandatory_peer(
-                    &mut mandatory_queue,
-                    |id| {
-                        mandatory_cursors.get(id).and_then(
+            for lane in DocumentLane::ALL {
+                // Reserve one existing slot per document lane. A held archive
+                // or directory stream cannot occupy the control/optional slot.
+                if document_active
+                    .iter()
+                    .any(|key: &DocumentPeer| key.lane == lane)
+                {
+                    continue;
+                }
+                let Some((key, peer)) = take_ready_mandatory_peer(
+                    &mut document_queues[lane.index()],
+                    |key| {
+                        document_cursors.get(key).and_then(
                             |state: &super::account_documents::sync::DocumentSyncCursor| {
                                 state.retry_at
                             },
@@ -2325,24 +2392,24 @@ impl Node {
                     },
                     std::time::Instant::now(),
                 ) else {
-                    break;
+                    continue;
                 };
-                if !mandatory_active.insert(id.clone()) {
+                if !document_active.insert(key.clone()) {
                     continue;
                 }
-                let mut state = mandatory_cursors
-                    .remove(&id)
-                    .unwrap_or_else(super::account_documents::sync::DocumentSyncCursor::mandatory);
+                let mut state = document_cursors
+                    .remove(&key)
+                    .unwrap_or_else(|| lane.cursor());
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
                     return;
                 };
-                let owner = id.clone();
-                let task = mandatory.spawn(permit.track(async move {
+                let owner = key.clone();
+                let task = documents.spawn(permit.track(async move {
                     let _ = node.pull_account_documents_page(&peer, &mut state).await;
-                    (id, peer, state)
+                    (key, peer, state)
                 }));
-                mandatory_owners.insert(task.id(), owner);
+                document_owners.insert(task.id(), owner);
             }
             while let Some(group) = fanout.start_next() {
                 // Bootstrap recovery may commit a group outside this turn's
@@ -2376,10 +2443,7 @@ impl Node {
                 if !active.insert(id.clone()) {
                     continue;
                 }
-                let mut state = cursors.remove(&id).unwrap_or_else(|| PeerCursor {
-                    documents: super::account_documents::sync::DocumentSyncCursor::optional(),
-                    ..PeerCursor::default()
-                });
+                let mut state = cursors.remove(&id).unwrap_or_default();
                 if state
                     .history_retry_at
                     .is_some_and(|at| at > std::time::Instant::now())
@@ -2457,11 +2521,6 @@ impl Node {
                     } else if !result.as_ref().is_err_and(local_sync_capacity_busy) {
                         state.favorite_next = None;
                     }
-                    // Optional private documents share this bounded worker and session pool.
-                    // Each turn transfers one bounded page; credentials retain their own owner.
-                    let _ = node
-                        .pull_account_documents_page(&peer, &mut state.documents)
-                        .await;
                     (id, peer, state, result)
                 }));
                 history_owners.insert(task.id(), owner);
@@ -2470,16 +2529,18 @@ impl Node {
             let fanout_retry = fanout.next_retry();
             // Deferred peers keep their cursor and queued refresh, but do not
             // consume another worker/maintenance turn before the exact deadline.
-            let mandatory_retry = (mandatory_active.len() < MANDATORY_WORKERS)
-                .then(|| {
-                    mandatory_retry_deadline(&mandatory_queue, |id| {
-                        mandatory_cursors.get(id).and_then(|state| state.retry_at)
+            let document_retry = DocumentLane::ALL
+                .into_iter()
+                .filter(|lane| !document_active.iter().any(|key| key.lane == *lane))
+                .filter_map(|lane| {
+                    mandatory_retry_deadline(&document_queues[lane.index()], |key| {
+                        document_cursors.get(key).and_then(|state| state.retry_at)
                     })
                 })
-                .flatten();
+                .min();
             tokio::select! {
                 _ = async {
-                    if let Some(at) = mandatory_retry {
+                    if let Some(at) = document_retry {
                         tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
                     } else {
                         std::future::pending::<()>().await;
@@ -2521,46 +2582,53 @@ impl Node {
                         }
                     }
                 }
-                result = mandatory.join_next_with_id(), if !mandatory.is_empty() => {
+                result = documents.join_next_with_id(), if !documents.is_empty() => {
                     if let Some(Err(error)) = &result
-                        && let Some(id) = mandatory_owners.remove(&error.id()) {
-                            mandatory_active.remove(&id);
-                            mandatory_refresh.remove(&id);
-                            mandatory_cursors.remove(&id);
-                            mandatory_statuses.insert(id.clone(), (SyncPhase::Error,
-                                Some("mandatory account document worker terminated".into()), false));
+                        && let Some(key) = document_owners.remove(&error.id()) {
+                            let id = key.device_id.clone();
+                            document_active.remove(&key);
+                            document_refresh.remove(&key);
+                            document_cursors.remove(&key);
+                            if self.certified_sibling(&key.public()) {
+                            document_statuses.insert(key.clone(), (SyncPhase::Error,
+                                Some("account document worker terminated".into()), false));
                             let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
                                 .get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
-                            let (phase, error, upgrade) = combined_document_status(optional_statuses.get(&id), mandatory_statuses.get(&id));
+                            let (phase, error, upgrade) = document_sync_status(&document_statuses, &key.public());
                             status.document_phase = phase;
                             status.document_error = error;
                             status.document_requires_upgrade = upgrade;
                             self.set_account_sync_status(id, status);
+                            } else { document_statuses.remove(&key); }
                     }
-                    if let Some(Ok((task, (id, peer, mut state)))) = result {
-                        mandatory_owners.remove(&task);
-                        mandatory_active.remove(&id);
+                    if let Some(Ok((task, (key, peer, mut state)))) = result {
+                        let id = key.device_id.clone();
+                        document_owners.remove(&task);
+                        document_active.remove(&key);
                         let (policy, current_revision) = self.device_sync_policy_snapshot();
                         if current_revision != revision { enqueue_all = true; }
-                        else {
-                            let refresh = mandatory_refresh.contains(&id);
+                        else if self.certified_sibling(&peer.public) {
+                            let refresh = document_refresh.contains(&key);
                             if refresh && state.begin_refresh() {
-                                mandatory_refresh.remove(&id);
+                                document_refresh.remove(&key);
                             }
                             let continuation = (refresh && !state.admission_deferred()) || state.pending;
-                            mandatory_statuses.insert(id.clone(), state.status(policy));
+                            document_statuses.insert(key.clone(), state.status(policy));
                             let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
                                 .get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
-                            let (phase, error, upgrade) = combined_document_status(optional_statuses.get(&id), mandatory_statuses.get(&id));
+                            let (phase, error, upgrade) = document_sync_status(&document_statuses, &peer.public);
                             status.document_phase = phase;
                             status.document_error = error;
                             status.document_requires_upgrade = upgrade;
                             self.set_account_sync_status(id.clone(), status);
-                            mandatory_cursors.insert(id.clone(), state);
+                            document_cursors.insert(key.clone(), state);
                             if continuation {
-                                mandatory_queue.push_back((id, peer));
+                                document_queues[key.lane.index()].push_back((key, peer));
                                 tokio::task::yield_now().await;
                             }
+                        } else {
+                            document_refresh.remove(&key);
+                            document_statuses.remove(&key);
                         }
                     }
                 }
@@ -2568,36 +2636,38 @@ impl Node {
                     if let Some(Err(error)) = &result
                         && let Some(id) = history_owners.remove(&error.id()) {
                             active.remove(&id); pending_refresh.remove(&id); cursors.remove(&id);
-                            optional_statuses.insert(id.clone(), (SyncPhase::Error,
-                                Some("account document worker terminated".into()), false));
-                            self.set_account_sync_status(id.clone(), DeviceSyncStatus { device_id: id,
-                                phase: SyncPhase::Error, pending_attachments: 0, legacy_file_metadata: false,
-                                document_phase:SyncPhase::Error,document_error:Some("account document worker terminated".into()),document_requires_upgrade:false,
-                                error: Some("account history worker terminated".into()) });
+                            let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
+                                .get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
+                            status.phase = SyncPhase::Error;
+                            status.error = Some("account history worker terminated".into());
+                            self.set_account_sync_status(id, status);
                     }
                     if let Some(Ok((task, (id, peer, mut state, result)))) = result {
                         history_owners.remove(&task);
                         active.remove(&id);
                         let (policy, current_revision) = self.device_sync_policy_snapshot();
                         if current_revision != revision { enqueue_all = true; }
-                        else {
+                        else if self.certified_sibling(&peer.public) {
                             let refresh = pending_refresh.contains(&id);
-                            if refresh && state.documents.begin_refresh() {
-                                pending_refresh.remove(&id);
-                            }
-                            optional_statuses.insert(id.clone(), state.documents.status(policy));
-                            let (document_phase,document_error,document_requires_upgrade)=combined_document_status(optional_statuses.get(&id), mandatory_statuses.get(&id));
+                            let (document_phase,document_error,document_requires_upgrade)=document_sync_status(&document_statuses, &peer.public);
                             let mut status = DeviceSyncStatus { device_id: id.clone(), phase: SyncPhase::CatchingUp,
                                 pending_attachments: 0, legacy_file_metadata: false, error: None,document_phase,document_error,document_requires_upgrade };
                             let favorites_waiting = state.favorite_retry_at.is_some_and(|at|at > std::time::Instant::now());
                             let favorites_pending = (state.favorite_next.is_some() || (state.favorites_supported && state.favorite_digest==[0;32] && state.favorite_error.is_none()))
                                 && !favorites_waiting;
-                            let mut continuation = (refresh && !state.documents.admission_deferred()) || favorites_pending || state.documents.pending;
+                            let mut continuation = favorites_pending;
                             match result {
                                 Ok((next, digest, version)) => {
                                     status.legacy_file_metadata = version == AccountSyncVersion::V1;
-                                    if state.complete_page(next, digest) && !favorites_pending && !favorites_waiting { status.phase = SyncPhase::UpToDate; }
-                                    else { continuation |= state.next.is_some() || state.documents.pending; }
+                                    let history_complete = state.complete_page(next, digest);
+                                    if history_complete && !favorites_pending && !favorites_waiting { status.phase = SyncPhase::UpToDate; }
+                                    else { continuation |= !history_complete; }
+                                    // Finish retained history/favorite pages before consuming
+                                    // one coalesced wake as a fresh comparison sweep.
+                                    if refresh && history_complete && state.favorite_next.is_none() {
+                                        pending_refresh.remove(&id);
+                                        continuation = true;
+                                    }
                                     if let Some(error)=&state.favorite_error {status.phase=SyncPhase::Error;status.error=Some(error.chars().take(160).collect());continuation=false;}
                                 }
                                 Err(error) if local_sync_capacity_busy(&error) => {
@@ -2727,22 +2797,23 @@ impl Node {
                 // Cancellation drops every network future. Blocking writers retain retirement
                 // admission and perform their own current-policy checks before commit.
                 history.abort_all();
-                mandatory.abort_all();
+                documents.abort_all();
                 attachments.abort_all();
                 while history.join_next().await.is_some() {}
-                while mandatory.join_next().await.is_some() {}
+                while documents.join_next().await.is_some() {}
                 while attachments.join_next().await.is_some() {}
                 active.clear();
                 pending_refresh.clear();
                 active_attachments.clear();
                 history_owners.clear();
-                mandatory_owners.clear();
-                mandatory_active.clear();
-                mandatory_refresh.clear();
-                mandatory_queue.clear();
-                mandatory_cursors.clear();
-                mandatory_statuses.clear();
-                optional_statuses.clear();
+                document_owners.clear();
+                document_active.clear();
+                document_refresh.clear();
+                for queue in &mut document_queues {
+                    queue.clear();
+                }
+                document_cursors.clear();
+                document_statuses.clear();
                 attachment_owners.clear();
                 queue.clear();
                 cursors.clear();
@@ -2762,30 +2833,39 @@ impl Node {
                 // queued retries. Active exchanges retain their exact admission
                 // and recheck current authority before any durable import.
                 cursors.retain(|id, _| certified.contains(id));
-                mandatory_cursors.retain(|id, _| certified.contains(id));
-                optional_statuses.retain(|id, _| certified.contains(id));
-                mandatory_statuses.retain(|id, _| certified.contains(id));
+                let document_identities: HashSet<_> = devices
+                    .iter()
+                    .map(|device| (device.public.ed25519_pub, device.public.x25519_pub))
+                    .collect();
+                document_cursors.retain(|key, _| document_identities.contains(&key.identity()));
+                document_statuses.retain(|key, _| document_identities.contains(&key.identity()));
                 queue.retain(|(id, _)| certified.contains(id));
-                mandatory_queue.retain(|(id, _)| certified.contains(id));
+                for queue in &mut document_queues {
+                    queue.retain(|(key, _)| document_identities.contains(&key.identity()));
+                }
                 pending_refresh.retain(|id| certified.contains(id));
-                mandatory_refresh.retain(|id| certified.contains(id));
+                document_refresh.retain(|key| document_identities.contains(&key.identity()));
                 for device in devices {
                     let id = device.public.user_id();
                     if id == self.user_id() {
                         continue;
                     }
-                    if mandatory_active.contains(&id) {
-                        mandatory_refresh.insert(id.clone());
-                    } else if !mandatory_queue.iter().any(|(queued, _)| queued == &id)
-                        && let Some(peer) = self.routing_peer(&id)
-                        && peer.public == device.public
-                    {
-                        if let Some(state) = mandatory_cursors.get_mut(&id)
-                            && !state.begin_refresh()
+                    for lane in DocumentLane::ALL {
+                        let key = DocumentPeer::new(&device.public, lane);
+                        let queue = &mut document_queues[lane.index()];
+                        if document_active.contains(&key) {
+                            document_refresh.insert(key);
+                        } else if !queue.iter().any(|(queued, _)| queued == &key)
+                            && let Some(peer) = self.routing_peer(&id)
+                            && peer.public == device.public
                         {
-                            mandatory_refresh.insert(id.clone());
+                            if let Some(state) = document_cursors.get_mut(&key)
+                                && !state.begin_refresh()
+                            {
+                                document_refresh.insert(key.clone());
+                            }
+                            queue.push_back((key, peer));
                         }
-                        mandatory_queue.push_back((id.clone(), peer));
                     }
                     if active.contains(&id) {
                         pending_refresh.insert(id);
@@ -2826,8 +2906,9 @@ impl Node {
                         );
                         continue;
                     }
-                    if let Some(state) = cursors.get_mut(&id)
-                        && !state.documents.begin_refresh()
+                    if cursors
+                        .get(&id)
+                        .is_some_and(|state| state.next.is_some() || state.favorite_next.is_some())
                     {
                         pending_refresh.insert(id.clone());
                     }
@@ -2858,6 +2939,91 @@ impl Node {
 mod tests {
     use super::*;
     use crate::identity::account::Account;
+
+    #[test]
+    fn mandatory_lane_status_never_inherits_a_retired_x25519_identity() {
+        let old = crate::identity::device::DeviceIdentity::generate().public();
+        let mut current = old.clone();
+        current.x25519_pub = crate::identity::device::DeviceIdentity::generate()
+            .public()
+            .x25519_pub;
+        assert_eq!(old.user_id(), current.user_id());
+        let mut statuses = HashMap::new();
+        for lane in DocumentLane::ALL {
+            statuses.insert(
+                DocumentPeer::new(&old, lane),
+                (SyncPhase::UpToDate, None, false),
+            );
+        }
+        assert_eq!(
+            document_sync_status(&statuses, &current),
+            (SyncPhase::CatchingUp, None, false),
+            "a new full identity has no completed lane despite the same device ID"
+        );
+        statuses.insert(
+            DocumentPeer::new(&old, DocumentLane::Directory),
+            (
+                SyncPhase::Error,
+                Some("retired directory failure".into()),
+                true,
+            ),
+        );
+        statuses.insert(
+            DocumentPeer::new(&current, DocumentLane::Control),
+            (SyncPhase::UpToDate, None, false),
+        );
+        assert_eq!(
+            document_sync_status(&statuses, &current),
+            (SyncPhase::CatchingUp, None, false)
+        );
+        statuses.insert(
+            DocumentPeer::new(&current, DocumentLane::Directory),
+            (SyncPhase::UpToDate, None, false),
+        );
+        assert_eq!(
+            document_sync_status(&statuses, &current),
+            (SyncPhase::CatchingUp, None, false)
+        );
+        statuses.insert(
+            DocumentPeer::new(&current, DocumentLane::Optional),
+            (SyncPhase::UpToDate, None, false),
+        );
+        assert_eq!(
+            document_sync_status(&statuses, &current),
+            (SyncPhase::UpToDate, None, false)
+        );
+    }
+
+    #[test]
+    fn mandatory_lane_status_requires_both_lanes_and_preserves_independent_errors() {
+        let public = crate::identity::device::DeviceIdentity::generate().public();
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            DocumentPeer::new(&public, DocumentLane::Optional),
+            (SyncPhase::UpToDate, None, false),
+        );
+        let control = DocumentPeer::new(&public, DocumentLane::Control);
+        let directory = DocumentPeer::new(&public, DocumentLane::Directory);
+        statuses.insert(control.clone(), (SyncPhase::UpToDate, None, false));
+        assert_eq!(
+            document_sync_status(&statuses, &public).0,
+            SyncPhase::CatchingUp
+        );
+        statuses.insert(
+            directory.clone(),
+            (SyncPhase::Error, Some("directory failure".into()), true),
+        );
+        statuses.insert(control, (SyncPhase::UpToDate, None, false));
+        assert_eq!(
+            document_sync_status(&statuses, &public),
+            (SyncPhase::Error, Some("directory failure".into()), true)
+        );
+        statuses.insert(directory, (SyncPhase::UpToDate, None, false));
+        assert_eq!(
+            document_sync_status(&statuses, &public),
+            (SyncPhase::UpToDate, None, false)
+        );
+    }
 
     #[tokio::test]
     async fn category_toggle_during_sibling_page_restarts_catch_up_including_off_on_aba() {

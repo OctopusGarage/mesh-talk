@@ -54,6 +54,8 @@ enum DocumentSyncScope {
     #[default]
     All,
     Mandatory,
+    Control,
+    Directory,
     Optional,
 }
 impl DocumentSyncScope {
@@ -65,6 +67,8 @@ impl DocumentSyncScope {
                     | (1 << AccountDocumentDomain::DeviceHostname as usize)
                     | (1 << AccountDocumentDomain::GroupControl as usize)
             }
+            Self::Control => 1 << AccountDocumentDomain::GroupControl as usize,
+            Self::Directory => Self::Mandatory.mask() & !Self::Control.mask(),
             Self::Optional => Self::All.mask() & !Self::Mandatory.mask(),
         }
     }
@@ -164,9 +168,23 @@ impl DocumentSyncCursor {
         self.admission_deferred
     }
 
+    #[cfg(test)]
     pub(in crate::node) fn mandatory() -> Self {
         Self {
             scope: DocumentSyncScope::Mandatory,
+            ..Self::default()
+        }
+    }
+    pub(in crate::node) fn control() -> Self {
+        Self {
+            scope: DocumentSyncScope::Control,
+            ..Self::default()
+        }
+    }
+    pub(in crate::node) fn directory() -> Self {
+        Self {
+            scope: DocumentSyncScope::Directory,
+            domain: AccountDocumentDomain::GroupInventory as usize,
             ..Self::default()
         }
     }
@@ -618,7 +636,11 @@ impl Node {
         {
             cursor.group_supported();
             if cursor.scope != DocumentSyncScope::Optional {
-                cursor.domain = AccountDocumentDomain::GroupControl as usize;
+                cursor.domain = if cursor.scope == DocumentSyncScope::Directory {
+                    AccountDocumentDomain::GroupInventory as usize
+                } else {
+                    AccountDocumentDomain::GroupControl as usize
+                };
                 cursor.after = None;
             }
         }
@@ -1368,6 +1390,31 @@ impl Node {
 mod status_tests {
     use super::*;
     use crate::node::{DeviceSyncPolicy, SyncPhase};
+    #[test]
+    fn mandatory_lanes_partition_domains_and_preserve_partial_refreshes() {
+        let mut control = DocumentSyncCursor::control();
+        let mut directory = DocumentSyncCursor::directory();
+        assert_eq!(control.scope.mask() & directory.scope.mask(), 0);
+        assert_eq!(
+            control.scope.mask() | directory.scope.mask(),
+            DocumentSyncCursor::mandatory().scope.mask()
+        );
+        assert_eq!(DOMAINS[control.domain], AccountDocumentDomain::GroupControl);
+        assert_eq!(
+            DOMAINS[directory.domain],
+            AccountDocumentDomain::GroupInventory
+        );
+        control.pending = true;
+        directory.pending = true;
+        directory.digests[AccountDocumentDomain::GroupInventory as usize] = [7; 32];
+        assert!(!control.begin_refresh());
+        assert!(!directory.begin_refresh());
+        assert_eq!(
+            directory.digests[AccountDocumentDomain::GroupInventory as usize],
+            [7; 32]
+        );
+    }
+
     #[test]
     fn refresh_preserves_partial_pages_and_cycles_and_retains_peer_hints() {
         let mut cursor = DocumentSyncCursor::mandatory();
@@ -2758,7 +2805,7 @@ mod group_control_tests {
         assert_eq!(
             take_ready_mandatory_peer(
                 &mut queue,
-                |key| (key == id).then_some(deadline),
+                |key| (key == &id).then_some(deadline),
                 deadline - Duration::from_nanos(1)
             )
             .unwrap()

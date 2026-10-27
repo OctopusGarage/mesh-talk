@@ -1260,6 +1260,23 @@ contact synchronization are disabled, so mandatory account control requests and
 results can progress promptly. Every subsequent content exchange independently
 enforces its category permissions.
 
+The two existing mandatory account-document workers reserve one slot for
+GroupControl and one for GroupInventory/DeviceHostname. Their independent
+per-peer cursors preserve partial pages and retry deadlines; neither lane can
+occupy the other's slot. This prevents directory pagination or a held directory
+response from delaying an accepted account operation's request/result, while
+directory work retains a bounded opportunity to progress. Both lanes use the
+same authenticated session pool and eight-slot TCP budget. Aggregate status
+retains either lane's error/upgrade and reports up to date only after both settle.
+
+The other two synchronization slots reserve one worker for optional private
+documents and one for history/favorites. Authorized custody and preference
+documents therefore do not wait for history/favorite responses. Each keeps its
+own continuation and retry state, and all optional category/read-entitlement
+checks remain in force. Document progress and archive progress are reported
+separately; the total remains four synchronization workers sharing the same
+eight TCP slots.
+
 Message Yourself is the self-account route. With no siblings, acceptance commits local history and encrypted file retention without reserving remote delivery capacity. A later certified sibling can reconcile retained records with their original logical IDs. Signed personal file evidence binds the exact manifest to its personal host; it does not grant access to unrelated account or channel files. Local acceptance and a completed selected exchange are distinct facts, and neither promises indefinite availability.
 
 Favorites is a separate account-owned encrypted snapshot collection. Its optional,
