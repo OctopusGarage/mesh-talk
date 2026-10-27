@@ -965,6 +965,10 @@
           {
             "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "The actual dedicated worker interleaves a physical class with a trigger at 256 free pages, a target at 64 free pages, up to 64 vacuum iterations and a 100 ms success cooldown plus duty pacing; typed BUSY/LOCKED or incomplete PASSIVE transfers back off independently without starving other classes. Restart discovers pending truncation from one known-main stat; idle/ordinary growth does not checkpoint, and shutdown drains admitted work before lease release.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
@@ -1071,6 +1075,18 @@
           {
             "name": "Faulted or poisoned database state is typed runtime supervision input; every rollback failure remains an authoritative Database error requiring reopen and preserves both sanitized operation and rollback causes without changing COMMIT fault policy.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Fresh encrypted databases establish incremental auto-vacuum mode 2 before metadata tables; authenticated warm open rejects NONE/FULL without full VACUUM, reinitialization or empty authority fallback.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Physical reclamation accepts only positive capped budgets, consumes all row-producing pragma steps through DONE inside the existing transaction, and reports progress only after COMMIT; late statement/COMMIT/rollback failures preserve authoritative causes and fault policy.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Checked physical scalars and one known-main startup length comparison require no history-body scan; logical charges, free pages, SQL estimates, main/WAL file lengths and filesystem block release stay distinct. PASSIVE completion is outside the vacuum transaction, validates partial/no-WAL counters and has no 64-page engine-work cap.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -1086,7 +1102,8 @@
         }
       ],
       "escalation": [
-        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
+        "Physical format/maintenance changes require storage::database::tests:: and postoffice::maintenance:: tests plus affected profile/repository/role and actual CLI compatibility evidence. Use the bundled SQLCipher engine to verify multiple zero-column ROW iterations, late errors, live data/counters, no-reader main shrink while open, reader-pinned partial progress/release and below-threshold restart continuation. Native filesystem/WAL and production-KDF/resource acceptance remain separate; fast-test fixtures do not certify deployment."
       ],
       "consumers": [
         "core-node",

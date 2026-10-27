@@ -111,6 +111,10 @@ impl IndexedRelayState {
         cursors.insert(key, id);
     }
     #[cfg(test)]
+    pub(crate) fn body_read_counts(&self) -> (usize, usize) {
+        self.repository.body_read_counts()
+    }
+    #[cfg(test)]
     pub(crate) fn physical_charge(
         &self,
     ) -> Result<crate::eventlog::repository::DomainChargeMetadata, LogError> {

@@ -4,7 +4,7 @@ use crate::eventlog::LogError;
 use rusqlite::{Connection, OpenFlags, Transaction};
 use std::{
     fs::OpenOptions,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -83,8 +83,94 @@ impl std::error::Error for RollbackFailure {
     }
 }
 
+/// Freelist-page work cap, not a CPU, IO, lock-time or filesystem-byte cap.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PhysicalReclaimBudget(u32);
+impl PhysicalReclaimBudget {
+    pub(crate) fn new(pages: u32) -> Result<Self, LogError> {
+        if !(1..=64).contains(&pages) {
+            return Err(invalid("physical reclamation budget must be 1..=64 pages"));
+        }
+        Ok(Self(pages))
+    }
+}
+impl Default for PhysicalReclaimBudget {
+    fn default() -> Self {
+        Self::new(64).expect("fixed positive physical reclamation budget")
+    }
+}
+
+/// Scalar SQL page observations. Neither the logical domain charge nor actual
+/// main/WAL filesystem usage: WAL readers may delay main-file truncation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PhysicalStats {
+    pub page_size: u64,
+    pub page_count: u64,
+    pub freelist_count: u64,
+}
+impl PhysicalStats {
+    fn read_on(c: &Connection) -> Result<Self, LogError> {
+        require_incremental_vacuum(c)?;
+        let scalar = |name| -> Result<u64, LogError> {
+            let value: i64 = c.pragma_query_value(None, name, |r| r.get(0))?;
+            u64::try_from(value).map_err(|_| invalid("negative physical page observation"))
+        };
+        // SQLCipher's page_size handler returns cipher_page_size as TEXT,
+        // unlike SQLite's integer page_count/freelist_count pragmas.
+        let page_size: String = c.pragma_query_value(None, "page_size", |r| r.get(0))?;
+        let stats = Self {
+            page_size: page_size
+                .parse::<u64>()
+                .map_err(|_| invalid("invalid physical page size"))?,
+            page_count: scalar("page_count")?,
+            freelist_count: scalar("freelist_count")?,
+        };
+        if stats.page_size == 0 || stats.freelist_count > stats.page_count {
+            return Err(invalid("invalid physical page observations"));
+        }
+        stats
+            .page_size
+            .checked_mul(stats.page_count)
+            .ok_or_else(|| invalid("physical page estimate overflow"))?;
+        Ok(stats)
+    }
+}
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PhysicalReclaimProgress {
+    pub before: PhysicalStats,
+    pub after: PhysicalStats,
+    /// Successful engine iterations consumed through SQLITE_DONE. Returned only
+    /// after the owning transaction commits; late errors cannot claim progress.
+    pub yielded_steps: u32,
+}
+fn require_incremental_vacuum(c: &Connection) -> Result<(), LogError> {
+    let mode: i64 = c.pragma_query_value(None, "auto_vacuum", |r| r.get(0))?;
+    if mode != 2 {
+        return Err(invalid(
+            "encrypted database requires incremental auto_vacuum mode (2)",
+        ));
+    }
+    Ok(())
+}
+
+/// PASSIVE may transfer a historical WAL backlog: this has no page-work cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassiveCheckpointProgress {
+    NoWal,
+    Frames { log: u64, checkpointed: u64 },
+}
+impl PassiveCheckpointProgress {
+    pub(crate) fn complete(self) -> bool {
+        match self {
+            Self::NoWal => true,
+            Self::Frames { log, checkpointed } => log == checkpointed,
+        }
+    }
+}
+
 pub(crate) struct EncryptedDatabase {
     connection: Mutex<Connection>,
+    path: PathBuf,
     faulted: AtomicBool,
 }
 impl EncryptedDatabase {
@@ -161,6 +247,10 @@ impl EncryptedDatabase {
             if tables != 0 {
                 return Err(invalid("unrecognized database schema"));
             }
+            // Pointer maps must exist before the first domain/metadata table.
+            // Only an exclusively created file is eligible for initialization.
+            tx.pragma_update(None, "auto_vacuum", 2)?;
+            require_incremental_vacuum(&tx)?;
             tx.execute_batch(
                 "CREATE TABLE mesh_database_metadata (
                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -189,6 +279,9 @@ impl EncryptedDatabase {
                 "database owner binding or store identity does not match",
             ));
         }
+        // Authenticate provenance and owner first on warm open. Never repair a
+        // known authority with NONE/FULL, VACUUM, or a replacement empty store.
+        require_incremental_vacuum(&tx)?;
         tx.commit()?;
         let journal: String =
             connection.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
@@ -199,9 +292,98 @@ impl EncryptedDatabase {
         connection.pragma_update(None, "journal_size_limit", JOURNAL_BYTES)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            path,
             faulted: AtomicBool::new(false),
         })
     }
+    pub(crate) fn physical_stats(&self) -> Result<PhysicalStats, LogError> {
+        self.read(PhysicalStats::read_on)
+    }
+
+    /// One known-main-file stat on the maintenance owner's first inspection.
+    /// This detects a WAL-committed truncation after restart without a history
+    /// walk or unconditional checkpoint of ordinary pending appends.
+    pub(crate) fn main_file_exceeds_page_estimate(&self) -> Result<bool, LogError> {
+        self.read(|c| {
+            let stats = PhysicalStats::read_on(c)?;
+            let estimate = stats
+                .page_size
+                .checked_mul(stats.page_count)
+                .ok_or_else(|| invalid("physical page estimate overflow"))?;
+            Ok(std::fs::metadata(&self.path)?.len() > estimate)
+        })
+    }
+
+    /// One background completion attempt; never waits for readers, never loops
+    /// or truncates the WAL. Engine checkpoint work is not limited by the
+    /// reclamation page budget. Partial progress remains an explicit outcome.
+    pub(crate) fn passive_checkpoint(&self) -> Result<PassiveCheckpointProgress, LogError> {
+        self.read(|c| {
+            #[cfg(test)]
+            observations::PASSIVE_ATTEMPTS
+                .with(|v| v.borrow_mut().push(tokio::time::Instant::now()));
+            let (busy, log, checkpointed): (i64, i64, i64) = c
+                .query_row("PRAGMA main.wal_checkpoint(PASSIVE)", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .map_err(|e| context("passive physical checkpoint", e))?;
+            if busy == 1 {
+                return Err(context(
+                    "passive physical checkpoint",
+                    rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                        Some(format!(
+                            "checkpoint busy={busy}, log={log}, checkpointed={checkpointed}"
+                        )),
+                    ),
+                ));
+            }
+            if busy != 0 {
+                return Err(invalid("invalid passive checkpoint busy observation"));
+            }
+            if log == -1 && checkpointed == -1 {
+                return Ok(PassiveCheckpointProgress::NoWal);
+            }
+            let log = u64::try_from(log)
+                .map_err(|_| invalid("negative passive checkpoint log observation"))?;
+            let checkpointed = u64::try_from(checkpointed)
+                .map_err(|_| invalid("negative passive checkpoint completion observation"))?;
+            if checkpointed > log {
+                return Err(invalid("invalid passive checkpoint frame observations"));
+            }
+            Ok(PassiveCheckpointProgress::Frames { log, checkpointed })
+        })
+    }
+
+    pub(crate) fn reclaim_pages(
+        &self,
+        budget: PhysicalReclaimBudget,
+    ) -> Result<PhysicalReclaimProgress, LogError> {
+        let before = self.physical_stats()?;
+        if before.freelist_count == 0 {
+            return Ok(PhysicalReclaimProgress {
+                before,
+                after: before,
+                yielded_steps: 0,
+            });
+        }
+        #[cfg(test)]
+        {
+            observations::VACUUM_ATTEMPTS
+                .with(|v| v.borrow_mut().push(tokio::time::Instant::now()));
+            if observations::FORCE_BUSY.with(|v| v.get()) {
+                return Err(context(
+                    "incremental vacuum fixture contention",
+                    rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                        None,
+                    ),
+                ));
+            }
+        }
+        self.transaction(|tx| reclaim_pages_on(tx, budget))
+    }
+
     /// Checked durability boundary for manifest-directed archive reclamation.
     pub(crate) fn checkpoint(&self) -> Result<(), LogError> {
         self.read(|c| {
@@ -316,6 +498,76 @@ impl EncryptedDatabase {
     }
 }
 
+fn reclaim_pages_on(
+    c: &Connection,
+    budget: PhysicalReclaimBudget,
+) -> Result<PhysicalReclaimProgress, LogError> {
+    let before = PhysicalStats::read_on(c)?;
+    if before.freelist_count == 0 {
+        return Ok(PhysicalReclaimProgress {
+            before,
+            after: before,
+            yielded_steps: 0,
+        });
+    }
+    #[cfg(test)]
+    observations::VACUUM_STATEMENTS.with(|n| n.set(n.get() + 1));
+    let mut statement = c
+        .prepare(&format!("PRAGMA main.incremental_vacuum({})", budget.0))
+        .map_err(|error| context("prepare incremental vacuum", error))?;
+    let mut yielded_steps = 0;
+    {
+        let mut rows = statement
+            .query([])
+            .map_err(|error| context("start incremental vacuum", error))?;
+        // Bundled SQLite emits a zero-column ROW after EACH IncrVacuum opcode.
+        // execute_batch steps just once; exhaust Rows without reading columns or
+        // collecting results so every iteration AND late error reaches the owner.
+        while rows
+            .next()
+            .map_err(|error| context("step incremental vacuum", error))?
+            .is_some()
+        {
+            yielded_steps += 1;
+            #[cfg(test)]
+            if observations::INTERRUPT_AFTER.with(|n| {
+                if n.get() == Some(yielded_steps) {
+                    n.set(None);
+                    true
+                } else {
+                    false
+                }
+            }) {
+                c.get_interrupt_handle().interrupt();
+            }
+        }
+    }
+    #[cfg(test)]
+    observations::VACUUM_VM_STEPS
+        .with(|n| n.set(statement.get_status(rusqlite::StatementStatus::VmStep)));
+    Ok(PhysicalReclaimProgress {
+        before,
+        after: PhysicalStats::read_on(c)?,
+        yielded_steps,
+    })
+}
+
+/// Shared driver-source classification for retryable local SQLite contention.
+/// A faulted owner must still reject admission even when this returns true.
+pub(crate) fn database_busy(error: &LogError) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = source {
+        if let Some(driver) = error.downcast_ref::<rusqlite::Error>() {
+            return matches!(
+                driver.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            );
+        }
+        source = error.source();
+    }
+    false
+}
+
 fn fatal_database_error(error: &LogError) -> bool {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
     while let Some(error) = source {
@@ -393,6 +645,12 @@ fn prepare_private_regular_file(path: &Path) -> Result<bool, LogError> {
 #[cfg(test)]
 pub(crate) mod observations {
     thread_local! {
+        pub static PASSIVE_ATTEMPTS: std::cell::RefCell<Vec<tokio::time::Instant>> = const {std::cell::RefCell::new(Vec::new())};
+        pub static INTERRUPT_AFTER: std::cell::Cell<Option<u32>> = const {std::cell::Cell::new(None)};
+        pub static FORCE_BUSY: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};
+        pub static VACUUM_ATTEMPTS: std::cell::RefCell<Vec<tokio::time::Instant>> = const {std::cell::RefCell::new(Vec::new())};
+        pub static VACUUM_STATEMENTS: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};
+        pub static VACUUM_VM_STEPS: std::cell::Cell<i32> = const {std::cell::Cell::new(0)};
         pub static CONNECTION_OPENS: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};
     }
 }
@@ -400,6 +658,7 @@ pub(crate) mod observations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OptionalExtension;
     use std::fs;
     const PASSWORD: &str = "quote'\"; secret password";
     const BINDING: &[u8] = b"profile owner";
@@ -423,6 +682,338 @@ mod tests {
         })
         .unwrap()
     }
+    #[test]
+    fn fresh_and_warm_database_require_incremental_vacuum() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = create(&path);
+        assert_eq!(
+            db.read(|c| Ok(c.pragma_query_value(None, "auto_vacuum", |r| r.get::<_, i64>(0))?))
+                .unwrap(),
+            2
+        );
+        assert!(root.path().join("profile.db-wal").exists());
+        drop(db);
+        let db = EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap();
+        assert_eq!(body(&db), SECRET);
+        assert_eq!(
+            db.read(|c| Ok(c.pragma_query_value(None, "auto_vacuum", |r| r.get::<_, i64>(0))?))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn warm_nonincremental_authority_is_rejected_without_repair() {
+        for mode in [0, 1] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("profile.db");
+            let db = create(&path);
+            // Fixture conversion only: production warm open must never VACUUM.
+            db.read(|c| {
+                c.pragma_update(None, "auto_vacuum", mode)?;
+                c.execute_batch("VACUUM")?;
+                assert_eq!(
+                    c.pragma_query_value(None, "auto_vacuum", |r| r.get::<_, i64>(0))?,
+                    mode
+                );
+                Ok(())
+            })
+            .unwrap();
+            db.checkpoint_and_close().unwrap();
+            let bytes = fs::read(&path).unwrap();
+            let result = EncryptedDatabase::open(&path, PASSWORD, BINDING);
+            assert!(result.is_err(), "accepted unsupported vacuum mode {mode}");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    fn free_body_pages(db: &EncryptedDatabase) {
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE disposable(body BLOB NOT NULL)")?;
+            for _ in 0..48 {
+                c.execute("INSERT INTO disposable VALUES(zeroblob(8192))", [])?;
+            }
+            c.execute("INSERT INTO disposable VALUES(zeroblob(2097152))", [])?;
+            c.execute("DELETE FROM disposable", [])?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn physical_reclamation_drives_multiple_rows_and_continues_after_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = create(&path);
+        free_body_pages(&db);
+        let before = db.physical_stats().unwrap();
+        assert!(before.freelist_count > 128);
+        for pages in [1, 8, 64] {
+            let started = std::time::Instant::now();
+            let progress = db
+                .reclaim_pages(PhysicalReclaimBudget::new(pages).unwrap())
+                .unwrap();
+            let elapsed = started.elapsed();
+            let vm_steps = observations::VACUUM_VM_STEPS.with(|v| v.get());
+            assert_eq!(progress.yielded_steps, pages);
+            assert_eq!(
+                progress.before.freelist_count - progress.after.freelist_count,
+                u64::from(pages)
+            );
+            assert!(progress.after.page_count < progress.before.page_count);
+            assert_eq!(body(&db), SECRET);
+            println!(
+                "pages={pages}, elapsed={elapsed:?}, vm_steps={vm_steps}, progress={progress:?}"
+            );
+            assert!(vm_steps > i32::try_from(pages).unwrap());
+        }
+        let continuation = db.physical_stats().unwrap();
+        drop(db);
+        let db = EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap();
+        assert_eq!(db.physical_stats().unwrap(), continuation);
+        let resumed = db.reclaim_pages(PhysicalReclaimBudget::default()).unwrap();
+        assert_eq!(resumed.yielded_steps, 64);
+        assert_eq!(body(&db), SECRET);
+        db.read(|c| {
+            assert!(
+                c.query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+                    .optional()?
+                    .is_none()
+            );
+            Ok(())
+        })
+        .unwrap();
+        for entry in [path.clone(), root.path().join("profile.db-wal")] {
+            let bytes = fs::read(&entry).unwrap();
+            assert!(!bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()));
+            println!(
+                "{}: {} bytes",
+                entry.file_name().unwrap().to_string_lossy(),
+                bytes.len()
+            );
+        }
+    }
+
+    #[test]
+    fn physical_busy_operation_preserves_source_and_retries_without_fault() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = create(&path);
+        free_body_pages(&db);
+        let before = db.physical_stats().unwrap();
+        let contender = EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap();
+        contender
+            .read(|c| {
+                c.execute_batch("BEGIN IMMEDIATE")?;
+                Ok(())
+            })
+            .unwrap();
+        db.read(|c| {
+            c.busy_timeout(Duration::ZERO)?;
+            Ok(())
+        })
+        .unwrap();
+        let error = db
+            .reclaim_pages(PhysicalReclaimBudget::default())
+            .unwrap_err();
+        assert!(
+            database_busy(&error),
+            "actual driver contention must retain source: {error}"
+        );
+        assert!(!db.requires_reopen());
+        assert_eq!(db.physical_stats().unwrap(), before);
+        contender
+            .read(|c| {
+                c.execute_batch("ROLLBACK")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            db.reclaim_pages(PhysicalReclaimBudget::default())
+                .unwrap()
+                .yielded_steps,
+            64
+        );
+    }
+
+    #[test]
+    fn passive_checkpoint_distinguishes_no_wal_and_partial_reader_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = create(&path);
+        db.checkpoint().unwrap();
+        db.read(|c| {
+            c.pragma_update(None, "journal_mode", "DELETE")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            db.passive_checkpoint().unwrap(),
+            PassiveCheckpointProgress::NoWal
+        );
+        db.read(|c| {
+            c.pragma_update(None, "journal_mode", "WAL")?;
+            Ok(())
+        })
+        .unwrap();
+        let reader = EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap();
+        reader
+            .read(|c| {
+                c.execute_batch("BEGIN")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(body(&reader), SECRET);
+        db.transaction(|c| {
+            c.execute("INSERT INTO messages VALUES('pending')", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let partial = db.passive_checkpoint().unwrap();
+        assert!(
+            !partial.complete(),
+            "busy flag zero must not hide reader-pinned frames: {partial:?}"
+        );
+        reader
+            .read(|c| {
+                c.execute_batch("ROLLBACK")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(db.passive_checkpoint().unwrap().complete());
+    }
+
+    #[test]
+    fn wal_reclamation_does_not_promise_immediate_main_file_shrink() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = create(&path);
+        free_body_pages(&db);
+        db.checkpoint().unwrap();
+        let reader = EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap();
+        reader
+            .read(|c| {
+                c.execute_batch("BEGIN")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(body(&reader), SECRET);
+        let main_before = fs::metadata(&path).unwrap().len();
+        let progress = db.reclaim_pages(PhysicalReclaimBudget::default()).unwrap();
+        assert_eq!(progress.yielded_steps, 64);
+        assert!(progress.after.page_count < progress.before.page_count);
+        assert_eq!(fs::metadata(&path).unwrap().len(), main_before);
+        let wal = fs::metadata(root.path().join("profile.db-wal"))
+            .unwrap()
+            .len();
+        assert!(wal > 0);
+        db.read(|c| {
+            c.busy_timeout(Duration::ZERO)?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(database_busy(&db.checkpoint().unwrap_err()));
+        assert_eq!(body(&reader), SECRET);
+        println!(
+            "pinned reader: SQL pages {} -> {}; main unchanged {main_before} bytes, WAL {wal} bytes",
+            progress.before.page_count, progress.after.page_count
+        );
+        reader
+            .read(|c| {
+                c.execute_batch("ROLLBACK")?;
+                Ok(())
+            })
+            .unwrap();
+        drop(reader);
+        drop(db);
+        let reopened = EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap();
+        assert_eq!(reopened.physical_stats().unwrap(), progress.after);
+        assert_eq!(body(&reopened), SECRET);
+    }
+
+    #[test]
+    fn incremental_vacuum_late_interrupt_is_not_false_committed_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = create(&path);
+        free_body_pages(&db);
+        let before = db.physical_stats().unwrap();
+        observations::INTERRUPT_AFTER.with(|n| n.set(Some(1)));
+        let error = db
+            .reclaim_pages(PhysicalReclaimBudget::new(8).unwrap())
+            .unwrap_err();
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        let mut interrupted = false;
+        while let Some(error) = cause {
+            if let Some(driver) = error.downcast_ref::<rusqlite::Error>() {
+                interrupted |=
+                    driver.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted);
+            }
+            cause = error.source();
+        }
+        assert!(
+            interrupted,
+            "late SQLITE_INTERRUPT must retain source: {error}"
+        );
+        // SQLite rolls back interrupted write transactions. The owner's failed
+        // explicit rollback still faults the handle and preserves both causes.
+        assert!(db.requires_reopen());
+        drop(db);
+        let reopened = EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap();
+        assert_eq!(reopened.physical_stats().unwrap(), before);
+        assert_eq!(body(&reopened), SECRET);
+        assert_eq!(
+            reopened
+                .reclaim_pages(PhysicalReclaimBudget::new(8).unwrap())
+                .unwrap()
+                .yielded_steps,
+            8
+        );
+    }
+
+    #[test]
+    fn incremental_vacuum_commit_failure_uses_existing_fault_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = create(&path);
+        free_body_pages(&db);
+        let result = db.transaction(|c| {
+            let progress = reclaim_pages_on(c, PhysicalReclaimBudget::new(8)?)?;
+            assert_eq!(progress.yielded_steps, 8);
+            c.execute_batch("COMMIT")?;
+            Ok(progress)
+        });
+        assert!(
+            result.is_err(),
+            "owner COMMIT failure cannot return successful progress"
+        );
+        assert!(db.requires_reopen());
+        drop(db);
+        assert_eq!(
+            body(&EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap()),
+            SECRET
+        );
+    }
+
+    #[test]
+    fn physical_budget_rejects_zero_and_excess_and_idle_does_no_vacuum() {
+        assert!(PhysicalReclaimBudget::new(0).is_err());
+        assert!(PhysicalReclaimBudget::new(65).is_err());
+        let root = tempfile::tempdir().unwrap();
+        let db = create(&root.path().join("profile.db"));
+        let before = db.physical_stats().unwrap();
+        assert_eq!(before.freelist_count, 0);
+        let changes = db.read(|c| Ok(c.total_changes())).unwrap();
+        observations::VACUUM_STATEMENTS.with(|n| n.set(0));
+        let progress = db.reclaim_pages(PhysicalReclaimBudget::default()).unwrap();
+        assert_eq!(progress.yielded_steps, 0);
+        assert_eq!(progress.before, before);
+        assert_eq!(progress.after, before);
+        assert_eq!(db.read(|c| Ok(c.total_changes())).unwrap(), changes);
+        assert_eq!(observations::VACUUM_STATEMENTS.with(|n| n.get()), 0);
+    }
+
     #[test]
     fn checked_close_preserves_encrypted_wal_rows_after_relocation() {
         let dir = tempfile::tempdir().unwrap();
@@ -621,6 +1212,7 @@ mod tests {
         db.read(|c| {
             for (name, expected) in [
                 ("foreign_keys", 1),
+                ("auto_vacuum", 2),
                 ("cache_size", -4096),
                 ("mmap_size", 0),
                 ("temp_store", 2),

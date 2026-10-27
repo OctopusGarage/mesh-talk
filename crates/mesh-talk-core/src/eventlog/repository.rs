@@ -93,6 +93,14 @@ impl std::ops::Deref for RepositoryOwner {
 }
 impl EventRepository {
     #[cfg(test)]
+    pub(crate) fn body_read_counts(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering;
+        (
+            self.body_fetches.load(Ordering::Relaxed),
+            self.body_decodes.load(Ordering::Relaxed),
+        )
+    }
+    #[cfg(test)]
     pub(crate) fn new(
         database: Arc<EncryptedDatabase>,
         domain: EventDomainId,

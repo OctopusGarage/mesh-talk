@@ -389,19 +389,6 @@ fn cleanup(profile: &ProfileStorage, sources: &[Source]) -> Result<(), LogError>
     // archive operation. DB and provenance errors still fail the constructor.
     cleanup_archives(profile, sources).map(|_| ())
 }
-fn checkpoint_busy(error: &LogError) -> bool {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
-    while let Some(error) = source {
-        if let Some(driver) = error.downcast_ref::<rusqlite::Error>() {
-            return matches!(
-                driver.sqlite_error_code(),
-                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
-            );
-        }
-        source = error.source();
-    }
-    false
-}
 fn defer_archive(
     profile: &ProfileStorage,
     cause: LogError,
@@ -428,7 +415,9 @@ fn cleanup_archives(
     // checkpoint's typed BUSY/LOCKED outcome is retryable; other DB errors retain
     // their original source, including faulted/poisoned owner state.
     if let Err(error) = profile.database().checkpoint() {
-        return if !profile.database().requires_reopen() && checkpoint_busy(&error) {
+        return if !profile.database().requires_reopen()
+            && crate::storage::database::database_busy(&error)
+        {
             defer_archive(profile, error)
         } else {
             Err(error)

@@ -271,7 +271,12 @@ cleanup failures retain their cause and an independently paced retry intent;
 they cannot block publication staging or normal role, digest and session work.
 Identical persistent error diagnostics are not repeatedly rewritten. Initial
 publication can leave retryable archive cleanup pending, while provenance and
-authoritative database failures remain explicit. The
+authoritative database failures remain explicit. A separate physical class
+reclaims already-free pages in capped background slices and completes eligible
+main-file truncation through PASSIVE checkpoints. It does not delete live mail
+or change retention. Reader-pinned or incomplete checkpoints retain independently
+paced work; ordinary traffic and cleanup continue. Actual checkpoint work can
+exceed the page-step budget, and retained WAL space may remain allocated. The
 [storage contract](ARCHITECTURE.md#storage-replay-and-query-budgets) defines
 transaction, expiry and shutdown semantics. Functional fast-KDF tests and Unix
 joined-stop tests do not establish production unlock performance, native Windows

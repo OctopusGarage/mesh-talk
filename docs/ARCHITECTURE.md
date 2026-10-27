@@ -1258,14 +1258,57 @@ queries. SQLCipher passphrases are domain-separated so user input cannot select
 the raw-key syntax. Production key derivation retains a 600,000-iteration
 password work factor; only existing test configurations reduce it.
 
+Fresh encrypted databases establish incremental auto-vacuum (mode 2) before the
+first metadata table. Warm open authenticates application/schema and owner first,
+then requires the same mode. Unsupported NONE/FULL modes fail without a full
+VACUUM, initialization over existing authority or an empty-store fallback.
+Authenticated legacy publication creates its new database with this policy.
+
 Connection policy disables mmap, keeps temporary data in memory, suggests a
-4 MiB page cache, and uses FULL synchronization with automatic WAL checkpointing
-after 256 pages and a 4 MiB retained-journal target. These are connection budgets,
+4 MiB page cache, and uses FULL synchronization with a 256-page automatic WAL
+checkpoint trigger and a 4 MiB retained-journal target. These are connection budgets,
 not a global RAM or disk cap: query results, concurrent domain work, long readers
 and historical data require their own bounds. Failed commits, failed rollbacks
 and fatal storage errors invalidate the handle until reopening. Read failures
 remain errors rather than missing records. The connection owner does not by
 itself convert legacy event or transcript stores to demand loading.
+
+Physical maintenance reads checked page-size, page-count and freelist scalars.
+Its explicit budget accepts one through 64 free-page iterations, default 64.
+The row-producing incremental-vacuum pragma is stepped through completion inside
+the existing transaction; even zero-column result rows represent engine work.
+Progress is returned only after COMMIT. Zero free pages avoid a vacuum statement
+and write transaction; late statement, COMMIT and rollback failures retain the
+same authority and fault policy. No whole-file scan or history-body hydration is
+needed to discover this work.
+
+The dedicated worker starts a physical drain at 256 free pages, stops at or below
+64, and processes at most 64 iterations per eligible slice with a 100 ms success
+cooldown plus its measured-duty gate. These are internal scheduling/hysteresis
+choices, not physical-byte, latency or throughput guarantees. The class has
+independent 100 ms–5 s retry eligibility for typed BUSY/LOCKED and incomplete
+checkpoint progress; other role, digest, staging, archive and session work
+continues. With only future physical work pending, the worker waits for its
+eligibility deadline, cancellation or a normal wake instead of polling a backlog.
+
+Each successful vacuum slice requests one background PASSIVE checkpoint outside
+its transaction and live statements. A partial frame transfer remains pending
+even when SQLite returns a zero busy flag. On the first worker inspection only,
+one known main-file length comparison against the checked logical page estimate
+discovers pending truncation after restart, including below-threshold freelists.
+Ordinary WAL growth does not initiate this completion path. No-WAL or complete
+frame progress clears the intent without promising shrink of mere file padding.
+A pinned reader can defer completion; retries never force WAL truncation or a
+checkpoint loop. PASSIVE may copy an arbitrarily large available WAL backlog,
+so its engine work is **not** capped by the 64 vacuum iterations. The measured
+slice duty and cooperative shutdown include that admitted synchronous work.
+
+Logical domain charges, reusable free pages, the SQL page estimate, main/WAL file
+lengths and actual filesystem block release are separate observations. Completed
+checkpointing permits main-file truncation while the owner remains open; allocated
+WAL space may remain for reuse. Neither the page budget nor the WAL trigger is a
+hard total disk or I/O cap. Physical maintenance removes only already-free pages
+and does not change live signed events, counters, local suppression or retention.
 
 The shared core profile lease retains the operating-system lock on persistent
 `node.lock`. The CLI acquires it before opening keystores and retains it through

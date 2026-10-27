@@ -6,13 +6,18 @@ use crate::{
         federation,
         role::{inventory::preparation::DigestWorker, maintenance::RelayMaintenanceBudget},
     },
-    storage::profile::context::ArchiveCleanupOutcome,
+    storage::{
+        database::{EncryptedDatabase, PhysicalReclaimBudget, database_busy},
+        profile::context::ArchiveCleanupOutcome,
+    },
 };
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 #[cfg(test)]
-thread_local! {static SLICE_TIMES: std::cell::RefCell<Vec<(Instant,Instant)>> = const { std::cell::RefCell::new(Vec::new()) };}
+thread_local! {
+static PHYSICAL_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+static SLICE_TIMES: std::cell::RefCell<Vec<(Instant,Instant)>> = const { std::cell::RefCell::new(Vec::new()) };}
 
 const MIN_SPACING: Duration = Duration::from_millis(10);
 fn pause_for(elapsed: Duration, failures: u32) -> Duration {
@@ -24,6 +29,92 @@ fn pause_for(elapsed: Duration, failures: u32) -> Duration {
             Duration::from_millis(100u64 << failures.saturating_sub(1).min(6))
                 .min(Duration::from_secs(5)),
         )
+    }
+}
+
+// Hysteresis amortizes tiny session deletes. Each eligible physical slice
+// returns to all other maintenance classes and the measured-duty pacing gate.
+const PHYSICAL_START_PAGES: u64 = 256;
+const PHYSICAL_STOP_PAGES: u64 = 64;
+const PHYSICAL_COOLDOWN: Duration = Duration::from_millis(100);
+#[derive(Default)]
+struct PhysicalCleanup {
+    active: bool,
+    inspected_main: bool,
+    checkpoint_pending: bool,
+    failures: u32,
+    next_eligible: Option<tokio::time::Instant>,
+}
+impl PhysicalCleanup {
+    fn step(&mut self, database: &EncryptedDatabase) -> Result<(), LogError> {
+        if self
+            .next_eligible
+            .is_some_and(|at| at > tokio::time::Instant::now())
+        {
+            return Ok(());
+        }
+        #[cfg(test)]
+        PHYSICAL_INSPECTIONS.with(|v| v.set(v.get() + 1));
+        let result = (|| {
+            if !self.inspected_main {
+                self.checkpoint_pending = database.main_file_exceeds_page_estimate()?;
+                self.inspected_main = true;
+            }
+            let stats = database.physical_stats()?;
+            if stats.freelist_count <= PHYSICAL_STOP_PAGES {
+                self.active = false;
+            } else if stats.freelist_count >= PHYSICAL_START_PAGES {
+                self.active = true;
+            }
+            if !self.active && !self.checkpoint_pending {
+                self.failures = 0;
+                self.next_eligible = None;
+                return Ok(());
+            }
+            if self.active {
+                let progress = database.reclaim_pages(PhysicalReclaimBudget::default())?;
+                log::debug!(
+                    "indexed relay physical cleanup: {} iterations, free pages {} -> {}, SQL pages {} -> {}",
+                    progress.yielded_steps,
+                    progress.before.freelist_count,
+                    progress.after.freelist_count,
+                    progress.before.page_count,
+                    progress.after.page_count
+                );
+                self.active = progress.yielded_steps > 0
+                    && progress.after.freelist_count > PHYSICAL_STOP_PAGES;
+                self.checkpoint_pending |= progress.yielded_steps > 0;
+            }
+            if self.checkpoint_pending {
+                // A completed PASSIVE transfer permits main truncation. It does
+                // not prove filesystem block release or shrink retained WAL bytes.
+                let progress = database.passive_checkpoint()?;
+                self.checkpoint_pending = !progress.complete();
+                if self.checkpoint_pending {
+                    self.failures = self.failures.saturating_add(1);
+                    self.next_eligible = Some(
+                        tokio::time::Instant::now() + pause_for(Duration::ZERO, self.failures),
+                    );
+                    log::debug!("indexed relay physical checkpoint deferred: {progress:?}");
+                    return Ok(());
+                }
+            }
+            self.failures = 0;
+            self.next_eligible = self
+                .active
+                .then(|| tokio::time::Instant::now() + PHYSICAL_COOLDOWN);
+            Ok(())
+        })();
+        match result {
+            Err(error) if !database.requires_reopen() && database_busy(&error) => {
+                self.failures = self.failures.saturating_add(1);
+                self.next_eligible =
+                    Some(tokio::time::Instant::now() + pause_for(Duration::ZERO, self.failures));
+                log::warn!("indexed relay physical cleanup deferred: {error}");
+                Ok(())
+            }
+            result => result,
+        }
     }
 }
 
@@ -43,6 +134,7 @@ impl IndexedPostOffice {
         let mut cancelled = profile.federation_cancellations().subscribe_changes();
         let mut hashes = DigestWorker::default();
         let mut failures = 0u32;
+        let mut physical = PhysicalCleanup::default();
         let mut archive_failures = 0u32;
         let mut archive_retry_at: Option<tokio::time::Instant> = None;
         loop {
@@ -107,8 +199,6 @@ impl IndexedPostOffice {
                 };
                 Ok::<_, LogError>((pending, deadline))
             })();
-            #[cfg(test)]
-            SLICE_TIMES.with(|v| v.borrow_mut().push((started, Instant::now())));
             let (pending, deadline) = match slice {
                 Ok(result) => {
                     failures = 0;
@@ -135,10 +225,20 @@ impl IndexedPostOffice {
                     (true, None)
                 }
             };
+            // Physical contention has its own deadline; it cannot short-circuit
+            // role, digest, staging, archive or session work above. All other
+            // physical DB errors propagate, including authority validation.
+            physical.step(profile.database())?;
+            #[cfg(test)]
+            SLICE_TIMES.with(|v| v.borrow_mut().push((started, Instant::now())));
             let deadline = match (
                 deadline.map(tokio::time::Instant::from_std),
                 archive_retry_at,
             ) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let deadline = match (deadline, physical.next_eligible) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             };
@@ -177,6 +277,470 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn physical_zero_frame_completion_does_not_retry_main_padding() {
+        use crate::storage::database::observations::PASSIVE_ATTEMPTS;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = EncryptedDatabase::open(&path, "pw", b"owner").unwrap();
+        db.checkpoint().unwrap();
+        let original = std::fs::metadata(&path).unwrap().len();
+        // Test-only trailing extent: no logical free-page work or WAL frames.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(original + 4096)
+            .unwrap();
+        assert!(db.main_file_exceeds_page_estimate().unwrap());
+        PASSIVE_ATTEMPTS.with(|v| v.borrow_mut().clear());
+        let mut cleanup = PhysicalCleanup::default();
+        cleanup.step(&db).unwrap();
+        assert!(!cleanup.checkpoint_pending);
+        assert!(cleanup.next_eligible.is_none());
+        assert_eq!(PASSIVE_ATTEMPTS.with(|v| v.borrow().len()), 1);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            original + 4096,
+            "zero transferred frames do not prove filesystem shrink"
+        );
+        cleanup.step(&db).unwrap();
+        assert_eq!(
+            PASSIVE_ATTEMPTS.with(|v| v.borrow().len()),
+            1,
+            "padding alone must not create a retry loop"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn physical_restart_discovers_small_wal_truncation_and_ignores_ordinary_growth() {
+        use crate::storage::database::observations::PASSIVE_ATTEMPTS;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = EncryptedDatabase::open(&path, "pw", b"owner").unwrap();
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE disposable(body BLOB)")?;
+            c.execute("INSERT INTO disposable VALUES(zeroblob(2097152))", [])?;
+            c.execute("DELETE FROM disposable", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.checkpoint().unwrap();
+        let main_before = std::fs::metadata(&path).unwrap().len();
+        let reader = EncryptedDatabase::open(&path, "pw", b"owner").unwrap();
+        reader
+            .read(|c| {
+                c.execute_batch("BEGIN")?;
+                c.query_row("SELECT count(*) FROM disposable", [], |r| {
+                    r.get::<_, i64>(0)
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        while db.physical_stats().unwrap().freelist_count > PHYSICAL_STOP_PAGES {
+            db.reclaim_pages(PhysicalReclaimBudget::default()).unwrap();
+        }
+        drop(db); // A second live reader prevents last-connection checkpoint.
+        let db = EncryptedDatabase::open(&path, "pw", b"owner").unwrap();
+        assert!(db.physical_stats().unwrap().freelist_count < PHYSICAL_START_PAGES);
+        assert!(db.main_file_exceeds_page_estimate().unwrap());
+        PASSIVE_ATTEMPTS.with(|v| v.borrow_mut().clear());
+        let mut cleanup = PhysicalCleanup::default();
+        cleanup.step(&db).unwrap();
+        assert!(!cleanup.active);
+        assert!(
+            cleanup.checkpoint_pending,
+            "partial PASSIVE is unfinished even with busy flag zero"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), main_before);
+        reader
+            .read(|c| {
+                c.execute_batch("ROLLBACK")?;
+                Ok(())
+            })
+            .unwrap();
+        drop(reader);
+        tokio::time::sleep_until(cleanup.next_eligible.unwrap()).await;
+        cleanup.step(&db).unwrap();
+        assert!(!cleanup.checkpoint_pending);
+        assert!(std::fs::metadata(&path).unwrap().len() < main_before);
+        assert_eq!(PASSIVE_ATTEMPTS.with(|v| v.borrow().len()), 2);
+        db.transaction(|c| {
+            c.execute("INSERT INTO disposable VALUES(zeroblob(131072))", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!db.main_file_exceeds_page_estimate().unwrap());
+        PASSIVE_ATTEMPTS.with(|v| v.borrow_mut().clear());
+        PhysicalCleanup::default().step(&db).unwrap();
+        assert_eq!(
+            PASSIVE_ATTEMPTS.with(|v| v.borrow().len()),
+            0,
+            "ordinary pending appends cannot trigger a startup checkpoint"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn physical_worker_releases_main_file_without_reader_and_after_reader_retires() {
+        for pinned in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let identity = DeviceIdentity::generate();
+            let public = identity.public();
+            let office = IndexedPostOffice::open_with_lease(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &root.path().join("relay.log"),
+                "pw",
+                identity,
+            )
+            .unwrap();
+            while office.state.profile().cleanup_pending().unwrap() {
+                office.state.profile().cleanup_step(true).unwrap();
+            }
+            let db = office.state.profile().database();
+            db.transaction(|c| {
+                c.execute_batch("CREATE TABLE disposable_pages(body BLOB)")?;
+                c.execute("INSERT INTO disposable_pages VALUES(zeroblob(2097152))", [])?;
+                c.execute("DELETE FROM disposable_pages", [])?;
+                Ok(())
+            })
+            .unwrap();
+            db.checkpoint().unwrap();
+            let main_path = root.path().join("profile.db");
+            let main_before = std::fs::metadata(&main_path).unwrap().len();
+            let reader = pinned.then(|| block_archive_checkpoint(&office, &public));
+            let (stop, rx) = watch::channel(false);
+            let worker = office.run_maintenance(rx);
+            tokio::pin!(worker);
+            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_secs(2))=>{}}
+            let stats = db.physical_stats().unwrap();
+            if !pinned {
+                assert!(stats.freelist_count <= PHYSICAL_STOP_PAGES);
+            }
+            if let Some(reader) = reader {
+                assert_eq!(
+                    std::fs::metadata(&main_path).unwrap().len(),
+                    main_before,
+                    "snapshot pins main-file truncation"
+                );
+                reader
+                    .read(|c| {
+                        c.execute_batch("ROLLBACK")?;
+                        Ok(())
+                    })
+                    .unwrap();
+                drop(reader);
+                tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_secs(6))=>{}}
+            }
+            assert!(db.physical_stats().unwrap().freelist_count <= PHYSICAL_STOP_PAGES);
+            let main_after = std::fs::metadata(&main_path).unwrap().len();
+            assert!(
+                main_after < main_before,
+                "background physical completion must release main-file space; pinned={pinned}, SQL={stats:?}, main={main_before}->{main_after}"
+            );
+            println!(
+                "worker pinned={pinned}: main {main_before}->{main_after}, WAL={} bytes",
+                std::fs::metadata(root.path().join("profile.db-wal"))
+                    .unwrap()
+                    .len()
+            );
+            stop.send_replace(true);
+            worker.await.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn healthy_watches_progress_without_physical_inspection_until_success_eligibility() {
+        use crate::postoffice::storage::federation::{Direction, SessionOwner};
+        use crate::storage::database::observations::VACUUM_ATTEMPTS;
+        let root = tempfile::tempdir().unwrap();
+        let office = office(&root);
+        while office.state.profile().cleanup_pending().unwrap() {
+            office.state.profile().cleanup_step(true).unwrap();
+        }
+        let db = office.state.profile().database();
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE disposable_pages(body BLOB)")?;
+            c.execute("INSERT INTO disposable_pages VALUES(zeroblob(2097152))", [])?;
+            c.execute("DELETE FROM disposable_pages", [])?;
+            Ok(())
+        })
+        .unwrap();
+        PHYSICAL_INSPECTIONS.with(|v| v.set(0));
+        VACUUM_ATTEMPTS.with(|v| v.borrow_mut().clear());
+        let (stop, rx) = watch::channel(false);
+        let worker = office.run_maintenance(rx);
+        tokio::pin!(worker);
+        tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(1))=>{}}
+        let first = VACUUM_ATTEMPTS.with(|v| {
+            assert_eq!(v.borrow().len(), 1);
+            v.borrow()[0]
+        });
+        let after_first = db.physical_stats().unwrap();
+        assert_eq!(PHYSICAL_INSPECTIONS.with(|v| v.get()), 1);
+        db.transaction(|c| {
+            c.execute("UPDATE relay_publication SET staging_pending=1", [])?;
+            Ok(())
+        })
+        .unwrap();
+        drop(
+            SessionOwner::begin(
+                office.state.profile().clone(),
+                Direction::Inbound,
+                super::super::network::unix_now(),
+                Instant::now(),
+            )
+            .unwrap(),
+        );
+        office
+            .state
+            .request_preparation_at(super::super::network::unix_now())
+            .unwrap();
+        tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep_until(first + Duration::from_millis(90))=>{}}
+        assert!(
+            office
+                .state
+                .preparation_ready_at(super::super::network::unix_now())
+                .unwrap()
+        );
+        assert!(!office.state.profile().cleanup_pending().unwrap());
+        assert_eq!(
+            scalar(&office, "SELECT session_rows FROM relay_federation_runtime"),
+            0
+        );
+        assert_eq!(VACUUM_ATTEMPTS.with(|v| v.borrow().len()), 1);
+        assert_eq!(
+            PHYSICAL_INSPECTIONS.with(|v| v.get()),
+            1,
+            "healthy watch wakes must not inspect physical scalars before success eligibility"
+        );
+        let limit = first + Duration::from_secs(2);
+        while VACUUM_ATTEMPTS.with(|v| v.borrow().len()) < 2 {
+            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(10))=>{}}
+            assert!(tokio::time::Instant::now() < limit);
+        }
+        let attempts = VACUUM_ATTEMPTS.with(|v| v.borrow().clone());
+        assert!(attempts[1] - attempts[0] >= PHYSICAL_COOLDOWN);
+        assert!(PHYSICAL_INSPECTIONS.with(|v| v.get()) >= 2);
+        assert!(db.physical_stats().unwrap().freelist_count < after_first.freelist_count);
+        stop.send_replace(true);
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_reclaims_a_capped_slice_then_waits_without_idle_writes() {
+        use crate::storage::database::observations::VACUUM_STATEMENTS;
+        let root = tempfile::tempdir().unwrap();
+        let office = office(&root);
+        while office.state.profile().cleanup_pending().unwrap() {
+            office.state.profile().cleanup_step(true).unwrap();
+        }
+        let db = office.state.profile().database();
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE disposable_pages(body BLOB)")?;
+            c.execute("INSERT INTO disposable_pages VALUES(zeroblob(2097152))", [])?;
+            c.execute("DELETE FROM disposable_pages", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let before = db.physical_stats().unwrap();
+        assert!(before.freelist_count >= 256);
+        VACUUM_STATEMENTS.with(|v| v.set(0));
+        PHYSICAL_INSPECTIONS.with(|v| v.set(0));
+        let (stop, rx) = watch::channel(false);
+        let worker = office.run_maintenance(rx);
+        tokio::pin!(worker);
+        tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(60))=>{}}
+        stop.send_replace(true);
+        worker.await.unwrap();
+        let after = db.physical_stats().unwrap();
+        assert!(
+            after.page_count < before.page_count,
+            "startup free pages must receive a slice"
+        );
+        assert_eq!(before.freelist_count - after.freelist_count, 64);
+        assert_eq!(VACUUM_STATEMENTS.with(|v| v.get()), 1);
+        assert_eq!(
+            PHYSICAL_INSPECTIONS.with(|v| v.get()),
+            1,
+            "successful cooldown must sleep instead of polling every10ms"
+        );
+        assert!(after.freelist_count > 64, "stop need not drain backlog");
+    }
+
+    #[tokio::test]
+    async fn actual_role_gc_supplies_free_pages_for_physical_progress() {
+        use crate::eventlog::{ConversationId, Event, EventKind, sync::network::NetworkSyncStore};
+        let root = tempfile::tempdir().unwrap();
+        let office = office(&root);
+        let author = DeviceIdentity::generate();
+        let recipient = DeviceIdentity::generate();
+        let mailbox =
+            crate::postoffice::opaque::RelayMailbox::federated(&author, &recipient.public())
+                .unwrap();
+        for seq in 1..=24 {
+            let event = mailbox
+                .wrap(&Event::new(
+                    &author,
+                    ConversationId::new([47; 32]),
+                    seq,
+                    vec![],
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![1; 50_000],
+                ))
+                .unwrap();
+            office.state.record(&event, 0, None).unwrap();
+        }
+        let live_recipient = DeviceIdentity::generate();
+        let live =
+            crate::postoffice::opaque::RelayMailbox::federated(&author, &live_recipient.public())
+                .unwrap()
+                .wrap(&Event::new(
+                    &author,
+                    ConversationId::new([48; 32]),
+                    1,
+                    vec![],
+                    1,
+                    0,
+                    EventKind::Message,
+                    vec![2],
+                ))
+                .unwrap();
+        office
+            .state
+            .record(&live, super::super::network::unix_now(), None)
+            .unwrap();
+        let reads_before = office.state.body_read_counts();
+        let db = office.state.profile().database();
+        let before = db.physical_stats().unwrap();
+        let (stop, rx) = watch::channel(false);
+        let worker = office.run_maintenance(rx);
+        tokio::pin!(worker);
+        tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(550))=>{}}
+        stop.send_replace(true);
+        worker.await.unwrap();
+        let after = db.physical_stats().unwrap();
+        assert!(
+            after.page_count < before.page_count,
+            "logical role GC must enable physical progress: {before:?} -> {after:?}"
+        );
+        assert!(
+            !office
+                .state
+                .next_work_at(super::super::network::unix_now())
+                .unwrap()
+                .has_work()
+        );
+        assert!(!office.state.digest_work_pending().unwrap());
+        assert_eq!(
+            office.state.body_read_counts(),
+            reads_before,
+            "logical and physical cleanup cannot rehydrate history bodies"
+        );
+        assert!(
+            office
+                .durable_have(&live.conversation_id, &live.id)
+                .unwrap()
+        );
+        assert_eq!(office.state.physical_charge().unwrap().event_count, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn physical_contention_cannot_starve_other_classes_or_bypass_retry_deadline() {
+        use crate::postoffice::storage::federation::{Direction, SessionOwner};
+        use crate::storage::database::observations::{FORCE_BUSY, VACUUM_ATTEMPTS};
+        struct ResetBusy;
+        impl Drop for ResetBusy {
+            fn drop(&mut self) {
+                FORCE_BUSY.with(|v| v.set(false));
+            }
+        }
+        let _reset = ResetBusy;
+        let root = tempfile::tempdir().unwrap();
+        let office = office(&root);
+        let db = office.state.profile().database();
+        db.transaction(|c| {
+            c.execute_batch("CREATE TABLE disposable_pages(body BLOB)")?;
+            c.execute("INSERT INTO disposable_pages VALUES(zeroblob(2097152))", [])?;
+            c.execute("DELETE FROM disposable_pages", [])?;
+            Ok(())
+        })
+        .unwrap();
+        FORCE_BUSY.with(|v| v.set(true));
+        VACUUM_ATTEMPTS.with(|v| v.borrow_mut().clear());
+        let (stop, rx) = watch::channel(false);
+        {
+            let worker = office.run_maintenance(rx);
+            tokio::pin!(worker);
+            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(1))=>{}}
+            assert_eq!(VACUUM_ATTEMPTS.with(|v| v.borrow().len()), 1);
+            db.transaction(|c| {
+                c.execute("UPDATE relay_publication SET staging_pending=1", [])?;
+                Ok(())
+            })
+            .unwrap();
+            drop(
+                SessionOwner::begin(
+                    office.state.profile().clone(),
+                    Direction::Inbound,
+                    super::super::network::unix_now(),
+                    Instant::now(),
+                )
+                .unwrap(),
+            );
+            office
+                .state
+                .request_preparation_at(super::super::network::unix_now())
+                .unwrap();
+            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(350))=>{}}
+            assert!(
+                office
+                    .state
+                    .preparation_ready_at(super::super::network::unix_now())
+                    .unwrap()
+            );
+            assert!(!office.state.profile().cleanup_pending().unwrap());
+            assert_eq!(
+                scalar(&office, "SELECT session_rows FROM relay_federation_runtime"),
+                0
+            );
+            let attempts = VACUUM_ATTEMPTS.with(|v| v.borrow().clone());
+            assert!(
+                (2..=3).contains(&attempts.len()),
+                "physical attempts: {}",
+                attempts.len()
+            );
+            for (index, pair) in attempts.windows(2).enumerate() {
+                assert!(pair[1] - pair[0] >= Duration::from_millis(100u64 << index));
+            }
+            let until = tokio::time::Instant::now() + Duration::from_secs(10);
+            while VACUUM_ATTEMPTS.with(|v| v.borrow().len()) < 3 {
+                tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(10))=>{}}
+                assert!(tokio::time::Instant::now() < until);
+            }
+            let next =
+                VACUUM_ATTEMPTS.with(|v| *v.borrow().last().unwrap()) + Duration::from_millis(400);
+            FORCE_BUSY.with(|v| v.set(false));
+            office
+                .state
+                .request_preparation_at(super::super::network::unix_now())
+                .unwrap();
+            tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep_until(next - MIN_SPACING)=>{}}
+            assert_eq!(
+                VACUUM_ATTEMPTS.with(|v| v.borrow().len()),
+                3,
+                "healthy wakes cannot bypass failed physical eligibility"
+            );
+            let stopped_at = tokio::time::Instant::now();
+            stop.send_replace(true);
+            worker.await.unwrap();
+            assert_eq!(tokio::time::Instant::now(), stopped_at);
+        }
+        drop(office);
+        assert!(ProfileStorageLease::acquire(root.path()).is_ok());
+    }
+
     #[test]
     fn pacing_enforces_spacing_duty_and_bounded_error_backoff() {
         assert_eq!(pause_for(Duration::ZERO, 0), Duration::from_millis(10));
@@ -224,6 +788,7 @@ mod tests {
         while office.state.profile().cleanup_pending().unwrap() {
             office.state.profile().cleanup_step(true).unwrap();
         }
+        crate::storage::database::observations::PASSIVE_ATTEMPTS.with(|v| v.borrow_mut().clear());
         let before = office
             .state
             .profile()
@@ -236,6 +801,10 @@ mod tests {
         tokio::select! { r=&mut worker=>panic!("worker stopped: {r:?}"), _=tokio::time::sleep(Duration::from_millis(80))=>{} }
         stop.send_replace(true);
         worker.await.unwrap();
+        assert_eq!(
+            crate::storage::database::observations::PASSIVE_ATTEMPTS.with(|v| v.borrow().len()),
+            0
+        );
         assert_eq!(
             office
                 .state
