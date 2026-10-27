@@ -1,0 +1,314 @@
+use super::*;
+
+pub(super) fn register(
+    tx: &rusqlite::Transaction<'_>,
+    domain: EventDomainId,
+) -> Result<(), LogError> {
+    let marker: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='event_repository_schema')",
+        [],
+        |r| r.get(0),
+    )?;
+    if marker {
+        // Verify the marker authority itself before trusting its typed values.
+        require_owned_ddl(
+            tx,
+            "event_repository_schema",
+            "table",
+            SCHEMA
+                .split(';')
+                .next()
+                .ok_or(LogError::IncompatibleEventSchema)?,
+        )?;
+        let mut rows = tx.prepare("SELECT singleton,version FROM event_repository_schema")?;
+        let mut rows = rows.query([])?;
+        let row = rows.next()?.ok_or(LogError::IncompatibleEventSchema)?;
+        if row.get::<_, i64>(0)? != 1 || row.get::<_, i64>(1)? != 1 || rows.next()?.is_some() {
+            return Err(LogError::IncompatibleEventSchema);
+        }
+    } else {
+        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('event_domains','event_conversations','retained_events','retained_event_parents','event_heads','event_author_max'))", [], |r| r.get(0))?;
+        if existing {
+            return Err(LogError::IncompatibleEventSchema);
+        }
+        tx.execute_batch(SCHEMA)?;
+    }
+    validate_owned_ddl(tx)?;
+    validate_objects(tx)?;
+    // Prepare all shared selectors before admitting a new domain. Missing/changed
+    // columns are storage errors, never successful absence.
+    tx.prepare("SELECT domain,next_commit FROM event_domains LIMIT 0")?;
+    tx.prepare("SELECT domain,conversation,revision,event_count,stored_bytes,max_lamport,v2_count,v3_count,v4_count,fingerprint_revision,fingerprint FROM event_conversations LIMIT 0")?;
+    tx.prepare(&format!(
+        "SELECT {HEADER_COLUMNS},body,commit_ordinal FROM retained_events LIMIT 0"
+    ))?;
+    tx.prepare("SELECT domain,child,parent FROM retained_event_parents LIMIT 0")?;
+    tx.prepare("SELECT domain,conversation,id FROM event_heads LIMIT 0")?;
+    tx.prepare("SELECT domain,conversation,author,max_seq FROM event_author_max LIMIT 0")?;
+    tx.execute(
+        "INSERT INTO event_domains(domain,next_commit) VALUES(?1,0) ON CONFLICT(domain) DO NOTHING",
+        [domain.0.as_slice()],
+    )?;
+    Ok(())
+}
+
+pub(super) const SCHEMA: &str = "
+CREATE TABLE event_repository_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);
+INSERT INTO event_repository_schema VALUES(1,1);
+CREATE TABLE event_domains(
+ domain BLOB PRIMARY KEY CHECK(typeof(domain)='blob' AND length(domain)=16),
+ next_commit INTEGER NOT NULL CHECK(typeof(next_commit)='integer' AND next_commit>=0)
+) WITHOUT ROWID;
+CREATE TABLE event_conversations(
+ domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
+ conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>=0),
+ event_count INTEGER NOT NULL CHECK(typeof(event_count)='integer' AND event_count>=0),
+ stored_bytes INTEGER NOT NULL CHECK(typeof(stored_bytes)='integer' AND stored_bytes>=0),
+ max_lamport BLOB NOT NULL CHECK(typeof(max_lamport)='blob' AND length(max_lamport)=8),
+ v2_count INTEGER NOT NULL CHECK(typeof(v2_count)='integer' AND v2_count>=0),
+ v3_count INTEGER NOT NULL CHECK(typeof(v3_count)='integer' AND v3_count>=0),
+ v4_count INTEGER NOT NULL CHECK(typeof(v4_count)='integer' AND v4_count>=0),
+ fingerprint_revision INTEGER CHECK(fingerprint_revision IS NULL OR (typeof(fingerprint_revision)='integer' AND fingerprint_revision>=0)),
+ fingerprint BLOB CHECK(fingerprint IS NULL OR (typeof(fingerprint)='blob' AND length(fingerprint)=32)),
+ PRIMARY KEY(domain,conversation), FOREIGN KEY(domain) REFERENCES event_domains(domain)
+) WITHOUT ROWID;
+CREATE TABLE retained_events(
+ domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
+ id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=32),
+ conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ author BLOB NOT NULL CHECK(typeof(author)='blob' AND length(author)=32),
+ seq BLOB NOT NULL CHECK(typeof(seq)='blob' AND length(seq)=8),
+ lamport BLOB NOT NULL CHECK(typeof(lamport)='blob' AND length(lamport)=8),
+ wall_clock BLOB NOT NULL CHECK(typeof(wall_clock)='blob' AND length(wall_clock)=8),
+ kind INTEGER NOT NULL CHECK(typeof(kind)='integer' AND kind BETWEEN 0 AND 18),
+ parent_count INTEGER NOT NULL CHECK(typeof(parent_count)='integer' AND parent_count>=0),
+ encoded_bytes INTEGER NOT NULL CHECK(typeof(encoded_bytes)='integer' AND encoded_bytes>=0),
+ ciphertext_bytes INTEGER NOT NULL CHECK(typeof(ciphertext_bytes)='integer' AND ciphertext_bytes>=0),
+ signature_bytes INTEGER NOT NULL CHECK(typeof(signature_bytes)='integer' AND signature_bytes>=0),
+ stored_bytes INTEGER NOT NULL CHECK(typeof(stored_bytes)='integer' AND stored_bytes>=0),
+ body BLOB NOT NULL CHECK(typeof(body)='blob' AND length(body)=stored_bytes),
+ commit_ordinal INTEGER NOT NULL CHECK(typeof(commit_ordinal)='integer' AND commit_ordinal>=0),
+ PRIMARY KEY(domain,id), UNIQUE(domain,conversation,author,seq), UNIQUE(domain,commit_ordinal),
+ FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
+) WITHOUT ROWID;
+CREATE INDEX retained_events_clock ON retained_events(domain,conversation,lamport,id);
+CREATE INDEX retained_events_ids ON retained_events(domain,conversation,id);
+CREATE INDEX retained_events_wall_clock ON retained_events(domain,conversation,wall_clock,id);
+CREATE INDEX retained_events_author_messages ON retained_events(domain,conversation,author,kind,lamport,id);
+CREATE INDEX retained_events_kind_author ON retained_events(domain,conversation,kind,author,lamport,id);
+CREATE TABLE retained_event_parents(
+ domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
+ child BLOB NOT NULL CHECK(typeof(child)='blob' AND length(child)=32),
+ parent BLOB NOT NULL CHECK(typeof(parent)='blob' AND length(parent)=32),
+ PRIMARY KEY(domain,child,parent),
+ FOREIGN KEY(domain,child) REFERENCES retained_events(domain,id),
+ FOREIGN KEY(domain,parent) REFERENCES retained_events(domain,id)
+) WITHOUT ROWID;
+CREATE INDEX retained_event_children ON retained_event_parents(domain,parent,child);
+CREATE TABLE event_heads(
+ domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
+ conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=32),
+ PRIMARY KEY(domain,conversation,id),
+ FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation),
+ FOREIGN KEY(domain,id) REFERENCES retained_events(domain,id)
+) WITHOUT ROWID;
+CREATE TABLE event_author_max(
+ domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
+ conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ author BLOB NOT NULL CHECK(typeof(author)='blob' AND length(author)=32),
+ max_seq BLOB NOT NULL CHECK(typeof(max_seq)='blob' AND length(max_seq)=8),
+ PRIMARY KEY(domain,conversation,author),
+ FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
+) WITHOUT ROWID;
+";
+
+// Constant-size schema inspection only: reopening must never recreate a missing
+// authority table or run a history-sized CREATE INDEX as implicit repair.
+fn validate_objects(c: &Connection) -> Result<(), LogError> {
+    for (table, primary) in [
+        ("event_repository_schema", &["singleton"][..]),
+        ("event_domains", &["domain"][..]),
+        ("event_conversations", &["domain", "conversation"][..]),
+        ("retained_events", &["domain", "id"][..]),
+        ("retained_event_parents", &["domain", "child", "parent"][..]),
+        ("event_heads", &["domain", "conversation", "id"][..]),
+        (
+            "event_author_max",
+            &["domain", "conversation", "author"][..],
+        ),
+    ] {
+        let kind: Option<String> = c
+            .query_row(
+                "SELECT type FROM sqlite_master WHERE name=?1",
+                [table],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if kind.as_deref() != Some("table") {
+            return Err(LogError::IncompatibleEventSchema);
+        }
+        let mut stmt =
+            c.prepare("SELECT name FROM pragma_table_info(?1) WHERE pk>0 ORDER BY pk")?;
+        let mut rows = stmt.query([table])?;
+        for expected in primary {
+            let Some(row) = rows.next()? else {
+                return Err(LogError::IncompatibleEventSchema);
+            };
+            if row.get::<_, String>(0)? != *expected {
+                return Err(LogError::IncompatibleEventSchema);
+            }
+        }
+        if rows.next()?.is_some() {
+            return Err(LogError::IncompatibleEventSchema);
+        }
+    }
+    for (name, table, columns) in [
+        (
+            "retained_events_clock",
+            "retained_events",
+            &["domain", "conversation", "lamport", "id"][..],
+        ),
+        (
+            "retained_events_ids",
+            "retained_events",
+            &["domain", "conversation", "id"][..],
+        ),
+        (
+            "retained_events_wall_clock",
+            "retained_events",
+            &["domain", "conversation", "wall_clock", "id"][..],
+        ),
+        (
+            "retained_events_author_messages",
+            "retained_events",
+            &["domain", "conversation", "author", "kind", "lamport", "id"][..],
+        ),
+        (
+            "retained_events_kind_author",
+            "retained_events",
+            &["domain", "conversation", "kind", "author", "lamport", "id"][..],
+        ),
+        (
+            "retained_event_children",
+            "retained_event_parents",
+            &["domain", "parent", "child"][..],
+        ),
+    ] {
+        let actual: Option<(String, String)> = c
+            .query_row(
+                "SELECT type,tbl_name FROM sqlite_master WHERE name=?1",
+                [name],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if actual
+            .as_ref()
+            .map(|(kind, owner)| (kind.as_str(), owner.as_str()))
+            != Some(("index", table))
+        {
+            return Err(LogError::IncompatibleEventSchema);
+        }
+        let partial: i64 = c.query_row(
+            "SELECT partial FROM pragma_index_list(?1) WHERE name=?2",
+            params![table, name],
+            |r| r.get(0),
+        )?;
+        if partial != 0 {
+            return Err(LogError::IncompatibleEventSchema);
+        }
+        let mut stmt = c.prepare(
+            "SELECT name,desc,coll FROM pragma_index_xinfo(?1) WHERE key=1 ORDER BY seqno",
+        )?;
+        let mut rows = stmt.query([name])?;
+        for expected in columns {
+            let Some(row) = rows.next()? else {
+                return Err(LogError::IncompatibleEventSchema);
+            };
+            if row.get::<_, String>(0)? != *expected
+                || row.get::<_, i64>(1)? != 0
+                || row.get::<_, String>(2)? != "BINARY"
+            {
+                return Err(LogError::IncompatibleEventSchema);
+            }
+        }
+        if rows.next()?.is_some() {
+            return Err(LogError::IncompatibleEventSchema);
+        }
+    }
+    Ok(())
+}
+
+// This compares our fixed versioned DDL, not arbitrary SQL grammar. SQLite keeps
+// each submitted CREATE statement in sqlite_master. Collapse outside-literal
+// whitespace runs while preserving token boundaries, and trim the statement
+// delimiter; never concatenate SQL tokens by removing their separator. A known
+// version with a changed type, CHECK, FK, UNIQUE or collation is not adoptable.
+fn normalized_owned_ddl(sql: &str) -> String {
+    let mut normalized = String::new();
+    let mut quoted = None;
+    let mut chars = sql.trim().trim_end_matches(';').trim().chars().peekable();
+    while let Some(character) = chars.next() {
+        if let Some(quote) = quoted {
+            normalized.push(character);
+            if character == quote {
+                if chars.peek() == Some(&quote) {
+                    normalized.push(chars.next().expect("peeked quote exists"));
+                } else {
+                    quoted = None;
+                }
+            }
+        } else if character == '\'' || character == '"' {
+            quoted = Some(character);
+            normalized.push(character);
+        } else if character.is_ascii_whitespace() {
+            if !normalized.ends_with(' ') {
+                normalized.push(' ');
+            }
+        } else {
+            normalized.push(character);
+        }
+    }
+    normalized
+}
+fn require_owned_ddl(
+    c: &Connection,
+    name: &str,
+    kind: &str,
+    expected: &str,
+) -> Result<(), LogError> {
+    let actual: Option<String> = c
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name=?1 AND type=?2",
+            params![name, kind],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if actual.as_deref().map(normalized_owned_ddl).as_deref()
+        != Some(normalized_owned_ddl(expected).as_str())
+    {
+        return Err(LogError::IncompatibleEventSchema);
+    }
+    Ok(())
+}
+fn validate_owned_ddl(c: &Connection) -> Result<(), LogError> {
+    for statement in SCHEMA.split(';').map(str::trim) {
+        if let Some(table) = statement.strip_prefix("CREATE TABLE ") {
+            let name = table
+                .split_once('(')
+                .ok_or(LogError::IncompatibleEventSchema)?
+                .0
+                .trim();
+            require_owned_ddl(c, name, "table", statement)?;
+        } else if let Some(index) = statement.strip_prefix("CREATE INDEX ") {
+            let name = index
+                .split_once(" ON ")
+                .ok_or(LogError::IncompatibleEventSchema)?
+                .0
+                .trim();
+            require_owned_ddl(c, name, "index", statement)?;
+        }
+    }
+    Ok(())
+}

@@ -109,6 +109,14 @@ impl EncryptedDatabase {
         connection
             .execute_batch(&format!("PRAGMA kdf_iter = {KDF_ITERATIONS}"))
             .map_err(|e| context("configure key derivation", e))?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        let foreign_keys: i64 =
+            connection.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
+        if foreign_keys != 1 {
+            return Err(invalid(
+                "encrypted database requires foreign key enforcement",
+            ));
+        }
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
         connection.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
@@ -403,6 +411,7 @@ mod tests {
             EncryptedDatabase::open(&dir.path().join("profile.db"), PASSWORD, BINDING).unwrap();
         db.read(|c| {
             for (name, expected) in [
+                ("foreign_keys", 1),
                 ("cache_size", -4096),
                 ("mmap_size", 0),
                 ("temp_store", 2),

@@ -761,7 +761,7 @@
         "core-storage"
       ],
       "capability": {
-        "summary": "Preserve encrypted causal history while amortizing profile maintenance against whole-log rewrite cost.",
+        "summary": "Preserve encrypted causal history, bounded indexed event queries and amortized legacy profile maintenance.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
@@ -774,6 +774,10 @@
           },
           {
             "name": "Individual durable event lookups return complete owned events or explicit read errors; absence-based proof fallbacks, media reclamation and delivery progress never hide failed reads; affected Node/runtime queries preserve errors and host success payloads",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed event domains transactionally preserve signed bytes, causal edges, frontier and full-u64 counters; bounded keyset reads validate source-bound cursors before decoding selected bodies and cache the unchanged wire fingerprint without body hydration",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

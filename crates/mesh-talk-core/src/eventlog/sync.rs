@@ -295,7 +295,7 @@ pub(crate) fn causal_events(events: Vec<&Event>) -> Vec<&Event> {
 }
 
 /// The fixint-bincode encoded size of one event (matches `node::session::encode`).
-fn encoded_event_size(event: &Event) -> usize {
+pub(crate) fn encoded_event_size(event: &Event) -> usize {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .serialized_size(event)

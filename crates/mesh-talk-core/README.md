@@ -114,6 +114,12 @@ accepted if subsequent projection/recovery reads fail. Its supervisor logs the
 failure and retains queued work for retry; acceptance does not assert a send or
 recipient delivery. Query failures still use the error channel above.
 
+Exhaustive `LogError` matches must also handle indexed-read failures:
+`StaleCursor`, `InvalidPageBudget`, `PageBudgetTooSmall`,
+`RepositoryCounterExhausted` and `IncompatibleEventSchema`. These are local read
+or repository-state errors, not invalid incoming events. Raw Lamport pagination
+does not provide causal ordering; use the ordering contract of the selected API.
+
 ## CLI: `mesh-talk-node`
 
 A headless node ships with the crate as a reference consumer:

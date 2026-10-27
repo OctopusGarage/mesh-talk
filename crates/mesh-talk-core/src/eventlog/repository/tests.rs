@@ -1,0 +1,1245 @@
+use super::pages::PageBudget;
+use super::*;
+use crate::{
+    eventlog::{ConversationId, EventKind},
+    identity::device::DeviceIdentity,
+};
+fn event(
+    identity: &DeviceIdentity,
+    seq: u64,
+    parents: Vec<EventId>,
+    clock: u64,
+    kind: EventKind,
+) -> Event {
+    Event::new(
+        identity,
+        ConversationId::new([1; 32]),
+        seq,
+        parents,
+        clock,
+        clock,
+        kind,
+        vec![42; 128],
+    )
+}
+fn database(dir: &tempfile::TempDir) -> Arc<EncryptedDatabase> {
+    Arc::new(
+        EncryptedDatabase::open(&dir.path().join("profile.db"), "password", b"profile").unwrap(),
+    )
+}
+#[test]
+fn retains_exact_event_across_reopen_without_cross_domain_leak() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let other = EventRepository::new(db, EventDomainId([2; 16])).unwrap();
+    let e = event(
+        &DeviceIdentity::generate(),
+        1,
+        vec![],
+        1,
+        EventKind::Message,
+    );
+    assert_eq!(repository.append(&e).unwrap(), AppendOutcome::Appended);
+    assert_eq!(repository.get(&e.id).unwrap(), Some(e.clone()));
+    assert!(other.get(&e.id).unwrap().is_none());
+    assert_eq!(other.append(&e).unwrap(), AppendOutcome::Appended);
+    drop(repository);
+    drop(other);
+    let reopened = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    assert_eq!(reopened.get(&e.id).unwrap(), Some(e.clone()));
+    assert_eq!(reopened.append(&e).unwrap(), AppendOutcome::Duplicate);
+}
+#[test]
+fn invalid_duplicate_and_missing_parent_do_not_mutate() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db, EventDomainId([1; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let e = event(&identity, 1, vec![], 1, EventKind::Message);
+    repository.append(&e).unwrap();
+    let mut invalid = e.clone();
+    invalid.sig[0] ^= 1;
+    assert!(matches!(
+        repository.append(&invalid),
+        Err(LogError::BadSignature)
+    ));
+    let missing = event(
+        &identity,
+        2,
+        vec![EventId::new([7; 32])],
+        2,
+        EventKind::Message,
+    );
+    assert!(matches!(
+        repository.append(&missing),
+        Err(LogError::MissingParents(_))
+    ));
+    assert!(repository.get(&missing.id).unwrap().is_none());
+}
+#[test]
+fn component_schema_rejects_future_version_without_adopting_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    db.transaction(|tx| {
+        tx.execute_batch(schema::SCHEMA.split(';').next().unwrap())?;
+        tx.execute("INSERT INTO event_repository_schema VALUES(1,99)", [])?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(
+        EventRepository::new(db.clone(), EventDomainId([1; 16])),
+        Err(LogError::IncompatibleEventSchema)
+    ));
+    db.read(|c| {
+        let count: i64 = c.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='event_domains'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(count, 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn metadata_matches_pure_log_for_profile_branch_merge_and_maximum_clocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let root = event(&a, 1, vec![], 7, EventKind::Message);
+    let profile = event(&a, 2, vec![root.id], 2, EventKind::Profile);
+    let branch = event(&b, 1, vec![root.id], 8, EventKind::ChannelReplica);
+    let merge = event(
+        &a,
+        3,
+        vec![profile.id, branch.id],
+        1,
+        EventKind::ChannelHistoryPolicy,
+    );
+    let max = event(
+        &a,
+        u64::MAX,
+        vec![merge.id],
+        u64::MAX,
+        EventKind::ChannelAccountAuthority,
+    );
+    let mut oracle = super::super::EventLog::default();
+    for e in [root, profile, branch, merge, max] {
+        oracle.append(e.clone()).unwrap();
+        repository.append(&e).unwrap();
+        assert_eq!(
+            repository.count(&e.conversation_id).unwrap(),
+            oracle.events(&e.conversation_id).len() as u64
+        );
+        assert_eq!(
+            repository.heads(&e.conversation_id).unwrap(),
+            oracle.heads(&e.conversation_id)
+        );
+        assert_eq!(
+            repository
+                .authored_event(&e.conversation_id, &e.author, e.seq)
+                .unwrap(),
+            Some(e.clone())
+        );
+        assert_eq!(
+            repository
+                .author_max(&e.conversation_id, &e.author)
+                .unwrap(),
+            Some(e.seq)
+        );
+        assert_eq!(
+            repository
+                .metadata(&e.conversation_id)
+                .unwrap()
+                .unwrap()
+                .max_lamport,
+            oracle
+                .events(&e.conversation_id)
+                .iter()
+                .map(|e| e.lamport)
+                .max()
+                .unwrap()
+        );
+    }
+    let conv = ConversationId::new([1; 32]);
+    let author = Author::from_ed25519(a.public().ed25519_pub);
+    assert!(matches!(
+        repository.next_sequence(&conv, &author),
+        Err(LogError::SequenceExhausted)
+    ));
+    assert!(matches!(
+        repository.prepare(&conv),
+        Err(LogError::ClockExhausted)
+    ));
+    let metadata = repository.metadata(&conv).unwrap().unwrap();
+    assert!(metadata.channel_v2 && metadata.channel_v3 && metadata.channel_v4);
+}
+#[test]
+fn atomic_new_channel_batch_rolls_back_missing_parent_and_equivocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let root = event(&a, 1, vec![], 1, EventKind::Message);
+    let missing = event(&a, 2, vec![EventId::new([99; 32])], 2, EventKind::Message);
+    assert!(matches!(
+        repository.append_channel_batch_atomic(&[root.clone(), missing]),
+        Err(LogError::MissingParents(_))
+    ));
+    assert!(!repository.has(&root.id).unwrap());
+    assert!(
+        repository
+            .metadata(&root.conversation_id)
+            .unwrap()
+            .is_none()
+    );
+    let fork = event(&a, 1, vec![root.id], 2, EventKind::Message);
+    assert!(matches!(
+        repository.append_channel_batch_atomic(&[root.clone(), fork]),
+        Err(LogError::AuthorEquivocation { .. })
+    ));
+    let child = event(&a, 2, vec![root.id], 2, EventKind::Message);
+    repository
+        .append_channel_batch_atomic(&[root.clone(), root.clone(), child.clone()])
+        .unwrap();
+    assert_eq!(repository.count(&root.conversation_id).unwrap(), 2);
+    assert_eq!(
+        repository.heads(&root.conversation_id).unwrap(),
+        vec![child.id]
+    );
+    assert!(repository.append_channel_batch_atomic(&[root]).is_err());
+}
+#[test]
+fn fingerprint_is_exact_cached_persistently_and_reads_no_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let events: Vec<_> = (1..=128)
+        .rev()
+        .map(|seq| event(&a, seq, vec![], seq % 3, EventKind::Message))
+        .collect();
+    repository.append_channel_batch_atomic(&events).unwrap();
+    let conv = events[0].conversation_id;
+    let expected = super::super::sync::fingerprint(events.iter().map(|e| e.id).collect());
+    assert_eq!(
+        repository.fingerprint_and_len(&conv).unwrap(),
+        (expected, 128)
+    );
+    assert_eq!(
+        repository
+            .fingerprint_ids
+            .load(std::sync::atomic::Ordering::Relaxed),
+        128
+    );
+    repository.append(&events[0]).unwrap();
+    assert_eq!(
+        repository.fingerprint_and_len(&conv).unwrap(),
+        (expected, 128)
+    );
+    assert_eq!(
+        repository
+            .fingerprint_ids
+            .load(std::sync::atomic::Ordering::Relaxed),
+        128
+    );
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    let unknown = ConversationId::new([8; 32]);
+    assert_eq!(
+        repository.fingerprint_and_len(&unknown).unwrap(),
+        (super::super::sync::fingerprint(vec![]), 0)
+    );
+    assert!(repository.metadata(&unknown).unwrap().is_none());
+    drop(repository);
+    drop(db);
+    let reopened = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    assert_eq!(
+        reopened.fingerprint_and_len(&conv).unwrap(),
+        (expected, 128)
+    );
+    assert_eq!(
+        reopened
+            .fingerprint_ids
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        reopened
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+#[test]
+fn keyset_pages_bound_rows_bytes_and_decode_only_selected_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let events: Vec<_> = (1..=128)
+        .map(|seq| event(&a, seq, vec![], seq % 3, EventKind::Message))
+        .collect();
+    repository.append_channel_batch_atomic(&events).unwrap();
+    let conv = events[0].conversation_id;
+    let mut expected = events.clone();
+    expected.sort_by_key(|e| (e.lamport, e.id));
+    let mut cursor = None;
+    let mut got = Vec::new();
+    loop {
+        let page = repository
+            .headers_page(
+                &conv,
+                cursor.as_ref(),
+                PageBudget {
+                    rows: 7,
+                    bytes: 7 * std::mem::size_of::<EventHeader>(),
+                },
+            )
+            .unwrap();
+        assert!(page.items.len() <= 7);
+        assert!(page.items.capacity() * std::mem::size_of::<EventHeader>() <= page.charged_bytes);
+        assert_eq!(
+            page.charged_bytes,
+            page.items.len() * std::mem::size_of::<EventHeader>()
+        );
+        got.extend(page.items.iter().map(|h| h.id));
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(got, expected.iter().map(|e| e.id).collect::<Vec<_>>());
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    let page = repository
+        .events_page(
+            &conv,
+            None,
+            PageBudget {
+                rows: 1,
+                bytes: 4096,
+            },
+        )
+        .unwrap();
+    assert_eq!(page.items, expected[..1]);
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let required = repository.events_page(&conv, None, PageBudget { rows: 1, bytes: 1 });
+    assert!(matches!(required,Err(LogError::PageBudgetTooSmall{required}) if required>1));
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert!(matches!(
+        repository.headers_page(
+            &conv,
+            None,
+            PageBudget {
+                rows: 0,
+                bytes: 1024
+            }
+        ),
+        Err(LogError::InvalidPageBudget)
+    ));
+    let ids = repository
+        .ids_page(&conv, None, PageBudget { rows: 2, bytes: 64 })
+        .unwrap();
+    assert_eq!(ids.items.len(), 2);
+    assert_eq!(ids.charged_bytes, 64);
+    let heads = repository
+        .heads_page(&conv, None, PageBudget { rows: 2, bytes: 64 })
+        .unwrap();
+    assert_eq!(heads.items, ids.items);
+    let conversations = repository
+        .conversations_page(None, PageBudget::default())
+        .unwrap();
+    assert_eq!(conversations.items.len(), 1);
+    assert_eq!(conversations.items[0].count, 128);
+}
+#[test]
+fn cursors_bind_store_domain_conversation_order_and_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let root = event(&a, 1, vec![], 1, EventKind::Message);
+    let child = event(&a, 2, vec![root.id], 2, EventKind::Message);
+    repository
+        .append_channel_batch_atomic(&[root.clone(), child.clone()])
+        .unwrap();
+    let page = repository
+        .headers_page(
+            &root.conversation_id,
+            None,
+            PageBudget {
+                rows: 1,
+                bytes: 4096,
+            },
+        )
+        .unwrap();
+    let cursor = page.next.unwrap();
+    assert!(matches!(
+        repository.ids_page(&root.conversation_id, Some(&cursor), PageBudget::default()),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        repository.headers_page(
+            &ConversationId::new([9; 32]),
+            Some(&cursor),
+            PageBudget::default()
+        ),
+        Err(LogError::StaleCursor)
+    ));
+    let other = EventRepository::new(db, EventDomainId([2; 16])).unwrap();
+    assert!(matches!(
+        other.headers_page(&root.conversation_id, Some(&cursor), PageBudget::default()),
+        Err(LogError::StaleCursor)
+    ));
+    let dir2 = tempfile::tempdir().unwrap();
+    let other_store = EventRepository::new(database(&dir2), EventDomainId([1; 16])).unwrap();
+    assert!(matches!(
+        other_store.headers_page(&root.conversation_id, Some(&cursor), PageBudget::default()),
+        Err(LogError::StaleCursor)
+    ));
+    repository.append(&child).unwrap(); // A true duplicate must not stale the cursor.
+    assert_eq!(
+        repository
+            .headers_page(&root.conversation_id, Some(&cursor), PageBudget::default())
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    repository
+        .append(&event(&a, 3, vec![child.id], 3, EventKind::Profile))
+        .unwrap();
+    assert!(matches!(
+        repository.headers_page(&root.conversation_id, Some(&cursor), PageBudget::default()),
+        Err(LogError::StaleCursor)
+    ));
+}
+#[test]
+fn parent_edges_are_separately_budgeted_and_cross_conversation_parents_fail() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let roots: Vec<_> = (1..=64)
+        .map(|seq| event(&a, seq, vec![], seq, EventKind::Message))
+        .collect();
+    repository.append_channel_batch_atomic(&roots).unwrap();
+    let merge = event(
+        &a,
+        65,
+        roots.iter().map(|e| e.id).collect(),
+        65,
+        EventKind::Profile,
+    );
+    repository.append(&merge).unwrap();
+    assert_eq!(
+        repository.header(&merge.id).unwrap().unwrap().parent_count,
+        64
+    );
+    let mut cursor = None;
+    let mut ids = Vec::new();
+    loop {
+        let page = repository
+            .parent_ids_page(
+                &merge.id,
+                cursor.as_ref(),
+                PageBudget { rows: 3, bytes: 96 },
+            )
+            .unwrap()
+            .unwrap();
+        ids.extend(page.items);
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids, merge.parents);
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    // The allocation preflight must continue to accept complete many-parent
+    // signed bodies, rather than imposing a new protocol parent cap.
+    assert_eq!(repository.get(&merge.id).unwrap(), Some(merge.clone()));
+    let other = Event::new(
+        &a,
+        ConversationId::new([2; 32]),
+        1,
+        vec![roots[0].id],
+        1,
+        1,
+        EventKind::Message,
+        vec![],
+    );
+    assert!(matches!(
+        repository.append(&other),
+        Err(LogError::MissingParents(_))
+    ));
+}
+
+#[test]
+fn missing_authoritative_schema_or_index_fails_reopen_without_repair() {
+    for object in ["TABLE event_heads", "INDEX retained_events_ids"] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = database(&dir);
+        let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+        let root = event(
+            &DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repository.append(&root).unwrap();
+        db.read(|c| {
+            c.execute_batch(&format!("DROP {object}"))?;
+            Ok(())
+        })
+        .unwrap();
+        drop(repository);
+        assert!(
+            EventRepository::new(db.clone(), EventDomainId([1; 16])).is_err(),
+            "must reject missing {object}"
+        );
+        db.read(|c| {
+            let count: i64 =
+                c.query_row("SELECT count(*) FROM retained_events", [], |r| r.get(0))?;
+            assert_eq!(count, 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+#[test]
+fn indexed_selectors_have_covering_id_plan_and_no_temporary_sort() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    db.read(|c| {
+        for sql in [
+            "EXPLAIN QUERY PLAN SELECT id FROM retained_events WHERE domain=?1 AND conversation=?2 ORDER BY id",
+            "EXPLAIN QUERY PLAN SELECT id FROM retained_events WHERE domain=?1 AND conversation=?2 AND id>?3 ORDER BY id LIMIT 8",
+        ] {
+            let mut stmt=c.prepare(sql)?;let mut rows=if sql.contains("?3"){stmt.query(params![[1u8;16].as_slice(),[1u8;32].as_slice(),[0u8;32].as_slice()])?}else{stmt.query(params![[1u8;16].as_slice(),[1u8;32].as_slice()])?};
+            let mut details=String::new();while let Some(row)=rows.next()? {details.push_str(&row.get::<_,String>(3)?);}
+            assert!(details.contains("COVERING INDEX retained_events_ids"),"{details}");assert!(!details.contains("TEMP B-TREE"),"{details}");
+        }
+        Ok(())
+    }).unwrap();
+}
+#[test]
+fn malformed_accessed_data_is_error_and_unselected_corrupt_body_is_not_decoded() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let root = event(
+        &DeviceIdentity::generate(),
+        1,
+        vec![],
+        1,
+        EventKind::Message,
+    );
+    repository.append(&root).unwrap();
+    let mut bytes = bincode::serialize(&root).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    db.read(|c| {
+        c.execute("UPDATE retained_events SET body=?1", [bytes])?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(repository.header(&root.id).unwrap().is_some());
+    assert_eq!(
+        repository
+            .fingerprint_and_len(&root.conversation_id)
+            .unwrap()
+            .1,
+        1
+    );
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert!(repository.get(&root.id).is_err());
+    db.read(|c| {
+        c.execute_batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE retained_events SET seq=x'00'",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(repository.header(&root.id).is_err());
+    db.read(|c| {
+        c.execute_batch("UPDATE event_conversations SET revision=-1")?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(repository.count(&root.conversation_id).is_err());
+}
+#[test]
+fn transaction_failure_and_counter_exhaustion_preserve_all_admission_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let root = event(&a, 1, vec![], 1, EventKind::Message);
+    repository.append(&root).unwrap();
+    let initial = repository.metadata(&root.conversation_id).unwrap();
+    let hash = repository
+        .fingerprint_and_len(&root.conversation_id)
+        .unwrap();
+    let child = event(&a, 2, vec![root.id], 2, EventKind::ChannelReplica);
+    db.read(|c| {c.execute_batch("CREATE TRIGGER fail_admission BEFORE UPDATE ON event_domains BEGIN SELECT RAISE(ABORT,'injected failure'); END")?;Ok(())}).unwrap();
+    assert!(repository.append(&child).is_err());
+    assert!(!repository.has(&child.id).unwrap());
+    assert_eq!(repository.metadata(&root.conversation_id).unwrap(), initial);
+    assert_eq!(
+        repository.heads(&root.conversation_id).unwrap(),
+        vec![root.id]
+    );
+    assert_eq!(
+        repository
+            .author_max(&root.conversation_id, &root.author)
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        repository
+            .fingerprint_and_len(&root.conversation_id)
+            .unwrap(),
+        hash
+    );
+    db.read(|c| {
+        c.execute_batch(
+            "DROP TRIGGER fail_admission; UPDATE event_domains SET next_commit=9223372036854775807",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(
+        repository.append(&child),
+        Err(LogError::RepositoryCounterExhausted)
+    ));
+    assert!(!repository.has(&child.id).unwrap());
+    db.read(|c| {c.execute_batch("UPDATE event_domains SET next_commit=1; UPDATE event_conversations SET revision=9223372036854775807")?;Ok(())}).unwrap();
+    assert!(matches!(
+        repository.append(&child),
+        Err(LogError::RepositoryCounterExhausted)
+    ));
+    assert!(!repository.has(&child.id).unwrap());
+}
+#[test]
+fn unsigned_clock_range_and_one_oversize_progress_retry_preserve_signed_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let mut events: Vec<_> = [u64::MAX, 0, i64::MAX as u64, (i64::MAX as u64) + 1]
+        .into_iter()
+        .enumerate()
+        .map(|(n, clock)| event(&a, n as u64, vec![], clock, EventKind::Message))
+        .collect();
+    events[1] = Event::new(
+        &a,
+        events[1].conversation_id,
+        events[1].seq,
+        vec![],
+        0,
+        0,
+        EventKind::Message,
+        vec![1; 16384],
+    );
+    repository.append_channel_batch_atomic(&events).unwrap();
+    let conv = events[0].conversation_id;
+    let page = repository
+        .headers_page(&conv, None, PageBudget::default())
+        .unwrap();
+    assert_eq!(
+        page.items.iter().map(|e| e.lamport).collect::<Vec<_>>(),
+        vec![0, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX]
+    );
+    let Err(LogError::PageBudgetTooSmall { required }) = repository.events_page(
+        &conv,
+        None,
+        PageBudget {
+            rows: 1,
+            bytes: 1024,
+        },
+    ) else {
+        panic!("oversized first event must not be fetched")
+    };
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    let page = repository
+        .events_page(
+            &conv,
+            None,
+            PageBudget {
+                rows: 1,
+                bytes: required,
+            },
+        )
+        .unwrap();
+    assert_eq!(page.items, vec![events[1].clone()]);
+    assert_eq!(page.charged_bytes, required);
+}
+
+#[test]
+fn other_domain_parent_and_invalid_content_leave_no_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let other = EventRepository::new(db, EventDomainId([2; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let root = event(&a, 1, vec![], 1, EventKind::Message);
+    repository.append(&root).unwrap();
+    let child = event(&a, 2, vec![root.id], 2, EventKind::Message);
+    assert!(
+        matches!(other.append(&child),Err(LogError::MissingParents(ids)) if ids==vec![root.id])
+    );
+    assert!(other.metadata(&child.conversation_id).unwrap().is_none());
+    let mut corrupt = child.clone();
+    corrupt.ciphertext.push(1);
+    assert!(matches!(
+        repository.append(&corrupt),
+        Err(LogError::CorruptId)
+    ));
+    let mut noncanonical = child;
+    noncanonical.parents.push(root.id);
+    assert!(matches!(
+        repository.append(&noncanonical),
+        Err(LogError::NonCanonical)
+    ));
+    assert_eq!(repository.count(&root.conversation_id).unwrap(), 1);
+}
+#[test]
+fn byte_limited_body_prefix_and_zero_budgets_never_fetch_the_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let events: Vec<_> = (1..=8)
+        .map(|seq| event(&a, seq, vec![], seq, EventKind::Message))
+        .collect();
+    repository.append_channel_batch_atomic(&events).unwrap();
+    let conv = events[0].conversation_id;
+    let one = repository
+        .header(&events[0].id)
+        .unwrap()
+        .unwrap()
+        .stored_bytes
+        * 3
+        + std::mem::size_of::<Event>();
+    let page = repository
+        .events_page(
+            &conv,
+            None,
+            PageBudget {
+                rows: 8,
+                bytes: one * 2,
+            },
+        )
+        .unwrap();
+    assert_eq!(page.items, events[..2]);
+    assert_eq!(page.charged_bytes, one * 2);
+    assert!(page.next.is_some());
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    for budget in [
+        PageBudget { rows: 0, bytes: 1 },
+        PageBudget { rows: 1, bytes: 0 },
+        PageBudget {
+            rows: usize::MAX,
+            bytes: 1,
+        },
+    ] {
+        assert!(matches!(
+            repository.events_page(&conv, None, budget),
+            Err(LogError::InvalidPageBudget)
+        ));
+        assert!(matches!(
+            repository.parent_ids_page(&events[0].id, None, budget),
+            Err(LogError::InvalidPageBudget)
+        ));
+    }
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    let id_page = repository
+        .ids_page(&conv, None, PageBudget { rows: 3, bytes: 96 })
+        .unwrap();
+    assert_eq!(id_page.items.capacity() * 32, id_page.charged_bytes);
+}
+
+#[test]
+fn stored_body_rejects_trailing_encoding_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let root = event(
+        &DeviceIdentity::generate(),
+        1,
+        vec![],
+        1,
+        EventKind::Message,
+    );
+    repository.append(&root).unwrap();
+    let mut bytes = bincode::serialize(&root).unwrap();
+    bytes.extend_from_slice(b"trailing garbage");
+    db.read(|c| {
+        c.execute(
+            "UPDATE retained_events SET body=?1,stored_bytes=?2",
+            params![bytes, bytes.len() as i64],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(repository.get(&root.id).is_err());
+}
+
+#[test]
+fn known_version_rejects_changed_types_nullability_keys_constraints_and_foreign_keys() {
+    for (original, changed) in [
+        (
+            "singleton INTEGER PRIMARY KEY CHECK(singleton=1)",
+            "singleton INTEGER PRIMARY KEY",
+        ),
+        ("version INTEGER NOT NULL", "version TEXT NOT NULL"),
+        ("max_seq BLOB NOT NULL", "max_seq INTEGER NOT NULL"),
+        ("max_seq BLOB NOT NULL", "max_seq BLOB"),
+        (
+            "PRIMARY KEY(domain,conversation,author)",
+            "PRIMARY KEY(domain,conversation,author DESC)",
+        ),
+        (
+            "PRIMARY KEY(domain,conversation,author)",
+            "PRIMARY KEY(domain,conversation,author COLLATE NOCASE)",
+        ),
+        (", UNIQUE(domain,conversation,author,seq)", ""),
+        (", UNIQUE(domain,commit_ordinal)", ""),
+        (
+            "CHECK(typeof(max_seq)='blob' AND length(max_seq)=8)",
+            "CHECK(length(max_seq)>0)",
+        ),
+        (
+            ",\n FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)\n",
+            "\n",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = database(&dir);
+        let ddl = schema::SCHEMA.replace(original, changed);
+        assert_ne!(ddl, schema::SCHEMA, "fixture must change {original}");
+        db.transaction(|tx| {
+            tx.execute_batch(&ddl)?;
+            Ok(())
+        })
+        .unwrap();
+        let before: Vec<String> = db
+            .read(|c| {
+                let mut stmt =
+                    c.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")?;
+                Ok(stmt
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?)
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                EventRepository::new(db.clone(), EventDomainId([1; 16])),
+                Err(LogError::IncompatibleEventSchema)
+            ),
+            "must reject changed authority: {original}"
+        );
+        db.read(|c| {
+            let mut stmt =
+                c.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")?;
+            let after: Vec<String> = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            assert_eq!(after, before);
+            let domains: i64 =
+                c.query_row("SELECT count(*) FROM event_domains", [], |r| r.get(0))?;
+            assert_eq!(domains, 0);
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+#[test]
+fn bounded_version_vector_discovers_all_authors_gaps_and_full_range_maxima() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let other = EventRepository::new(db, EventDomainId([2; 16])).unwrap();
+    let mut oracle = super::super::EventLog::default();
+    let mut events = Vec::new();
+    for sequences in [&[1, 7, 3][..], &[0, u64::MAX, 9][..], &[8, 4][..]] {
+        let author = DeviceIdentity::generate();
+        for &seq in sequences {
+            events.push(event(&author, seq, vec![], seq, EventKind::Message));
+        }
+    }
+    for e in &events {
+        oracle.append(e.clone()).unwrap();
+    }
+    repository.append_channel_batch_atomic(&events).unwrap();
+    let conv = events[0].conversation_id;
+    let mut cursor = None;
+    let mut maxima = std::collections::HashMap::new();
+    loop {
+        let page = repository
+            .author_maxima_page(
+                &conv,
+                cursor.as_ref(),
+                PageBudget {
+                    rows: 1,
+                    bytes: std::mem::size_of::<super::pages::AuthorMaximum>(),
+                },
+            )
+            .unwrap();
+        assert!(page.items.len() <= 1);
+        for row in page.items {
+            maxima.insert(row.author, row.max_seq);
+        }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(maxima, oracle.version_vector(&conv));
+    assert_eq!(maxima.len(), 3);
+    assert!(
+        other
+            .author_maxima_page(&conv, None, PageBudget::default())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let page = repository
+        .author_maxima_page(
+            &conv,
+            None,
+            PageBudget {
+                rows: 1,
+                bytes: 128,
+            },
+        )
+        .unwrap();
+    let cursor = page.next.unwrap();
+    assert!(matches!(
+        repository.ids_page(&conv, Some(&cursor), PageBudget::default()),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        repository.author_maxima_page(&conv, None, PageBudget { rows: 1, bytes: 1 }),
+        Err(LogError::PageBudgetTooSmall { .. })
+    ));
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+#[test]
+fn another_conversation_append_preserves_conversation_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let root = event(&a, 1, vec![], 1, EventKind::Message);
+    let child = event(&a, 2, vec![root.id], 2, EventKind::Message);
+    repository
+        .append_channel_batch_atomic(&[root.clone(), child.clone()])
+        .unwrap();
+    let page = repository
+        .headers_page(
+            &root.conversation_id,
+            None,
+            PageBudget {
+                rows: 1,
+                bytes: 4096,
+            },
+        )
+        .unwrap();
+    let cursor = page.next.unwrap();
+    let other = Event::new(
+        &a,
+        ConversationId::new([2; 32]),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::Message,
+        vec![],
+    );
+    repository.append(&other).unwrap();
+    assert_eq!(
+        repository
+            .headers_page(&root.conversation_id, Some(&cursor), PageBudget::default())
+            .unwrap()
+            .items[0]
+            .id,
+        child.id
+    );
+}
+#[test]
+fn oversized_metadata_arithmetic_errors_before_selecting_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let root = event(
+        &DeviceIdentity::generate(),
+        1,
+        vec![],
+        1,
+        EventKind::Message,
+    );
+    repository.append(&root).unwrap();
+    db.read(|c| {c.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE retained_events SET stored_bytes=9223372036854775807")?;Ok(())}).unwrap();
+    assert!(matches!(
+        repository.events_page(
+            &root.conversation_id,
+            None,
+            PageBudget {
+                rows: 1,
+                bytes: usize::MAX
+            }
+        ),
+        Err(LogError::RepositoryCounterExhausted)
+    ));
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+
+#[test]
+fn empty_channel_batch_is_noop_for_existing_and_unknown_conversations() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    repository.append_channel_batch_atomic(&[]).unwrap();
+    let a = DeviceIdentity::generate();
+    let root = event(&a, 1, vec![], 1, EventKind::Message);
+    repository.append(&root).unwrap();
+    let before = repository.metadata(&root.conversation_id).unwrap();
+    let hash = repository
+        .fingerprint_and_len(&root.conversation_id)
+        .unwrap();
+    repository.append_channel_batch_atomic(&[]).unwrap();
+    assert_eq!(repository.metadata(&root.conversation_id).unwrap(), before);
+    assert_eq!(
+        repository
+            .fingerprint_and_len(&root.conversation_id)
+            .unwrap(),
+        hash
+    );
+    db.read(|c| {
+        let next: i64 = c.query_row("SELECT next_commit FROM event_domains", [], |r| r.get(0))?;
+        assert_eq!(next, 1);
+        Ok(())
+    })
+    .unwrap();
+}
+#[test]
+fn false_small_body_metadata_is_rejected_before_blob_fetch() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let a = DeviceIdentity::generate();
+    let root = Event::new(
+        &a,
+        ConversationId::new([1; 32]),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::Message,
+        vec![1; 16384],
+    );
+    repository.append(&root).unwrap();
+    db.read(|c| {
+        c.execute_batch(
+            "PRAGMA ignore_check_constraints=ON; UPDATE retained_events SET stored_bytes=1",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        repository
+            .events_page(
+                &root.conversation_id,
+                None,
+                PageBudget {
+                    rows: 1,
+                    bytes: 1024
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        repository
+            .body_decodes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+
+#[test]
+fn known_version_preserves_ddl_token_boundaries_when_validating_column_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let ddl = schema::SCHEMA.replace("max_seq BLOB NOT NULL", "max_seq BLOBNOTNULL");
+    db.transaction(|tx| {
+        tx.execute_batch(&ddl)?;
+        Ok(())
+    })
+    .unwrap();
+    db.read(|c| {
+        let (kind,required):(String,i64)=c.query_row("SELECT type,\"notnull\" FROM pragma_table_info('event_author_max') WHERE name='max_seq'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        assert_eq!((kind,required),("BLOBNOTNULL".into(),0));
+        Ok(())
+    }).unwrap();
+    assert!(matches!(
+        EventRepository::new(db.clone(), EventDomainId([1; 16])),
+        Err(LogError::IncompatibleEventSchema)
+    ));
+    db.read(|c| {
+        let domains: i64 = c.query_row("SELECT count(*) FROM event_domains", [], |r| r.get(0))?;
+        assert_eq!(domains, 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn assert_vector_length_rejected_before_event_decode(field: &str) {
+    for matching_header in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = database(&dir);
+        let repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+        let root = event(
+            &DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repository.append(&root).unwrap();
+        // Derive each length-prefix position from the existing fixint types,
+        // rather than baking Event's current field byte offsets into a fixture.
+        let parent_offset =
+            bincode::serialized_size(&(root.id, root.conversation_id, root.author, root.seq))
+                .unwrap();
+        let cipher_offset = bincode::serialized_size(&(
+            root.id,
+            root.conversation_id,
+            root.author,
+            root.seq,
+            &root.parents,
+            root.lamport,
+            root.wall_clock,
+            root.kind,
+        ))
+        .unwrap();
+        let signature_offset = bincode::serialized_size(&(
+            root.id,
+            root.conversation_id,
+            root.author,
+            root.seq,
+            &root.parents,
+            root.lamport,
+            root.wall_clock,
+            root.kind,
+            &root.ciphertext,
+        ))
+        .unwrap();
+        let (offset, column) = match field {
+            "parents" => (parent_offset, "parent_count"),
+            "ciphertext" => (cipher_offset, "ciphertext_bytes"),
+            "signature" => (signature_offset, "signature_bytes"),
+            _ => unreachable!(),
+        };
+        let claimed = if matching_header { 4096_u64 } else { u64::MAX };
+        let mut bytes = bincode::serialize(&root).unwrap();
+        let prefix = bincode::serialize(&claimed).unwrap();
+        let offset = offset as usize;
+        bytes[offset..offset + prefix.len()].copy_from_slice(&prefix);
+        db.read(|c| {
+            c.execute("UPDATE retained_events SET body=?1", [bytes])?;
+            if matching_header {
+                c.execute(
+                    &format!("UPDATE retained_events SET {column}=?1"),
+                    [claimed as i64],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            repository
+                .events_page(
+                    &root.conversation_id,
+                    None,
+                    PageBudget {
+                        rows: 1,
+                        bytes: 4096
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(
+            repository
+                .body_decodes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "{field}: corrupt length must fail before derived Event deserialization; matching_header={matching_header}"
+        );
+    }
+}
+#[test]
+fn corrupt_parent_length_is_rejected_before_length_driven_allocation() {
+    assert_vector_length_rejected_before_event_decode("parents");
+}
+#[test]
+fn corrupt_ciphertext_length_is_rejected_before_length_driven_allocation() {
+    assert_vector_length_rejected_before_event_decode("ciphertext");
+}
+#[test]
+fn corrupt_signature_length_is_rejected_before_length_driven_allocation() {
+    assert_vector_length_rejected_before_event_decode("signature");
+}

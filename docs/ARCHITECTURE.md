@@ -1267,6 +1267,28 @@ and fatal storage errors invalidate the handle until reopening. Read failures
 remain errors rather than missing records. The connection owner does not by
 itself convert legacy event or transcript stores to demand loading.
 
+The domain-owned indexed event repository keeps immutable signed event bytes,
+parent edges, author sequences, frontier and conversation metadata in the same
+encrypted database transaction. Explicit domain IDs isolate stores sharing a
+connection. A component-wide schema marker is checked before event-domain table
+adoption; foreign-key enforcement is enabled and verified by the connection
+owner. Existing unsigned 64-bit sequence and clock values use ordered eight-byte
+big-endian blobs, preserving their full range.
+
+Indexed individual lookups return complete owned events. Metadata headers omit
+bodies and expose parent counts; parent edges have separate bounded pages.
+Keyset pages enforce row and byte budgets before selecting bodies, and bind their
+cursors to database UUID, domain, conversation, ordering and source revision.
+Raw Lamport pages do not claim causal order. Invalid budgets, oversized first rows,
+stale cursors, exhausted repository counters and incompatible component schemas
+remain explicit errors. Fingerprints preserve the wire's exact
+`SHA256(count_le || sorted_event_ids)` construction: an indexed ID scan uses
+bounded memory, and its revision-bound cache persists across reopening. The
+first hash after changes may still scan all IDs; unchanged probes do not.
+The repository backend alone does not switch the existing runtime persistence or
+replace its full-history replay; bounded consumers and verified source migration
+are required before that cutover.
+
 Owned individual event reads copy only the selected event from the current
 resident index. They establish the fallible ownership boundary needed for disk
 queries, but do not bound the existing index or whole-conversation replay.

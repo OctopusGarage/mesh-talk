@@ -9,6 +9,8 @@
 pub mod event;
 pub(crate) mod order;
 pub mod persist;
+#[allow(dead_code)] // Indexed backend is wired only after bounded consumers and migration exist.
+pub(crate) mod repository;
 pub mod store;
 pub mod sync;
 
@@ -32,6 +34,16 @@ pub enum LogError {
     ClockExhausted,
     /// No representable sequence remains for this local author.
     SequenceExhausted,
+    /// Cursor belongs to another store, query, or mutation revision.
+    StaleCursor,
+    /// Page limits cannot make progress.
+    InvalidPageBudget,
+    /// The first selected row exceeds the requested allocation budget.
+    PageBudgetTooSmall { required: usize },
+    /// An internal persisted revision or commit ordinal cannot advance.
+    RepositoryCounterExhausted,
+    /// The shared event schema cannot be adopted by this implementation.
+    IncompatibleEventSchema,
     /// One or more `parents` are not present in the log yet (causally incomplete).
     MissingParents(Vec<EventId>),
     /// The author already has a *different* event at this `seq` (equivocation).
@@ -73,6 +85,13 @@ impl std::fmt::Display for LogError {
             LogError::NonCanonical => write!(f, "event parents are not in canonical form"),
             LogError::ClockExhausted => write!(f, "event clock exhausted"),
             LogError::SequenceExhausted => write!(f, "event author sequence exhausted"),
+            LogError::StaleCursor => write!(f, "stale event page cursor"),
+            LogError::InvalidPageBudget => write!(f, "invalid event page budget"),
+            LogError::PageBudgetTooSmall { required } => {
+                write!(f, "event page requires {required} bytes")
+            }
+            LogError::RepositoryCounterExhausted => write!(f, "event repository counter exhausted"),
+            LogError::IncompatibleEventSchema => write!(f, "incompatible event repository schema"),
             LogError::MissingParents(p) => write!(f, "missing {} parent event(s)", p.len()),
             LogError::AuthorEquivocation { seq, .. } => {
                 write!(f, "author equivocation at seq {seq}")
