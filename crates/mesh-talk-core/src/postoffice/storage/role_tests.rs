@@ -577,3 +577,161 @@ fn expired_duplicate_is_unavailable_immediately_before_any_gc() {
 mod policy_tests;
 
 mod maintenance_tests;
+
+#[test]
+fn network_views_bind_unknown_and_expiry_without_collecting_or_false_custody() {
+    use crate::eventlog::sync::network::IdPageBudget;
+    let root = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let profile = open(&root, &identity);
+    let state = relay(profile.clone());
+    let e = event(&identity, 1, vec![]);
+    let unknown = state.network_view_at(&e.conversation_id, 10).unwrap();
+    assert_eq!(state.network_metadata_at(&unknown, 10).unwrap().count, 0);
+    assert!(
+        state
+            .network_have_at(
+                &unknown,
+                None,
+                IdPageBudget {
+                    ids: 1,
+                    examined: 1
+                },
+                10
+            )
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    state.record(&e, 10, None).unwrap();
+    assert!(matches!(
+        state.network_validate_at(&unknown, 10),
+        Err(LogError::StaleCursor)
+    ));
+    let view = state.network_view_at(&e.conversation_id, 10).unwrap();
+    assert_eq!(state.network_metadata_at(&view, 10).unwrap().count, 1);
+    assert_eq!(
+        state
+            .network_have_at(
+                &view,
+                None,
+                IdPageBudget {
+                    ids: 1,
+                    examined: 1
+                },
+                10
+            )
+            .unwrap()
+            .items,
+        vec![e.id]
+    );
+    assert!(
+        state
+            .durable_have_at(&e.conversation_id, &e.id, 10)
+            .unwrap()
+    );
+    let expires = 10 + super::super::MAX_RELAY_AGE.as_secs();
+    assert!(state.network_validate_at(&view, expires).is_err());
+    assert!(state.network_view_at(&e.conversation_id, expires).is_err());
+    assert!(
+        state
+            .durable_have_at(&e.conversation_id, &e.id, expires)
+            .is_err()
+    );
+    assert!(
+        profile.events().unwrap().get(&e.id).unwrap().is_some(),
+        "expiry is logical before bounded reclamation"
+    );
+}
+
+#[test]
+fn network_finite_pages_survive_appends_and_hold_lease_until_last_cursor() {
+    use crate::eventlog::sync::network::IdPageBudget;
+    let root = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let profile = open(&root, &identity);
+    let state = relay(profile.clone());
+    let first = event(&identity, 1, vec![]);
+    state.record(&first, 10, None).unwrap();
+    let second = event(&identity, 2, vec![first.id]);
+    state.record(&second, 10, None).unwrap();
+    let view = state.network_view_at(&first.conversation_id, 10).unwrap();
+    let third = event(&identity, 3, vec![second.id]);
+    state.record(&third, 11, None).unwrap();
+    let budget = IdPageBudget {
+        ids: 1,
+        examined: 1,
+    };
+    let page = state.network_have_at(&view, None, budget, 11).unwrap();
+    assert_eq!(page.items, vec![first.id]);
+    let cursor = page.next.unwrap();
+    let page = state
+        .network_have_at(&view, Some(&cursor), budget, 11)
+        .unwrap();
+    assert_eq!(page.items, vec![second.id]);
+    assert!(
+        page.next.is_none(),
+        "third append is outside captured finite commit cutoff"
+    );
+    assert_eq!(state.network_metadata_at(&view, 11).unwrap().count, 2);
+    drop(view);
+    drop(state);
+    drop(profile);
+    assert!(
+        ProfileStorageLease::acquire(root.path()).is_err(),
+        "cursor retains exact profile ownership"
+    );
+    drop(cursor);
+    assert!(ProfileStorageLease::acquire(root.path()).is_ok());
+}
+
+#[test]
+fn network_corrupt_retained_mailbox_never_looks_unknown() {
+    let root = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let profile = open(&root, &identity);
+    let state = relay(profile.clone());
+    let e = event(&identity, 1, vec![]);
+    state.record(&e, 10, None).unwrap();
+    profile
+        .database()
+        .transaction(|c| {
+            c.execute("DELETE FROM relay_mailboxes", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        state.network_view_at(&e.conversation_id, 10),
+        Err(LogError::CorruptFile(_))
+    ));
+}
+
+#[test]
+fn published_staging_cleanup_remains_visible_after_archive_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let profile = open(&root, &identity);
+    profile
+        .database()
+        .transaction(|c| {
+            c.execute(
+                "UPDATE relay_publication SET staging_pending=1 WHERE singleton=1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        profile.cleanup_pending().unwrap(),
+        "post-publication crash staging must remain scheduled even when archive flags are clear"
+    );
+    profile.cleanup_step(true).unwrap();
+    assert!(!profile.cleanup_pending().unwrap());
+    let before = profile.database().read(|c| Ok(c.total_changes())).unwrap();
+    profile.cleanup_step(true).unwrap();
+    assert_eq!(
+        profile.database().read(|c| Ok(c.total_changes())).unwrap(),
+        before,
+        "completed cleanup does not write on idle"
+    );
+}

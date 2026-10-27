@@ -60,15 +60,38 @@ fn context(operation: &'static str, source: rusqlite::Error) -> LogError {
     }))
 }
 
-// The foundation is deliberately not connected to legacy stores until their
-// indexed implementations can share this single profile connection.
-#[allow(dead_code)]
+/// Both causes are retained when transaction recovery itself fails. The
+/// enclosing Database error and owner's fault flag remain authoritative even
+/// when the original operation returned an ordinary admission outcome.
+#[derive(Debug)]
+struct RollbackFailure {
+    operation: LogError,
+    rollback: LogError,
+}
+impl std::fmt::Display for RollbackFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "database rollback failed after {}: {}",
+            self.operation, self.rollback
+        )
+    }
+}
+impl std::error::Error for RollbackFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.operation)
+    }
+}
+
 pub(crate) struct EncryptedDatabase {
     connection: Mutex<Connection>,
     faulted: AtomicBool,
 }
-#[allow(dead_code)]
 impl EncryptedDatabase {
+    /// An ambiguous commit or fatal driver failure requires a fresh owner.
+    pub(crate) fn requires_reopen(&self) -> bool {
+        self.faulted.load(Ordering::Acquire) || self.connection.is_poisoned()
+    }
     pub(crate) fn open(path: &Path, password: &str, binding: &[u8]) -> Result<Self, LogError> {
         if password.is_empty() {
             return Err(invalid("database password must not be empty"));
@@ -283,7 +306,10 @@ impl EncryptedDatabase {
                 Ok(()) => Err(error),
                 Err(rollback) => {
                     self.faulted.store(true, Ordering::Release);
-                    Err(rollback.into())
+                    Err(LogError::Database(Box::new(RollbackFailure {
+                        operation: error,
+                        rollback: rollback.into(),
+                    })))
                 }
             },
         }
@@ -643,6 +669,33 @@ mod tests {
         }));
         assert!(db.read(|_| Ok(())).is_err());
         assert!(db.transaction(|_| Ok(())).is_err());
+    }
+    #[test]
+    fn d_regression_failed_rollback_preserves_primary_database_error() {
+        use std::error::Error;
+        for primary in [
+            LogError::Database(Box::new(std::io::Error::other("primary write failure"))),
+            LogError::AdmissionRejected("ordinary policy rejection".into()),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let db = create(&root.path().join("profile.db"));
+            let expected = primary.to_string();
+            let result: Result<(), LogError> = db.transaction(|c| {
+                c.execute_batch("ROLLBACK")?;
+                Err(primary)
+            });
+            let error = result.unwrap_err();
+            assert!(db.requires_reopen());
+            let LogError::Database(cause) = &error else {
+                panic!("rollback failure cannot remain an ordinary outcome")
+            };
+            let both = cause.downcast_ref::<RollbackFailure>().unwrap();
+            assert_eq!(both.operation.to_string(), expected);
+            assert!(matches!(both.rollback, LogError::Database(_)));
+            assert_eq!(both.source().unwrap().to_string(), expected);
+            assert!(error.to_string().contains(&expected));
+            assert!(error.to_string().contains("rollback failed"));
+        }
     }
     #[test]
     fn failed_commit_and_rollback_fault_the_connection() {

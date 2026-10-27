@@ -1863,12 +1863,15 @@ A deleted local record or recalled event does not recall already copied data fro
 | Directory presence                   | At most 15 seconds.                                                                                                                                           | Origin freshness is not renewed by forwarding. Refresh and network delays can still affect observed liveness.                                                                                             |
 | Relay seed probes / reconciliation   | Eight concurrent probes and eight relay sync operations, separately. Coalesced durable/directory/route wakes; immediate bounded-batch continuation; adaptive jittered idle fallback.             | Not a fixed five-second end-to-end convergence promise or a global eight-socket cap for the relay process.                                                                                 |
 | Relay storage                        | Soft limits of 100,000 events and 512 MiB, with 5,000-event / 16 MiB compaction slack.                                                                        | Storage can temporarily exceed soft limits; capacity may evict younger copies before their age limit.                                                                                                     |
+| Indexed relay Have memory            | Four shared, nonwaiting 32 MiB logical reservations per endpoint. | Reservations span receive/conversion/use; overload is retryable. The 128 MiB accounting budget excludes other process memory and is not an RSS measurement. |
+| Indexed federation staging           | 512 outstanding sessions, 262,144 entries and 64 MiB accounted storage; 256 current inbound/eight outbound directions. | Remote inventory and selected local snapshots share charges. Cancellation revokes authority immediately; bounded cleanup releases charges later. |
+| Indexed relay maintenance            | Separate slices of up to 512 raw producer rows and 512 retained IDs hashed per pass; minimum 10 ms pause and three times slice duration; retry backoff 100 ms–5 s. | Interleaves retention, preparation and cleanup. Pacing is not a total service CPU or hard transaction latency cap. |
 | Maximum relay event age              | Thirty days from retained original arrival semantics.                                                                                                         | Upper age bound, not minimum guaranteed retention. Forwarding/restart must preserve expiry behavior.                                                                                                      |
 | Group initial text/sticker seeding   | Small-group threshold five members; larger groups normally seed two peers.                                                                                    | Authority controls and file manifests retain their separate fanout rules.                                                                                                                                 |
 | Group recovery                       | Three peers per channel recovery step; coalesced wakes visit up to eight joined channels; jittered recovery fallback grows from three to sixty seconds, with independent three-second custody work.                      | Bounded anti-entropy with per-peer deadlines and fair cursor/identity rotation, not immediate all-member broadcast.                                                                        |
 | Group control fanout                 | At most four concurrent contacts.                                                                                                                             | A stalled peer must not serialize every healthy member's control delivery.                                                                                                                                |
 
-The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
+The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, `node/route_timing.rs`, `node/delivery_runtime.rs`, `node/delivery_retry.rs`, `node/serving.rs`, `discovery/query.rs`, desktop `src-tauri/src/routed_discovery.rs`, `node/bridge_client.rs`, `node/bridge_directory.rs`, `node/channels.rs`, `postoffice/mod.rs`, `postoffice/maintenance.rs`, `postoffice/storage/federation.rs`, `node/session/have_budget.rs` and `bin/mesh-talk-node/federation_runtime.rs`. Change the implementation and this table together.
 
 ### Idle mailbox work and rejected pages
 
@@ -1904,8 +1907,11 @@ An unavailable current fingerprint bypasses the optional probe; it cannot become
 a fabricated digest or an empty-set match. Availability, fingerprints and view
 completion never replace a fresh durable custody qualification. Local page or
 decode failures abort the exchange while preserving any committed received prefix.
-Store and runtime owners must adopt the direct paged path before claiming bounded
-production startup or serving.
+The dedicated post-office CLI uses the direct indexed path. Participant and
+collecting SDK paths retain their separate adoption boundary; this does not
+establish their startup or resident-memory bounds. The shared endpoint's Have
+reservations bound concurrent aggregate reception as well as each individual
+peer's existing aggregate limit.
 
 The internal indexed relay policy applies persisted monotonic expiry before an
 exact custody result or eligible body read. Its policy views also bind arrival
@@ -1916,8 +1922,13 @@ returns a local retryable error; a permanently oversized event has a distinct
 local resource failure. Neither outcome is a rejected peer event or successful
 custody. Arrival removal and graph finalization commit together. The
 [storage owner](ARCHITECTURE.md#storage-replay-and-query-budgets) defines these
-transactions and budgets; actual paged serving and supervised worker adoption
-are still required before this internal role replaces the legacy runtime.
+transactions and budgets. The dedicated runtime's paced maintenance owner
+advances reclamation and demanded digests without inline history hashing. Scoped
+queue saturation leaves optional fingerprint readiness pending for a later probe;
+only explicit federation demand starts global inventory preparation. Typed local
+failures do not select older wire versions. The runtime stops admission on a
+faulted profile and joins owned work before releasing its lease during
+cooperative shutdown.
 
 An opaque mailbox exchange retains IDs of wrappers whose inner events cannot yet
 be admitted, so a rejected page cannot repeatedly occupy every response while

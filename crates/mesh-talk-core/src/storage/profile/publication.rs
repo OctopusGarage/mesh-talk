@@ -7,7 +7,9 @@ use super::publication_files::{
 };
 use super::{
     ProfileStorageLease,
-    context::{ProfileStorage, RELAY_ARRIVALS, RELAY_EVENTS},
+    context::{
+        ArchiveCleanupOutcome, ProfileCleanupProgress, ProfileStorage, RELAY_ARRIVALS, RELAY_EVENTS,
+    },
     manifest::{self, Source, invalid},
 };
 use crate::{
@@ -359,41 +361,121 @@ fn reclaim_step(db: &EncryptedDatabase) -> Result<bool, LogError> {
     }
     Ok(events && arrivals)
 }
+/// Normal runtime continuation after a crash following publication. Never
+/// drains staging to completion or skips the authenticated publication barriers.
+pub(super) fn resume_cleanup_step(
+    profile: &ProfileStorage,
+    archive_due: bool,
+) -> Result<ProfileCleanupProgress, LogError> {
+    manifest::require_published(profile.database())?;
+    let sources = manifest::sources(profile.database())?;
+    validate_barriers(profile, &sources)?;
+    let staging_pending = !reclaim_step(profile.database())?;
+    let archive = if !profile.archive_cleanup_pending()? {
+        ArchiveCleanupOutcome::Complete
+    } else if archive_due {
+        cleanup_archives(profile, &sources)?
+    } else {
+        ArchiveCleanupOutcome::Waiting
+    };
+    Ok(ProfileCleanupProgress {
+        staging_pending,
+        archive,
+    })
+}
 fn cleanup(profile: &ProfileStorage, sources: &[Source]) -> Result<(), LogError> {
     reclaim_step(profile.database())?;
-    if !profile.cleanup_pending()? {
-        return Ok(());
+    // Initial publication/reopen is best effort only for an explicitly deferred
+    // archive operation. DB and provenance errors still fail the constructor.
+    cleanup_archives(profile, sources).map(|_| ())
+}
+fn checkpoint_busy(error: &LogError) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = source {
+        if let Some(driver) = error.downcast_ref::<rusqlite::Error>() {
+            return matches!(
+                driver.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            );
+        }
+        source = error.source();
     }
-    // The intent was atomically committed with publication. Checkpoint before
-    // reclaiming raw encrypted archives; failure leaves a visible retry intent.
-    let result = (|| {
-        profile.database().checkpoint()?;
-        cut("checkpoint")?;
+    false
+}
+fn defer_archive(
+    profile: &ProfileStorage,
+    cause: LogError,
+) -> Result<ArchiveCleanupOutcome, LogError> {
+    if profile.database().requires_reopen() {
+        return Err(cause);
+    }
+    profile.database().transaction(|tx| {
+        tx.execute("UPDATE relay_sources SET cleanup_error='archive cleanup remains pending' WHERE cleanup_pending=1 AND cleanup_error IS NOT 'archive cleanup remains pending'", [])?;
+        Ok(())
+    })?;
+    Ok(ArchiveCleanupOutcome::Deferred(cause))
+}
+fn cleanup_archives(
+    profile: &ProfileStorage,
+    sources: &[Source],
+) -> Result<ArchiveCleanupOutcome, LogError> {
+    if !profile.archive_cleanup_pending()? {
+        return Ok(ArchiveCleanupOutcome::Complete);
+    }
+    #[cfg(test)]
+    tests::ARCHIVE_ATTEMPTS.with(|v| v.borrow_mut().push(tokio::time::Instant::now()));
+    // No artifact is removed until this durability boundary succeeds. Only the
+    // checkpoint's typed BUSY/LOCKED outcome is retryable; other DB errors retain
+    // their original source, including faulted/poisoned owner state.
+    if let Err(error) = profile.database().checkpoint() {
+        return if !profile.database().requires_reopen() && checkpoint_busy(&error) {
+            defer_archive(profile, error)
+        } else {
+            Err(error)
+        };
+    }
+    if let Err(error) = cut("checkpoint") {
+        return defer_archive(profile, error);
+    }
+    // Validate every fixed manifest-owned artifact before unlinking any. Actual
+    // provenance rejection is authoritative; unavailable filesystem IO can defer.
+    let paths = (|| {
+        let mut paths = Vec::with_capacity(4);
         for source in sources {
             for (locator, extension) in [(&source.work, "work"), (&source.archive, "raw")] {
-                let Some(locator) = locator else {
-                    continue;
-                };
-                let path = artifact_path(profile.root(), source, locator, extension)?;
-                if inspect_regular(&path)? {
-                    fs::remove_file(&path)?;
-                    sync_parent(&path)?;
+                if let Some(locator) = locator {
+                    let path = artifact_path(profile.root(), source, locator, extension)?;
+                    if inspect_regular(&path)? {
+                        paths.push(path);
+                    }
                 }
             }
         }
-        cut("cleanup")?;
-        profile.database().transaction(|tx| {
-            tx.execute(
-                "UPDATE relay_sources SET cleanup_pending=0,cleanup_error=NULL",
-                [],
-            )?;
-            Ok(())
-        })
+        Ok::<_, LogError>(paths)
     })();
-    if result.is_err() {
-        profile.database().transaction(|tx| {tx.execute("UPDATE relay_sources SET cleanup_error='archive cleanup remains pending' WHERE cleanup_pending=1",[])?;Ok(())})?;
+    let paths = match paths {
+        Ok(paths) => paths,
+        Err(error @ LogError::Io(_)) => return defer_archive(profile, error),
+        Err(error) => return Err(error),
+    };
+    for path in paths {
+        if let Err(error) = fs::remove_file(&path) {
+            return defer_archive(profile, error.into());
+        }
+        if let Err(error) = sync_parent(&path) {
+            return defer_archive(profile, error);
+        }
     }
-    Ok(())
+    if let Err(error) = cut("cleanup") {
+        return defer_archive(profile, error);
+    }
+    // A failed final transaction is an authoritative database failure, never a
+    // request to write a second diagnostic through a now-unusable connection.
+    profile.database().transaction(|tx| {
+        tx.execute("UPDATE relay_sources SET cleanup_pending=0,cleanup_error=NULL WHERE cleanup_pending=1 OR cleanup_error IS NOT NULL", [])?;
+        Ok(())
+    })?;
+    Ok(ArchiveCleanupOutcome::Complete)
 }
 
 pub(crate) struct DecodedRecord;
@@ -433,7 +515,7 @@ pub(crate) fn cut(point: &str) -> Result<(), LogError> {
 pub(crate) mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
-    thread_local! { pub static CUT: RefCell<Option<&'static str>>=const {RefCell::new(None)}; pub static HASHES:Cell<usize>=const {Cell::new(0)}; pub static DECODES:Cell<usize>=const {Cell::new(0)}; pub static LIVE:Cell<usize>=const {Cell::new(0)}; pub static MAX_LIVE:Cell<usize>=const {Cell::new(0)}; pub static MAX_BATCH:Cell<usize>=const {Cell::new(0)}; pub static MAX_EDGES:Cell<usize>=const {Cell::new(0)}; }
+    thread_local! { pub static ARCHIVE_ATTEMPTS:RefCell<Vec<tokio::time::Instant>>=const {RefCell::new(Vec::new())}; pub static CUT: RefCell<Option<&'static str>>=const {RefCell::new(None)}; pub static HASHES:Cell<usize>=const {Cell::new(0)}; pub static DECODES:Cell<usize>=const {Cell::new(0)}; pub static LIVE:Cell<usize>=const {Cell::new(0)}; pub static MAX_LIVE:Cell<usize>=const {Cell::new(0)}; pub static MAX_BATCH:Cell<usize>=const {Cell::new(0)}; pub static MAX_EDGES:Cell<usize>=const {Cell::new(0)}; }
     pub fn enter() {
         LIVE.with(|v| {
             v.set(v.get() + 1);

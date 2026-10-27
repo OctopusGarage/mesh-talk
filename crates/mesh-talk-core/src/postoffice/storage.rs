@@ -18,7 +18,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 const SCHEMA:&str="
 CREATE TABLE relay_arrival_stage(conversation BLOB PRIMARY KEY CHECK(length(conversation)=32), first_seen BLOB NOT NULL CHECK(length(first_seen)=8)) WITHOUT ROWID;
-CREATE TABLE relay_runtime(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version=1), ready INTEGER NOT NULL CHECK(typeof(ready)='integer' AND ready IN (0,1)), next_touch BLOB NOT NULL CHECK(typeof(next_touch)='blob' AND length(next_touch)=8), expired_cutoff BLOB CHECK(expired_cutoff IS NULL OR (typeof(expired_cutoff)='blob' AND length(expired_cutoff)=8)), drain_requested INTEGER NOT NULL DEFAULT 0 CHECK(typeof(drain_requested)='integer' AND drain_requested IN (0,1)));
+CREATE TABLE relay_runtime(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version=1), ready INTEGER NOT NULL CHECK(typeof(ready)='integer' AND ready IN (0,1)), next_touch BLOB NOT NULL CHECK(typeof(next_touch)='blob' AND length(next_touch)=8), expired_cutoff BLOB CHECK(expired_cutoff IS NULL OR (typeof(expired_cutoff)='blob' AND length(expired_cutoff)=8)), inventory_visibility_epoch INTEGER NOT NULL DEFAULT 0 CHECK(typeof(inventory_visibility_epoch)='integer' AND inventory_visibility_epoch>=0), drain_requested INTEGER NOT NULL DEFAULT 0 CHECK(typeof(drain_requested)='integer' AND drain_requested IN (0,1)));
 CREATE TABLE relay_mailboxes(domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16), conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32), first_seen BLOB NOT NULL CHECK(typeof(first_seen)='blob' AND length(first_seen)=8), touched BLOB NOT NULL CHECK(typeof(touched)='blob' AND length(touched)=8), pending INTEGER NOT NULL DEFAULT 0 CHECK(typeof(pending)='integer' AND pending IN (0,1)), PRIMARY KEY(domain,conversation)) WITHOUT ROWID;
 CREATE INDEX relay_mailboxes_expiry ON relay_mailboxes(domain,first_seen,conversation) WHERE pending=0;
 CREATE INDEX relay_mailboxes_lru ON relay_mailboxes(domain,touched,conversation) WHERE pending=0;
@@ -27,6 +27,16 @@ CREATE UNIQUE INDEX relay_mailboxes_pending ON relay_mailboxes(domain) WHERE pen
 pub(crate) fn initialize(db: &EncryptedDatabase) -> Result<(), LogError> {
     db.transaction(|tx| {
         tx.execute_batch(SCHEMA)?;
+        tx.execute_batch(federation::SCHEMA)?;
+        tx.execute_batch(role::inventory::SCHEMA)?;
+        tx.execute(
+            "INSERT INTO relay_digest_preparation(singleton) VALUES(1)",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO relay_federation_runtime(singleton) VALUES(1)",
+            [],
+        )?;
         tx.execute(
             "INSERT INTO relay_runtime(singleton,version,ready,next_touch) VALUES(1,1,0,?1)",
             [1u64.to_be_bytes().as_slice()],
@@ -37,7 +47,19 @@ pub(crate) fn initialize(db: &EncryptedDatabase) -> Result<(), LogError> {
 pub(crate) fn validate(db: &EncryptedDatabase) -> Result<(), LogError> {
     db.read(|c| {
         validate_ddl(c, SCHEMA)?;
+        validate_ddl(c, federation::SCHEMA)?;
+        validate_ddl(c, role::inventory::SCHEMA)?;
+        role::inventory::validate_preparation_on(c)?;
+        federation::validate_runtime_on(c)?;
         runtime_state(c)?;
+        let epoch: i64 = c.query_row(
+            "SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?;
+        if epoch < 0 {
+            return Err(invalid("invalid inventory visibility authority"));
+        }
         Ok(())
     })
 }
@@ -532,4 +554,53 @@ mod runtime_authority_tests {
 #[cfg(test)]
 mod role_tests;
 
+pub(crate) mod federation;
 pub(crate) mod role;
+
+#[cfg(test)]
+mod federation_authority_schema_tests {
+    use crate::{
+        identity::device::DeviceIdentity,
+        storage::profile::{ProfileStorageLease, context::ProfileStorage},
+    };
+    #[test]
+    fn fresh_profile_publishes_bounded_digest_preparation_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let profile = ProfileStorage::open_relay(
+            ProfileStorageLease::acquire(root.path()).unwrap(),
+            &identity.public(),
+            &root.path().join("relay.log"),
+            "pw",
+            123,
+        )
+        .unwrap();
+        profile.database().read(|c| {
+            let authority: (i64,i64,i64) = c.query_row(
+                "SELECT generation,queued,tail_after FROM relay_digest_preparation WHERE singleton=1",
+                [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            assert_eq!(authority,(0,0,0));
+            let epoch:i64=c.query_row("SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",[],|r|r.get(0))?;
+            assert_eq!(epoch,0);
+            Ok(())
+        }).unwrap();
+    }
+    #[test]
+    fn fresh_profile_publishes_federation_staging_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let profile = ProfileStorage::open_relay(
+            ProfileStorageLease::acquire(root.path()).unwrap(),
+            &identity.public(),
+            &root.path().join("relay.log"),
+            "pw",
+            123,
+        )
+        .unwrap();
+        profile.database().read(|c| {
+            let exists:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='relay_federation_runtime')", [], |r|r.get(0))?;
+            assert!(exists, "published relay requires encrypted federation resource authority");
+            Ok(())
+        }).unwrap();
+    }
+}

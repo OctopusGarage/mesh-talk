@@ -9,7 +9,6 @@
 //! (always-on) peer is the post office: the one with the lowest identity
 //! fingerprint. Full election with standbys and uptime detection is Phase 1.
 
-#[allow(dead_code)] // Indexed relay storage awaits paged runtime consumers.
 pub(crate) mod storage;
 
 use crate::eventlog::LogError;
@@ -25,6 +24,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod indexed;
+mod maintenance;
+pub use indexed::{
+    IndexedPostOffice, IndexedRelayExportCursor, IndexedRelayHaveCursor, IndexedRelayView,
+};
 pub mod election;
 pub mod federation;
 pub mod gateway;

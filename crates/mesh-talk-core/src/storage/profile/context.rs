@@ -8,16 +8,34 @@ use crate::{
     identity::device::PublicIdentity,
     storage::database::EncryptedDatabase,
 };
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{Arc, OnceLock},
+};
 
 pub(crate) const RELAY_EVENTS: EventDomainId = EventDomainId(*b"MeshRelayEvents1");
 pub(crate) const RELAY_ARRIVALS: [u8; 16] = *b"MeshRelayArrive1";
+
+/// Archive retry is distinct from bounded publication-staging progress.
+#[derive(Debug)]
+pub(crate) enum ArchiveCleanupOutcome {
+    Complete,
+    Waiting,
+    Deferred(LogError),
+}
+#[derive(Debug)]
+pub(crate) struct ProfileCleanupProgress {
+    pub staging_pending: bool,
+    pub archive: ArchiveCleanupOutcome,
+}
 
 // The database drops before the OS lease. No password or derived key is copied
 // outside SQLCipher, and production repositories cannot own a bare database Arc.
 pub(crate) struct ProfileStorage {
     database: EncryptedDatabase,
     lease: ProfileStorageLease,
+    federation_owner_epoch: OnceLock<i64>,
+    federation_cancellations: crate::postoffice::storage::federation::CancellationQueue,
 }
 impl ProfileStorage {
     pub(crate) fn open_relay(
@@ -32,11 +50,32 @@ impl ProfileStorage {
         binding.extend_from_slice(&identity.ed25519_pub);
         binding.extend_from_slice(&identity.x25519_pub);
         let database = publication::open_database(&lease, &paths, password, &binding)?;
-        let profile = Arc::new(Self { database, lease });
+        let profile = Arc::new(Self {
+            database,
+            lease,
+            federation_owner_epoch: OnceLock::new(),
+            federation_cancellations: Default::default(),
+        });
         manifest::validate(&profile.database, &paths)?;
         EventRepository::validate_existing_domain(&profile.database, RELAY_EVENTS)?;
         publication::complete(&profile, password, now)?;
+        let epoch = crate::postoffice::storage::federation::start_owner(profile.database())?;
+        profile
+            .federation_owner_epoch
+            .set(epoch)
+            .map_err(|_| manifest::invalid("federation owner already initialized"))?;
         Ok(profile)
+    }
+    pub(crate) fn federation_cancellations(
+        &self,
+    ) -> &crate::postoffice::storage::federation::CancellationQueue {
+        &self.federation_cancellations
+    }
+    pub(crate) fn federation_owner_epoch(&self) -> Result<i64, LogError> {
+        self.federation_owner_epoch
+            .get()
+            .copied()
+            .ok_or_else(|| manifest::invalid("federation owner is not started"))
     }
     pub(crate) fn database(&self) -> &EncryptedDatabase {
         &self.database
@@ -49,6 +88,22 @@ impl ProfileStorage {
         EventRepository::from_profile(self.clone(), RELAY_EVENTS)
     }
     pub(crate) fn cleanup_pending(&self) -> Result<bool, LogError> {
+        self.database.read(|c| {
+            Ok(c.query_row(
+                "SELECT staging_pending OR EXISTS(SELECT 1 FROM relay_sources WHERE cleanup_pending=1) FROM relay_publication WHERE singleton=1",
+                [], |r| r.get(0),
+            )?)
+        })
+    }
+    /// Staging always receives one bounded step. Only archive retry is gated;
+    /// authentication and authoritative failures never become deferred success.
+    pub(crate) fn cleanup_step(
+        &self,
+        archive_due: bool,
+    ) -> Result<ProfileCleanupProgress, LogError> {
+        publication::resume_cleanup_step(self, archive_due)
+    }
+    pub(super) fn archive_cleanup_pending(&self) -> Result<bool, LogError> {
         self.database.read(|c| {
             Ok(c.query_row(
                 "SELECT EXISTS(SELECT 1 FROM relay_sources WHERE cleanup_pending=1)",

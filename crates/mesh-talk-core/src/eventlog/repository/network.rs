@@ -46,7 +46,11 @@ impl EventRepository {
         let epoch: Option<i64> = c.query_row("SELECT destructive_epoch FROM event_conversations WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|r.get(0)).optional()?;
         nonnegative(epoch.unwrap_or(0))
     }
-    fn validate_network_on(&self, c: &Connection, view: &NetworkView) -> Result<(), LogError> {
+    pub(crate) fn validate_network_on(
+        &self,
+        c: &Connection,
+        view: &NetworkView,
+    ) -> Result<(), LogError> {
         if view.binding.store_uuid != self.store_uuid
             || view.binding.domain != self.domain
             || self.network_epoch_on(c, &view.binding.conversation)? != view.binding.epoch
@@ -117,44 +121,198 @@ impl EventRepository {
         }
     }
 }
+impl EventRepository {
+    pub(crate) fn network_open_view_on(
+        &self,
+        c: &Connection,
+        conv: &ConversationId,
+    ) -> Result<NetworkView, LogError> {
+        let cutoff = nonnegative(c.query_row(
+            "SELECT next_commit FROM event_domains WHERE domain=?1",
+            [self.domain.0.as_slice()],
+            |r| r.get(0),
+        )?)?;
+        let metadata = self.metadata_on(c, conv)?;
+        let mut captured = SyncMetadata::default();
+        if let Some(m) = metadata {
+            captured = SyncMetadata {
+                count: m.count,
+                channel_v2: m.channel_v2,
+                channel_v3: m.channel_v3,
+                channel_v4: m.channel_v4,
+                fingerprint: self.cached_fingerprint_on(c, conv, m.revision)?,
+            };
+        }
+        Ok(NetworkView {
+            binding: Binding {
+                store_uuid: self.store_uuid,
+                domain: self.domain,
+                conversation: *conv,
+                cutoff,
+                epoch: self.network_epoch_on(c, conv)?,
+            },
+            metadata: captured,
+            _lease: self.database.clone(),
+        })
+    }
+    pub(crate) fn network_have_page_on(
+        &self,
+        c: &Connection,
+        view: &NetworkView,
+        after: Option<&HaveCursor>,
+        budget: IdPageBudget,
+    ) -> Result<SyncPage<EventId, HaveCursor>, LogError> {
+        budget.validate()?;
+
+        self.validate_network_on(c, view)?;
+        if after.is_some_and(|a| a.binding != view.binding) {
+            return Err(LogError::StaleCursor);
+        }
+        let limit = budget.ids.min(budget.examined);
+        let (last, id) = after.map_or((-1, [0; 32]), |a| (a.after, a.id));
+        let mut stmt = c.prepare(SELECT_COMMIT_IDS)?;
+        let mut rows = stmt.query(params![
+            self.domain.0.as_slice(),
+            view.binding.conversation.as_bytes().as_slice(),
+            last.max(0),
+            view.binding.cutoff,
+            last,
+            id.as_slice(),
+            scan_limit(limit)?
+        ])?;
+        let mut items = Vec::new();
+        let mut cursor = None;
+        while let Some(row) = rows.next()? {
+            if items.len() == limit {
+                return Ok(SyncPage {
+                    examined: items.len(),
+                    items,
+                    next: cursor,
+                });
+            }
+            let ordinal = nonnegative(row.get(0)?)?;
+            let id = blob(row, 1)?;
+            items.reserve_exact(1);
+            items.push(EventId::new(id));
+            cursor = Some(HaveCursor {
+                binding: view.binding,
+                after: ordinal,
+                id,
+            });
+        }
+        Ok(SyncPage {
+            examined: items.len(),
+            items,
+            next: None,
+        })
+    }
+    pub(crate) fn network_export_page_on(
+        &self,
+        c: &Connection,
+        view: &NetworkView,
+        have: &HashSet<EventId>,
+        after: Option<&ExportCursor>,
+        budget: ExportPageBudget,
+    ) -> Result<ExportPage<ExportCursor>, LogError> {
+        budget.validate()?;
+
+        self.validate_network_on(c, view)?;
+        if after.is_some_and(|a| a.binding != view.binding) {
+            return Err(LogError::StaleCursor);
+        }
+        let (last, id) = after.map_or((-1, [0; 32]), |a| (a.after, a.id));
+        let mut cursor = ExportCursor {
+            binding: view.binding,
+            after: last,
+            id,
+        };
+        let mut page = ExportPage {
+            events: Vec::new(),
+            next: None,
+            examined: 0,
+            encoded_bytes: 0,
+            allocated_bytes: 0,
+        };
+        let mut stmt = c.prepare(SELECT_COMMIT_IDS)?;
+        let mut rows = stmt.query(params![
+            self.domain.0.as_slice(),
+            view.binding.conversation.as_bytes().as_slice(),
+            last.max(0),
+            view.binding.cutoff,
+            last,
+            id.as_slice(),
+            scan_limit(budget.examined)?
+        ])?;
+        while let Some(row) = rows.next()? {
+            if page.examined == budget.examined || page.events.len() == budget.events {
+                page.next = Some(cursor);
+                return Ok(page);
+            }
+            let ordinal = nonnegative(row.get(0)?)?;
+            let id = EventId::new(blob(row, 1)?);
+            if !have.contains(&id) {
+                let header = self.network_header_on(c, &id)?;
+                if header.conversation != view.binding.conversation {
+                    return Err(corrupt("network header conversation differs"));
+                }
+                let allocation = header
+                    .stored_bytes
+                    .checked_mul(3)
+                    .and_then(|n| n.checked_add(std::mem::size_of::<Event>()))
+                    .ok_or(LogError::RepositoryCounterExhausted)?;
+                let encoded = page
+                    .encoded_bytes
+                    .checked_add(header.encoded_bytes)
+                    .ok_or(LogError::RepositoryCounterExhausted)?;
+                let allocated = page
+                    .allocated_bytes
+                    .checked_add(allocation)
+                    .ok_or(LogError::RepositoryCounterExhausted)?;
+                if encoded > budget.encoded_bytes || allocated > budget.allocated_bytes {
+                    if page.events.is_empty() {
+                        return Err(LogError::PageBudgetTooSmall {
+                            required: if encoded > budget.encoded_bytes {
+                                header.encoded_bytes
+                            } else {
+                                allocation
+                            },
+                        });
+                    }
+                    page.next = Some(cursor);
+                    return Ok(page);
+                }
+                let event = self
+                    .get_on(c, &id)?
+                    .ok_or_else(|| corrupt("network selected body disappeared"))?;
+                page.events.reserve_exact(1);
+                page.events.push(event);
+                page.encoded_bytes = encoded;
+                page.allocated_bytes = allocated;
+            }
+            page.examined += 1;
+            cursor.after = ordinal;
+            cursor.id = *id.as_bytes();
+        }
+        Ok(page)
+    }
+    pub(crate) fn network_metadata_on(
+        &self,
+        c: &Connection,
+        view: &NetworkView,
+    ) -> Result<SyncMetadata, LogError> {
+        self.validate_network_on(c, view)?;
+        Ok(view.metadata)
+    }
+}
 impl NetworkSyncStore for EventRepository {
     type View = NetworkView;
     type HaveCursor = HaveCursor;
     type ExportCursor = ExportCursor;
     fn open_view(&self, conv: &ConversationId) -> Result<NetworkView, LogError> {
-        self.database.read(|c| {
-            let cutoff = nonnegative(c.query_row(
-                "SELECT next_commit FROM event_domains WHERE domain=?1",
-                [self.domain.0.as_slice()],
-                |r| r.get(0),
-            )?)?;
-            let metadata = self.metadata_on(c, conv)?;
-            let mut captured = SyncMetadata::default();
-            if let Some(m) = metadata {
-                captured = SyncMetadata {
-                    count: m.count,
-                    channel_v2: m.channel_v2,
-                    channel_v3: m.channel_v3,
-                    channel_v4: m.channel_v4,
-                    fingerprint: self.cached_fingerprint_on(c, conv, m.revision)?,
-                };
-            }
-            Ok(NetworkView {
-                binding: Binding {
-                    store_uuid: self.store_uuid,
-                    domain: self.domain,
-                    conversation: *conv,
-                    cutoff,
-                    epoch: self.network_epoch_on(c, conv)?,
-                },
-                metadata: captured,
-                _lease: self.database.clone(),
-            })
-        })
+        self.database.read(|c| self.network_open_view_on(c, conv))
     }
     fn metadata(&self, view: &NetworkView) -> Result<SyncMetadata, LogError> {
-        self.validate_view(view)?;
-        Ok(view.metadata)
+        self.database.read(|c| self.network_metadata_on(c, view))
     }
     fn validate_view(&self, view: &NetworkView) -> Result<(), LogError> {
         self.database.read(|c| self.validate_network_on(c, view))
@@ -166,49 +324,8 @@ impl NetworkSyncStore for EventRepository {
         budget: IdPageBudget,
     ) -> Result<SyncPage<EventId, HaveCursor>, LogError> {
         budget.validate()?;
-        self.database.read(|c| {
-            self.validate_network_on(c, view)?;
-            if after.is_some_and(|a| a.binding != view.binding) {
-                return Err(LogError::StaleCursor);
-            }
-            let limit = budget.ids.min(budget.examined);
-            let (last, id) = after.map_or((-1, [0; 32]), |a| (a.after, a.id));
-            let mut stmt = c.prepare(SELECT_COMMIT_IDS)?;
-            let mut rows = stmt.query(params![
-                self.domain.0.as_slice(),
-                view.binding.conversation.as_bytes().as_slice(),
-                last.max(0),
-                view.binding.cutoff,
-                last,
-                id.as_slice(),
-                scan_limit(limit)?
-            ])?;
-            let mut items = Vec::new();
-            let mut cursor = None;
-            while let Some(row) = rows.next()? {
-                if items.len() == limit {
-                    return Ok(SyncPage {
-                        examined: items.len(),
-                        items,
-                        next: cursor,
-                    });
-                }
-                let ordinal = nonnegative(row.get(0)?)?;
-                let id = blob(row, 1)?;
-                items.reserve_exact(1);
-                items.push(EventId::new(id));
-                cursor = Some(HaveCursor {
-                    binding: view.binding,
-                    after: ordinal,
-                    id,
-                });
-            }
-            Ok(SyncPage {
-                examined: items.len(),
-                items,
-                next: None,
-            })
-        })
+        self.database
+            .read(|c| self.network_have_page_on(c, view, after, budget))
     }
     fn export_page(
         &self,
@@ -218,86 +335,8 @@ impl NetworkSyncStore for EventRepository {
         budget: ExportPageBudget,
     ) -> Result<ExportPage<ExportCursor>, LogError> {
         budget.validate()?;
-        self.database.read(|c| {
-            self.validate_network_on(c, view)?;
-            if after.is_some_and(|a| a.binding != view.binding) {
-                return Err(LogError::StaleCursor);
-            }
-            let (last, id) = after.map_or((-1, [0; 32]), |a| (a.after, a.id));
-            let mut cursor = ExportCursor {
-                binding: view.binding,
-                after: last,
-                id,
-            };
-            let mut page = ExportPage {
-                events: Vec::new(),
-                next: None,
-                examined: 0,
-                encoded_bytes: 0,
-                allocated_bytes: 0,
-            };
-            let mut stmt = c.prepare(SELECT_COMMIT_IDS)?;
-            let mut rows = stmt.query(params![
-                self.domain.0.as_slice(),
-                view.binding.conversation.as_bytes().as_slice(),
-                last.max(0),
-                view.binding.cutoff,
-                last,
-                id.as_slice(),
-                scan_limit(budget.examined)?
-            ])?;
-            while let Some(row) = rows.next()? {
-                if page.examined == budget.examined || page.events.len() == budget.events {
-                    page.next = Some(cursor);
-                    return Ok(page);
-                }
-                let ordinal = nonnegative(row.get(0)?)?;
-                let id = EventId::new(blob(row, 1)?);
-                if !have.contains(&id) {
-                    let header = self.network_header_on(c, &id)?;
-                    if header.conversation != view.binding.conversation {
-                        return Err(corrupt("network header conversation differs"));
-                    }
-                    let allocation = header
-                        .stored_bytes
-                        .checked_mul(3)
-                        .and_then(|n| n.checked_add(std::mem::size_of::<Event>()))
-                        .ok_or(LogError::RepositoryCounterExhausted)?;
-                    let encoded = page
-                        .encoded_bytes
-                        .checked_add(header.encoded_bytes)
-                        .ok_or(LogError::RepositoryCounterExhausted)?;
-                    let allocated = page
-                        .allocated_bytes
-                        .checked_add(allocation)
-                        .ok_or(LogError::RepositoryCounterExhausted)?;
-                    if encoded > budget.encoded_bytes || allocated > budget.allocated_bytes {
-                        if page.events.is_empty() {
-                            return Err(LogError::PageBudgetTooSmall {
-                                required: if encoded > budget.encoded_bytes {
-                                    header.encoded_bytes
-                                } else {
-                                    allocation
-                                },
-                            });
-                        }
-                        page.next = Some(cursor);
-                        return Ok(page);
-                    }
-                    let event = self
-                        .get_on(c, &id)?
-                        .ok_or_else(|| corrupt("network selected body disappeared"))?;
-                    page.events.reserve_exact(1);
-                    page.events.push(event);
-                    page.encoded_bytes = encoded;
-                    page.allocated_bytes = allocated;
-                }
-                page.examined += 1;
-                cursor.after = ordinal;
-                cursor.id = *id.as_bytes();
-            }
-            Ok(page)
-        })
+        self.database
+            .read(|c| self.network_export_page_on(c, view, have, after, budget))
     }
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         self.append(&event)

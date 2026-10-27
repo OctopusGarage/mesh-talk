@@ -1,5 +1,6 @@
 //! Narrow role-policy identities and exact scope lookup, never body reads.
 use super::*;
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Binding {
     store_uuid: [u8; 16],
@@ -7,6 +8,7 @@ struct Binding {
     conversation: ConversationId,
     epoch: i64,
 }
+#[cfg(test)]
 pub(crate) struct RepositoryPolicyView {
     binding: Binding,
     _lease: RepositoryOwner,
@@ -32,6 +34,7 @@ impl EventRepository {
             })
             .transpose()
     }
+    #[cfg(test)]
     pub(crate) fn policy_view_on(
         &self,
         c: &Connection,
@@ -49,6 +52,7 @@ impl EventRepository {
             _lease: self.database.clone(),
         })
     }
+    #[cfg(test)]
     pub(crate) fn validate_policy_view_on(
         &self,
         c: &Connection,

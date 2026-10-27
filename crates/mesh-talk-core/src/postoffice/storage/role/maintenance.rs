@@ -177,9 +177,11 @@ impl IndexedRelayState {
                     if m.retained.retiring{return Err(invalid("active selector chose pending scope"))}
                     let token=match self.repository.begin_retirement_on(c,&conv)? {
                         RetirementBegin::Started(token)=>token,
-                        _=>return Err(invalid("relay begin and selected lifecycle disagree")),
+                        RetirementBegin::Existing(token)=>{drop(token);return Err(invalid("relay begin and selected lifecycle disagree"))},
+                        RetirementBegin::Absent=>return Err(invalid("relay begin and selected lifecycle disagree")),
                     };
                     if c.execute("UPDATE relay_mailboxes SET pending=1 WHERE domain=?1 AND conversation=?2 AND pending=0",params![RELAY_ARRIVALS.as_slice(),conv.as_bytes().as_slice()])?!=1{return Err(invalid("relay begin lost arrival"))}
+                    inventory::retire_on(c,&conv)?;
                     fault_cut(c,"begin")?;
                     p.selected_scopes=1;
                     Some((conv,token))

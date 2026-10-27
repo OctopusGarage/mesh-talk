@@ -1,5 +1,6 @@
 //! Logical scope retirement and persistent, bounded physical reclamation.
 use super::*;
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +56,7 @@ pub(crate) struct RetirementProgress {
     pub deleted_body_bytes: u64,
     pub oversized_body_bytes: Option<u64>,
     /// Set only by the committing wrapper; `_on` does not own COMMIT.
+    #[cfg(test)]
     pub transaction_latency: Option<Duration>,
 }
 pub(super) struct Scope {
@@ -143,6 +145,7 @@ impl EventRepository {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn scope_revision_on(
         &self,
         c: &Connection,
@@ -223,6 +226,7 @@ impl EventRepository {
             _lease: self.database.clone(),
         }
     }
+    #[cfg(test)]
     pub(crate) fn resume_retirement(
         &self,
         conv: &ConversationId,
@@ -240,6 +244,7 @@ impl EventRepository {
             .filter(|s| s.lifecycle == 1)
             .map(|s| self.retirement_token(*conv, &s)))
     }
+    #[cfg(test)]
     pub(crate) fn begin_retirement(
         &self,
         conv: &ConversationId,
@@ -292,6 +297,7 @@ impl EventRepository {
             self.retirement_token(*conv, &scope),
         ))
     }
+    #[cfg(test)]
     pub(crate) fn reclaim_retirement(
         &self,
         token: &RetirementToken,

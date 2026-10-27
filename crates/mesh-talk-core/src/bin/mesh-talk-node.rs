@@ -16,17 +16,16 @@ use mesh_talk_core::node::{
     DEFAULT_DISCOVERY_PORT, Node, ParticipantConfig, ParticipantRuntime, PreparedParticipant,
     ReceivedDm, discovery_socket,
 };
-use mesh_talk_core::node::{
-    run_federated_relay_accept_loop_with_directory, run_network_relay_accept_loop_with_directory,
-    run_relay_accept_loop,
+use mesh_talk_core::postoffice::IndexedPostOffice;
+use mesh_talk_core::postoffice::federation::{
+    FederationDirectory, IndexedRelayEndpoint, IndexedRelayTrust,
 };
-use mesh_talk_core::postoffice::PostOffice;
-use mesh_talk_core::postoffice::federation::FederationDirectory;
 use mesh_talk_core::storage::profile::ProfileStorageLease;
 use mesh_talk_core::transport::net::POST_OFFICE_DISCOVERY_PORT;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -39,6 +38,8 @@ mod federation_runtime;
 mod file_saves;
 #[path = "mesh-talk-node/network_config.rs"]
 mod network_config;
+#[path = "mesh-talk-node/relay_runtime.rs"]
+mod relay_runtime;
 use federation_config::{FederationSeed, parse_fingerprint};
 use federation_runtime::run_federation_loop;
 
@@ -262,11 +263,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
-    let _data_dir_lock = ProfileStorageLease::acquire(&data_dir)?;
+    let data_dir_lock = ProfileStorageLease::acquire(&data_dir)?;
 
     if args.post_office {
-        return run_post_office(args, network_configuration).await;
+        return run_post_office(args, network_configuration, data_dir_lock).await;
     }
+    let _data_dir_lock = data_dir_lock;
     let password = args
         .password
         .as_deref()
@@ -536,36 +538,33 @@ fn spawn_relay_lan_discovery(
     roster: Arc<Mutex<Roster>>,
     announce: mesh_talk_core::discovery::service::SharedAnnounce,
     user_id: String,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<tokio::task::JoinHandle<()>>> {
     if lan_port == routed_port {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let shared_socket = Arc::new(discovery_socket(lan_port)?);
-    mesh_talk_core::discovery::service::spawn_discovery_with_trigger(
-        shared_socket,
-        roster,
-        announce,
-        user_id,
-        lan_port,
-        None,
-    );
-    Ok(())
+    Ok(
+        mesh_talk_core::discovery::service::spawn_discovery_with_trigger(
+            shared_socket,
+            roster,
+            announce,
+            user_id,
+            lan_port,
+            None,
+        ),
+    )
 }
 
 /// Run as a post office: load the identity, advertise the post-office role,
-/// serve a durable `PostOffice` relay. No DM send/drain — a pure relay. Runs the
-/// accept loop forever (stop with Ctrl-C / kill).
-///
-/// Note: cold start does TWO password-KDF unlocks back to back — the keystore
-/// (`load_or_create`) and the relay log (`PostOffice::open`) — so the startup
-/// line can take ~15s to appear on first run. Tooling that waits for a relay to
-/// come up should poll for the startup line, not fixed-sleep.
+/// serve the indexed encrypted relay under one owned shutdown supervisor.
+/// Tooling should poll the startup line rather than assume a fixed unlock time.
 async fn run_post_office(
     args: Args,
     network_configuration: Option<(
         mesh_talk_core::postoffice::network::NetworkPolicy,
         mesh_talk_core::postoffice::network::NetworkMembership,
     )>,
+    lease: ProfileStorageLease,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let password = args
         .password
@@ -610,153 +609,130 @@ async fn run_post_office(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("relay.log");
-    let store = Arc::new(Mutex::new(PostOffice::open(
-        &relay_path,
-        password,
-        identity,
-    )?));
-    let retention_store = Arc::clone(&store);
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            if let Err(error) = retention_store
-                .lock()
-                .expect("post office lock not poisoned")
-                .prune_expired()
-            {
-                eprintln!("post office retention cleanup failed: {error}");
-            }
-        }
-    });
+    let store = IndexedPostOffice::open_with_lease(lease, &relay_path, password, identity)?;
+    // Install real service signals before announcing readiness or spawning work.
+    let signals = relay_runtime::ShutdownSignals::install()?;
+    let mut background = relay_runtime::BackgroundTasks::default();
 
     // Discovery: advertise ourselves (and harmlessly track peers) on the shared socket.
     let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
     let socket = Arc::new(discovery_socket(args.discovery_port)?);
     let shared_announce = mesh_talk_core::discovery::service::shared_announce(&announce);
     let discovery_identity = DeviceIdentity::from_secret_bytes(ed, x);
-    mesh_talk_core::discovery::service::spawn_discovery_with_routed(
-        Arc::clone(&socket),
-        Arc::clone(&roster),
-        Arc::clone(&shared_announce),
-        user_id.clone(),
-        args.discovery_port,
-        None,
-        Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::default()),
-        Some(Arc::new(
-            mesh_talk_core::discovery::service::RoutedDiscovery::new(Arc::new(
-                move |nonce, announce| {
-                    mesh_talk_core::discovery::query::encode_response(
-                        nonce,
-                        announce,
-                        &discovery_identity,
-                    )
-                },
+    background.handles.extend(
+        mesh_talk_core::discovery::service::spawn_discovery_with_routed(
+            Arc::clone(&socket),
+            Arc::clone(&roster),
+            Arc::clone(&shared_announce),
+            user_id.clone(),
+            args.discovery_port,
+            None,
+            Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::default()),
+            Some(Arc::new(
+                mesh_talk_core::discovery::service::RoutedDiscovery::new(Arc::new(
+                    move |nonce, announce| {
+                        mesh_talk_core::discovery::query::encode_response(
+                            nonce,
+                            announce,
+                            &discovery_identity,
+                        )
+                    },
+                )),
             )),
-        )),
+        ),
     );
     if let Some(port) = args.lan_announce_port {
-        spawn_relay_lan_discovery(
+        background.handles.extend(spawn_relay_lan_discovery(
             port,
             args.discovery_port,
             Arc::clone(&roster),
             shared_announce,
             user_id.clone(),
-        )?;
+        )?);
     }
 
     let gateway = if let (Some(remote), Some(peer_id)) = (args.bridge_peer, args.bridge_peer_id) {
         let proof = Arc::new(Mutex::new(None));
-        tokio::spawn(
-            mesh_talk_core::postoffice::gateway::run_bridge_gateway_on_port(
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(
+            mesh_talk_core::postoffice::gateway::run_bridge_gateway_on_port_until(
                 Arc::clone(&proof),
                 tcp_port,
                 remote,
                 peer_id,
                 args.bridge_proxy_port,
+                rx,
             ),
         );
+        background.gateway = Some((stop, task));
         Some(proof)
     } else {
         None
     };
 
-    emit(&format!(
-        "post-office {user_id} listening on tcp/{tcp_port}, discovery udp/{}",
-        args.discovery_port
-    ));
-
-    if let Some(network) = network {
-        let directory = FederationDirectory::new();
-        directory.set_office_name(&args.name);
-        emit(
-            "post-office network ready: automatic approved-member discovery; software integrity not attested",
-        );
-        tokio::spawn(run_federation_loop(
-            Arc::clone(&roster),
-            args.relay_seeds,
-            DeviceIdentity::from_secret_bytes(ed, x),
-            Arc::clone(&store),
-            directory.clone(),
-            Some(network.clone()),
-        ));
-        run_network_relay_accept_loop_with_directory(
-            transport_identity,
-            listener,
-            store,
-            network,
-            directory,
-        )
-        .await;
-        return Ok(());
-    }
-
-    if args.federation_config.is_some() || !args.federation_peers.is_empty() {
+    let federation_enabled =
+        network.is_some() || args.federation_config.is_some() || !args.federation_peers.is_empty();
+    let directory = if federation_enabled || gateway.is_some() || args.bridge {
         let directory = gateway
             .map(FederationDirectory::with_gateway)
             .unwrap_or_default();
         directory.set_office_name(&args.name);
-        let trusted = Arc::new(
-            args.federation_peers
-                .iter()
-                .map(|seed| seed.id.clone())
-                .collect::<HashSet<_>>(),
-        );
-        let federation_identity = DeviceIdentity::from_secret_bytes(ed, x);
-        tokio::spawn(run_federation_loop(
-            Arc::clone(&roster),
-            args.federation_peers.clone(),
-            federation_identity,
-            Arc::clone(&store),
-            directory.clone(),
-            None,
-        ));
-        run_federated_relay_accept_loop_with_directory(
-            transport_identity,
-            listener,
-            store,
-            trusted,
-            directory,
-        )
-        .await;
-        return Ok(());
-    }
-
-    // Serve relay connections until killed. This loop never returns; the trailing
-    // Ok(()) is unreachable in practice (the process is stopped by a signal).
-    if gateway.is_some() || args.bridge {
-        mesh_talk_core::node::run_named_bridge_relay_accept_loop(
-            transport_identity,
-            listener,
-            store,
-            gateway,
-            &args.name,
-        )
-        .await;
+        directory.set_office_public(transport_identity.public());
+        Some(directory)
     } else {
-        run_relay_accept_loop(transport_identity, listener, store).await;
+        None
+    };
+    let trust = network.clone().map(IndexedRelayTrust::Network).or_else(|| {
+        federation_enabled.then(|| {
+            IndexedRelayTrust::Pinned(Arc::new(
+                args.federation_peers
+                    .iter()
+                    .map(|seed| seed.id.clone())
+                    .collect(),
+            ))
+        })
+    });
+    let endpoint = IndexedRelayEndpoint::new(store.clone(), directory.clone(), trust);
+    let outgoing_endpoint = endpoint.clone();
+    let outgoing_store = store.clone();
+    let seeds = if network.is_some() {
+        args.relay_seeds
+    } else {
+        args.federation_peers
+    };
+    let outgoing = async move {
+        if let Some(directory) = directory.filter(|_| federation_enabled) {
+            run_federation_loop(
+                roster,
+                seeds,
+                DeviceIdentity::from_secret_bytes(ed, x),
+                outgoing_store,
+                directory,
+                network,
+                outgoing_endpoint,
+            )
+            .await
+        } else {
+            std::future::pending().await
+        }
+    };
+    emit(&format!(
+        "post-office {user_id} listening on tcp/{tcp_port}, discovery udp/{}",
+        args.discovery_port
+    ));
+    if federation_enabled {
+        emit("post-office federation ready; software integrity not attested");
     }
-    Ok(())
+    relay_runtime::run(
+        store,
+        endpoint,
+        transport_identity,
+        listener,
+        outgoing,
+        background,
+        signals,
+    )
+    .await
 }
 
 /// Parse and dispatch a `/msg <prefix> <text>` command: resolve the recipient

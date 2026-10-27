@@ -47,6 +47,7 @@ impl IndexedRelayState {
                 "UPDATE relay_runtime SET expired_cutoff=?1 WHERE singleton=1",
                 [next.to_be_bytes().as_slice()],
             )?;
+            inventory::invalidate_visibility_on(c)?;
             fault_cut(c, "cutoff")?;
             return Ok(Some(next));
         }
@@ -59,9 +60,74 @@ impl IndexedRelayState {
         now: u64,
         operation: impl FnOnce(&Connection, Option<u64>) -> Result<T, LogError>,
     ) -> Result<T, LogError> {
-        let (result, changed) = self.profile.database().transaction(|c| {
+        self.transaction_notifying(now, true, operation)
+    }
+    pub(super) fn derived_transaction<T>(
+        &self,
+        now: u64,
+        operation: impl FnOnce(&Connection, Option<u64>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_notifying(now, false, operation)
+    }
+    /// Session authority fences the whole callback, including initial failures
+    /// after cutoff advancement. Expected availability is commit-preserving only
+    /// while the current session still owns authority.
+    pub(super) fn session_derived_transaction<T>(
+        &self,
+        now: u64,
+        session: Option<&crate::postoffice::storage::federation::SessionLease>,
+        complete: bool,
+        operation: impl FnOnce(&Connection, Option<u64>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_with_session(now, session, complete, false, operation)
+    }
+    pub(super) fn session_policy_transaction<T>(
+        &self,
+        now: u64,
+        session: &crate::postoffice::storage::federation::SessionLease,
+        complete: bool,
+        operation: impl FnOnce(&Connection, Option<u64>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        self.transaction_with_session(now, Some(session), complete, true, operation)
+    }
+    fn transaction_with_session<T>(
+        &self,
+        now: u64,
+        session: Option<&crate::postoffice::storage::federation::SessionLease>,
+        complete: bool,
+        visible_writes: bool,
+        operation: impl FnOnce(&Connection, Option<u64>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        if session.is_some_and(|s| !s.belongs_to(&self.profile)) {
+            return Err(LogError::StaleCursor);
+        }
+        self.transaction_notifying(now, visible_writes, |c, cutoff| {
+            let result = (|| {
+                if let Some(session) = session {
+                    session.validate_on(c, complete)?;
+                }
+                operation(c, cutoff)
+            })();
+            match session {
+                Some(session) => session.finish_on(c, complete, result),
+                None => result,
+            }
+        })
+    }
+    fn transaction_notifying<T>(
+        &self,
+        now: u64,
+        visible_writes: bool,
+        operation: impl FnOnce(&Connection, Option<u64>) -> Result<T, LogError>,
+    ) -> Result<T, LogError> {
+        let (result, changed, visible_changed) = self.profile.database().transaction(|c| {
             require_ready(c)?;
             let before = c.total_changes();
+            let visibility: i64 = c.query_row(
+                "SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )?;
             let cutoff = self.advance_cutoff_on(c, now)?;
             let result = operation(c, cutoff);
             let result = match result {
@@ -76,9 +142,22 @@ impl IndexedRelayState {
                 Ok(value) => Ok(value),
             };
             fault_cut(c, "commit")?;
-            Ok((result, c.total_changes() != before))
+            let after_visibility: i64 = c.query_row(
+                "SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok((
+                result,
+                c.total_changes() != before,
+                visibility != after_visibility,
+            ))
         })?;
         if changed {
+            self.work_changes
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
+        if changed && (visible_writes || visible_changed) {
             self.changes
                 .send_modify(|generation| *generation = generation.wrapping_add(1));
         }
@@ -104,6 +183,7 @@ impl IndexedRelayState {
         }
         Ok(metadata)
     }
+    #[cfg(test)]
     pub(crate) fn mailbox_metadata_at(
         &self,
         conv: &ConversationId,
@@ -111,6 +191,7 @@ impl IndexedRelayState {
     ) -> Result<Option<MailboxMetadata>, LogError> {
         self.policy_transaction(now, |c, cutoff| self.eligible_on(c, conv, cutoff))
     }
+    #[cfg(test)]
     pub(crate) fn retained_event_at(
         &self,
         id: &EventId,
@@ -141,6 +222,7 @@ impl IndexedRelayState {
                 .is_some_and(|scope| scope == *conv))
         })
     }
+    #[cfg(test)]
     pub(crate) fn policy_view_at(
         &self,
         conv: &ConversationId,
@@ -158,6 +240,7 @@ impl IndexedRelayState {
             }))
         })
     }
+    #[cfg(test)]
     pub(crate) fn validate_policy_view_at(
         &self,
         view: &RelayPolicyView,

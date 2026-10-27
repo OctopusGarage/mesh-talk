@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    eventlog::{ConversationId, Event, EventKind},
+    eventlog::{ConversationId, Event, EventKind, LogError},
     identity::device::DeviceIdentity,
     storage::record_log::EncryptedRecordLog,
 };
@@ -654,4 +654,60 @@ fn prepared_raw_archive_is_independent_and_preserves_original_torn_bytes() {
         profile.events().unwrap().get(&event.id).unwrap(),
         Some(event)
     );
+}
+
+#[test]
+fn runtime_cleanup_preserves_authoritative_commit_error_before_any_diagnostic_retry() {
+    use super::publication::tests::CUT;
+    let root = tempfile::tempdir().unwrap();
+    let (device, path, _) = fixture(root.path());
+    CUT.with(|v| v.replace(Some("checkpoint")));
+    let profile = open(root.path(), &device, &path).unwrap();
+    profile.database().read(|c|{c.execute_batch("CREATE TEMP TABLE cleanup_fault_parent(id INTEGER PRIMARY KEY);CREATE TEMP TABLE cleanup_fault_child(id INTEGER REFERENCES cleanup_fault_parent(id) DEFERRABLE INITIALLY DEFERRED);CREATE TEMP TRIGGER cleanup_commit_fault AFTER UPDATE OF cleanup_pending ON relay_sources WHEN NEW.cleanup_pending=0 BEGIN INSERT INTO cleanup_fault_child VALUES(1); END;")?;Ok(())}).unwrap();
+    let error = profile.cleanup_step(true).unwrap_err();
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    let mut code = None;
+    while let Some(error) = source {
+        if let Some(driver) = error.downcast_ref::<rusqlite::Error>() {
+            code = driver.sqlite_error_code();
+            break;
+        }
+        source = error.source();
+    }
+    assert_eq!(
+        code,
+        Some(rusqlite::ErrorCode::ConstraintViolation),
+        "original COMMIT failure must survive faulted-handle diagnostics: {error}"
+    );
+    assert!(profile.database().requires_reopen());
+}
+#[test]
+fn runtime_cleanup_rejects_invalid_artifact_provenance_instead_of_deferring_it() {
+    use super::publication::tests::CUT;
+    let root = tempfile::tempdir().unwrap();
+    let (device, path, _) = fixture(root.path());
+    CUT.with(|v| v.replace(Some("checkpoint")));
+    let profile = open(root.path(), &device, &path).unwrap();
+    let directory = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|v| v.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".relay-publication-")
+        })
+        .unwrap();
+    let saved = root.path().join("saved-owned-artifacts");
+    std::fs::rename(&directory, &saved).unwrap();
+    std::fs::write(&directory, b"invalid parent identity").unwrap();
+    assert!(
+        matches!(profile.cleanup_step(true), Err(LogError::CorruptFile(_))),
+        "unknown artifact ownership must not be downgraded to successful cleanup"
+    );
+    assert_eq!(
+        std::fs::read(&directory).unwrap(),
+        b"invalid parent identity"
+    );
+    assert!(saved.is_dir());
 }

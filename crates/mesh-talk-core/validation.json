@@ -882,7 +882,10 @@
       "id": "core-postoffice",
       "paths": [
         "crates/mesh-talk-core/src/postoffice/",
-        "crates/mesh-talk-core/src/bin/mesh-talk-node/federation_runtime.rs"
+        "crates/mesh-talk-core/src/bin/mesh-talk-node/federation_runtime.rs",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node.rs",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node/relay_runtime.rs",
+        "crates/mesh-talk-core/tests/indexed_relay_cli.rs"
       ],
       "rust": [
         {
@@ -890,19 +893,21 @@
           "filters": [
             "postoffice::",
             "node::opaque_relay::",
-            "node::session::tests::"
+            "node::session::tests::",
+            "node::session::paged_tests::"
           ]
         }
       ],
       "escalation": [
         "Federation continuation cadence changes require cargo test -p mesh-talk-core --bin mesh-talk-node federation_runtime:: in addition to library metadata, paging and admission regressions.",
-        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance. Network trust changes also require cargo test -p mesh-talk-core --test relay_network --test relay_network_cli --test federation_config_cli and the mesh-talk-node federation_runtime:: binary tests. Membership exchanges must reject forged, copied, expired, revoked and foreign-network credentials before bulk metadata disclosure."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance. Network trust changes also require cargo test -p mesh-talk-core --test relay_network --test relay_network_cli --test federation_config_cli and the mesh-talk-node federation_runtime:: binary tests. Membership exchanges must reject forged, copied, expired, revoked and foreign-network credentials before bulk metadata disclosure.",
+        "Indexed runtime changes require cargo test -p mesh-talk-core --bin mesh-talk-node, --test federation_config_cli and --test relay_network_cli; on Unix additionally run --test indexed_relay_cli (five real mode branches, ordinary mail exchange, pre-keystore exclusion, SIGTERM joined stop and warm restart). Library selectors do not execute binary/integration targets. Native Windows hard-stop/WAL recovery, supported-platform lock scenarios and actual discovery remain separate acceptance. Production startup/resource evidence must use a separately built normal binary with feature/KDF proof, not the fast-test binary."
       ],
       "consumers": [
         "core-node"
       ],
       "capability": {
-        "summary": "Authorize equal relay reconciliation and bound idle mailbox checks and rejected-page retries without weakening event admission.",
+        "summary": "Authorize equal relay reconciliation and own bounded indexed dedicated-relay serving, maintenance and lifecycle without weakening event admission.",
         "guide": "docs/post-office-federation.md",
         "invariants": [
           {
@@ -940,6 +945,26 @@
           {
             "name": "Leased relay policy views bind cutoff, arrival and repository destructive identity; stale bindings fail before newer work is interpreted, while current authority corruption and storage failures remain explicit errors.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Dedicated CLI plain, named bridge, gateway, pinned and approved-network paths share one indexed endpoint and transfer the pre-keystore profile lease without collecting historical bodies or IDs; participant and legacy SDK storage remain separate.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "Federation inventory and selected local snapshots share persisted session/row/byte budgets, finite view bindings and absolute deadlines; cancellation revokes authority before bounded cleanup releases charge, with no database lock across network await.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "Endpoint clones share nonwaiting global Have reservations through vector-to-set conversion and retained use; local overload, preparation and storage causes cannot trigger protocol fallback or false custody.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "Scoped fingerprint demand stays bounded and saturation never starts global inventory; explicit preparation advances finite key and commit-tail cursors with one digest context, preserving empty continuations and exact sent digests.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           }
         ]
       }
@@ -1041,6 +1066,10 @@
           },
           {
             "name": "Strict profile schema validation includes exact named unique-index authority and fixed relay cutoff/drain records; missing or weakened authority never becomes a repaired or empty successful profile.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Faulted or poisoned database state is typed runtime supervision input; every rollback failure remains an authoritative Database error requiring reopen and preserves both sanitized operation and rollback causes without changing COMMIT fault policy.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -1444,7 +1473,8 @@
       ],
       "escalation": [
         "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
-        "CLI data-directory ownership changes additionally require the shared core storage profile-lock subprocess tests and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart."
+        "CLI data-directory ownership changes additionally require the shared core storage profile-lock subprocess tests and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart.",
+        "Dedicated indexed relay lifecycle changes require the complete mesh-talk-node binary tests and, on Unix, the indexed_relay_cli integration target. Exercise all five branches and gateway proxy cancellation; successful Unix SIGTERM evidence does not establish native Windows forced-stop recovery or production-KDF startup performance."
       ],
       "capability": {
         "summary": "Exclude cooperating CLI writers before opening participant or post-office stores, retaining the OS lock through the process lifetime.",
@@ -1456,6 +1486,10 @@
           },
           {
             "name": "Releasing ownership preserves the lock file and actual process termination permits restart",
+            "reference": "specifications/deployment_guide.md#data-directory-ownership"
+          },
+          {
+            "name": "The dedicated indexed relay consumes its pre-keystore lease once and cooperatively joins owned maintenance, reconciliation, sessions, discovery and gateway proxies before storage release; Windows hard termination retains separate crash-recovery acceptance.",
             "reference": "specifications/deployment_guide.md#data-directory-ownership"
           }
         ]

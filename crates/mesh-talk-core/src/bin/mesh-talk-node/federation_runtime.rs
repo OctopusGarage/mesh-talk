@@ -3,8 +3,10 @@ use super::federation_config::FederationSeed;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use mesh_talk_core::discovery::Roster;
 use mesh_talk_core::identity::device::{DeviceIdentity, PublicIdentity};
-use mesh_talk_core::postoffice::federation::{FederationDirectory, MAX_MAILBOXES_PER_EXCHANGE};
-use mesh_talk_core::postoffice::{PostOffice, network::RelayNetwork};
+use mesh_talk_core::postoffice::federation::{
+    FederationDirectory, IndexedRelayEndpoint, IndexedRelayError, MAX_MAILBOXES_PER_EXCHANGE,
+};
+use mesh_talk_core::postoffice::{IndexedPostOffice, network::RelayNetwork};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -122,14 +124,12 @@ pub(super) async fn run_federation_loop(
     roster: Arc<Mutex<Roster>>,
     seeds: Vec<FederationSeed>,
     identity: DeviceIdentity,
-    store: Arc<Mutex<PostOffice>>,
+    store: IndexedPostOffice,
     directory: FederationDirectory,
     network: Option<RelayNetwork>,
-) {
-    let mut mail = store
-        .lock()
-        .expect("post office lock not poisoned")
-        .subscribe_changes();
+    endpoint: IndexedRelayEndpoint,
+) -> Result<(), IndexedRelayError> {
+    let mut mail = store.subscribe_changes();
     let mut presence = directory.subscribe_changes();
     let mut routes = roster
         .lock()
@@ -187,21 +187,13 @@ pub(super) async fn run_federation_loop(
             edge.active = true;
             let peer = edge.peer.clone();
             let identity = identity.clone();
-            let store = store.clone();
-            let directory = directory.clone();
-            let network = network.clone();
+            let endpoint = endpoint.clone();
             exchanges.push(async move {
                 (
                     key,
-                    if let Some(network) = network.as_ref() {
-                        directory
-                            .sync_with_network_relay(key.0, &identity, &peer, &store, network)
-                            .await
-                    } else {
-                        directory
-                            .sync_with_relay(key.0, &identity, &peer, &store)
-                            .await
-                    },
+                    endpoint
+                        .sync_with_relay_checked(key.0, &identity, &peer)
+                        .await,
                 )
             });
         }
@@ -254,7 +246,7 @@ pub(super) async fn run_federation_loop(
         });
         tokio::select! {
             result = exchanges.next(), if !exchanges.is_empty() => {
-                let Some((key, result)) = result else { return; };
+                let Some((key, result)) = result else { return Ok(()); };
                 let edge = edges.get_mut(&key).expect("active edge remains installed");
                 edge.active = false;
                 match result {
@@ -262,16 +254,18 @@ pub(super) async fn run_federation_loop(
                         edge.succeeded(count, Instant::now());
                     }
                     Err(error) => {
+                        if store.requires_reopen() { return Err(error); }
                         log::debug!("federation sync at {}: {error}", key.0);
                         edge.continuation_batches = 0;
                         edge.failures = edge.failures.saturating_add(1);
-                        edge.retry_at = Instant::now() + retry_delay(edge.failures);
+                        let local = error.is_local_retry();
+                        edge.retry_at = Instant::now() + if local { Duration::from_millis(100u64 << edge.failures.saturating_sub(1).min(6)).min(Duration::from_secs(5)) } else { retry_delay(edge.failures) };
                         edge.pending = true;
                     }
                 }
             }
             result = queries.next(), if !queries.is_empty() => {
-                let Some((key, result)) = result else { return; };
+                let Some((key, result)) = result else { return Ok(()); };
                 let probe = probes.get_mut(&key).unwrap();
                 probe.active = false;
                 match result {
@@ -317,18 +311,42 @@ pub(super) async fn run_federation_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mesh_talk_core::{
+        eventlog::sync::network::NetworkSyncStore,
+        postoffice::{PostOffice, federation::IndexedRelayTrust},
+        storage::profile::ProfileStorageLease,
+    };
+    async fn run_federation_loop(
+        roster: Arc<Mutex<Roster>>,
+        seeds: Vec<FederationSeed>,
+        identity: DeviceIdentity,
+        store: IndexedPostOffice,
+        directory: FederationDirectory,
+        network: Option<RelayNetwork>,
+    ) {
+        let trust = network.clone().map(IndexedRelayTrust::Network).or_else(|| {
+            Some(IndexedRelayTrust::Pinned(Arc::new(
+                seeds.iter().map(|s| s.id.clone()).collect(),
+            )))
+        });
+        let endpoint = IndexedRelayEndpoint::new(store.clone(), Some(directory.clone()), trust);
+        let (_stop, rx) = tokio::sync::watch::channel(false);
+        tokio::select! {
+            result=super::run_federation_loop(roster,seeds,identity,store.clone(),directory,network,endpoint)=>{result.unwrap();}
+            result=store.run_maintenance(rx)=>{result.unwrap();}
+        }
+    }
     use mesh_talk_core::discovery::Announce;
     use tokio::net::{TcpListener, UdpSocket};
 
-    fn local_store(temp: &tempfile::TempDir) -> Arc<Mutex<PostOffice>> {
-        Arc::new(Mutex::new(
-            PostOffice::open(
-                &temp.path().join("relay.log"),
-                "pw",
-                DeviceIdentity::generate(),
-            )
-            .unwrap(),
-        ))
+    fn local_store(temp: &tempfile::TempDir) -> IndexedPostOffice {
+        IndexedPostOffice::open_with_lease(
+            ProfileStorageLease::acquire(temp.path()).unwrap(),
+            &temp.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -449,7 +467,7 @@ mod tests {
                 b"initial".to_vec(),
             ))
             .unwrap();
-        store.lock().unwrap().accept(warmup.clone()).unwrap();
+        store.clone().ingest(warmup.clone()).unwrap();
         let server = tokio::spawn(
             mesh_talk_core::node::run_federated_relay_accept_loop_with_directory(
                 healthy,
@@ -502,7 +520,7 @@ mod tests {
             ))
             .unwrap();
         let id = next.id;
-        store.lock().unwrap().accept(next).unwrap();
+        store.clone().ingest(next).unwrap();
         let delivered = tokio::time::timeout(Duration::from_secs(2), async {
             while !target.lock().unwrap().has(&id) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -599,9 +617,9 @@ mod tests {
             .collect::<Vec<_>>();
         let ids = events.iter().map(|event| event.id).collect::<Vec<_>>();
         {
-            let mut office = store.lock().unwrap();
+            let mut office = store.clone();
             for event in events {
-                office.accept(event).unwrap();
+                office.ingest(event).unwrap();
             }
         }
         let delivered = tokio::time::timeout(Duration::from_secs(2), async {

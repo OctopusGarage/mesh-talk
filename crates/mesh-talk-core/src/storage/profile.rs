@@ -405,15 +405,11 @@ mod tests {
     }
 }
 
-#[allow(dead_code)] // Runtime adoption follows bounded sync consumers.
 pub(crate) mod context;
-#[allow(dead_code)]
 pub(crate) mod manifest;
-#[allow(dead_code)]
 pub(crate) mod publication;
 #[cfg(test)]
 mod publication_acceptance_tests;
-#[allow(dead_code)]
 mod publication_files;
 #[cfg(test)]
 mod publication_tests;

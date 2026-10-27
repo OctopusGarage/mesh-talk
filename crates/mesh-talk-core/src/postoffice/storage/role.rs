@@ -24,6 +24,7 @@ pub(crate) struct MailboxMetadata {
     /// Physical row count/charge, preserved by future logical retirement until GC.
     pub retained: ConversationChargeMetadata,
 }
+#[cfg(test)]
 impl MailboxMetadata {
     pub(crate) fn expiry_deadline(&self) -> Option<u64> {
         self.first_seen
@@ -31,6 +32,7 @@ impl MailboxMetadata {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct RelayPolicyView {
     repository: crate::eventlog::repository::RepositoryPolicyView,
     conversation: ConversationId,
@@ -43,12 +45,16 @@ struct ArrivalState {
     pending: bool,
 }
 
+type FederationPeerKey = ([u8; 32], [u8; 32]);
 pub(crate) struct IndexedRelayState {
     profile: Arc<ProfileStorage>,
     repository: EventRepository,
     admission: RelayAdmission,
     changes: tokio::sync::watch::Sender<u64>,
     limits: capacity::RelayLimits,
+    work_changes: tokio::sync::watch::Sender<u64>,
+    federation_cursors:
+        std::sync::Mutex<std::collections::HashMap<FederationPeerKey, ConversationId>>,
 }
 impl IndexedRelayState {
     /// Takes the existing shared profile; never opens another connection/KDF/cache.
@@ -66,12 +72,48 @@ impl IndexedRelayState {
             admission,
             changes: tokio::sync::watch::channel(0).0,
             limits: capacity::RelayLimits::default(),
+            work_changes: tokio::sync::watch::channel(0).0,
+            federation_cursors: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
     pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changes.subscribe()
     }
-    pub(crate) fn physical_charge(&self) -> Result<DomainChargeMetadata, LogError> {
+    pub(crate) fn subscribe_work(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.work_changes.subscribe()
+    }
+    pub(crate) fn profile(&self) -> &Arc<ProfileStorage> {
+        &self.profile
+    }
+    pub(crate) fn federation_cursor(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+    ) -> Option<ConversationId> {
+        self.federation_cursors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(peer.ed25519_pub, peer.x25519_pub))
+            .copied()
+    }
+    pub(crate) fn advance_federation_cursor(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        id: ConversationId,
+    ) {
+        let mut cursors = self
+            .federation_cursors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = (peer.ed25519_pub, peer.x25519_pub);
+        if cursors.len() >= 1024 && !cursors.contains_key(&key) {
+            cursors.clear();
+        }
+        cursors.insert(key, id);
+    }
+    #[cfg(test)]
+    pub(crate) fn physical_charge(
+        &self,
+    ) -> Result<crate::eventlog::repository::DomainChargeMetadata, LogError> {
         self.profile.database().read(|c| {
             require_ready(c)?;
             self.repository.domain_charge_on(c)
@@ -157,93 +199,133 @@ impl IndexedRelayState {
         origin: Option<u64>,
     ) -> Result<AppendOutcome, LogError> {
         self.policy_transaction(now, |c, cutoff| {
-            let next_touch = require_ready(c)?;
-            if matches!(self.admission, RelayAdmission::OpaqueOnly)
-                && !super::super::opaque::envelope_shape(event)
+            self.record_on(c, cutoff, event, now, origin)
+        })
+    }
+    fn record_on(
+        &self,
+        c: &Connection,
+        cutoff: Option<u64>,
+        event: &Event,
+        now: u64,
+        origin: Option<u64>,
+    ) -> Result<AppendOutcome, LogError> {
+        let next_touch = require_ready(c)?;
+        if matches!(self.admission, RelayAdmission::OpaqueOnly)
+            && !super::super::opaque::envelope_shape(event)
+        {
+            return Err(LogError::AdmissionRejected(
+                "post office requires an opaque envelope".into(),
+            ));
+        }
+        if let Some(seen) = origin {
+            let expired = seen
+                .checked_add(super::super::MAX_RELAY_AGE.as_secs())
+                .is_some_and(|deadline| deadline <= now);
+            let future = now.checked_add(300).is_some_and(|latest| seen > latest);
+            if !super::super::opaque::RelayMailbox::is_federated_id(&event.conversation_id)
+                || expired
+                || future
             {
                 return Err(LogError::AdmissionRejected(
-                    "post office requires an opaque envelope".into(),
+                    "federated mailbox arrival is expired or invalid".into(),
                 ));
             }
-            if let Some(seen) = origin {
-                let expired = seen.checked_add(super::super::MAX_RELAY_AGE.as_secs())
-                    .is_some_and(|deadline| deadline <= now);
-                let future = now.checked_add(300).is_some_and(|latest| seen > latest);
-                if !super::super::opaque::RelayMailbox::is_federated_id(&event.conversation_id)
-                    || expired || future
-                {
-                    return Err(LogError::AdmissionRejected(
-                        "federated mailbox arrival is expired or invalid".into(),
-                    ));
-                }
+        }
+        let prior = self.mailbox_on(c, &event.conversation_id)?;
+        let first = origin.unwrap_or(now).min(now);
+        let lowered = prior.is_some_and(|m| origin.is_some() && first < m.first_seen);
+        let effective_first = prior.map_or(first, |m| if lowered { first } else { m.first_seen });
+        // The repository authenticates duplicates and all new growth before
+        // this role may schedule drain or persist an origin correction.
+        let mut following_touch = None;
+        let outcome = self.repository.append_with_gate_on(c, event, |cost| {
+            if cutoff.is_some_and(|cutoff| effective_first <= cutoff) {
+                return Ok(crate::eventlog::repository::AppendGate::Block(
+                    capacity::RelayBlock::Unavailable,
+                ));
             }
-            let prior = self.mailbox_on(c, &event.conversation_id)?;
-            let first = origin.unwrap_or(now).min(now);
-            let lowered = prior.is_some_and(|m| origin.is_some() && first < m.first_seen);
-            let effective_first = prior.map_or(first, |m| if lowered {first} else {m.first_seen});
-            // The repository authenticates duplicates and all new growth before
-            // this role may schedule drain or persist an origin correction.
-            let mut following_touch=None;
-            let outcome = self.repository.append_with_gate_on(c, event, |cost| {
-                if cutoff.is_some_and(|cutoff| effective_first <= cutoff) {
-                    return Ok(crate::eventlog::repository::AppendGate::Block(capacity::RelayBlock::Unavailable));
-                }
-                following_touch=Some(next_touch.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?);
-                self.capacity_gate_on(c, cost)
-            })?;
-            let outcome = match outcome {
-                crate::eventlog::repository::GatedAppend::Accepted(outcome) => outcome,
-                crate::eventlog::repository::GatedAppend::Blocked(reason) => return Err(reason.error()),
-            };
-            fault_cut(c, "event")?;
-            let appended = matches!(outcome, AppendOutcome::Appended);
-            let mailbox = event.conversation_id.as_bytes().as_slice();
-            if appended {
-                let following = following_touch.ok_or_else(||invalid("accepted relay growth lacks reserved touch"))?;
-                if prior.is_none() {
-                    c.execute(
+            following_touch = Some(
+                next_touch
+                    .checked_add(1)
+                    .ok_or(LogError::RepositoryCounterExhausted)?,
+            );
+            self.capacity_gate_on(c, cost)
+        })?;
+        let outcome = match outcome {
+            crate::eventlog::repository::GatedAppend::Accepted(outcome) => outcome,
+            crate::eventlog::repository::GatedAppend::Blocked(reason) => return Err(reason.error()),
+        };
+        fault_cut(c, "event")?;
+        let appended = matches!(outcome, AppendOutcome::Appended);
+        let mailbox = event.conversation_id.as_bytes().as_slice();
+        if appended {
+            let following = following_touch
+                .ok_or_else(|| invalid("accepted relay growth lacks reserved touch"))?;
+            if prior.is_none() {
+                c.execute(
                         "INSERT INTO relay_mailboxes(domain,conversation,first_seen,touched) VALUES(?1,?2,?3,?4)",
                         params![RELAY_ARRIVALS.as_slice(), mailbox,
                             first.to_be_bytes().as_slice(), next_touch.to_be_bytes().as_slice()],
                     )?;
-                } else if lowered {
-                    c.execute(
-                        "UPDATE relay_mailboxes SET first_seen=?3 WHERE domain=?1 AND conversation=?2",
-                        params![RELAY_ARRIVALS.as_slice(), mailbox, first.to_be_bytes().as_slice()],
-                    )?;
-                }
-                fault_cut(c, "arrival")?;
-                c.execute(
-                    "UPDATE relay_mailboxes SET touched=?3 WHERE domain=?1 AND conversation=?2",
-                    params![RELAY_ARRIVALS.as_slice(), mailbox, next_touch.to_be_bytes().as_slice()],
-                )?;
-                fault_cut(c, "touch")?;
-                c.execute(
-                    "UPDATE relay_runtime SET next_touch=?1 WHERE singleton=1",
-                    [following.to_be_bytes().as_slice()],
-                )?;
             } else if lowered {
                 c.execute(
                     "UPDATE relay_mailboxes SET first_seen=?3 WHERE domain=?1 AND conversation=?2",
-                    params![RELAY_ARRIVALS.as_slice(), mailbox, first.to_be_bytes().as_slice()],
+                    params![
+                        RELAY_ARRIVALS.as_slice(),
+                        mailbox,
+                        first.to_be_bytes().as_slice()
+                    ],
                 )?;
             }
-            fault_cut(c, "runtime")?;
-            let cutoff = self.advance_cutoff_on(c, now)?;
-            self.eligible_on(c, &event.conversation_id, cutoff)?;
+            fault_cut(c, "arrival")?;
+            c.execute(
+                "UPDATE relay_mailboxes SET touched=?3 WHERE domain=?1 AND conversation=?2",
+                params![
+                    RELAY_ARRIVALS.as_slice(),
+                    mailbox,
+                    next_touch.to_be_bytes().as_slice()
+                ],
+            )?;
+            fault_cut(c, "touch")?;
+            c.execute(
+                "UPDATE relay_runtime SET next_touch=?1 WHERE singleton=1",
+                [following.to_be_bytes().as_slice()],
+            )?;
+        } else if lowered {
+            c.execute(
+                "UPDATE relay_mailboxes SET first_seen=?3 WHERE domain=?1 AND conversation=?2",
+                params![
+                    RELAY_ARRIVALS.as_slice(),
+                    mailbox,
+                    first.to_be_bytes().as_slice()
+                ],
+            )?;
+        }
+        if lowered {
+            inventory::invalidate_visibility_on(c)?;
+        }
+        if appended && prior.is_none() {
+            let epoch:i64=c.query_row("SELECT destructive_epoch FROM event_conversations WHERE domain=?1 AND conversation=?2",params![RELAY_EVENTS.0.as_slice(),mailbox],|r|r.get(0))?;
+            if epoch > 0 {
+                inventory::invalidate_visibility_on(c)?;
+            }
+        }
+        fault_cut(c, "runtime")?;
+        let cutoff = self.advance_cutoff_on(c, now)?;
+        self.eligible_on(c, &event.conversation_id, cutoff)?;
 
-            Ok(outcome)
-        })
+        Ok(outcome)
     }
 }
-fn decode_time(bytes: Vec<u8>) -> Result<u64, LogError> {
+pub(super) fn decode_time(bytes: Vec<u8>) -> Result<u64, LogError> {
     Ok(u64::from_be_bytes(
         bytes
             .try_into()
             .map_err(|_| invalid("invalid relay timestamp"))?,
     ))
 }
-fn fault_cut(_c: &Connection, _point: &str) -> Result<(), LogError> {
+pub(super) fn fault_cut(_c: &Connection, _point: &str) -> Result<(), LogError> {
     #[cfg(test)]
     if super::role_tests::CUT.with(|v| v.get() == Some(_point)) {
         if _point == "commit" {
@@ -259,4 +341,9 @@ fn fault_cut(_c: &Connection, _point: &str) -> Result<(), LogError> {
 
 mod capacity;
 pub(crate) mod maintenance;
+pub(crate) mod network;
 mod policy;
+
+mod federation;
+
+pub(crate) mod inventory;

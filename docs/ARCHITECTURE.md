@@ -1397,10 +1397,11 @@ row is an explicit atomic-work exception; it is reported separately and consumes
 the step. Ordinary reclamation does not decode event bodies or collect history
 IDs. Only a transaction-owning wrapper measures commit latency; helpers within a
 caller's transaction cannot claim that timing. The indexed relay role composes
-these primitives with expiry and capacity policy; actual serving and scheduler
-adoption remain separate integration requirements.
+these primitives with expiry and capacity policy. The dedicated relay runtime
+uses this indexed authority; participant storage retains its separate migration
+boundary below.
 
-The internal indexed relay state retains the existing shared profile connection
+The indexed relay state retains the existing shared profile connection
 and owns first-arrival time, touch ticks, role readiness and retention policy.
 Validated admission and arrival/touch changes commit in one transaction through
 the event repository. Its new-growth gate runs after signature, causal and
@@ -1445,9 +1446,60 @@ causing repeated over-selection. Role pending state and repository retirement
 change together; completion removes the matching arrival in the same transaction
 as final graph reclamation. Metadata probes, scope selection and graph work have
 separate budgets. Physical charge is not an exact live-mailbox total or a promise
-of equivalent filesystem shrinkage. The next-deadline and pending-work scalars
-support a later paced worker; these internal operations do not yet replace the
-legacy participant or dedicated relay runtime.
+of equivalent filesystem shrinkage.
+
+The dedicated `mesh-talk-node --post-office` path transfers its pre-keystore
+profile lease into one `IndexedPostOffice` and shares one `IndexedRelayEndpoint`
+across plain, named bridge, gateway, pinned federation and approved-network
+modes. Normal reopen uses encrypted indexed state without hydrating the legacy
+history log. Initial authenticated legacy migration remains proportional to
+source data. Participant `Node` and legacy collecting SDK helpers retain their
+existing storage paths; relay adoption does not establish desktop startup or
+total process memory bounds.
+
+Federation sessions persist bounded remote inventory and the exact local digest
+snapshot actually sent. Owner/session identities, monotonic deadlines and
+cancellation qualify each operation in its current transaction. Stale sessions
+retain their storage charges until bounded cleanup. Inventory preparation keeps
+one active digest context and a finite initial scan followed by an indexed commit
+tail. Each pass has separate limits of 512 raw producer rows and 512 retained
+event IDs hashed; these are not a combined 512-row limit for the whole maintenance
+pass or its other bounded work classes. Derived digest writes
+wake maintenance separately from externally visible mailbox changes. Ordinary
+metadata probes request only scoped fingerprints; a full demand queue leaves an
+optional cache miss for a later probe instead of starting global preparation.
+Explicit federation demand starts global preparation. Missing or stale derived
+state never authorizes a fabricated fingerprint match or positive custody.
+
+One owned maintenance future interleaves retention, demanded digests, publication
+cleanup and session cleanup. It subscribes before inspecting work, waits at least
+10 ms and three times the measured slice duration between passes, and backs off
+retryable failures from 100 ms to five seconds. Self notifications cannot bypass
+that pacing. This is a maintenance duty policy, not a total CPU or transaction
+latency limit. Idle passes do not scan historical IDs/bodies or rewrite policy.
+Expiry waits use checked monotonic conversion with at most a 24-hour recheck
+horizon and retain earlier session deadlines. A faulted or poisoned database
+stops admission and fails the owned runtime; it is not reused in a retry loop.
+A rollback failure remains an authoritative database error requiring reopen and
+retains both sanitized operation and rollback diagnostics; COMMIT failure policy
+is unchanged.
+
+Archive-only checkpoint contention or filesystem unavailability returns a typed
+deferred outcome with its original cause. Its independent 100 ms–5 s retry
+schedule does not delay bounded publication staging, role, digest or session
+work; unrelated successful slices and watch notifications cannot reset or bypass
+that schedule. Repeated identical cleanup diagnostics do not rewrite their
+stored value. Initial publication/reopen may leave these explicitly deferred
+archives pending. Invalid source/artifact provenance and authoritative database
+failures remain errors, and faulted handles are not reused for diagnostic writes.
+
+The CLI owns inbound sessions, outgoing reconciliation, discovery and gateway
+proxy tasks. Cooperative shutdown stops admission, cancels and joins those
+owners, lets admitted synchronous database work return, then releases profile
+ownership. Unix SIGINT/SIGTERM use this path. Windows hard service termination
+requires separate crash/reopen evidence. See the
+[relay resource bounds](post-office-federation.md#indexed-relay-runtime-and-resource-bounds)
+and [data-directory ownership](../specifications/deployment_guide.md#data-directory-ownership).
 
 Profile maintenance records pending conversations on disk and examines candidates
 in bounded steps. Its snapshot keeps the newest two unreferenced Profile leaves

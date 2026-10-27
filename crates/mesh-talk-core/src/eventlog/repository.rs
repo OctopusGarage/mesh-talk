@@ -9,16 +9,21 @@ use std::sync::Arc;
 
 mod decode;
 pub(crate) mod import;
+#[cfg(test)]
 pub(crate) mod maintenance;
 mod metadata;
 mod policy;
+#[cfg(test)]
 pub(crate) use policy::RepositoryPolicyView;
 pub(crate) mod network;
 pub(crate) mod order;
+#[cfg(test)]
 pub(crate) mod pages;
 pub(crate) mod retirement;
 mod schema;
-pub(crate) use metadata::{ConversationMetadata, DomainChargeMetadata};
+#[cfg(test)]
+pub(crate) use metadata::ConversationMetadata;
+pub(crate) use metadata::DomainChargeMetadata;
 pub(crate) use retirement::ConversationChargeMetadata;
 #[cfg(test)]
 mod tests;
@@ -296,12 +301,14 @@ impl EventRepository {
             |r| r.get(0),
         )?)
     }
+    #[cfg(test)]
     pub(crate) fn has(&self, id: &EventId) -> Result<bool, LogError> {
         self.database.read(|c| self.has_on(c, id))
     }
 
     /// Inherent allocation bound: one complete signed Event, including arbitrarily
     /// many accepted parents. Use body pages when a caller needs a byte budget.
+    #[cfg(test)]
     pub(crate) fn get(&self, id: &EventId) -> Result<Option<Event>, LogError> {
         self.database.read(|c| self.get_on(c, id))
     }
@@ -359,6 +366,7 @@ impl EventRepository {
         }
         Ok(Some(event))
     }
+    #[cfg(test)]
     pub(crate) fn header(&self, id: &EventId) -> Result<Option<EventHeader>, LogError> {
         self.database.read(|c| {
             self.require_visible_id_on(c, id)?;

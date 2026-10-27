@@ -11,6 +11,9 @@ pub(super) trait SessionBackend {
     type View;
     type HaveCursor;
     type ExportCursor;
+    fn remote_have_budget(&self) -> Option<&RemoteHaveBudget> {
+        None
+    }
     fn probe_metadata(
         &self,
         conversation: &ConversationId,
@@ -202,9 +205,14 @@ impl<S: SyncStore> SessionBackend for LegacyCollectingNetworkAdapter<'_, S> {
             .signed_file_consent(c, id)
     }
 }
-#[allow(dead_code)] // Adopted by the separate SQL runtime cutover.
-pub(super) struct PagedNetworkBackend<'a, S>(pub(super) &'a Mutex<S>);
+pub(super) struct PagedNetworkBackend<'a, S>(
+    pub(super) &'a Mutex<S>,
+    pub(super) Option<&'a RemoteHaveBudget>,
+);
 impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
+    fn remote_have_budget(&self) -> Option<&RemoteHaveBudget> {
+        self.1
+    }
     type View = S::View;
     type HaveCursor = S::HaveCursor;
     type ExportCursor = S::ExportCursor;

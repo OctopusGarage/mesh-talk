@@ -9,7 +9,6 @@
 pub mod event;
 pub(crate) mod order;
 pub mod persist;
-#[allow(dead_code)] // Indexed backend is wired only after bounded consumers and migration exist.
 pub(crate) mod repository;
 pub mod store;
 pub mod sync;

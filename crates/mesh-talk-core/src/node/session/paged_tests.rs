@@ -485,7 +485,7 @@ async fn paged_second_write_failure_preserves_prefix_and_closes_exchange() {
 fn paged_batch_classifies_peer_rejections_without_losing_valid_suffix() {
     let (_dir, store, signer, c) = tiny_fixture();
     let backend_store = Mutex::new(store);
-    let backend = PagedNetworkBackend(&backend_store);
+    let backend = PagedNetworkBackend(&backend_store, None);
     let root = Event::new(&signer, c, 1, vec![], 10, 0, EventKind::Message, vec![]);
     let mut invalid = root.clone();
     invalid.sig[0] ^= 1;
@@ -642,7 +642,7 @@ async fn paged_export_uses_actual_frame_framing_and_rejects_one_byte_oversize() 
         );
         store.repo.append(&event).unwrap();
         let store = Mutex::new(store);
-        let backend = PagedNetworkBackend(&store);
+        let backend = PagedNetworkBackend(&store, None);
         let view = backend.open_view(&c).unwrap();
         let result = select_export_frames(&backend, &view, c, &HashSet::new(), 1).await;
         if excess == 0 {
@@ -718,7 +718,7 @@ async fn paged_file_burst_fills_four_bounded_frames_across_tiny_scan_pages() {
         parent = Some(event.id);
     }
     let store = Mutex::new(store);
-    let backend = PagedNetworkBackend(&store);
+    let backend = PagedNetworkBackend(&store, None);
     let view = backend.open_view(&c).unwrap();
     let frames = select_export_frames(&backend, &view, c, &HashSet::new(), FILE_FOLLOWUP_BURST)
         .await
@@ -1149,4 +1149,262 @@ fn legacy_view_open_and_have_read_never_collect_event_bodies() {
         .unwrap();
     assert_eq!(page.items, [EventId::new([3; 32])]);
     assert!(page.next.is_none());
+}
+
+#[test]
+fn remote_have_budget_is_global_fail_fast_and_holds_conversion_overlap() {
+    use super::have_budget::{ReceivedHave, RemoteHaveBudget};
+    let budget = RemoteHaveBudget::default();
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(budget.try_admit().unwrap());
+    }
+    assert!(
+        budget.try_admit().is_err(),
+        "fifth endpoint must fail immediately, never await a symmetric endpoint"
+    );
+    let reservation = held.pop().unwrap();
+    let ids = (0..200_000u64)
+        .map(|i| {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&i.to_le_bytes());
+            EventId::new(b)
+        })
+        .collect::<Vec<_>>();
+    let received = ReceivedHave::from_vec(ids, Some(reservation)).unwrap();
+    assert_eq!(received.len(), 200_000);
+    assert!(received.accounted_bytes() <= 32 * 1024 * 1024);
+    assert!(
+        budget.try_admit().is_err(),
+        "conversion must retain the same reservation"
+    );
+    drop(received);
+    assert!(budget.try_admit().is_ok());
+    held.clear();
+    for _ in 0..4 {
+        held.push(budget.try_admit().unwrap());
+    }
+}
+
+#[tokio::test]
+async fn indexed_relay_and_legacy_real_tcp_converge_both_directions_with_budget() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        for sql_requests in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let owner_identity = DeviceIdentity::generate();
+            let profile = crate::storage::profile::context::ProfileStorage::open_relay(
+                crate::storage::profile::ProfileStorageLease::acquire(dir.path()).unwrap(),
+                &owner_identity.public(),
+                &dir.path().join("relay.log"),
+                "pw",
+                crate::postoffice::network::unix_now(),
+            )
+            .unwrap();
+            let state = Arc::new(
+                crate::postoffice::storage::role::IndexedRelayState::from_profile(
+                    profile,
+                    crate::postoffice::storage::role::RelayAdmission::LegacyCompatible,
+                )
+                .unwrap(),
+            );
+            let budget = RemoteHaveBudget::default();
+            let server_budget = budget.clone();
+            let signer = DeviceIdentity::generate();
+            let conversation = ConversationId::new([7; 32]);
+            let mut log = EventLog::default();
+            let mut parent = None;
+            let mut missing_roots = Vec::new();
+            // More than one Have chunk. SQL-only roots are inserted opposite
+            // canonical clock priority; their child has an inverted signed clock.
+            for seq in 1..=1501 {
+                let event = Event::new(
+                    &signer,
+                    conversation,
+                    seq,
+                    vec![],
+                    2000 - seq,
+                    0,
+                    EventKind::Message,
+                    vec![],
+                );
+                state
+                    .record(&event, crate::postoffice::network::unix_now(), None)
+                    .unwrap();
+                if seq <= 2 {
+                    missing_roots.push(event.id);
+                } else {
+                    log.append(event.clone()).unwrap();
+                }
+                parent = Some(event.id);
+            }
+            let sql_extra = Event::new(
+                &signer,
+                conversation,
+                1502,
+                missing_roots,
+                0,
+                0,
+                EventKind::Message,
+                vec![1],
+            );
+            let legacy_extra = Event::new(
+                &signer,
+                conversation,
+                1503,
+                parent.into_iter().collect(),
+                1,
+                0,
+                EventKind::Message,
+                vec![2],
+            );
+            state
+                .record(&sql_extra, crate::postoffice::network::unix_now(), None)
+                .unwrap();
+            log.append(legacy_extra.clone()).unwrap();
+            let sql = Arc::new(Mutex::new(crate::postoffice::IndexedPostOffice {
+                state: state.clone(),
+            }));
+            let legacy = Arc::new(Mutex::new(log));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server_sql = sql.clone();
+            let server_legacy = legacy.clone();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut channel = SecureChannel::accept(stream, &DeviceIdentity::generate())
+                    .await
+                    .unwrap();
+                loop {
+                    let served = if sql_requests {
+                        serve_one(&mut channel, &server_legacy).await
+                    } else {
+                        serve_one_budgeted(&mut channel, &server_sql, &server_budget).await
+                    };
+                    match served.unwrap() {
+                        Served::Closed => break,
+                        Served::Handled(_) => {}
+                    }
+                }
+            });
+            let mut channel = SecureChannel::connect(
+                tokio::net::TcpStream::connect(address).await.unwrap(),
+                &DeviceIdentity::generate(),
+                None,
+            )
+            .await
+            .unwrap();
+            if sql_requests {
+                request_round_budgeted(&mut channel, &sql, conversation, &budget)
+                    .await
+                    .unwrap();
+            } else {
+                request_round(&mut channel, &legacy, conversation)
+                    .await
+                    .unwrap();
+            }
+            if !sql_requests {
+                assert!(
+                    request_durable_have(&mut channel, conversation, legacy_extra.id)
+                        .await
+                        .unwrap()
+                );
+            }
+            drop(channel);
+            server.await.unwrap();
+            assert!(
+                state
+                    .durable_have_at(
+                        &conversation,
+                        &legacy_extra.id,
+                        crate::postoffice::network::unix_now()
+                    )
+                    .unwrap()
+            );
+            assert!(legacy.lock().unwrap().get(&sql_extra.id).is_some());
+        }
+    })
+    .await
+    .expect("mixed paged/legacy TCP exchange timed out");
+}
+
+#[tokio::test]
+async fn budgeted_round_saturation_cancellation_and_healthy_retry_release_reservations() {
+    async fn exchange(budget: RemoteHaveBudget) -> Result<(), SessionError> {
+        let (a, b) = tokio::io::duplex(262144);
+        let requester = DeviceIdentity::generate();
+        let responder = DeviceIdentity::generate();
+        let (client, server) = tokio::join!(
+            SecureChannel::connect(a, &requester, None),
+            SecureChannel::accept(b, &responder)
+        );
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            EncryptedDatabase::open(&dir.path().join("profile.db"), "pw", b"profile").unwrap(),
+        );
+        let store = Arc::new(Mutex::new(
+            EventRepository::new(db, EventDomainId([1; 16])).unwrap(),
+        ));
+        let server_store = store.clone();
+        let server_budget = budget.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                match serve_one_budgeted(&mut server, &server_store, &server_budget).await? {
+                    Served::Closed => return Ok::<(), SessionError>(()),
+                    Served::Handled(_) => {}
+                }
+            }
+        });
+        let result =
+            request_round_budgeted(&mut client, &store, ConversationId::new([7; 32]), &budget)
+                .await;
+        drop(client);
+        let served = task.await.unwrap();
+        match served {
+            Err(error) => Err(error),
+            Ok(_) => result.map(|_| ()),
+        }
+    }
+    let budget = RemoteHaveBudget::default();
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(budget.try_admit().unwrap());
+    }
+    let results = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(exchange(budget.clone()), exchange(budget.clone()))
+    })
+    .await
+    .expect("symmetric endpoint admission must fail immediately without distributed waiting");
+    assert!(matches!(results.0, Err(SessionError::ResourceUnavailable)));
+    assert!(matches!(results.1, Err(SessionError::ResourceUnavailable)));
+    held.clear();
+    tokio::time::timeout(std::time::Duration::from_secs(2), exchange(budget.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    // Cancellation during Have receive must drop its full reservation.
+    let (a, b) = tokio::io::duplex(262144);
+    let requester = DeviceIdentity::generate();
+    let responder = DeviceIdentity::generate();
+    let (client, server) = tokio::join!(
+        SecureChannel::connect(a, &requester, None),
+        SecureChannel::accept(b, &responder)
+    );
+    let _client = client.unwrap();
+    let mut server = server.unwrap();
+    let receive = recv_have_owned(
+        &mut server,
+        true,
+        ConversationId::new([7; 32]),
+        Some(&budget),
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), receive)
+            .await
+            .is_err()
+    );
+    for _ in 0..4 {
+        held.push(budget.try_admit().unwrap());
+    }
 }

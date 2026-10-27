@@ -131,8 +131,18 @@ message stores. Keep each independent node in its own data directory. Cooperatin
 updated CLI processes refuse a second owner, including while the first process
 is still starting. The PID written to `node.lock` is diagnostic information;
 file contents alone do not establish ownership. The CLI uses the shared core
-`ProfileStorageLease` primitive; its acquired guard is transferable to the
-storage owner without reacquiring the same lock.
+`ProfileStorageLease` primitive. Dedicated post-office startup transfers the
+acquired guard by value into its indexed storage owner without reacquiring the
+same lock; participant startup retains its lexical guard.
+
+The dedicated relay owns its maintenance, reconciliation, inbound sessions,
+discovery and gateway proxy tasks. Unix SIGINT/SIGTERM stop admission, cancel
+and join these tasks, and finish any admitted synchronous database slice before
+releasing storage. A faulted database exits through this owner rather than being
+advertised indefinitely; existing macOS/Windows service restart throttling remains
+in effect. Windows forced Scheduled Task termination is a crash boundary and
+needs native restart/WAL recovery verification, rather than Unix graceful-stop
+claims. See [indexed relay resource bounds](../docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds).
 
 The file remains after a normal stop or crash. The OS releases ownership when
 the process's lock handle closes, including on termination. Restart the node

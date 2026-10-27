@@ -22,6 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
+mod indexed;
+pub use indexed::{IndexedRelayEndpoint, IndexedRelayError, IndexedRelayTrust};
+
 const REQUEST_V4: &[u8] = b"MTFI4Q";
 const PRESENCE_ORIGIN_FRAME: &[u8] = b"MTFP3D";
 const REQUEST: &[u8] = b"MTFI1Q";
@@ -172,6 +175,12 @@ impl FederationDirectory {
         Self(Arc::new(Mutex::new(BridgeDirectory::with_gateway(gateway))))
     }
 
+    pub fn set_office_public(&self, public: PublicIdentity) {
+        self.0
+            .lock()
+            .expect("directory lock not poisoned")
+            .set_office_public(public);
+    }
     pub fn set_office_name(&self, name: &str) {
         self.0
             .lock()

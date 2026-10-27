@@ -16,8 +16,10 @@ use crate::eventlog::sync::{
 };
 use crate::transport::{MAX_PLAINTEXT, SecureChannel, TransportError};
 mod backend;
+mod have_budget;
 use backend::*;
 use bincode::Options;
+pub use have_budget::RemoteHaveBudget;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -197,6 +199,8 @@ pub enum SessionError {
     UnexpectedMessage,
     /// Neither local application nor acceptance of the previous push advanced.
     NoProgress,
+    /// Local process RAM admission/allocation failed; retry on a fresh channel.
+    ResourceUnavailable,
 }
 
 impl std::fmt::Display for SessionError {
@@ -206,6 +210,7 @@ impl std::fmt::Display for SessionError {
             SessionError::Transport(e) => write!(f, "sync transport error: {e}"),
             SessionError::Serialization(m) => write!(f, "sync serialization error: {m}"),
             SessionError::UnexpectedMessage => write!(f, "unexpected sync message"),
+            SessionError::ResourceUnavailable => write!(f, "local sync resources unavailable"),
             SessionError::NoProgress => write!(f, "sync made no progress"),
         }
     }
@@ -387,12 +392,36 @@ where
         if have.len() + chunk.ids.len() > MAX_HAVE_IDS_TOTAL {
             return Err(SessionError::UnexpectedMessage);
         }
+        let required = have.len() + chunk.ids.len();
+        if required > have.capacity() {
+            let target = required
+                .max(have.capacity().saturating_mul(2))
+                .min(MAX_HAVE_IDS_TOTAL);
+            have.try_reserve_exact(target - have.len())
+                .map_err(|_| SessionError::ResourceUnavailable)?;
+            if have.capacity() > MAX_HAVE_IDS_TOTAL {
+                return Err(SessionError::ResourceUnavailable);
+            }
+        }
         have.extend(chunk.ids);
         if !chunk.more {
             return Ok(have);
         }
     }
     Err(SessionError::UnexpectedMessage)
+}
+
+async fn recv_have_owned<IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    want_req: bool,
+    conversation: ConversationId,
+    budget: Option<&RemoteHaveBudget>,
+) -> Result<have_budget::ReceivedHave, SessionError> {
+    // Never await admission: requester/responder endpoints may already be in
+    // opposite network phases while holding other resources.
+    let permit = budget.map(RemoteHaveBudget::try_admit).transpose()?;
+    let ids = recv_have(channel, want_req, conversation).await?;
+    have_budget::ReceivedHave::from_vec(ids, permit)
 }
 
 /// Run one reconciliation round as the REQUESTER over `channel`, for
@@ -635,11 +664,8 @@ impl SyncProgress {
         {
             return Err(SessionError::UnexpectedMessage);
         }
-        let remote_have: std::collections::HashSet<EventId> =
-            recv_have(channel, false, conversation)
-                .await?
-                .into_iter()
-                .collect();
+        let remote_have =
+            recv_have_owned(channel, false, conversation, backend.remote_have_budget()).await?;
         self.remote_have_count = Some(intersection_count(backend, &have_view, &remote_have).await?);
         drop(have_view);
         let report = backend.apply(&response.events)?;
@@ -850,8 +876,8 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             let v2 = v3 || matches!(decode(bytes)?, SyncWire::RequestV2(_));
             // The Request's inline have is empty on the networked path; read the
             // requester's streamed have, then answer.
-            let have = recv_have(channel, true, conversation).await?;
-            let have: std::collections::HashSet<EventId> = have.into_iter().collect();
+            let have =
+                recv_have_owned(channel, true, conversation, backend.remote_have_budget()).await?;
             let view = backend.open_view(&conversation)?;
             let metadata = backend.metadata(&view)?;
             have_count(metadata.count)?;
@@ -2609,7 +2635,7 @@ pub async fn request_round_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite
 ) -> Result<ApplyReport, SessionError> {
     let mut progress = SyncProgress::default();
     while !progress
-        .step_backend(channel, &PagedNetworkBackend(store), conversation, 1)
+        .step_backend(channel, &PagedNetworkBackend(store, None), conversation, 1)
         .await?
     {}
     Ok(progress.total)
@@ -2633,5 +2659,51 @@ pub async fn serve_wire_bytes_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWr
     store: &Mutex<S>,
     bytes: &[u8],
 ) -> Result<Served, SessionError> {
-    serve_wire_backend(channel, &PagedNetworkBackend(store), bytes).await
+    serve_wire_backend(channel, &PagedNetworkBackend(store, None), bytes).await
+}
+
+/// Dedicated runtime requester; the process owner's shared Have budget is mandatory.
+pub(crate) async fn request_round_budgeted<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+    budget: &RemoteHaveBudget,
+) -> Result<ApplyReport, SessionError> {
+    let mut progress = SyncProgress::default();
+    while !progress
+        .step_backend(
+            channel,
+            &PagedNetworkBackend(store, Some(budget)),
+            conversation,
+            1,
+        )
+        .await?
+    {}
+    Ok(progress.total)
+}
+/// Dedicated runtime responder; every path retains the process owner RAM gate.
+pub(crate) async fn serve_wire_bytes_budgeted<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    bytes: &[u8],
+    budget: &RemoteHaveBudget,
+) -> Result<Served, SessionError> {
+    serve_wire_backend(channel, &PagedNetworkBackend(store, Some(budget)), bytes).await
+}
+pub(crate) async fn serve_one_budgeted<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite + Unpin>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    budget: &RemoteHaveBudget,
+) -> Result<Served, SessionError> {
+    let bytes = match channel.recv().await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(Served::Closed),
+    };
+    serve_wire_bytes_budgeted(channel, store, &bytes, budget).await
 }

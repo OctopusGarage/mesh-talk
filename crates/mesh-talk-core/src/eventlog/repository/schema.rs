@@ -144,6 +144,7 @@ CREATE TABLE retained_events(
  FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
 );
 CREATE INDEX retained_events_clock ON retained_events(domain,conversation,lamport,id);
+CREATE INDEX retained_events_domain_commits ON retained_events(domain,commit_ordinal,conversation);
 CREATE INDEX retained_events_commit ON retained_events(domain,conversation,commit_ordinal,id);
 CREATE INDEX retained_events_ids ON retained_events(domain,conversation,id);
 CREATE INDEX retained_events_wall_clock ON retained_events(domain,conversation,wall_clock,id);
