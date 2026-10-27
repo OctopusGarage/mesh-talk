@@ -23,7 +23,7 @@ settings to confirm the value before editing it again.
 ## Linked-account scope
 
 With preference synchronization enabled, linked devices share portable settings:
-notifications and preview preference, retention, calling and ringtone, post-office
+notifications and preview preference, calling and ringtone, post-office
 master/send/receive, LAN restriction, bridge discovery/hub, privacy preset, idle and
 hidden locking, sensitive-copy confirmation and clipboard clearing. Existing
 appearance preferences include language, theme, wallpaper and library selection.
@@ -31,12 +31,13 @@ Custom themes, stickers, avatars and their validated assets use versioned privat
 account documents. Contact remarks, pins and private contact/group photos share
 account scope; they do not change a contact's public signed nickname.
 
-Download destinations, autostart, close-to-tray, stay-signed-in, update channel,
-OS authorization, local-agent grants and device sync selection remain local.
+Local history retention, download destinations, autostart, close-to-tray,
+stay-signed-in, update channel, OS authorization, local-agent grants and device
+sync selection remain local.
 
 Imported linked-device preferences may strengthen local privacy protections,
-but do not silently weaken them. Weaker imported preview, lock, clipboard,
-copy-confirmation or retention values retain the current local protection;
+but do not silently weaken them. Weaker imported preview, lock, clipboard
+or copy-confirmation values retain the current local protection;
 mixed settings show Custom. An explicit local change can apply the weaker value
 after [identity verification](privacy-controls.md#verify-sensitive-operations).
 Invisible mode and reply-permission grants remain device-local under
@@ -234,6 +235,11 @@ An unavailable receiving policy displays an unknown state with Retry. It does
 not show an assumed Ask/Automatic choice as the persisted setting.
 
 ## Retention and backup
+
+History retention belongs to the signed-in account on this device. Changing it
+does not change another linked device's retention or delete its history. Older
+shared retention values and removals are ignored; existing local values stay
+in effect. Linked devices may retain different amounts of history.
 
 Shortening retention means changing Forever to a finite window, or reducing an
 existing finite window. The confirmation states that eligible local history is

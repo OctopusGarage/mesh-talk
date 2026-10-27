@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 
 const FIELDS: &[&str] = &[
     "notifications",
-    "retention_days",
     "calls_enabled",
     "post_office_enabled",
     "post_office_send_enabled",
@@ -51,7 +50,7 @@ fn valid(field: &str, value: &Value) -> bool {
         "bridge_hub_id" => value.as_str().is_some_and(|v| {
             v.is_empty() || (v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit()))
         }),
-        "retention_days" | "auto_lock_seconds" | "clipboard_clear_seconds" => {
+        "auto_lock_seconds" | "clipboard_clear_seconds" => {
             value.as_u64().is_some_and(|v| u32::try_from(v).is_ok())
         }
         _ => value.is_boolean(),
@@ -142,6 +141,44 @@ mod tests {
         assert!(!installation_patch(&serde_json::json!({})));
     }
     #[test]
+    fn local_retention_is_not_exported_as_an_account_preference() {
+        let settings = AppSettings {
+            retention_days: 90,
+            ..AppSettings::default()
+        };
+        assert!(!values(&settings).contains_key("settings.retention_days"));
+    }
+    #[test]
+    fn changing_only_local_retention_produces_no_shared_diff() {
+        let previous = AppSettings {
+            retention_days: 90,
+            ..AppSettings::default()
+        };
+        let next = AppSettings {
+            retention_days: 7,
+            ..previous.clone()
+        };
+        assert!(changed(&previous, &next).is_empty());
+    }
+    #[test]
+    fn legacy_remote_retention_values_and_tombstones_leave_local_retention_unchanged() {
+        let original = AppSettings {
+            retention_days: 90,
+            ..AppSettings::default()
+        };
+        for remote in [Some("7"), Some("365"), Some("0"), None] {
+            let next = project(
+                &original,
+                &[
+                    record("retention_days", remote),
+                    record("notifications", Some("false")),
+                ],
+            );
+            assert_eq!(next.retention_days, 90, "remote retention: {remote:?}");
+            assert!(!next.notifications);
+        }
+    }
+    #[test]
     fn allowlist_never_exports_paths_credentials_or_installation_controls() {
         let settings = AppSettings {
             download_dir: "/private/files".into(),
@@ -149,9 +186,10 @@ mod tests {
             ..AppSettings::default()
         };
         let exported = values(&settings);
-        assert_eq!(exported.len(), 16);
+        assert_eq!(exported.len(), 15);
         for field in [
             "download_dir",
+            "retention_days",
             "last_user",
             "stay_signed_in",
             "minimize_to_tray",
