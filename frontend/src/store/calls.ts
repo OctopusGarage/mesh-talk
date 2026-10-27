@@ -68,6 +68,8 @@ export interface CallTarget {
   deviceIds: string[];
 }
 
+export type CallFailureKind = "capture" | "connection" | "timeout";
+
 interface CallState {
   phase: CallPhase;
   peerId: string | null;
@@ -84,6 +86,14 @@ interface CallState {
   /** A terminal note for the UI (e.g. "declined", "busy", or an error), shown then cleared. */
   endedReason: string | null;
   error: string | null;
+  failureKind: CallFailureKind | null;
+  /** Explicit outgoing intent; presentation must re-resolve routes before retrying. */
+  retryTarget: {
+    target: CallTarget;
+    video: boolean;
+    owner: string;
+    generation: number;
+  } | null;
 
   startCall: (target: CallTarget, video: boolean) => Promise<void>;
   accept: () => Promise<void>;
@@ -173,7 +183,7 @@ export const useCalls = create<CallState>((set, get) => {
         connectTimer = null;
         set({ phase: "connected" });
       } else if (s === "failed") {
-        get().hangup();
+        end("failed", "failed");
       }
     };
     return conn;
@@ -196,7 +206,11 @@ export const useCalls = create<CallState>((set, get) => {
   }
 
   /** Reset to idle, stopping media. `reason` is surfaced briefly to the UI. */
-  function end(reason: string | null, signalReason?: ByeReason) {
+  function end(
+    reason: string | null,
+    signalReason?: ByeReason,
+    failureKind: CallFailureKind = "connection",
+  ) {
     const { callId, peerId, phase } = get();
     if (signalReason && callId) {
       const targets = ringingPeers.length
@@ -220,6 +234,8 @@ export const useCalls = create<CallState>((set, get) => {
       camOn: true,
       hasVideo: false,
       endedReason: reason,
+      failureKind: reason === "failed" ? failureKind : null,
+      retryTarget: reason === "failed" ? get().retryTarget : null,
     });
   }
 
@@ -229,7 +245,7 @@ export const useCalls = create<CallState>((set, get) => {
     connectTimer = setTimeout(() => {
       if (get().callId !== callId) return;
       if (["connecting", "outgoing", "incoming"].includes(get().phase)) {
-        end("failed", "failed");
+        end("failed", "failed", "timeout");
       }
     }, CONNECT_TIMEOUT_MS);
   }
@@ -247,6 +263,8 @@ export const useCalls = create<CallState>((set, get) => {
     hasVideo: false,
     endedReason: null,
     error: null,
+    failureKind: null,
+    retryTarget: null,
 
     startCall: async (target, video) => {
       if (get().phase !== "idle") return; // one call at a time
@@ -264,9 +282,18 @@ export const useCalls = create<CallState>((set, get) => {
         video,
         endedReason: null,
         error: null,
+        failureKind: null,
+        retryTarget: {
+          target: { ...target, deviceIds: [...target.deviceIds] },
+          video,
+          owner,
+          generation: useAuth.getState().generation,
+        },
       });
+      let captured = false;
       try {
         const { stream, hasVideo } = await getLocalMedia(video);
+        captured = true;
         // The user may have hung up / logged out while the camera was opening. If so the
         // call was already torn down; release the capture we just acquired and bail, or it
         // leaks (camera light stays on) and we'd dial peers we abandoned.
@@ -328,7 +355,7 @@ export const useCalls = create<CallState>((set, get) => {
           return;
         }
         set({ error: errorMessage(e) });
-        end("failed", "failed");
+        end("failed", "failed", captured ? "connection" : "capture");
       }
     },
 
@@ -337,10 +364,12 @@ export const useCalls = create<CallState>((set, get) => {
       if (phase !== "incoming" || !pendingOffer || !peerId || !callId) return;
       const offer = pendingOffer;
       pendingOffer = null;
+      let captured = false;
       try {
         // Mirror the caller's media kind so the answer's m-lines match the offer
         // (non-trickle, single-shot — a mismatched track would need renegotiation).
         const { stream, hasVideo } = await getLocalMedia(offer.video);
+        captured = true;
         // The caller may have hung up (a `bye` resets us to idle) while the camera was
         // opening. If so, release the capture and bail rather than answering a dead call.
         if (get().callId !== callId) {
@@ -374,7 +403,7 @@ export const useCalls = create<CallState>((set, get) => {
       } catch (e) {
         if (get().callId !== callId) return;
         set({ error: errorMessage(e) });
-        end("failed", "failed");
+        end("failed", "failed", captured ? "connection" : "capture");
       }
     },
 
@@ -438,6 +467,8 @@ export const useCalls = create<CallState>((set, get) => {
           video: msg.video,
           endedReason: null,
           error: null,
+          failureKind: null,
+          retryTarget: null,
         });
         armConnectTimeout();
         return;
@@ -484,7 +515,13 @@ export const useCalls = create<CallState>((set, get) => {
       }
     },
 
-    clearEnded: () => set({ endedReason: null, error: null }),
+    clearEnded: () =>
+      set({
+        endedReason: null,
+        error: null,
+        failureKind: null,
+        retryTarget: null,
+      }),
 
     teardown: () => end(null, "hangup"),
   };

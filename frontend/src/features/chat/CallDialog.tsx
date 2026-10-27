@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   FlaskConical,
@@ -22,6 +22,16 @@ import { playCallTone } from "@/lib/ringtones";
 import { cn } from "@/lib/utils";
 import { rosterProjection } from "@/lib/rosterProjection";
 import { ease, useMotionOK } from "@/lib/motion";
+import { useAuth } from "@/store/auth";
+import { CallConnectionNotice } from "./CallConnectionNotice";
+
+/** Explicit false means mailbox-only; older hosts without this field remain attemptable. */
+function callDeviceIds(accountId: string) {
+  return rosterProjection(useChat.getState().peers)
+    .contactDevicesForAccount(accountId)
+    .filter((peer) => peer.directly_reachable !== false)
+    .map((peer) => peer.user_id);
+}
 
 /** Header actions: start a voice or video call with a DM contact. Separate entry points
  * (like WeChat et al.). Rendered only when the experimental calls feature is enabled, and
@@ -39,6 +49,8 @@ export function CallButtons({
   const phase = useCalls((s) => s.phase);
   const presence = usePresenceFor(accountId);
   const online = presence.online;
+  const [unavailable, setUnavailable] = useState(false);
+  const lastTrigger = useRef<HTMLButtonElement | null>(null);
   // Subscribe to a BOOLEAN (does the account have any discovered device?), not the whole
   // roster array — the array's identity changes every ~4s on the roster poll and would
   // re-render the header for nothing.
@@ -49,45 +61,55 @@ export function CallButtons({
   // Opt-in: the feature is hidden entirely until enabled in Settings.
   if (!callsEnabled) return null;
   const canCall = phase === "idle" && online && hasDevice;
-  const start = (video: boolean) => {
+  const start = (video: boolean, trigger: HTMLButtonElement) => {
+    lastTrigger.current = trigger;
     // Read the device list fresh at click time. Ring EVERY discovered device of the account
     // (first-to-answer wins; see store/calls.ts).
-    const deviceIds = rosterProjection(useChat.getState().peers)
-      .contactDevicesForAccount(accountId)
-      .map((p) => p.user_id);
-    if (deviceIds.length > 0)
-      void useCalls.getState().startCall({ name, accountId, deviceIds }, video);
+    const deviceIds = callDeviceIds(accountId);
+    if (!deviceIds.length) {
+      setUnavailable(true);
+      return;
+    }
+    void useCalls.getState().startCall({ name, accountId, deviceIds }, video);
   };
   return (
-    <div className="flex items-center gap-0.5">
-      <span
-        className="text-amber-500"
-        title={t("call.experimentalHint")}
-        aria-label={t("call.experimental")}
-      >
-        <FlaskConical className="h-3.5 w-3.5" />
-      </span>
-      <Button
-        variant="ghost"
-        size="icon"
-        disabled={!canCall}
-        data-testid="conversation-call-voice"
-        title={canCall ? t("call.voice") : t("call.offlineHint")}
-        onClick={() => start(false)}
-      >
-        <Phone className="h-4 w-4" />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        disabled={!canCall}
-        data-testid="conversation-call-video"
-        title={canCall ? t("call.video") : t("call.offlineHint")}
-        onClick={() => start(true)}
-      >
-        <VideoIcon className="h-4 w-4" />
-      </Button>
-    </div>
+    <>
+      <div className="flex items-center gap-0.5">
+        <span
+          className="text-amber-500"
+          title={t("call.experimentalHint")}
+          aria-label={t("call.experimental")}
+        >
+          <FlaskConical className="h-3.5 w-3.5" />
+        </span>
+        <Button
+          variant="ghost"
+          size="icon"
+          disabled={!canCall}
+          data-testid="conversation-call-voice"
+          title={canCall ? t("call.voice") : t("call.offlineHint")}
+          onClick={(event) => start(false, event.currentTarget)}
+        >
+          <Phone className="h-4 w-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          disabled={!canCall}
+          data-testid="conversation-call-video"
+          title={canCall ? t("call.video") : t("call.offlineHint")}
+          onClick={(event) => start(true, event.currentTarget)}
+        >
+          <VideoIcon className="h-4 w-4" />
+        </Button>
+      </div>
+      <CallConnectionNotice
+        open={unavailable}
+        onOpenChange={setUnavailable}
+        unavailable
+        returnFocus={() => lastTrigger.current?.focus()}
+      />
+    </>
   );
 }
 
@@ -103,12 +125,17 @@ function StreamVideo({
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
-    if (!ref.current) return;
-    ref.current.srcObject = stream;
+    const player = ref.current;
+    if (!player) return;
+    player.srcObject = stream;
     // `autoPlay` alone isn't enough on autoplay-restricted webviews (WKWebView/WebKitGTK):
     // without an explicit play() the remote video/audio can stay paused though the stream
     // is flowing. Best-effort — a rejection (no user gesture yet) is harmless.
-    if (stream) void ref.current.play().catch(() => {});
+    if (stream) void player.play().catch(() => {});
+    return () => {
+      player.pause();
+      player.srcObject = null;
+    };
   }, [stream]);
   return (
     <video ref={ref} autoPlay playsInline muted={muted} className={className} />
@@ -162,12 +189,33 @@ export function CallDialog() {
   const toggleMic = useCalls((s) => s.toggleMic);
   const toggleCam = useCalls((s) => s.toggleCam);
   const clearEnded = useCalls((s) => s.clearEnded);
+  const failureKind = useCalls((s) => s.failureKind);
+  const retryTarget = useCalls((s) => s.retryTarget);
+  const owner = useAuth((s) => s.user?.id);
+  const generation = useAuth((s) => s.generation);
+  const callsEnabled = useSettings((s) => s.callsEnabled);
+  const [retryUnavailable, setRetryUnavailable] = useState(false);
+  const canRetry =
+    callsEnabled &&
+    retryTarget?.owner === owner &&
+    retryTarget?.generation === generation;
+  const retry = () => {
+    if (!retryTarget || !canRetry) return;
+    const { target, video } = retryTarget;
+    const deviceIds = callDeviceIds(target.accountId);
+    if (!deviceIds.length) {
+      setRetryUnavailable(true);
+      return;
+    }
+    setRetryUnavailable(false);
+    void useCalls.getState().startCall({ ...target, deviceIds }, video);
+  };
 
   useCallTone(phase);
 
   // Auto-dismiss the terminal note (declined / busy / failed) after a moment.
   useEffect(() => {
-    if (phase === "idle" && (endedReason || error)) {
+    if (phase === "idle" && endedReason && endedReason !== "failed") {
       const id = setTimeout(() => clearEnded(), 3500);
       return () => clearTimeout(id);
     }
@@ -193,7 +241,7 @@ export function CallDialog() {
   return (
     <>
       <AnimatePresence>
-        {phase === "idle" && (endedReason || error) && (
+        {phase === "idle" && endedReason && endedReason !== "failed" && (
           <motion.div
             key="call-note"
             initial={{
@@ -251,12 +299,16 @@ export function CallDialog() {
             >
               {/* Stage: remote video (or a glyph for ringing / audio-only), local PiP. */}
               <div className="relative aspect-video w-full bg-black">
-                {phase === "connected" && remoteHasVideo ? (
+                {/* Audio-only calls still need a player for the remote sound. */}
+                {phase === "connected" && remoteStream && (
                   <StreamVideo
                     stream={remoteStream}
-                    className="h-full w-full object-cover"
+                    className={
+                      remoteHasVideo ? "h-full w-full object-cover" : "hidden"
+                    }
                   />
-                ) : (
+                )}
+                {!(phase === "connected" && remoteHasVideo) && (
                   <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-white">
                     {peerId && (
                       <IdentityGlyph seed={peerId} size={84} title={who} />
@@ -377,6 +429,19 @@ export function CallDialog() {
           </motion.div>
         )}
       </AnimatePresence>
+      <CallConnectionNotice
+        open={phase === "idle" && endedReason === "failed"}
+        onOpenChange={(open) => {
+          if (!open) {
+            clearEnded();
+            setRetryUnavailable(false);
+          }
+        }}
+        unavailable={retryUnavailable}
+        failureKind={failureKind}
+        detail={error}
+        onRetry={canRetry ? retry : undefined}
+      />
     </>
   );
 }
