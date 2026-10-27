@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::sync::Arc;
 
 mod decode;
+pub(crate) mod import;
 pub(crate) mod maintenance;
 mod metadata;
 pub(crate) mod order;
@@ -39,7 +40,7 @@ pub(crate) struct EventHeader {
 const HEADER_COLUMNS: &str = "id,conversation,author,seq,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes";
 
 pub(crate) struct EventRepository {
-    database: Arc<EncryptedDatabase>,
+    database: RepositoryOwner,
     domain: EventDomainId,
     store_uuid: [u8; 16],
     #[cfg(test)]
@@ -48,13 +49,51 @@ pub(crate) struct EventRepository {
     fingerprint_ids: std::sync::atomic::AtomicUsize,
 }
 
+enum RepositoryOwner {
+    Profile(Arc<crate::storage::profile::context::ProfileStorage>),
+    #[cfg(test)]
+    Fixture(Arc<EncryptedDatabase>),
+}
+impl std::ops::Deref for RepositoryOwner {
+    type Target = EncryptedDatabase;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Profile(profile) => profile.database(),
+            #[cfg(test)]
+            Self::Fixture(database) => database,
+        }
+    }
+}
 impl EventRepository {
+    #[cfg(test)]
     pub(crate) fn new(
         database: Arc<EncryptedDatabase>,
         domain: EventDomainId,
     ) -> Result<Self, LogError> {
-        let store_uuid = database.transaction(|tx| {
-            schema::register(tx, domain)?;
+        database.transaction(|tx| schema::register(tx, domain))?;
+        Self::with_owner(RepositoryOwner::Fixture(database), domain)
+    }
+    pub(crate) fn initialize_unpublished_domain(
+        database: &EncryptedDatabase,
+        domain: EventDomainId,
+    ) -> Result<(), LogError> {
+        database.transaction(|tx| schema::register(tx, domain))
+    }
+    pub(crate) fn validate_existing_domain(
+        database: &EncryptedDatabase,
+        domain: EventDomainId,
+    ) -> Result<(), LogError> {
+        database.read(|c| schema::open_existing(c, domain))
+    }
+    pub(crate) fn from_profile(
+        profile: Arc<crate::storage::profile::context::ProfileStorage>,
+        domain: EventDomainId,
+    ) -> Result<Self, LogError> {
+        Self::with_owner(RepositoryOwner::Profile(profile), domain)
+    }
+    fn with_owner(database: RepositoryOwner, domain: EventDomainId) -> Result<Self, LogError> {
+        let store_uuid = database.read(|tx| {
+            schema::open_existing(tx, domain)?;
             let mut stmt =
                 tx.prepare("SELECT store_uuid FROM mesh_database_metadata WHERE singleton=1")?;
             let mut rows = stmt.query([])?;

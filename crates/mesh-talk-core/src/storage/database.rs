@@ -177,6 +177,25 @@ impl EncryptedDatabase {
             faulted: AtomicBool::new(false),
         })
     }
+    /// Checked durability boundary for manifest-directed archive reclamation.
+    pub(crate) fn checkpoint(&self) -> Result<(), LogError> {
+        self.read(|c| {
+            let (busy, log, checkpointed): (i64, i64, i64) =
+                c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?;
+            if busy != 0 || log != 0 || checkpointed != 0 {
+                return Err(context(
+                    "checkpoint profile publication",
+                    rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                        None,
+                    ),
+                ));
+            }
+            Ok(())
+        })
+    }
     /// Retire the connection before relocating its main file. A successful
     /// TRUNCATE checkpoint has no retained frames; neither busy nor incomplete
     /// results authorize publishing the main file without its WAL.
@@ -776,5 +795,56 @@ mod tests {
             body(&EncryptedDatabase::open(&path, PASSWORD, BINDING).unwrap()),
             SECRET
         );
+    }
+}
+
+#[cfg(test)]
+mod publication_checkpoint_tests {
+    use super::*;
+    #[test]
+    fn publication_checkpoint_retries_busy_snapshot_without_closing_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("profile.db");
+        let db = EncryptedDatabase::open(&path, "pw", b"fixture").unwrap();
+        db.transaction(|tx|{tx.execute_batch("CREATE TABLE values_for_checkpoint(value INTEGER);INSERT INTO values_for_checkpoint VALUES(1)")?;Ok(())}).unwrap();
+        let reader = EncryptedDatabase::open(&path, "pw", b"fixture").unwrap();
+        reader
+            .read(|c| {
+                c.execute_batch("BEGIN")?;
+                let _: i64 =
+                    c.query_row("SELECT value FROM values_for_checkpoint", [], |r| r.get(0))?;
+                Ok(())
+            })
+            .unwrap();
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO values_for_checkpoint VALUES(2)", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.read(|c| {
+            c.busy_timeout(Duration::ZERO)?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(db.checkpoint().is_err());
+        let count: i64 = db
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT count(*) FROM values_for_checkpoint", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(count, 2);
+        reader
+            .read(|c| {
+                c.execute_batch("ROLLBACK")?;
+                Ok(())
+            })
+            .unwrap();
+        drop(reader);
+        db.checkpoint().unwrap();
+        db.checkpoint_and_close().unwrap();
     }
 }

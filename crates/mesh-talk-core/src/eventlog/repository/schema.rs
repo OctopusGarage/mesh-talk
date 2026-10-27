@@ -1,9 +1,31 @@
 use super::*;
 
+/// Creation is restricted to an unpublished candidate (or a cfg(test) fixture).
 pub(super) fn register(
     tx: &rusqlite::Transaction<'_>,
     domain: EventDomainId,
 ) -> Result<(), LogError> {
+    require_schema(tx, true)?;
+    tx.execute(
+        "INSERT INTO event_domains(domain,next_commit) VALUES(?1,0) ON CONFLICT(domain) DO NOTHING",
+        [domain.0.as_slice()],
+    )?;
+    Ok(())
+}
+/// Published authority is never repaired by creating an empty schema/domain.
+pub(super) fn open_existing(c: &Connection, domain: EventDomainId) -> Result<(), LogError> {
+    require_schema(c, false)?;
+    let exists: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM event_domains WHERE domain=?1)",
+        [domain.0.as_slice()],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Err(LogError::IncompatibleEventSchema);
+    }
+    Ok(())
+}
+fn require_schema(tx: &Connection, initialize: bool) -> Result<(), LogError> {
     let marker: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='event_repository_schema')",
         [],
@@ -27,6 +49,9 @@ pub(super) fn register(
             return Err(LogError::IncompatibleEventSchema);
         }
     } else {
+        if !initialize {
+            return Err(LogError::IncompatibleEventSchema);
+        }
         let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('event_domains','event_conversations','retained_events','retained_event_parents','event_heads','event_author_max','event_order_jobs','event_order_work','event_order_rows','event_order_current','event_profile_requests','event_profile_jobs','event_profile_candidates','event_profile_leaves'))", [], |r| r.get(0))?;
         if existing {
             return Err(LogError::IncompatibleEventSchema);
@@ -45,10 +70,6 @@ pub(super) fn register(
     tx.prepare("SELECT domain,child,parent FROM retained_event_parents LIMIT 0")?;
     tx.prepare("SELECT domain,conversation,id FROM event_heads LIMIT 0")?;
     tx.prepare("SELECT domain,conversation,author,max_seq FROM event_author_max LIMIT 0")?;
-    tx.execute(
-        "INSERT INTO event_domains(domain,next_commit) VALUES(?1,0) ON CONFLICT(domain) DO NOTHING",
-        [domain.0.as_slice()],
-    )?;
     Ok(())
 }
 

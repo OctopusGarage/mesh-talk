@@ -1281,6 +1281,32 @@ moving files. Failure preserves the database for recovery rather than allowing
 publication of a main file without committed WAL data. Ordinary append and
 normal open do not perform this retirement checkpoint.
 
+The shared profile context retains that lease for every repository using its
+single encrypted connection. Its immutable owner binding includes both device
+public keys and a versioned profile class, separately from mutable account
+membership. Explicit role and source-domain manifests prevent filename-based
+ownership inference. Source locators inside the profile are relative to its
+leased root, preserving closed-profile relocation.
+
+Relay source publication validates independent encrypted legacy archives before
+replacing source paths with manifest-bound downgrade barriers. A private database
+bootstrap is checkpointed and closed before publication. Prepared, frozen,
+importing, verified and published states make interrupted operations explicit;
+event and arrival domains become available together only after verification.
+Streaming encrypted staging repairs historical child-before-parent ordering
+without retaining the graph or bodies in memory. Interrupted imports restart
+their authenticated stream; the legacy parser does not provide seek recovery.
+Arrival import preserves last-record precedence and seeds only missing retained
+mailboxes with the upgrade time.
+
+Published opens inspect manifests and fixed barriers rather than rehashing or
+decrypting archived history. Replaced or missing barriers cannot trigger empty
+creation or automatic legacy merging. Published migration archives are retired
+through durable cleanup intent after successful publication; a cleanup failure
+does not make them an alternate history source. This storage capability alone
+does not switch the existing post-office or participant runtime to indexed
+serving; bounded sync consumers must adopt it before that cutover.
+
 The domain-owned indexed event repository keeps immutable signed event bytes,
 parent edges, author sequences, frontier and conversation metadata in the same
 encrypted database transaction. Explicit domain IDs isolate stores sharing a

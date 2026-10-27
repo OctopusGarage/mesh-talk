@@ -9,6 +9,9 @@
 //! (always-on) peer is the post office: the one with the lowest identity
 //! fingerprint. Full election with standbys and uptime detection is Phase 1.
 
+#[allow(dead_code)] // Indexed relay storage awaits paged runtime consumers.
+pub(crate) mod storage;
+
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId};
 use crate::eventlog::persist::PersistentEventLog;

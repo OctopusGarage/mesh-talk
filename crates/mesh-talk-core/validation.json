@@ -982,6 +982,10 @@
           {
             "name": "The shared profile lease excludes cooperating writers before CLI keystore initialization without unlinking node.lock; database relocation requires checked WAL checkpoint and connection close, and busy or faulted retirement cannot authorize publication.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Shared profile repositories retain device-bound ownership and one encrypted connection; authenticated streaming relay publication preserves legacy sources before freeze, resolves ancestry on disk, publishes mandatory domains together and rejects barrier mismatches without replaying archives on normal reopen.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },

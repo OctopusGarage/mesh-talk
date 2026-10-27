@@ -214,6 +214,8 @@ impl<R: Serialize + DeserializeOwned> EncryptedRecordLog<R> {
                 return Err(LogError::CorruptFile("record shorter than nonce".into()));
             }
             record.resize(len, 0);
+            #[cfg(test)]
+            frame_observations::record_capacity(record.capacity());
             reader.read_exact(&mut record)?;
             let nonce: [u8; NONCE_SIZE] = record[..NONCE_SIZE]
                 .try_into()
@@ -828,5 +830,47 @@ mod tests {
         let (_log, records): (EncryptedRecordLog<Rec>, _) =
             EncryptedRecordLog::open(&path, "pw", TEST_MAGIC).unwrap();
         assert_eq!(records, vec![big, rec(2, b"small after big")]);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod frame_observations {
+    use std::cell::Cell;
+    thread_local! {static MAXIMUM:Cell<usize>=const{Cell::new(0)};}
+    pub(crate) fn record_capacity(capacity: usize) {
+        MAXIMUM.with(|v| v.set(v.get().max(capacity)));
+    }
+    pub(crate) fn reset() {
+        MAXIMUM.with(|v| v.set(0));
+    }
+    pub(crate) fn maximum_capacity() -> usize {
+        MAXIMUM.with(Cell::get)
+    }
+}
+#[cfg(test)]
+mod frame_budget_tests {
+    use super::*;
+    #[test]
+    fn visitor_frame_buffer_tracks_largest_record_without_history_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frames");
+        let (mut writer, _) = EncryptedRecordLog::<Vec<u8>>::open(&path, "pw", b"FRAMES").unwrap();
+        for bytes in [32, 32768, 64] {
+            writer.append_durable(&vec![7; bytes]).unwrap();
+        }
+        drop(writer);
+        frame_observations::reset();
+        let mut count = 0;
+        drop(
+            EncryptedRecordLog::<Vec<u8>>::open_with_visitor(&path, "pw", b"FRAMES", |_| {
+                count += 1;
+                Ok(())
+            })
+            .unwrap(),
+        );
+        assert_eq!(count, 3);
+        let maximum = frame_observations::maximum_capacity();
+        assert!(maximum >= 32768, "missing frame allocation observation");
+        assert!(maximum <= 2 * 32768 + 64);
     }
 }
