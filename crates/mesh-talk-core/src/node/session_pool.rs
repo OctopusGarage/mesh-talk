@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedSemaphorePermit, Semaphore},
 };
 
 pub(super) const MAX_TCP_CONNECTIONS: usize = 8;
@@ -25,7 +25,107 @@ const ACCOUNT_CAPABILITY_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_ACCOUNT_CAPABILITIES: usize = 256;
 const MAX_ROUTE_AFFINITIES: usize = 256;
 const MAX_AUTHENTICATION_GATES: usize = 256;
-type AuthenticationGate = tokio::sync::Mutex<()>;
+#[derive(Default)]
+struct AuthenticationGate {
+    state: Mutex<AuthenticationState>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct AuthenticationState {
+    active: bool,
+    next_ticket: u64,
+    ordinary_due: bool,
+    ordinary: std::collections::VecDeque<u64>,
+    control: std::collections::VecDeque<u64>,
+}
+
+impl AuthenticationState {
+    fn queue(&mut self, priority: AuthenticationPriority) -> &mut std::collections::VecDeque<u64> {
+        match priority {
+            AuthenticationPriority::Ordinary => &mut self.ordinary,
+            AuthenticationPriority::Control => &mut self.control,
+        }
+    }
+    fn next(&self) -> Option<(AuthenticationPriority, u64)> {
+        if self.ordinary_due
+            && let Some(ticket) = self.ordinary.front()
+        {
+            Some((AuthenticationPriority::Ordinary, *ticket))
+        } else if let Some(ticket) = self.control.front() {
+            Some((AuthenticationPriority::Control, *ticket))
+        } else {
+            self.ordinary
+                .front()
+                .map(|ticket| (AuthenticationPriority::Ordinary, *ticket))
+        }
+    }
+}
+
+pub(in crate::node) struct AuthenticationLease {
+    gate: Arc<AuthenticationGate>,
+}
+impl Drop for AuthenticationLease {
+    fn drop(&mut self) {
+        self.gate.state.lock().unwrap().active = false;
+        self.gate.changed.notify_waiters();
+    }
+}
+
+struct AuthenticationWaiter {
+    gate: Arc<AuthenticationGate>,
+    priority: AuthenticationPriority,
+    ticket: u64,
+    queued: bool,
+}
+impl Drop for AuthenticationWaiter {
+    fn drop(&mut self) {
+        if self.queued {
+            self.gate
+                .state
+                .lock()
+                .unwrap()
+                .queue(self.priority)
+                .retain(|ticket| *ticket != self.ticket);
+            self.gate.changed.notify_waiters();
+        }
+    }
+}
+impl AuthenticationWaiter {
+    async fn wait(mut self) -> AuthenticationLease {
+        loop {
+            // Register before inspecting state: release/cancellation between the
+            // check and await must not lose the sole owner's handoff.
+            let changed = self.gate.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let admitted = {
+                let mut state = self.gate.state.lock().unwrap();
+                if !state.active && state.next() == Some((self.priority, self.ticket)) {
+                    state.queue(self.priority).pop_front();
+                    state.active = true;
+                    state.ordinary_due = self.priority == AuthenticationPriority::Control;
+                    true
+                } else {
+                    false
+                }
+            };
+            if admitted {
+                self.queued = false;
+                return AuthenticationLease {
+                    gate: self.gate.clone(),
+                };
+            }
+            changed.await;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) enum AuthenticationPriority {
+    Ordinary,
+    Control,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::node) enum SessionProtocol {
@@ -113,7 +213,16 @@ impl SessionPool {
     pub(in crate::node) async fn authentication_admission(
         &self,
         key: PeerEndpointKey,
-    ) -> Result<OwnedMutexGuard<()>, TransportError> {
+    ) -> Result<AuthenticationLease, TransportError> {
+        self.authentication_admission_priority(key, AuthenticationPriority::Ordinary)
+            .await
+    }
+
+    pub(in crate::node) async fn authentication_admission_priority(
+        &self,
+        key: PeerEndpointKey,
+        priority: AuthenticationPriority,
+    ) -> Result<AuthenticationLease, TransportError> {
         let gate = {
             let mut gates = self.authentication_gates.lock().unwrap();
             gates.retain(|(_, gate)| gate.strong_count() > 0);
@@ -128,12 +237,27 @@ impl SessionPool {
                         "peer authentication capacity busy".into(),
                     ));
                 }
-                let gate = Arc::new(AuthenticationGate::new(()));
+                let gate = Arc::new(AuthenticationGate::default());
                 gates.push((key, Arc::downgrade(&gate)));
                 gate
             }
         };
-        tokio::time::timeout(CAPACITY_WAIT, gate.lock_owned())
+        let ticket = {
+            let mut state = gate.state.lock().unwrap();
+            let ticket = state.next_ticket;
+            state.next_ticket = ticket
+                .checked_add(1)
+                .ok_or_else(|| TransportError::Noise("peer authentication capacity busy".into()))?;
+            state.queue(priority).push_back(ticket);
+            ticket
+        };
+        let waiter = AuthenticationWaiter {
+            gate,
+            priority,
+            ticket,
+            queued: true,
+        };
+        tokio::time::timeout(CAPACITY_WAIT, waiter.wait())
             .await
             .map_err(|_| TransportError::Noise("peer authentication capacity busy".into()))
     }
@@ -723,6 +847,105 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn control_authentication_overtakes_only_queued_ordinary_handshakes() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let active = pool.authentication_admission(key.clone()).await.unwrap();
+        let ordinary = pool.authentication_admission(key.clone());
+        tokio::pin!(ordinary);
+        assert!(futures_util::poll!(&mut ordinary).is_pending());
+        let control =
+            pool.authentication_admission_priority(key.clone(), AuthenticationPriority::Control);
+        tokio::pin!(control);
+        assert!(futures_util::poll!(&mut control).is_pending());
+        assert_eq!(pool.outbound.available_permits(), MAX_DIRECTION_CONNECTIONS);
+        drop(active);
+        let first = tokio::time::timeout(CAPACITY_WAIT, async {
+            tokio::select! {
+                result = &mut control => { drop(result.unwrap()); AuthenticationPriority::Control }
+                result = &mut ordinary => { drop(result.unwrap()); AuthenticationPriority::Ordinary }
+            }
+        }).await.unwrap();
+        assert_eq!(
+            first,
+            AuthenticationPriority::Control,
+            "an explicit Control handshake must overtake an earlier queued ordinary Wake without cancelling the active handshake"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_priority_preserves_class_fifo_and_one_control_then_ordinary_fairness() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let active = pool.authentication_admission(key.clone()).await.unwrap();
+        let ordinary_first = pool.authentication_admission(key.clone());
+        let ordinary_second = pool.authentication_admission(key.clone());
+        let control_first =
+            pool.authentication_admission_priority(key.clone(), AuthenticationPriority::Control);
+        let control_second =
+            pool.authentication_admission_priority(key, AuthenticationPriority::Control);
+        tokio::pin!(
+            ordinary_first,
+            ordinary_second,
+            control_first,
+            control_second
+        );
+        assert!(futures_util::poll!(&mut ordinary_first).is_pending());
+        assert!(futures_util::poll!(&mut ordinary_second).is_pending());
+        assert!(futures_util::poll!(&mut control_first).is_pending());
+        assert!(futures_util::poll!(&mut control_second).is_pending());
+        drop(active);
+        assert!(futures_util::poll!(&mut control_second).is_pending());
+        let first = control_first.await.unwrap();
+        assert!(futures_util::poll!(&mut ordinary_first).is_pending());
+        drop(first);
+        assert!(futures_util::poll!(&mut control_second).is_pending());
+        assert!(futures_util::poll!(&mut ordinary_second).is_pending());
+        let ordinary = ordinary_first.await.unwrap();
+        drop(ordinary);
+        let control = control_second.await.unwrap();
+        drop(control);
+        assert!(ordinary_second.await.is_ok());
+        assert_eq!(pool.total.available_permits(), MAX_TCP_CONNECTIONS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_priority_cancellation_and_timeouts_release_waiter_turns() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let active = pool.authentication_admission(key.clone()).await.unwrap();
+        {
+            let cancelled = pool
+                .authentication_admission_priority(key.clone(), AuthenticationPriority::Control);
+            tokio::pin!(cancelled);
+            assert!(futures_util::poll!(&mut cancelled).is_pending());
+        }
+        assert!(
+            pool.authentication_admission_priority(key.clone(), AuthenticationPriority::Control)
+                .await
+                .is_err()
+        );
+        drop(active);
+        let control = pool
+            .authentication_admission_priority(key.clone(), AuthenticationPriority::Control)
+            .await
+            .unwrap();
+        {
+            let cancelled = pool.authentication_admission(key.clone());
+            tokio::pin!(cancelled);
+            assert!(futures_util::poll!(&mut cancelled).is_pending());
+        }
+        drop(control);
+        assert!(
+            pool.authentication_admission_priority(key.clone(), AuthenticationPriority::Control)
+                .await
+                .is_ok()
+        );
+        assert!(pool.authentication_admission(key).await.is_ok());
+        assert_eq!(pool.authentication_gates.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn authentication_gates_scope_both_identity_keys_endpoint_and_generation() {
         let pool = SessionPool::default();
         let key = authentication_key(1);
@@ -735,7 +958,10 @@ mod tests {
                 2 => independent.address.set_port(2),
                 _ => independent.generation += 1,
             }
-            let _guard = pool.authentication_admission(independent).await.unwrap();
+            let _guard = pool
+                .authentication_admission_priority(independent, AuthenticationPriority::Control)
+                .await
+                .unwrap();
         }
         assert!(
             pool.authentication_admission(key.clone()).await.is_err(),
@@ -758,9 +984,12 @@ mod tests {
             owners.push(pool.authentication_admission(independent).await.unwrap());
         }
         assert!(
-            pool.authentication_admission(authentication_key(300))
-                .await
-                .is_err()
+            pool.authentication_admission_priority(
+                authentication_key(300),
+                AuthenticationPriority::Control
+            )
+            .await
+            .is_err()
         );
         pool.clear();
         pool.network_changed();

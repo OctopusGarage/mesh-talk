@@ -3831,3 +3831,104 @@ async fn optional_identity_request_rejection_preserves_reusable_account_capabili
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test]
+async fn private_control_noise_handshake_overtakes_queued_background_without_more_capacity() {
+    use super::super::account_documents::sync::DocumentSyncCursor;
+    use tokio::sync::oneshot;
+    let (dir, source, receiver) = sibling_nodes();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = reusable_sibling_peer(dir.path(), &receiver, &source, address);
+    let group = source
+        .create_channel("Authentication priority", vec![])
+        .await
+        .unwrap();
+    source.publish_account_group_access_for(group);
+    let key = super::super::AccountDocumentKey::GroupControl {
+        channel: hex::encode(group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let expected = source.account_document_meta(&key).unwrap();
+    let endpoint = receiver.peer_endpoint_key(address, &peer.public);
+    let active = receiver
+        .sessions
+        .authentication_admission(endpoint.clone())
+        .await
+        .unwrap();
+    let ordinary = receiver.sessions.authentication_admission(endpoint);
+    tokio::pin!(ordinary);
+    assert!(futures_util::poll!(&mut ordinary).is_pending());
+    let (queued_tx, queued_rx) = oneshot::channel();
+    let queued = Arc::new(std::sync::Mutex::new(Some(queued_tx)));
+    let (noise_tx, noise_rx) = oneshot::channel();
+    let noise = Arc::new(std::sync::Mutex::new(Some(noise_tx)));
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let public = peer.public.clone();
+        move |observed, event| {
+            if observed != public {
+                return;
+            }
+            if event == "dial_authentication_admission_wait"
+                && let Some(tx) = queued.lock().unwrap().take()
+            {
+                let _ = tx.send(());
+            }
+            if event == "dial_noise_begin"
+                && let Some(tx) = noise.lock().unwrap().take()
+            {
+                let _ = tx.send(());
+            }
+        }
+    }));
+    let server = {
+        let source = source.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let channel = source.privacy_accept(stream).await.unwrap();
+            source.serve_connection(channel).await;
+        })
+    };
+    let control = {
+        let receiver = receiver.clone();
+        tokio::spawn(async move {
+            receiver
+                .pull_account_documents_page(&peer, &mut DocumentSyncCursor::control())
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(8), queued_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(active);
+    let (foreground_first, result) = tokio::time::timeout(Duration::from_secs(8), async {
+        let foreground_first = tokio::select! {
+            result = noise_rx => { result.unwrap(); true }
+            guard = &mut ordinary => { drop(guard.unwrap()); false }
+        };
+        (foreground_first, control.await.unwrap())
+    })
+    .await
+    .unwrap();
+    let actual = receiver.account_document_meta(&key);
+    // A successful Control Noise releases its gate; the older ordinary turn
+    // must still be admitted afterward, without a new worker or TCP allowance.
+    if foreground_first {
+        drop(ordinary.await.unwrap());
+    }
+    *receiver.account_client_test_hook.lock().unwrap() = None;
+    receiver.sessions.clear();
+    source.runtime_work.close();
+    receiver.runtime_work.close();
+    server.abort();
+    let _ = server.await;
+    source.runtime_work.drain().await;
+    receiver.runtime_work.drain().await;
+    assert!(
+        foreground_first,
+        "queued ordinary work cannot take the Control Noise turn"
+    );
+    assert!(result.is_ok());
+    assert_eq!(actual.as_ref(), Some(&expected));
+}

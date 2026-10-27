@@ -2105,6 +2105,15 @@ channel still performs its own identity-pinned Noise handshake and retains its
 own connection permits. A different candidate, identity or privacy generation
 has independent admission.
 
+Fresh authenticated account GroupControl requests use the Control admission
+class; other callers retain Ordinary admission. A Control waiter may overtake
+queued Ordinary handshakes, including directory and Wake work, but never an
+active handshake. Each class remains FIFO, and after one Control admission the
+oldest waiting Ordinary caller gets the next turn before another Control. A small
+owned lease and cancellation-safe waiter ticket retain this ordering through
+timeout, caller retirement and route races. Priority changes neither identity
+validation nor connection capacity, and confers no account or group authority.
+
 The gate registry retains at most 256 live keys, prunes only expired weak entries
 and never evicts an active owner into a duplicate gate. Gate acquisition uses
 the existing two-second capacity wait; the actual handshake retains its adaptive

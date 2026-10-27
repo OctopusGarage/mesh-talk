@@ -301,7 +301,10 @@
       "paths": [
         "crates/mesh-talk-core/src/node/privacy_routing.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime_tests.rs",
-        "crates/mesh-talk-core/src/node/session_pool.rs"
+        "crates/mesh-talk-core/src/node/session_pool.rs",
+        "crates/mesh-talk-core/src/node/account_session.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs"
       ],
       "rust": [
         {
@@ -313,6 +316,7 @@
             "private_probe_refreshes_public_presence_before_its_lease_expires",
             "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
             "node::session_pool::",
+            "private_control_noise_handshake_overtakes_queued_background_without_more_capacity",
             "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel",
             "authentication_backpressure_preserves_document_progress_and_recovers",
             "account_worker_retries_local_authentication_contention_without_a_false_sync_error",
@@ -324,6 +328,10 @@
         "summary": "Keep historical route probing within its background connection budget and rotate only launched devices across canceled rounds.",
         "guide": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance",
         "invariants": [
+          {
+            "name": "GroupControl fresh authentication overtakes queued Ordinary work only: one active handshake per exact full identity, endpoint and privacy generation remains; FIFO within each class and an Ordinary turn after each Control prevent starvation, while cancellation and the unchanged two-second wait release all tickets.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
           {
             "name": "At most two background device probes race candidates concurrently; canceled queued devices retain their next turn and healthy foreground Noise exchanges retain capacity against this producer.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"

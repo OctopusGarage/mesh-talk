@@ -14,6 +14,7 @@ import test from "node:test";
 import {
   prepareUbuntuAptSources,
   rewriteUbuntuAptSource,
+  rewriteUbuntuAptMirrorList,
 } from "./ubuntu-apt-source.mjs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -200,6 +201,25 @@ test("browser and native dependency installation use the same Linux-only prepara
     native,
     /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS.*scripts\/ci\/ubuntu-apt-source\.mjs/,
   );
+  for (const name of ["ci.yml", "mutants.yml"]) {
+    const workflow = await readFile(
+      new URL(`../../.github/workflows/${name}`, import.meta.url),
+      "utf8",
+    );
+    const prepare = workflow.indexOf("name: Prepare Ubuntu archive source");
+    assert.ok(
+      prepare > workflow.indexOf("uses: actions/setup-node@"),
+      `${name} must establish the pinned Node before preparing APT`,
+    );
+    assert.ok(
+      prepare < workflow.indexOf("name: Install Tauri system dependencies"),
+      `${name} must prepare APT before Linux dependency installation`,
+    );
+    assert.match(
+      workflow,
+      /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS.*scripts\/ci\/ubuntu-apt-source\.mjs/,
+    );
+  }
   const baseline = ui.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
   assert.match(baseline, /timeout-minutes: 25/);
   assert.match(
@@ -278,4 +298,118 @@ test("the actual CLI rejects a non-GitHub context before accessing host APT sour
     child.stderr,
     /requires a disposable GitHub-hosted Linux runner/,
   );
+});
+
+test(
+  "the runner's referenced local mirror list replaces only its Azure URI and keeps priorities",
+  posixOnly,
+  async (t) => {
+    const root = await fixture(t);
+    const source = join(root, "etc/apt/sources.list.d/ubuntu.sources");
+    const legacy = join(root, "etc/apt/sources.list");
+    const mirror = join(root, "etc/apt/apt-mirrors.txt");
+    const signed =
+      "Types: deb\nURIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble noble-updates noble-backports noble-security\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n";
+    await writeFile(source, signed);
+    await writeFile(
+      legacy,
+      "deb mirror+file:/etc/apt/apt-mirrors.txt noble main\n",
+    );
+    const rows =
+      "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://archive.ubuntu.com/ubuntu/\tpriority:2\nhttp://security.ubuntu.com/ubuntu/\tpriority:3\n\n";
+    assert.equal(Buffer.byteLength(rows), 144);
+    await writeFile(mirror, rows, { mode: 0o640 });
+    assert.equal(
+      await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+      1,
+    );
+    assert.equal(
+      await readFile(mirror, "utf8"),
+      "https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://archive.ubuntu.com/ubuntu/\tpriority:2\nhttp://security.ubuntu.com/ubuntu/\tpriority:3\n\n",
+    );
+    assert.equal(await readFile(source, "utf8"), signed);
+    assert.equal(
+      await readFile(legacy, "utf8"),
+      "deb mirror+file:/etc/apt/apt-mirrors.txt noble main\n",
+    );
+    assert.equal((await stat(mirror)).mode & 0o777, 0o640);
+    assert.equal(
+      await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+      0,
+    );
+  },
+);
+
+test("pure mirror-list rewriting preserves priority annotations, comments, security and other origins", () => {
+  const input =
+    "# http://azure.archive.ubuntu.com/ubuntu\nhttp://azure.archive.ubuntu.com/ubuntu/\tpriority:1 arch:amd64\nhttps://archive.ubuntu.com/ubuntu/\tpriority:2\nhttp://security.ubuntu.com/ubuntu/\tpriority:3\nhttps://mirror.example/ubuntu\tpriority:4\n";
+  const expected =
+    "# http://azure.archive.ubuntu.com/ubuntu\nhttps://archive.ubuntu.com/ubuntu/\tpriority:1 arch:amd64\nhttps://archive.ubuntu.com/ubuntu/\tpriority:2\nhttp://security.ubuntu.com/ubuntu/\tpriority:3\nhttps://mirror.example/ubuntu\tpriority:4\n";
+  assert.equal(rewriteUbuntuAptMirrorList(input), expected);
+  assert.equal(rewriteUbuntuAptMirrorList(expected), expected);
+});
+
+test("unsafe or unsupported mirror-list references reject in both source formats", () => {
+  for (const uri of [
+    "mirror+file:/etc/apt/../secrets",
+    "mirror+file://host/etc/apt/apt-mirrors.txt",
+    "mirror+file:///etc/apt/apt-mirrors.txt",
+    "mirror+file:/tmp/mirrors",
+    "mirror+https://mirror.example/list",
+    "mirror+file:/etc/apt/apt-mirrors.txt?extra=1",
+  ]) {
+    assert.throws(
+      () => rewriteUbuntuAptSource(`URIs: ${uri}\n`, true),
+      /Unsupported APT mirror-list reference/,
+    );
+    assert.throws(
+      () => rewriteUbuntuAptSource(`deb ${uri} noble main\n`, false),
+      /Unsupported APT mirror-list reference/,
+    );
+  }
+});
+
+test("only referenced mirror files are inspected or rewritten", async (t) => {
+  const root = await fixture(t);
+  const mirror = join(root, "etc/apt/apt-mirrors.txt");
+  const rows = "http://azure.archive.ubuntu.com/ubuntu priority:1\n";
+  await writeFile(mirror, rows);
+  assert.equal(
+    await prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+    0,
+  );
+  assert.equal(await readFile(mirror, "utf8"), rows);
+});
+
+test("a missing referenced mirror list rejects before a valid direct source is changed", async (t) => {
+  const root = await fixture(t);
+  const direct = join(root, "etc/apt/sources.list");
+  const original = "deb http://azure.archive.ubuntu.com/ubuntu noble main\n";
+  await writeFile(direct, original);
+  await writeFile(
+    join(root, "etc/apt/sources.list.d/mirror.sources"),
+    "URIs: mirror+file:/etc/apt/apt-mirrors.txt\nSuites: noble\n",
+  );
+  await assert.rejects(
+    prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+    /Referenced APT mirror list is missing/,
+  );
+  assert.equal(await readFile(direct, "utf8"), original);
+});
+
+test("a referenced mirror file cannot be a symlink", posixOnly, async (t) => {
+  const root = await fixture(t);
+  const outside = join(root, "outside-mirrors.txt");
+  const original = "http://azure.archive.ubuntu.com/ubuntu priority:1\n";
+  await writeFile(outside, original);
+  await symlink(outside, join(root, "etc/apt/apt-mirrors.txt"));
+  await writeFile(
+    join(root, "etc/apt/sources.list"),
+    "deb mirror+file:/etc/apt/apt-mirrors.txt noble main\n",
+  );
+  await assert.rejects(
+    prepareUbuntuAptSources({ root, env: hosted, platform: "linux" }),
+    /regular file/,
+  );
+  assert.equal(await readFile(outside, "utf8"), original);
 });

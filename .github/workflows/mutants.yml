@@ -46,6 +46,17 @@ jobs:
         with:
           fetch-depth: 0 # PR-diff mode needs history
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
+
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
@@ -58,12 +69,6 @@ jobs:
         with:
           workspaces: '.'
           key: mutants
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Build frontend
         working-directory: frontend

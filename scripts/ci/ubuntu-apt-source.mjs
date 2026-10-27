@@ -27,7 +27,23 @@ function archiveUri(uri) {
   return `https://archive.ubuntu.com/ubuntu${exact[1]}`;
 }
 
+const localMirrorLists = new Set(["/etc/apt/apt-mirrors.txt"]);
+function sourceUri(uri, references) {
+  if (/^mirror/i.test(uri)) {
+    const path = uri.slice("mirror+file:".length);
+    if (!uri.startsWith("mirror+file:") || !localMirrorLists.has(path)) {
+      throw new Error("Unsupported APT mirror-list reference");
+    }
+    references?.add(path);
+    return uri;
+  }
+  return archiveUri(uri);
+}
 export function rewriteUbuntuAptSource(text, deb822) {
+  return rewriteSource(text, deb822);
+}
+function rewriteSource(text, deb822, references) {
+  const rewrite = (uri) => sourceUri(uri, references);
   let uriField = false;
   return text
     .split(/(?<=\n)/u)
@@ -53,20 +69,47 @@ export function rewriteUbuntuAptSource(text, deb822) {
           }
           return line;
         }
-        return `${row[1]}${archiveUri(row[2])}${row[3]}${ending}`;
+        return `${row[1]}${rewrite(row[2])}${row[3]}${ending}`;
       }
       const field = /^([A-Za-z][A-Za-z0-9-]*:[ \t]*)(.*)$/.exec(body);
       if (field) {
         uriField = field[1].split(":")[0].toLowerCase() === "uris";
         return uriField
-          ? `${field[1]}${field[2].replace(/\S+/g, archiveUri)}${ending}`
+          ? `${field[1]}${field[2].replace(/\S+/g, rewrite)}${ending}`
           : line;
       }
       return uriField && /^[ \t]/.test(body)
-        ? body.replace(/\S+/g, archiveUri) + ending
+        ? body.replace(/\S+/g, rewrite) + ending
         : line;
     })
     .join("");
+}
+
+export function rewriteUbuntuAptMirrorList(text) {
+  return text
+    .split(/(?<=\n)/u)
+    .map((line) => {
+      if (/^[ \t]*(?:#|$)/.test(line)) return line;
+      return line.replace(
+        /^([ \t]*)(\S+)/,
+        (_, space, uri) => space + archiveUri(uri),
+      );
+    })
+    .join("");
+}
+
+async function referencedMirrorFile(root, reference) {
+  let parent = root;
+  for (const part of reference.slice(1).split("/").slice(0, -1)) {
+    parent = join(parent, part);
+    if (!(await lstat(parent)).isDirectory()) {
+      throw new Error("APT mirror-list directory must not be a symlink");
+    }
+  }
+  const path = join(root, reference.slice(1));
+  const info = await regularFile(path);
+  if (!info) throw new Error("Referenced APT mirror list is missing");
+  return { path, info };
 }
 
 async function regularFile(path) {
@@ -95,6 +138,8 @@ export async function prepareUbuntuAptSources({
       "APT source preparation requires a disposable GitHub-hosted Linux runner",
     );
   }
+  if (!(await lstat(root)).isDirectory())
+    throw new Error("APT root must not be a symlink");
   const release = await readFile(join(root, "etc/os-release"), "utf8");
   if (!/^ID=(?:ubuntu|"ubuntu"|'ubuntu')[ \t]*$/m.test(release)) {
     throw new Error("APT source preparation requires Ubuntu");
@@ -116,12 +161,19 @@ export async function prepareUbuntuAptSources({
     if (error.code !== "ENOENT") throw error;
   }
   const changes = [];
+  const references = new Set();
   // Validate every candidate before replacing any source file.
   for (const path of files) {
     const info = await regularFile(path);
     if (!info) continue;
     const before = await readFile(path, "utf8");
-    const after = rewriteUbuntuAptSource(before, path.endsWith(".sources"));
+    const after = rewriteSource(before, path.endsWith(".sources"), references);
+    if (after !== before) changes.push({ path, info, after });
+  }
+  for (const reference of references) {
+    const { path, info } = await referencedMirrorFile(root, reference);
+    const before = await readFile(path, "utf8");
+    const after = rewriteUbuntuAptMirrorList(before);
     if (after !== before) changes.push({ path, info, after });
   }
   for (const { path, info, after } of changes) {

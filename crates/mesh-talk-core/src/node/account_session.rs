@@ -185,6 +185,16 @@ impl Node {
             }
             _ => false,
         };
+        let authentication_priority = match &body {
+            AccountSessionRequest::Documents { body }
+                if super::account_documents::wire::DocumentRequest::decode(body).is_some_and(
+                    |request| request.domain == super::AccountDocumentDomain::GroupControl,
+                ) =>
+            {
+                super::session_pool::AuthenticationPriority::Control
+            }
+            _ => super::session_pool::AuthenticationPriority::Ordinary,
+        };
         for fresh in [false, true] {
             #[cfg(test)]
             self.trace_account_client(&peer.public, || {
@@ -205,7 +215,7 @@ impl Node {
             let mut channel = match pooled {
                 Some(channel) => channel,
                 None => self
-                    .privacy_dial(peer.addr, &peer.public)
+                    .privacy_dial_priority(peer.addr, &peer.public, authentication_priority)
                     .await
                     .map_err(transport)?,
             };
@@ -283,7 +293,7 @@ impl Node {
                     drop(channel);
                     self.sessions.note_account_unsupported(key);
                     let mut channel = self
-                        .privacy_dial(peer.addr, &peer.public)
+                        .privacy_dial_priority(peer.addr, &peer.public, authentication_priority)
                         .await
                         .map_err(transport)?;
                     send(&mut channel, version, &request)

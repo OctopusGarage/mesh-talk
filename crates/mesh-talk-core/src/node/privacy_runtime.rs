@@ -1246,6 +1246,20 @@ impl Node {
         addr: std::net::SocketAddr,
         expected: &PublicIdentity,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_dial_priority(
+            addr,
+            expected,
+            super::session_pool::AuthenticationPriority::Ordinary,
+        )
+        .await
+    }
+
+    pub(in crate::node) async fn privacy_dial_priority(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+        priority: super::session_pool::AuthenticationPriority,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
         let mut addr = addr;
@@ -1290,10 +1304,19 @@ impl Node {
                     self.trace_account_client(expected, || {
                         "dial_authentication_admission_wait".into()
                     });
-                    let _authentication = self
-                        .sessions
-                        .authentication_admission(self.peer_endpoint_key(candidate, expected))
-                        .await?;
+                    let authentication_key = self.peer_endpoint_key(candidate, expected);
+                    let _authentication = match priority {
+                        super::session_pool::AuthenticationPriority::Ordinary => {
+                            self.sessions
+                                .authentication_admission(authentication_key)
+                                .await?
+                        }
+                        super::session_pool::AuthenticationPriority::Control => {
+                            self.sessions
+                                .authentication_admission_priority(authentication_key, priority)
+                                .await?
+                        }
+                    };
                     #[cfg(test)]
                     self.trace_account_client(expected, || {
                         "dial_authentication_admission_acquired_outbound_wait".into()
