@@ -395,7 +395,7 @@ fn short_name(name: &str) -> String {
 fn describe_destinations(node: &Node, destinations: &[Destination]) -> Vec<Value> {
     let channels = node.list_channels();
     destinations.iter().map(|destination| match destination {
-        Destination::Account { id } => json!({"destination":destination,"name":id}),
+        Destination::Account { id } => json!({"destination":destination,"name":short_name(node.account_display_name(id).as_deref().unwrap_or(id))}),
         Destination::Channel { id } => json!({"destination":destination,"name":short_name(channels.iter().find(|channel| hex::encode(channel.id.as_bytes()) == *id).map(|channel| channel.name.as_str()).unwrap_or(id))}),
     }).collect()
 }
@@ -444,6 +444,86 @@ mod tests {
     ) -> Value {
         service.handle(admin, "grant_create", json!({"client_id":client,"destinations":[destination],"describe":describe,"expires_at_ms":now_ms()+60000})).await.unwrap()
     }
+    #[tokio::test]
+    async fn conversation_names_resolve_granted_accounts_including_offline_contacts() {
+        use mesh_talk_core::{discovery::announce::Announce, identity::account::Account};
+        use std::{
+            net::{IpAddr, Ipv4Addr},
+            time::Duration,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let roster = Arc::new(Mutex::new(Roster::default()));
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            roster.clone(),
+            dm,
+            channel,
+            file,
+            &dir.path().join("events"),
+            &dir.path().join("sent"),
+            "pw",
+        )
+        .unwrap();
+        let account = Account::generate();
+        let proof =
+            Announce::new_with_account(&DeviceIdentity::generate(), &account, "Duncan", 47001);
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &node.user_id());
+        let hidden = Account::generate();
+        let proof = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &hidden,
+            "Private contact",
+            47002,
+        );
+        roster
+            .lock()
+            .unwrap()
+            .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &node.user_id());
+        let destination = Destination::Account {
+            id: account.account_id(),
+        };
+        let admin = new_token();
+        let service = fixture(dir.path(), node, &admin);
+        let grant = issue(&service, &admin, "desktop-local-agent", &destination, true).await;
+        let token = grant["token"].as_str().unwrap();
+        for offline in [false, true] {
+            if offline {
+                roster.lock().unwrap().evict_stale(Duration::ZERO);
+            }
+            let response = service
+                .handle(token, "list_conversations", json!({}))
+                .await
+                .unwrap();
+            assert_eq!(response["conversations"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                response["conversations"][0]["destination"],
+                json!(destination)
+            );
+            assert_eq!(response["conversations"][0]["name"], "Duncan");
+            assert!(!response.to_string().contains("Private contact"));
+        }
+        let unknown_id = Account::generate().account_id();
+        let unknown = Destination::Account {
+            id: unknown_id.clone(),
+        };
+        let grant = issue(&service, &admin, "unknown-contact", &unknown, true).await;
+        let response = service
+            .handle(
+                grant["token"].as_str().unwrap(),
+                "list_conversations",
+                json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response["conversations"][0]["name"], json!(unknown_id));
+    }
+
     #[tokio::test]
     async fn scoped_group_send_retries_and_narrowed_status_are_enforced() {
         let dir = tempfile::tempdir().unwrap();

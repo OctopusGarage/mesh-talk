@@ -262,6 +262,13 @@ identifies the current granted destinations and limits. The help catalog describ
 `POST /v1/conversations`, `/v1/messages` and `/v1/send-result`; there are no HTTP
 administration or arbitrary RPC routes.
 
+Conversation descriptions include the best known account display name (signed
+profile, current discovery, or retained verified discovery), including offline
+contacts. Unknown names fall back to the account ID. Names can be shared by
+multiple accounts: agents should match an unambiguous granted name to its returned
+`destination` and send using that exact ID. Only granted conversations are listed;
+name resolution does not expose other contacts or chat history.
+
 The listener binds only `127.0.0.1`. Requests must use its exact numeric Host;
 browser Origin and Sec-Fetch metadata are rejected, and no CORS access is granted.
 This is local agent automation, not a remotely reachable API. Processes running

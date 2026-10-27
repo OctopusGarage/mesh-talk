@@ -20,6 +20,8 @@ import {
   Upload,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { messageSummary } from "@/lib/messagePresentation";
+import { usePacks } from "@/store/packs";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { ReceptionStatus } from "./ReceptionStatus";
 import { Composer } from "./Composer";
@@ -83,6 +85,7 @@ const NO_REACTIONS: ReactionInfo[] = [];
 
 export function ConversationView() {
   const { t } = useTranslation();
+  const packs = usePacks((s) => s.packs);
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
   const owner = useAuth((s) => s.user?.id ?? null);
@@ -723,9 +726,7 @@ export function ConversationView() {
                         className="h-4 w-4 accent-[hsl(var(--signal))]"
                       />
                       {t("messageFavorites.selectMessage", {
-                        text: m.protection
-                          ? t("protectedMessage.label")
-                          : (m.text || m.file?.name || "").slice(0, 60),
+                        text: messageSummary(m, t, packs).slice(0, 60),
                       })}
                     </label>
                   )}

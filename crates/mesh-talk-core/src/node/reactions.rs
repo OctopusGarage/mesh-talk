@@ -219,6 +219,9 @@ impl Node {
                 decoded.push((my_account.clone(), *w, p.clone()));
             }
         }
+        for (_, _, payload) in &mut decoded {
+            payload.target = self.file_message_logical_id(acct_conv, payload.target);
+        }
         aggregate(&decoded)
     }
 

@@ -39,7 +39,13 @@ function observationAge(
   );
 }
 
-export function DeliveryDetails({ message }: { message: ChatMessage }) {
+export function DeliveryDetails({
+  message,
+  compact = false,
+}: {
+  message: ChatMessage;
+  compact?: boolean;
+}) {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
   const recover = useDeliveryRecovery();
@@ -75,10 +81,14 @@ export function DeliveryDetails({ message }: { message: ChatMessage }) {
             ref={origin}
             data-testid="delivery-details-trigger"
             data-delivery="awaiting"
+            aria-label={t("message.delivery.awaiting")}
+            title={compact ? t("message.delivery.awaiting") : undefined}
             className="inline-flex min-h-6 items-center gap-1 rounded-sm text-left underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <span aria-hidden="true">◷</span>
-            {t("message.delivery.awaiting")}
+            <span className={compact ? "sr-only" : undefined}>
+              {t("message.delivery.awaiting")}
+            </span>
           </button>
         </PopoverTrigger>
         <PopoverContent

@@ -111,6 +111,20 @@ Conversation content presented as one logical message. Pending UI content and
 protocol records are different representations, not interchangeable identities.
 _Avoid_: Event ID before acceptance, transport frame.
 
+**Logical file message**:
+One accepted file or sticker send, identified independently of its per-device
+signed manifests. An authenticated sender binding can associate those exact
+manifests with the same logical message. Repeated sends remain separate messages
+even when they reuse the same encrypted transfer or have identical artwork.
+_Avoid_: file-conversation ID, checksum, timestamp or device-manifest ID as an
+interchangeable message identity.
+
+**Device file manifest**:
+A signed file offer for one destination device. Its exact event identity remains
+authoritative for that device's consent and completion, even when history
+projects a shared logical file message.
+_Avoid_: logical file message, completed image bytes.
+
 **Outgoing intent**:
 A local attempt to send content to a conversation before or while acceptance is
 resolved. Its local identity is distinct from an accepted event's identity.

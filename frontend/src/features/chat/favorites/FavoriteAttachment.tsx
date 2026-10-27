@@ -114,7 +114,7 @@ export function FavoriteAttachment({
         {fileGlyph(file.name, file.mime)}
         <div className="min-w-0 flex-1">
           <p className="break-words text-sm font-medium">
-            {attachmentLabel(file.name, file.mime, file)}
+            {attachmentLabel(file.name, file.mime, file, t("message.sticker"))}
           </p>
           <p className="text-xs text-muted-foreground">
             {humanSize(file.size)} ·{" "}
@@ -157,12 +157,22 @@ export function FavoriteAttachment({
             controls
             preload="metadata"
             className="max-h-80 max-w-full"
-            aria-label={file.name}
+            aria-label={attachmentLabel(
+              file.name,
+              file.mime,
+              file,
+              t("message.sticker"),
+            )}
           />
         ) : (
           <img
             src={url}
-            alt={file.name}
+            alt={attachmentLabel(
+              file.name,
+              file.mime,
+              file,
+              t("message.sticker"),
+            )}
             className="max-h-80 max-w-full object-contain"
           />
         ))}

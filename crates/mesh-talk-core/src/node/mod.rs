@@ -19,6 +19,7 @@ pub(crate) mod account_file_proofs;
 pub(crate) mod account_preferences;
 mod account_profile;
 mod account_session;
+pub(crate) mod file_message_identity;
 pub use account_documents::{
     AccountDocument, AccountDocumentDomain, AccountDocumentKey, AccountDocumentMeta,
     AccountDocumentPage, DocumentConversation, DocumentVersion, GroupInventoryMember,

@@ -394,6 +394,7 @@ function receptionRows(key: string, rows: HistoryItem[]) {
   const name = user?.display_name || user?.username || "";
   return rows.map((row) => ({
     id: row.id,
+    fileMessageAliases: row.file_message_aliases,
     fromMe: row.from_me,
     mentioned:
       key.startsWith("channel:") &&
