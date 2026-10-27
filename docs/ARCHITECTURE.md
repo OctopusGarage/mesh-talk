@@ -1259,7 +1259,12 @@ declared frame length against the remaining file bytes before allocating that
 frame. It preserves the existing encrypted format, authenticated decode errors,
 valid-prefix crash-tail recovery and Windows repair-handle ownership. This bounds
 the temporary ciphertext buffer by one record; decoded retained records and
-their indexes still consume memory proportional to retained data.
+their indexes still consume memory proportional to retained data. Migration
+callers can instead use `open_with_visitor` to process each authenticated decoded
+record before decoding the next. The visitor owns any retained values or partial
+staged effects. A callback error returns no writer and preserves source bytes,
+including an unfinished tail; tail repair happens only after complete successful
+visitation. The existing collecting API uses this same framing/parser path.
 
 Canonical history queries select lightweight retained metadata before copying
 the chosen message content. Ordering, logical-ID deduplication, pending accepted

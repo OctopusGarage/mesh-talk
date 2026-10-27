@@ -954,6 +954,10 @@
           {
             "name": "Indexed storage encrypts metadata and WAL; wrong keys, owners, versions or fatal transaction failures never become an empty successful history.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Streaming import visits only authenticated records without retaining prior decoded bodies, and callback errors preserve source bytes before any tail repair.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
