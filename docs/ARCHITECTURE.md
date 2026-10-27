@@ -1289,6 +1289,24 @@ The repository backend alone does not switch the existing runtime persistence or
 replace its full-history replay; bounded consumers and verified source migration
 are required before that cutover.
 
+Canonical signed-event order uses a separate persisted Kahn generation for
+Lamport and wall-clock priorities. Encrypted ordinary work tables hold indegrees,
+the indexed ready queue, ranks and a partially drained parent's child cursor.
+Seed, vertex and edge work is bounded per step; child updates and their cursor
+advance commit together. Pending or stale generations cannot masquerade as a
+successful empty or current history. Generation cursors bind their source and
+ordering, and publication checks the completed source boundary atomically.
+
+A new event can append to an exact generation only when its priority tuple is
+greater than the maximum over all prior vertices, including Profile leaves.
+The last ranked event and protocol heads are insufficient proofs. A building
+generation can retain a closed commit-prefix and append a validated safe tail;
+ordinary monotonic writes must not perpetually restart its repair. Unsafe late
+insertions invalidate the candidate, and obsolete work is reclaimed in bounded
+steps. These signed-event generations do not include archive-only transcript
+roots or provide channel-state checkpoints; their owners must integrate those
+sources before runtime history/replay cutover.
+
 Owned individual event reads copy only the selected event from the current
 resident index. They establish the fallible ownership boundary needed for disk
 queries, but do not bound the existing index or whole-conversation replay.

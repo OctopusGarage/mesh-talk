@@ -779,6 +779,10 @@
           {
             "name": "Indexed event domains transactionally preserve signed bytes, causal edges, frontier and full-u64 counters; bounded keyset reads validate source-bound cursors before decoding selected bodies and cache the unchanged wire fingerprint without body hydration",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Canonical signed-event generations use bounded encrypted Kahn work, atomic child-drain progress and source-bound publication; safe monotonic appends preserve progress while unsafe insertions invalidate stale order without exposing empty successful history",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }

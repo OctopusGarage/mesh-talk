@@ -27,7 +27,7 @@ pub(super) fn register(
             return Err(LogError::IncompatibleEventSchema);
         }
     } else {
-        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('event_domains','event_conversations','retained_events','retained_event_parents','event_heads','event_author_max'))", [], |r| r.get(0))?;
+        let existing: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('event_domains','event_conversations','retained_events','retained_event_parents','event_heads','event_author_max','event_order_jobs','event_order_work','event_order_rows','event_order_current'))", [], |r| r.get(0))?;
         if existing {
             return Err(LogError::IncompatibleEventSchema);
         }
@@ -93,6 +93,7 @@ CREATE TABLE retained_events(
  FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
 ) WITHOUT ROWID;
 CREATE INDEX retained_events_clock ON retained_events(domain,conversation,lamport,id);
+CREATE INDEX retained_events_commit ON retained_events(domain,conversation,commit_ordinal,id);
 CREATE INDEX retained_events_ids ON retained_events(domain,conversation,id);
 CREATE INDEX retained_events_wall_clock ON retained_events(domain,conversation,wall_clock,id);
 CREATE INDEX retained_events_author_messages ON retained_events(domain,conversation,author,kind,lamport,id);
@@ -101,11 +102,13 @@ CREATE TABLE retained_event_parents(
  domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
  child BLOB NOT NULL CHECK(typeof(child)='blob' AND length(child)=32),
  parent BLOB NOT NULL CHECK(typeof(parent)='blob' AND length(parent)=32),
+ child_commit INTEGER NOT NULL CHECK(typeof(child_commit)='integer' AND child_commit>=0),
  PRIMARY KEY(domain,child,parent),
  FOREIGN KEY(domain,child) REFERENCES retained_events(domain,id),
  FOREIGN KEY(domain,parent) REFERENCES retained_events(domain,id)
 ) WITHOUT ROWID;
 CREATE INDEX retained_event_children ON retained_event_parents(domain,parent,child);
+CREATE INDEX retained_event_children_commit ON retained_event_parents(domain,parent,child_commit,child);
 CREATE TABLE event_heads(
  domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
  conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
@@ -122,6 +125,51 @@ CREATE TABLE event_author_max(
  PRIMARY KEY(domain,conversation,author),
  FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
 ) WITHOUT ROWID;
+CREATE TABLE event_order_jobs(
+ job BLOB PRIMARY KEY CHECK(typeof(job)='blob' AND length(job)=16),
+ domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
+ conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ order_kind INTEGER NOT NULL CHECK(typeof(order_kind)='integer' AND order_kind IN (0,1)),
+ source_revision INTEGER NOT NULL CHECK(typeof(source_revision)='integer' AND source_revision>=0),
+ target_count INTEGER NOT NULL CHECK(typeof(target_count)='integer' AND target_count>=0),
+ base_count INTEGER NOT NULL CHECK(typeof(base_count)='integer' AND base_count>=0 AND base_count<=target_count),
+ cutoff INTEGER NOT NULL CHECK(typeof(cutoff)='integer' AND cutoff>=0),
+ phase INTEGER NOT NULL CHECK(typeof(phase)='integer' AND phase BETWEEN 0 AND 4),
+ seed_after INTEGER NOT NULL CHECK(typeof(seed_after)='integer' AND seed_after>=-1),
+ seeded INTEGER NOT NULL CHECK(typeof(seeded)='integer' AND seeded>=0 AND seeded<=base_count),
+ next_rank INTEGER NOT NULL CHECK(typeof(next_rank)='integer' AND next_rank>=0 AND next_rank<=target_count),
+ pop BLOB CHECK(pop IS NULL OR (typeof(pop)='blob' AND length(pop)=32)),
+ child_after INTEGER NOT NULL CHECK(typeof(child_after)='integer' AND child_after>=-1),
+ tail_after INTEGER NOT NULL CHECK(typeof(tail_after)='integer' AND tail_after>=cutoff),
+ UNIQUE(domain,conversation,order_kind),
+ FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
+) WITHOUT ROWID;
+CREATE TABLE event_order_work(
+ job BLOB NOT NULL CHECK(typeof(job)='blob' AND length(job)=16),
+ id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=32),
+ priority BLOB NOT NULL CHECK(typeof(priority)='blob' AND length(priority)=8),
+ remaining_degree INTEGER NOT NULL CHECK(typeof(remaining_degree)='integer' AND remaining_degree>=0),
+ status INTEGER NOT NULL CHECK(typeof(status)='integer' AND status BETWEEN 0 AND 2),
+ PRIMARY KEY(job,id), FOREIGN KEY(job) REFERENCES event_order_jobs(job)
+) WITHOUT ROWID;
+CREATE INDEX event_order_ready ON event_order_work(job,status,remaining_degree,priority,id);
+CREATE TABLE event_order_rows(
+ job BLOB NOT NULL CHECK(typeof(job)='blob' AND length(job)=16),
+ rank INTEGER NOT NULL CHECK(typeof(rank)='integer' AND rank>=0),
+ id BLOB NOT NULL CHECK(typeof(id)='blob' AND length(id)=32),
+ PRIMARY KEY(job,rank), UNIQUE(job,id), FOREIGN KEY(job) REFERENCES event_order_jobs(job)
+) WITHOUT ROWID;
+CREATE TABLE event_order_current(
+ domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16),
+ conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32),
+ order_kind INTEGER NOT NULL CHECK(typeof(order_kind)='integer' AND order_kind IN (0,1)),
+ source_revision INTEGER NOT NULL CHECK(typeof(source_revision)='integer' AND source_revision>=0),
+ job BLOB NOT NULL CHECK(typeof(job)='blob' AND length(job)=16),
+ PRIMARY KEY(domain,conversation,order_kind), FOREIGN KEY(job) REFERENCES event_order_jobs(job),
+ FOREIGN KEY(domain,conversation) REFERENCES event_conversations(domain,conversation)
+) WITHOUT ROWID;
+CREATE INDEX event_order_current_job ON event_order_current(job);
+
 ";
 
 // Constant-size schema inspection only: reopening must never recreate a missing
@@ -133,6 +181,13 @@ fn validate_objects(c: &Connection) -> Result<(), LogError> {
         ("event_conversations", &["domain", "conversation"][..]),
         ("retained_events", &["domain", "id"][..]),
         ("retained_event_parents", &["domain", "child", "parent"][..]),
+        ("event_order_jobs", &["job"][..]),
+        ("event_order_work", &["job", "id"][..]),
+        ("event_order_rows", &["job", "rank"][..]),
+        (
+            "event_order_current",
+            &["domain", "conversation", "order_kind"][..],
+        ),
         ("event_heads", &["domain", "conversation", "id"][..]),
         (
             "event_author_max",
@@ -165,6 +220,26 @@ fn validate_objects(c: &Connection) -> Result<(), LogError> {
         }
     }
     for (name, table, columns) in [
+        (
+            "event_order_current_job",
+            "event_order_current",
+            &["job"][..],
+        ),
+        (
+            "retained_events_commit",
+            "retained_events",
+            &["domain", "conversation", "commit_ordinal", "id"][..],
+        ),
+        (
+            "retained_event_children_commit",
+            "retained_event_parents",
+            &["domain", "parent", "child_commit", "child"][..],
+        ),
+        (
+            "event_order_ready",
+            "event_order_work",
+            &["job", "status", "remaining_degree", "priority", "id"][..],
+        ),
         (
             "retained_events_clock",
             "retained_events",

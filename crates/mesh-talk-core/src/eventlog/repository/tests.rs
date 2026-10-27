@@ -4,7 +4,7 @@ use crate::{
     eventlog::{ConversationId, EventKind},
     identity::device::DeviceIdentity,
 };
-fn event(
+pub(super) fn event(
     identity: &DeviceIdentity,
     seq: u64,
     parents: Vec<EventId>,
@@ -22,7 +22,7 @@ fn event(
         vec![42; 128],
     )
 }
-fn database(dir: &tempfile::TempDir) -> Arc<EncryptedDatabase> {
+pub(super) fn database(dir: &tempfile::TempDir) -> Arc<EncryptedDatabase> {
     Arc::new(
         EncryptedDatabase::open(&dir.path().join("profile.db"), "password", b"profile").unwrap(),
     )
@@ -1242,4 +1242,16 @@ fn corrupt_ciphertext_length_is_rejected_before_length_driven_allocation() {
 #[test]
 fn corrupt_signature_length_is_rejected_before_length_driven_allocation() {
     assert_vector_length_rejected_before_event_decode("signature");
+}
+
+#[test]
+fn causal_order_work_is_persisted_in_encrypted_ordinary_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let _repository = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    db.read(|c| {
+        let count:i64 = c.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('event_order_jobs','event_order_work','event_order_rows','event_order_current')", [], |r|r.get(0))?;
+        assert_eq!(count,4,"exact causal order needs persistent resumable encrypted work");
+        Ok(())
+    }).unwrap();
 }

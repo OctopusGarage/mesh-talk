@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 mod decode;
 mod metadata;
+pub(crate) mod order;
 pub(crate) mod pages;
 mod schema;
 pub(crate) use metadata::ConversationMetadata;
@@ -147,11 +148,12 @@ impl EventRepository {
         c.execute("INSERT INTO retained_events(domain,id,conversation,author,seq,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes,body,commit_ordinal) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![domain,event.id.as_bytes().as_slice(),conv,event.author.ed25519_pub().as_slice(),event.seq.to_be_bytes().as_slice(),event.lamport.to_be_bytes().as_slice(),event.wall_clock.to_be_bytes().as_slice(),event.kind as i64,integer(header.parent_count)?,integer(header.encoded_bytes)?,integer(header.ciphertext_bytes)?,integer(header.signature_bytes)?,integer(header.stored_bytes)?,body,commit])?;
         for parent in &event.parents {
             c.execute(
-                "INSERT INTO retained_event_parents VALUES(?1,?2,?3)",
+                "INSERT INTO retained_event_parents VALUES(?1,?2,?3,?4)",
                 params![
                     domain,
                     event.id.as_bytes().as_slice(),
-                    parent.as_bytes().as_slice()
+                    parent.as_bytes().as_slice(),
+                    commit
                 ],
             )?;
             if event.kind != EventKind::Profile {
@@ -173,6 +175,7 @@ impl EventRepository {
             "UPDATE event_domains SET next_commit=?2 WHERE domain=?1",
             params![domain, next_commit],
         )?;
+        self.order_appended(c, event, revision, count)?;
         Ok(AppendOutcome::Appended)
     }
 
