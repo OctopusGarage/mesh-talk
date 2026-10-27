@@ -1,5 +1,6 @@
 import { test, expect } from "./tauri-mock";
 import { BOB, enterChat, openBobDm } from "./helpers/session";
+import type { PeerInfo } from "../src/lib/types";
 
 /** The real header and call dialogs with a controlled backend roster. */
 async function prepare(
@@ -29,13 +30,8 @@ async function prepare(
         }
       ).__TAURI_INTERNALS__;
       const invoke = internals.invoke;
-      internals.invoke = (cmd, args) => {
-        if (cmd === "send_call_signal") state.signals++;
-        return invoke(cmd, args);
-      };
-      useSettings.setState({ callsEnabled: true });
-      useChat.setState({
-        peers: useChat.getState().peers.map((peer: { account_id: string }) =>
+      const projectRoutes = (peers: PeerInfo[]) =>
+        peers.map((peer) =>
           peer.account_id === account
             ? {
                 ...peer,
@@ -43,8 +39,16 @@ async function prepare(
                 discovered_on_lan: false,
               }
             : peer,
-        ),
-      });
+        );
+      internals.invoke = async (cmd, args) => {
+        if (cmd === "send_call_signal") state.signals++;
+        const result = await invoke(cmd, args);
+        return cmd === "list_peers"
+          ? projectRoutes(result as PeerInfo[])
+          : result;
+      };
+      useSettings.setState({ callsEnabled: true });
+      await useChat.getState().refreshRoster();
     },
     { account: BOB.account, direct },
   );
@@ -55,6 +59,13 @@ test("relay-only voice and video explain the limitation before requesting captur
 }) => {
   await prepare(page, false);
   for (const kind of ["voice", "video"]) {
+    // Exercise the real refresh path so a fast local run cannot hide a fixture
+    // whose backend route disagrees with the displayed roster.
+    await page.evaluate(async () => {
+      const path = "/src/store/chat.ts";
+      const { useChat } = await import(/* @vite-ignore */ path);
+      await useChat.getState().refreshRoster();
+    });
     await page.getByTestId(`conversation-call-${kind}`).click();
     await expect(page.getByRole("dialog")).toContainText(
       "Calling unavailable on this connection",
