@@ -92,6 +92,8 @@ impl EncryptedDatabase {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         let mut connection = Connection::open_with_flags(&path, flags)
             .map_err(|e| context("open encrypted connection", e))?;
+        #[cfg(test)]
+        observations::CONNECTION_OPENS.with(|count| count.set(count.get() + 1));
         let passphrase = Zeroizing::new(format!("{PASSPHRASE_DOMAIN}{password}"));
         assign_key(&mut connection, passphrase.as_bytes())?;
         drop(passphrase);
@@ -358,6 +360,15 @@ fn prepare_private_regular_file(path: &Path) -> Result<bool, LogError> {
         return Err(invalid("database path must be a regular file"));
     }
     Ok(created)
+}
+
+// Actual successful SQLite connection opens, isolated to each test thread.
+// This measures resource ownership, not production password-derivation timing.
+#[cfg(test)]
+pub(crate) mod observations {
+    thread_local! {
+        pub static CONNECTION_OPENS: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};
+    }
 }
 
 #[cfg(test)]

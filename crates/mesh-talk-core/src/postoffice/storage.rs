@@ -3,7 +3,7 @@
 //! semantics; missing arrival histories start their clock at upgrade as before.
 use super::{MailboxArrival, RETENTION_MAGIC};
 use crate::{
-    eventlog::LogError,
+    eventlog::{LogError, repository::EventRepository},
     storage::{
         database::EncryptedDatabase,
         profile::{
@@ -18,18 +18,27 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 const SCHEMA:&str="
 CREATE TABLE relay_arrival_stage(conversation BLOB PRIMARY KEY CHECK(length(conversation)=32), first_seen BLOB NOT NULL CHECK(length(first_seen)=8)) WITHOUT ROWID;
-CREATE TABLE relay_mailboxes(domain BLOB NOT NULL CHECK(length(domain)=16), conversation BLOB NOT NULL CHECK(length(conversation)=32), first_seen BLOB NOT NULL CHECK(length(first_seen)=8), touched BLOB NOT NULL CHECK(length(touched)=8), PRIMARY KEY(domain,conversation)) WITHOUT ROWID;
+CREATE TABLE relay_runtime(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version=1), ready INTEGER NOT NULL CHECK(typeof(ready)='integer' AND ready IN (0,1)), next_touch BLOB NOT NULL CHECK(typeof(next_touch)='blob' AND length(next_touch)=8));
+CREATE TABLE relay_mailboxes(domain BLOB NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=16), conversation BLOB NOT NULL CHECK(typeof(conversation)='blob' AND length(conversation)=32), first_seen BLOB NOT NULL CHECK(typeof(first_seen)='blob' AND length(first_seen)=8), touched BLOB NOT NULL CHECK(typeof(touched)='blob' AND length(touched)=8), PRIMARY KEY(domain,conversation)) WITHOUT ROWID;
 CREATE INDEX relay_mailboxes_expiry ON relay_mailboxes(domain,first_seen,conversation);
 CREATE INDEX relay_mailboxes_lru ON relay_mailboxes(domain,touched,conversation);
 ";
 pub(crate) fn initialize(db: &EncryptedDatabase) -> Result<(), LogError> {
     db.transaction(|tx| {
         tx.execute_batch(SCHEMA)?;
+        tx.execute(
+            "INSERT INTO relay_runtime VALUES(1,1,0,?1)",
+            [1u64.to_be_bytes().as_slice()],
+        )?;
         Ok(())
     })
 }
 pub(crate) fn validate(db: &EncryptedDatabase) -> Result<(), LogError> {
-    db.read(|c| validate_ddl(c, SCHEMA))
+    db.read(|c| {
+        validate_ddl(c, SCHEMA)?;
+        runtime_state(c)?;
+        Ok(())
+    })
 }
 pub(crate) fn authenticate(
     path: &Path,
@@ -94,7 +103,11 @@ pub(crate) fn stage(db: &EncryptedDatabase, path: &Path, password: &str) -> Resu
     })?;
     Ok(count)
 }
-pub(crate) fn publish(c: &Connection, now: u64) -> Result<(), LogError> {
+pub(crate) fn publish(
+    c: &Connection,
+    repository: &EventRepository,
+    now: u64,
+) -> Result<(), LogError> {
     let unique: i64 = c.query_row("SELECT count(*) FROM relay_arrival_stage", [], |r| r.get(0))?;
     let (expected, records): (i64, i64) = c.query_row(
         "SELECT unique_records,imported_records FROM relay_sources WHERE source=1 AND phase=3",
@@ -104,24 +117,39 @@ pub(crate) fn publish(c: &Connection, now: u64) -> Result<(), LogError> {
     if unique != expected || unique > records {
         return Err(invalid("verified arrival source coverage changed"));
     }
-    let mailboxes: i64 = c.query_row(
-        "SELECT count(*) FROM event_conversations WHERE domain=?1 AND event_count>0",
-        [RELAY_EVENTS.0.as_slice()],
-        |r| r.get(0),
-    )?;
     // Legacy cold opens had no persisted LRU source and seeded arbitrary
     // distinct ticks. Keep expiry separate and seed deterministic ticks through
     // bounded indexed metadata lookups in this same publication transaction.
+    struct PublishedMailbox {
+        conversation: Vec<u8>,
+        first_seen: Option<Vec<u8>>,
+        events: i64,
+        bytes: i64,
+    }
     let mut after = Vec::<u8>::new();
     let mut tick = 0u64;
+    let mut count = 0u64;
+    let mut estimated = 0u64;
     loop {
-        let next:Option<(Vec<u8>,Option<Vec<u8>>)>=c.query_row(
-            "SELECT e.conversation,a.first_seen FROM event_conversations e INDEXED BY event_conversations_active LEFT JOIN relay_arrival_stage a ON a.conversation=e.conversation WHERE e.domain=?1 AND e.event_count>0 AND e.conversation>?2 ORDER BY e.conversation LIMIT 1",
-            params![RELAY_EVENTS.0.as_slice(),after],|r|Ok((r.get(0)?,r.get(1)?))
+        let next:Option<PublishedMailbox>=c.query_row(
+            "SELECT e.conversation,a.first_seen,e.event_count,e.estimated_bytes FROM event_conversations e INDEXED BY event_conversations_active LEFT JOIN relay_arrival_stage a ON a.conversation=e.conversation WHERE e.domain=?1 AND e.event_count>0 AND e.conversation>?2 ORDER BY e.conversation LIMIT 1",
+            params![RELAY_EVENTS.0.as_slice(),after],|r|Ok(PublishedMailbox{conversation:r.get(0)?,first_seen:r.get(1)?,events:r.get(2)?,bytes:r.get(3)?})
         ).optional()?;
-        let Some((conversation, first_seen)) = next else {
+        let Some(PublishedMailbox {
+            conversation,
+            first_seen,
+            events,
+            bytes,
+        }) = next
+        else {
             break;
         };
+        count = count
+            .checked_add(u64::try_from(events).map_err(|_| invalid("negative published count"))?)
+            .ok_or(LogError::RepositoryCounterExhausted)?;
+        estimated = estimated
+            .checked_add(u64::try_from(bytes).map_err(|_| invalid("negative published estimate"))?)
+            .ok_or(LogError::RepositoryCounterExhausted)?;
         tick = tick
             .checked_add(1)
             .ok_or(LogError::RepositoryCounterExhausted)?;
@@ -137,10 +165,46 @@ pub(crate) fn publish(c: &Connection, now: u64) -> Result<(), LogError> {
         )?;
         after = conversation;
     }
-    if i64::try_from(tick).map_err(|_| LogError::RepositoryCounterExhausted)? != mailboxes {
-        return Err(invalid("published mailbox count differs from event domain"));
+    let charge = repository.domain_charge_on(c)?;
+    if charge.event_count != count || charge.estimated_bytes != estimated {
+        return Err(invalid(
+            "published mailbox charge differs from event domain",
+        ));
+    }
+    let next = tick
+        .checked_add(1)
+        .ok_or(LogError::RepositoryCounterExhausted)?;
+    if c.execute(
+        "UPDATE relay_runtime SET ready=1,next_touch=?1 WHERE singleton=1 AND ready=0",
+        [next.to_be_bytes().as_slice()],
+    )? != 1
+    {
+        return Err(invalid("relay publication runtime state changed"));
     }
     Ok(())
+}
+
+fn runtime_state(c: &Connection) -> Result<(bool, u64), LogError> {
+    let (version, ready, next): (i64, i64, Vec<u8>) = c.query_row(
+        "SELECT version,ready,next_touch FROM relay_runtime WHERE singleton=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    if version != 1 || !(0..=1).contains(&ready) {
+        return Err(invalid("incompatible relay runtime authority"));
+    }
+    let next = u64::from_be_bytes(next.try_into().map_err(|_| invalid("invalid next touch"))?);
+    if next == 0 {
+        return Err(invalid("invalid zero next touch"));
+    }
+    Ok((ready == 1, next))
+}
+pub(crate) fn require_ready(c: &Connection) -> Result<u64, LogError> {
+    let (ready, next) = runtime_state(c)?;
+    if !ready {
+        return Err(invalid("relay runtime is not published"));
+    }
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -381,3 +445,87 @@ mod touch_tests {
         }).unwrap();
     }
 }
+
+#[cfg(test)]
+mod runtime_authority_tests {
+    use crate::{
+        identity::device::DeviceIdentity,
+        storage::profile::{ProfileStorageLease, context::ProfileStorage},
+    };
+    #[test]
+    fn published_reopen_rejects_missing_runtime_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let path = root.path().join("relay.log");
+        let profile = ProfileStorage::open_relay(
+            ProfileStorageLease::acquire(root.path()).unwrap(),
+            &identity.public(),
+            &path,
+            "pw",
+            123,
+        )
+        .unwrap();
+        profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TABLE IF EXISTS relay_runtime")?;
+                Ok(())
+            })
+            .unwrap();
+        drop(profile);
+        assert!(
+            ProfileStorage::open_relay(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &identity.public(),
+                &path,
+                "pw",
+                123
+            )
+            .is_err(),
+            "published runtime authority must never be silently recreated"
+        );
+    }
+    #[test]
+    fn published_reopen_rejects_missing_or_unready_runtime_row() {
+        for sql in [
+            "DELETE FROM relay_runtime",
+            "UPDATE relay_runtime SET ready=0",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let identity = DeviceIdentity::generate();
+            let path = root.path().join("relay.log");
+            let profile = ProfileStorage::open_relay(
+                ProfileStorageLease::acquire(root.path()).unwrap(),
+                &identity.public(),
+                &path,
+                "pw",
+                123,
+            )
+            .unwrap();
+            profile
+                .database()
+                .transaction(|c| {
+                    c.execute_batch(sql)?;
+                    Ok(())
+                })
+                .unwrap();
+            drop(profile);
+            assert!(
+                ProfileStorage::open_relay(
+                    ProfileStorageLease::acquire(root.path()).unwrap(),
+                    &identity.public(),
+                    &path,
+                    "pw",
+                    123
+                )
+                .is_err(),
+                "{sql}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod role_tests;
+
+pub(crate) mod role;

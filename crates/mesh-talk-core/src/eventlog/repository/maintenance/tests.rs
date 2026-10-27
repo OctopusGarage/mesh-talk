@@ -54,6 +54,9 @@ fn profile_snapshot_preserves_newest_two_and_referenced_parents() {
         assert!(repo.has(&id).unwrap())
     }
     assert_eq!(repo.count(&parent.conversation_id).unwrap(), 3);
+    let charge = repo.database.read(|c| repo.domain_charge_on(c)).unwrap();
+    assert_eq!(charge.event_count, 3);
+    assert_eq!(charge.estimated_bytes, 3 * 384);
     assert_eq!(
         repo.body_decodes.load(std::sync::atomic::Ordering::Relaxed),
         0

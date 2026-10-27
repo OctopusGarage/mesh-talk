@@ -179,7 +179,7 @@ pub(crate) fn publish(repository: &EventRepository, c: &Connection) -> Result<()
             .map_err(|e| LogError::Serialization(e.to_string()))?;
         let _decoded = DecodedRecord::new();
         drop(body);
-        if repository.insert(c, &event)? != AppendOutcome::Appended {
+        if repository.append_on(c, &event)? != AppendOutcome::Appended {
             return Err(invalid("final event domain was not empty"));
         }
         rank = rank

@@ -35,6 +35,11 @@ impl EventRepository {
                 dropped: 0,
             });
         }
+        let remaining_count = subtract(
+            i64::try_from(self.domain_charge_on(c)?.event_count)
+                .map_err(|_| LogError::RepositoryCounterExhausted)?,
+            job.count,
+        )?;
         let new_source = advance(source)?;
         let domain = self.domain.0.as_slice();
         let job_id = token.job.as_slice();
@@ -133,8 +138,8 @@ impl EventRepository {
             return Err(corrupt("maintenance final count disagrees"));
         }
         c.execute(
-            "UPDATE event_domains SET source_revision=?2,estimated_bytes=?3 WHERE domain=?1",
-            params![domain, new_source, subtract(total, job.bytes)?],
+            "UPDATE event_domains SET source_revision=?2,estimated_bytes=?3,event_count=?4 WHERE domain=?1",
+            params![domain, new_source, subtract(total, job.bytes)?,remaining_count],
         )?;
         clear_profile_leaves(c, job_id)?;
         Ok(MaintenanceApply {

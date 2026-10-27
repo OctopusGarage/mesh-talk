@@ -110,6 +110,11 @@ impl EventRepository {
             return Ok(0);
         };
         let (source, estimate) = self.domain_maintenance_on(c)?;
+        let domain_count = subtract(
+            i64::try_from(self.domain_charge_on(c)?.event_count)
+                .map_err(|_| LogError::RepositoryCounterExhausted)?,
+            i64::try_from(metadata.count).map_err(|_| LogError::RepositoryCounterExhausted)?,
+        )?;
         let source = advance(source)?;
         let revision = advance(metadata.revision)?;
         let estimate = subtract(
@@ -171,8 +176,8 @@ impl EventRepository {
         }
         c.execute("UPDATE event_conversations SET revision=?3,event_count=0,stored_bytes=0,estimated_bytes=0,max_lamport=?4,v2_count=0,v3_count=0,v4_count=0,fingerprint_revision=NULL,fingerprint=NULL WHERE domain=?1 AND conversation=?2",params![domain,conversation,revision,0u64.to_be_bytes().as_slice()])?;
         c.execute(
-            "UPDATE event_domains SET source_revision=?2,estimated_bytes=?3 WHERE domain=?1",
-            params![domain, source, estimate],
+            "UPDATE event_domains SET source_revision=?2,estimated_bytes=?3,event_count=?4 WHERE domain=?1",
+            params![domain, source, estimate, domain_count],
         )?;
         c.execute(
             "DELETE FROM event_profile_requests WHERE domain=?1 AND conversation=?2",

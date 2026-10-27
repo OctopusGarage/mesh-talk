@@ -1334,3 +1334,31 @@ fn maintenance_drop_is_scoped_atomic_and_recreate_cannot_reuse_cursor() {
         0
     );
 }
+
+#[test]
+fn physical_domain_charge_tracks_append_duplicate_and_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([1; 16])).unwrap();
+    let e = event(
+        &DeviceIdentity::generate(),
+        1,
+        vec![],
+        1,
+        EventKind::Message,
+    );
+    repo.append(&e).unwrap();
+    repo.append(&e).unwrap();
+    let charge = || {
+        db.read(|c| {
+            Ok(c.query_row(
+                "SELECT event_count,estimated_bytes FROM event_domains WHERE domain=?1",
+                [[1u8; 16].as_slice()],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )?)
+        })
+    };
+    assert_eq!(charge().unwrap(), (1, 384));
+    repo.drop_conversation(&e.conversation_id).unwrap();
+    assert_eq!(charge().unwrap(), (0, 0));
+}

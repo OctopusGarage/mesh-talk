@@ -34,8 +34,30 @@ pub(super) fn read_metadata(row: &Row<'_>) -> Result<ConversationMetadata, LogEr
         channel_v4: v4 != 0,
     })
 }
+/// Physical retained-row charge. Logical hiding must preserve these counters
+/// until row reclamation; serialized storage bytes have a different meaning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DomainChargeMetadata {
+    pub event_count: u64,
+    pub estimated_bytes: u64,
+}
 impl EventRepository {
-    pub(super) fn metadata_on(
+    pub(crate) fn domain_charge_on(
+        &self,
+        c: &Connection,
+    ) -> Result<DomainChargeMetadata, LogError> {
+        let (count, bytes): (i64, i64) = c.query_row(
+            "SELECT event_count,estimated_bytes FROM event_domains WHERE domain=?1",
+            [self.domain.0.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(DomainChargeMetadata {
+            event_count: nonnegative(count)? as u64,
+            estimated_bytes: nonnegative(bytes)? as u64,
+        })
+    }
+
+    pub(crate) fn metadata_on(
         &self,
         c: &Connection,
         conv: &ConversationId,
@@ -178,7 +200,7 @@ impl EventRepository {
                         "channel batch spans conversations".into(),
                     ));
                 }
-                self.insert(tx, event)?;
+                self.append_on(tx, event)?;
             }
             Ok(())
         })

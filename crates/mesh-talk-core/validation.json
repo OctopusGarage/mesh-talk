@@ -791,6 +791,10 @@
           {
             "name": "Paged unfiltered sync uses finite commit-cutoff views with destructive-generation binding, skips peer-known IDs through a covering index before header or body reads, and preserves topological prefixes without changing canonical timeline ordering.",
             "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
+          },
+          {
+            "name": "Indexed event-domain physical count and estimated cost remain authoritative and change together through append, whole-conversation drop and profile-leaf removal; relay bookkeeping reuses those fixed-key scalars rather than duplicating charge counters.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
@@ -896,6 +900,10 @@
           {
             "name": "Failed membership cannot downgrade to pin-only federation and ordinary mailbox clients retain opaque-only admission",
             "reference": "docs/post-office-federation.md#automatic-membership-in-an-approved-network"
+          },
+          {
+            "name": "Internal indexed relay state validates opaque admission and signed duplicates, atomically commits event and first-arrival/touch changes on the shared connection, and emits watch changes only after commit; retained physical rows alone do not qualify expiry-safe custody.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
@@ -989,6 +997,10 @@
           },
           {
             "name": "Shared profile repositories retain device-bound ownership and one encrypted connection; authenticated streaming relay publication preserves legacy sources before freeze, resolves ancestry on disk, publishes mandatory domains together and rejects barrier mismatches without replaying archives on normal reopen.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Relay role readiness and metadata charge validation publish with both mandatory source domains; published missing or unready authority fails closed, while warm profile open and additional role facades avoid historical body decoding and extra database connections.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

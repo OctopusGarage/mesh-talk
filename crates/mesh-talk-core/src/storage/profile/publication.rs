@@ -260,6 +260,9 @@ pub(super) fn complete(
     import::validate(profile.database())?;
     arrivals::validate(profile.database())?;
     if sources.iter().all(|s| s.phase == manifest::PUBLISHED) {
+        profile
+            .database()
+            .read(|c| arrivals::require_ready(c).map(|_| ()))?;
         validate_barriers(profile, &sources)?;
         cleanup(profile, &sources)?;
         return Ok(());
@@ -317,7 +320,7 @@ pub(super) fn complete(
     let repository = EventRepository::from_profile(profile.clone(), RELAY_EVENTS)?;
     profile.database().transaction(|tx| {
         import::publish(&repository,tx)?;
-        arrivals::publish(tx,now)?;
+        arrivals::publish(tx,&repository,now)?;
         tx.execute("UPDATE relay_sources SET phase=4,cleanup_pending=CASE WHEN archive IS NULL THEN 0 ELSE 1 END WHERE phase=3",[])?;
         let count:i64=tx.query_row("SELECT count(*) FROM relay_sources WHERE phase=4",[],|r|r.get(0))?;
         if count!=2 { return Err(invalid("mandatory source publication incomplete")); }

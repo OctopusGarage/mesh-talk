@@ -62,7 +62,7 @@ fn require_schema(tx: &Connection, initialize: bool) -> Result<(), LogError> {
     validate_objects(tx)?;
     // Prepare all shared selectors before admitting a new domain. Missing/changed
     // columns are storage errors, never successful absence.
-    tx.prepare("SELECT domain,next_commit FROM event_domains LIMIT 0")?;
+    tx.prepare("SELECT domain,next_commit,event_count,estimated_bytes FROM event_domains LIMIT 0")?;
     tx.prepare("SELECT domain,conversation,destructive_epoch,revision,event_count,stored_bytes,max_lamport,v2_count,v3_count,v4_count,fingerprint_revision,fingerprint FROM event_conversations LIMIT 0")?;
     tx.prepare(&format!(
         "SELECT {HEADER_COLUMNS},body,commit_ordinal FROM retained_events LIMIT 0"
@@ -79,6 +79,7 @@ INSERT INTO event_repository_schema VALUES(1,1);
 CREATE TABLE event_domains(
  domain BLOB PRIMARY KEY CHECK(typeof(domain)='blob' AND length(domain)=16),
  next_commit INTEGER NOT NULL CHECK(typeof(next_commit)='integer' AND next_commit>=0),
+ event_count INTEGER NOT NULL DEFAULT 0 CHECK(typeof(event_count)='integer' AND event_count>=0),
  source_revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(source_revision)='integer' AND source_revision>=0),
  estimated_bytes INTEGER NOT NULL DEFAULT 0 CHECK(typeof(estimated_bytes)='integer' AND estimated_bytes>=0)
 ) WITHOUT ROWID;

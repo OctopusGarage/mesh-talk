@@ -1297,7 +1297,12 @@ Streaming encrypted staging repairs historical child-before-parent ordering
 without retaining the graph or bodies in memory. Interrupted imports restart
 their authenticated stream; the legacy parser does not provide seek recovery.
 Arrival import preserves last-record precedence and seeds only missing retained
-mailboxes with the upgrade time.
+mailboxes with the upgrade time. The same indexed metadata pass assigns distinct
+touch ticks and verifies summed event counts and costs against the event domain;
+it does not reread event IDs or bodies. Relay role readiness is published in the
+transaction that publishes both mandatory sources. Prepared imports can resume
+while unready; a published profile with missing or unready role authority fails
+closed rather than rebuilding that authority during ordinary open.
 
 Published opens inspect manifests and fixed barriers rather than rehashing or
 decrypting archived history. Replaced or missing barriers cannot trigger empty
@@ -1348,10 +1353,25 @@ roots or provide channel-state checkpoints; their owners must integrate those
 sources before runtime history/replay cutover.
 
 Indexed maintenance uses metadata rather than loading retained bodies. Domain
-and conversation counters track the legacy record-cost estimate separately from
-encoded byte lengths. A conversation drop removes its own rows transactionally;
+and conversation counters track physical event counts and the legacy record-cost
+estimate separately from encoded byte lengths. The event repository maintains
+these counters together during append, conversation drop and profile-leaf
+removal. Relay bookkeeping reuses these authoritative counters rather than
+maintaining another count or byte estimate. A conversation drop removes its own
+rows transactionally;
 an empty revision tombstone prevents an old cursor becoming valid when that
 conversation is recreated. Empty tombstones are excluded from discovery.
+
+The internal indexed relay state retains the existing shared profile connection
+and owns first-arrival time, touch ticks and role readiness. Validated event
+admission and arrival/touch changes commit in one transaction through the event
+repository's existing admission implementation. Signed duplicates do not add
+charge or advance touch; a valid trusted federation origin may lower their
+first-arrival time. Watch notifications follow successful commit only. Ordinary
+open and constructing additional role facades do not materialize mailbox history
+or open another database connection. An exact physically retained event read is
+not an expiry-safe custody qualification: expiry visibility, capacity policy and
+bounded reclamation must be integrated before this state serves the runtime.
 
 Profile maintenance records pending conversations on disk and examines candidates
 in bounded steps. Its snapshot keeps the newest two unreferenced Profile leaves

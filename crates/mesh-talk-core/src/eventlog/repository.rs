@@ -15,7 +15,7 @@ pub(crate) mod network;
 pub(crate) mod order;
 pub(crate) mod pages;
 mod schema;
-pub(crate) use metadata::ConversationMetadata;
+pub(crate) use metadata::{ConversationMetadata, DomainChargeMetadata};
 #[cfg(test)]
 mod tests;
 
@@ -126,10 +126,14 @@ impl EventRepository {
     }
 
     pub(crate) fn append(&self, event: &Event) -> Result<AppendOutcome, LogError> {
-        self.database.transaction(|tx| self.insert(tx, event))
+        self.database.transaction(|tx| self.append_on(tx, event))
     }
 
-    fn insert(&self, c: &Connection, event: &Event) -> Result<AppendOutcome, LogError> {
+    pub(crate) fn append_on(
+        &self,
+        c: &Connection,
+        event: &Event,
+    ) -> Result<AppendOutcome, LogError> {
         // Match the pure EventLog validation order, including invalid duplicates.
         if !event.is_canonical() {
             return Err(LogError::NonCanonical);
@@ -182,11 +186,12 @@ impl EventRepository {
             |r| r.get(0),
         )?;
         let next_commit = advance(commit)?;
-        let (source_revision, domain_estimate): (i64, i64) = c.query_row(
-            "SELECT source_revision,estimated_bytes FROM event_domains WHERE domain=?1",
+        let (source_revision, domain_estimate, domain_count): (i64, i64, i64) = c.query_row(
+            "SELECT source_revision,estimated_bytes,event_count FROM event_domains WHERE domain=?1",
             [domain],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
+        let domain_count = advance(domain_count)?;
         let source_revision = advance(source_revision)?;
         let estimate = estimated_cost(event.ciphertext.len(), event.parents.len())?;
         let domain_estimate = checked_total(domain_estimate, estimate)?;
@@ -233,8 +238,8 @@ impl EventRepository {
         c.execute("INSERT INTO event_author_max VALUES(?1,?2,?3,?4) ON CONFLICT(domain,conversation,author) DO UPDATE SET max_seq=max(max_seq,excluded.max_seq)",params![domain,conv,event.author.ed25519_pub().as_slice(),event.seq.to_be_bytes().as_slice()])?;
         c.execute("UPDATE event_conversations SET revision=?3,event_count=?4,stored_bytes=?5,max_lamport=?6,v2_count=?7,v3_count=?8,v4_count=?9,estimated_bytes=?10 WHERE domain=?1 AND conversation=?2",params![domain,conv,revision,count,stored,max.max(event.lamport).to_be_bytes().as_slice(),v2,v3,v4,estimated])?;
         c.execute(
-            "UPDATE event_domains SET next_commit=?2,source_revision=?3,estimated_bytes=?4 WHERE domain=?1",
-            params![domain, next_commit,source_revision,domain_estimate],
+            "UPDATE event_domains SET next_commit=?2,source_revision=?3,estimated_bytes=?4,event_count=?5 WHERE domain=?1",
+            params![domain, next_commit,source_revision,domain_estimate,domain_count],
         )?;
         self.order_appended(c, event, revision, count)?;
         Ok(AppendOutcome::Appended)
@@ -256,7 +261,7 @@ impl EventRepository {
     pub(crate) fn get(&self, id: &EventId) -> Result<Option<Event>, LogError> {
         self.database.read(|c| self.get_on(c, id))
     }
-    fn get_on(&self, c: &Connection, id: &EventId) -> Result<Option<Event>, LogError> {
+    pub(crate) fn get_on(&self, c: &Connection, id: &EventId) -> Result<Option<Event>, LogError> {
         // End both SQL result lifetimes before deserializing. During the BLOB
         // copy SQLite and Rust each own encoded bytes; during decode only Rust
         // owns them. This keeps the documented three-copy estimate meaningful.
