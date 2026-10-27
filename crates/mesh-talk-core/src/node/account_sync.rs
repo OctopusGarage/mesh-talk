@@ -2418,6 +2418,17 @@ impl Node {
         let mut history_owners: HashMap<tokio::task::Id, String> = HashMap::new();
         let mut documents = tokio::task::JoinSet::new();
         let mut document_owners: HashMap<tokio::task::Id, DocumentPeer> = HashMap::new();
+        // An aborted read replays its exact checkpoint after resource release.
+        let mut document_checkpoints: HashMap<
+            tokio::task::Id,
+            (
+                PeerRecord,
+                super::account_documents::sync::DocumentSyncCursor,
+            ),
+        > = HashMap::new();
+        let mut document_aborts: HashMap<tokio::task::Id, tokio::task::AbortHandle> =
+            HashMap::new();
+        let mut document_preemptions = HashSet::new();
         let mut document_cursors = HashMap::new();
         let mut document_queues: [VecDeque<(DocumentPeer, PeerRecord)>; DOCUMENT_WORKERS] =
             std::array::from_fn(|_| VecDeque::new());
@@ -2537,6 +2548,33 @@ impl Node {
                     attachment_owners.insert(task.id(), owner);
                 }
             }
+            let selected = self.pending_account_operation_sources();
+            let control_queue = &mut document_queues[DocumentLane::Control.index()];
+            control_queue
+                .make_contiguous()
+                .sort_by_key(|(key, _)| !selected.contains(&key.identity()));
+            let selected_waiting = control_queue.iter().any(|(key, _)| {
+                selected.contains(&key.identity())
+                    && document_cursors
+                        .get(key)
+                        .and_then(
+                            |state: &super::account_documents::sync::DocumentSyncCursor| {
+                                state.retry_at
+                            },
+                        )
+                        .is_none_or(|at| at <= std::time::Instant::now())
+            });
+            if selected_waiting {
+                for (task, key) in &document_owners {
+                    if key.lane == DocumentLane::Control
+                        && !selected.contains(&key.identity())
+                        && document_preemptions.insert(*task)
+                        && let Some(handle) = document_aborts.get(task)
+                    {
+                        handle.abort();
+                    }
+                }
+            }
             for lane in DocumentLane::ALL {
                 // Reserve one existing slot per document lane. A held archive
                 // or directory stream cannot occupy the control/optional slot.
@@ -2562,6 +2600,14 @@ impl Node {
                 if !document_active.insert(key.clone()) {
                     continue;
                 }
+                debug_assert!(document_active.len() <= DOCUMENT_WORKERS);
+                debug_assert_eq!(
+                    document_active
+                        .iter()
+                        .filter(|active| active.lane == lane)
+                        .count(),
+                    1
+                );
                 let mut state = document_cursors
                     .remove(&key)
                     .unwrap_or_else(|| lane.cursor());
@@ -2570,10 +2616,13 @@ impl Node {
                     return;
                 };
                 let owner = key.clone();
+                let checkpoint = (peer.clone(), state.clone());
                 let task = documents.spawn(permit.track(async move {
                     let _ = node.pull_account_documents_page(&peer, &mut state).await;
                     (key, peer, state)
                 }));
+                document_checkpoints.insert(task.id(), checkpoint);
+                document_aborts.insert(task.id(), task.clone());
                 document_owners.insert(task.id(), owner);
             }
             while let Some(group) = fanout.start_next() {
@@ -2752,6 +2801,15 @@ impl Node {
                         && let Some(key) = document_owners.remove(&error.id()) {
                             let id = key.device_id.clone();
                             document_active.remove(&key);
+                            document_aborts.remove(&error.id());
+                            if document_preemptions.remove(&error.id()) {
+                                if let Some((peer, state)) = document_checkpoints.remove(&error.id())
+                                    && self.certified_sibling(&peer.public) {
+                                    document_cursors.insert(key.clone(), state);
+                                    document_queues[key.lane.index()].push_back((key, peer));
+                                }
+                            } else {
+                            document_checkpoints.remove(&error.id());
                             document_refresh.remove(&key);
                             document_cursors.remove(&key);
                             if self.certified_sibling(&key.public()) {
@@ -2765,8 +2823,12 @@ impl Node {
                             status.document_requires_upgrade = upgrade;
                             self.set_account_sync_status(id, status);
                             } else { document_statuses.remove(&key); }
+                            }
                     }
                     if let Some(Ok((task, (key, peer, mut state)))) = result {
+                        document_checkpoints.remove(&task);
+                        document_aborts.remove(&task);
+                        document_preemptions.remove(&task);
                         let id = key.device_id.clone();
                         document_owners.remove(&task);
                         document_active.remove(&key);
@@ -2972,6 +3034,9 @@ impl Node {
                 active_attachments.clear();
                 history_owners.clear();
                 document_owners.clear();
+                document_checkpoints.clear();
+                document_aborts.clear();
+                document_preemptions.clear();
                 document_active.clear();
                 document_refresh.clear();
                 for queue in &mut document_queues {

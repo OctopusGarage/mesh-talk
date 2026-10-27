@@ -1759,7 +1759,10 @@
         "frontend/src/store/contactPolicy.ts",
         "frontend/src/store/contactPolicy.test.ts",
         "frontend/src/store/accountGroupOperations.ts",
-        "frontend/src/store/accountGroupOperations.test.ts"
+        "frontend/src/store/accountGroupOperations.test.ts",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/MembersDialog.test.ts",
+        "frontend/e2e/dissolve-channel.spec.ts"
       ],
       "frontend": [
         "src/features/chat/DeleteContactDialog.test.ts",
@@ -1770,7 +1773,8 @@
         "src/store/channelRefresh.test.ts",
         "src/features/chat/HiddenContactsDialog.test.ts",
         "src/store/contactPolicy.test.ts",
-        "src/store/accountGroupOperations.test.ts"
+        "src/store/accountGroupOperations.test.ts",
+        "src/features/chat/MembersDialog.test.ts"
       ],
       "capability": {
         "summary": "Remove personal chats and optional history across linked devices without changing other accounts’ membership or copies.",
@@ -2374,11 +2378,14 @@
         "frontend/src/features/chat/HiddenContactsDialog.tsx",
         "frontend/src/store/channelActions.ts",
         "frontend/e2e/delete-contacts.spec.ts",
-        "frontend/e2e/channel-lifecycle.spec.ts"
+        "frontend/e2e/channel-lifecycle.spec.ts",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/e2e/dissolve-channel.spec.ts"
       ],
       "browser": [
         "e2e/delete-contacts.spec.ts",
-        "e2e/channel-lifecycle.spec.ts"
+        "e2e/channel-lifecycle.spec.ts",
+        "e2e/dissolve-channel.spec.ts"
       ]
     },
     {

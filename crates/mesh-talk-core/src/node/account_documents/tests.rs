@@ -331,22 +331,40 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             &lost.user_id(),
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        a.roster.lock().unwrap().update(
-            &Announce::new_with_account(&lost.identity, &other, "Bob", port),
-            IpAddr::from([127, 0, 0, 1]),
-            &a.user_id(),
-        );
+        let mut bob_peer = a.routing_peer(&bob.user_id()).unwrap();
+        bob_peer.addr = listener.local_addr().unwrap();
+        bob_peer.routes.clear();
+        // This exact endpoint is only an authenticated loss probe. Publishing
+        // it as Bob's delivery route lets ordinary background retries repair
+        // the lost copy and legitimately supersede the negative evidence.
+        a.roster.lock().unwrap().forget(&bob.identity.public());
+        sibling
+            .roster
+            .lock()
+            .unwrap()
+            .forget(&bob.identity.public());
         let lost_server = tokio::spawn(lost.clone().run_accept_loop(listener));
-        let bob_peer = a.routing_peer(&bob.user_id()).unwrap();
         a.recheck_channel_custody_peer(channel, event, &bob_peer)
             .await;
         assert_eq!(a.channel_custody_count(channel, event), Some(0));
+        let negative_version = a.account_document_meta(&held.key).unwrap().version();
         let mut cursor = custody_cursor();
         sibling
             .pull_account_documents_page(&source_peer, &mut cursor)
             .await
             .unwrap();
+        assert_eq!(
+            a.channel_custody_count(channel, event),
+            Some(0),
+            "source reacquired a durable external copy during the negative snapshot check"
+        );
+        assert_eq!(
+            sibling
+                .account_document_meta(&held.key)
+                .map(|meta| meta.version()),
+            Some(negative_version),
+            "the explicit custody exchange must import the exact signed negative version"
+        );
         assert_eq!(
             sibling.channel_custody_count(channel, event),
             Some(0),
@@ -389,6 +407,12 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             sibling.channel_custody_count(channel, event),
             Some(0),
             "the negative survives a fresh encrypted-store open"
+        );
+        // Only now expose the repaired holder as a normal delivery route.
+        a.roster.lock().unwrap().update(
+            &Announce::new_with_account(&lost.identity, &other, "Bob", bob_peer.addr.port()),
+            bob_peer.addr.ip(),
+            &a.user_id(),
         );
         a.retry_one_channel_custody(
             0,

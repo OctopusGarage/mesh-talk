@@ -91,7 +91,8 @@
             "node::delivery_store::group_self_control::tests::",
             "node::channel::tests::modern_account_departure_retains_only_the_original_sources_retry_route_on_replay",
             "node::channel::tests::modern_owner_or_unregistered_leave_never_creates_a_departure_route",
-            "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route"
+            "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route",
+            "selected_source_receipt_overtakes_another_siblings_held_control_over_noise"
           ]
         }
       ],
@@ -154,6 +155,10 @@
           {
             "name": "Direct or eligible-relay local admission backpressure retains the same committed fanout revision for bounded delayed retry; successful revisions deduplicate and overflow remains owned by the source journal.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "A pending account action can preempt only an unrelated Control read, restore its exact checkpoint after owned cancellation and resume it after completion without increasing the four-worker budget or cancelling accepted mutations.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
       },
@@ -349,7 +354,7 @@
             "node::account_documents::",
             "node::account_sync::selection_tests::foreign_public_profile_documents_cross_certified_loopback_with_profile_consent",
             "node::account_sync::personal_replay_tests::",
-            "node::lifecycle::personal_scope_tests::"
+            "late_group_clear_preserves_only_fresh_lifetime_ancestry"
           ]
         }
       ],

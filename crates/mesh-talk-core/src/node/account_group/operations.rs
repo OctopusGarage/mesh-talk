@@ -763,6 +763,30 @@ impl Node {
         ))
     }
 
+    /// Only locally requested, nonterminal operations prioritize a remote
+    /// executor. Full transport identity prevents a replacement device from
+    /// inheriting another executor's scheduling authority.
+    pub(in crate::node) fn pending_account_operation_sources(
+        &self,
+    ) -> std::collections::HashSet<([u8; 32], [u8; 32])> {
+        let own = self.identity.public();
+        self.group_operations
+            .lock()
+            .expect("group operation journal mutex")
+            .entries
+            .values()
+            .filter(|entry| {
+                !entry.terminal()
+                    && entry.reference.origin.public() == own
+                    && entry.reference.executor.device != own
+            })
+            .map(|entry| {
+                let public = &entry.reference.executor.device;
+                (public.ed25519_pub, public.x25519_pub)
+            })
+            .collect()
+    }
+
     pub fn account_group_operation_status(
         &self,
         expected_account: &str,

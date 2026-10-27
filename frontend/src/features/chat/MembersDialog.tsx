@@ -857,16 +857,28 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               ) : dissolved ||
                 accountAccess?.role === "left" ||
                 (!accountAccess && channel?.left) ? (
-                <Button
-                  variant="ghost"
-                  className="text-destructive hover:text-destructive"
-                  onClick={() => {
-                    if (active?.kind === "channel")
-                      setDeleteChatTarget({ id: active.id, name: active.name });
-                  }}
-                >
-                  {t("conversationDeletion.delete")}
-                </Button>
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      dissolved
+                        ? "conversation.dissolvedChannelHint"
+                        : "conversation.leftChannelHint",
+                    )}
+                  </p>
+                  <Button
+                    variant="ghost"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => {
+                      if (active?.kind === "channel")
+                        setDeleteChatTarget({
+                          id: active.id,
+                          name: active.name,
+                        });
+                    }}
+                  >
+                    {t("conversationDeletion.delete")}
+                  </Button>
+                </div>
               ) : isOwner ? (
                 <p className="text-xs text-muted-foreground">
                   {t("members.transferBeforeLeave")}

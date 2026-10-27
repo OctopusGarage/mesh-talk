@@ -626,11 +626,13 @@ it("loads live replica state, toggles the local replica, and preserves it on a f
   }
 });
 
-it("does not offer dissolution after the channel is closed", () => {
+it("explains read-only dissolution and offers personal chat deletion", () => {
   const html = renderToStaticMarkup(
     createElement(MembersDialog, { dissolved: true }),
   );
   expect(html).not.toContain('data-testid="dissolve-channel-trigger"');
+  expect(html).toContain("The owner dissolved this channel.");
+  expect(html).toContain("Delete chat");
 });
 
 it("requires confirmation and closes the dialog after successful dissolution", async () => {

@@ -1705,3 +1705,6 @@ mod result_lifecycle;
 
 #[path = "tests/legacy_leave_reference.rs"]
 mod legacy_leave_reference;
+
+#[path = "tests/selected_source_control_latency.rs"]
+mod selected_source_control_latency;

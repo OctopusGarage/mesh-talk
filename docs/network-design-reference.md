@@ -1308,6 +1308,15 @@ directory work retains a bounded opportunity to progress. Both lanes use the
 same authenticated session pool and eight-slot TCP budget. Aggregate status
 retains either lane's error/upgrade and reports up to date only after both settle.
 
+Within the Control slot, locally pending account operations prioritize their
+selected executors by full device identity. An unrelated sibling's metadata read
+may be cancelled and requeued from its exact cursor checkpoint. The replacement
+starts only after owned cancellation completes and releases admission; cancellation
+neither retires protocol support nor reports a network failure. An active selected
+executor is not restarted by repeated status polling. Terminal operations retire
+that priority, allowing unrelated sibling metadata to resume. Accepted mutations
+are never cancelled by this scheduling rule, and worker/TCP limits do not increase.
+
 The other two synchronization slots reserve one worker for optional private
 documents and one for history/favorites. Authorized custody and preference
 documents therefore do not wait for history/favorite responses. Each keeps its

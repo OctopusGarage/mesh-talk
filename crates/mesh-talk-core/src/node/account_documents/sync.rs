@@ -73,6 +73,7 @@ impl DocumentSyncScope {
         }
     }
 }
+#[derive(Clone)]
 pub(in crate::node) struct DocumentSyncCursor {
     scope: DocumentSyncScope,
     pub(super) domain: usize,

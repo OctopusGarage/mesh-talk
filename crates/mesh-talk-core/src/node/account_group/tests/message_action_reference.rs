@@ -66,7 +66,7 @@ pub(super) async fn pull_reference_action_control(
     let peer = target.routing_peer(&source.user_id()).unwrap();
     assert_eq!(peer.public, source.identity.public());
     assert!(target.certified_sibling(&peer.public));
-    let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::default();
+    let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::control();
     let mut interruptions = 0;
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
