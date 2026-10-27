@@ -1455,14 +1455,19 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
                 .unwrap();
             if let Some(status) = status
                 && status.phase == AccountGroupOperationPhase::Committed
-                && reference.channel_shared_reference(group).is_some_and(|view|
-                    view.name == "After account rename" && !view.directory_reconciling)
-                && external
-                    .channels
-                    .lock()
-                    .unwrap()
-                    .state(&group)
-                    .is_some_and(|state| state.name() == "After account rename")
+                && status.committed_events.len() == 1
+                && owner.account_group_operation_status(&account.account_id(), id).unwrap()
+                    .is_some_and(|source| source.phase == AccountGroupOperationPhase::Committed
+                        && source.committed_events == status.committed_events)
+                && reference.account_group_operation_inputs().into_iter().any(|(_, _, frame)| {
+                    frame.group == group && frame.proof.public() == owner.identity.public()
+                        && frame.projection.results.iter().any(|result| result.reference.id == id
+                            && result.reference.group == group
+                            && result.reference.origin.public() == reference.identity.public()
+                            && result.reference.executor.device == owner.identity.public()
+                            && result.status.phase == AccountGroupOperationPhase::Committed
+                            && result.status.committed_events == status.committed_events)
+                })
             {
                 break status;
             }
@@ -1482,6 +1487,43 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
             reference.group_operation_versions.lock().unwrap().contains_key(&owner.user_id()),
             owner.group_operation_versions.lock().unwrap().contains_key(&reference.user_id()));
     });
+    // Durable private commitment does not certify public fanout or directory
+    // arrival. Observe those through their existing authenticated owners after
+    // the original eight-second private request/result barrier has completed.
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        let peer = external.routing_peer(&owner.user_id()).unwrap();
+        assert_eq!(peer.public, owner.identity.public());
+        let mut connection = external
+            .privacy_sync_dial(peer.addr, &peer.public)
+            .await
+            .expect("the real external member must authenticate the original owner");
+        let store = external.pull_sync_store(connection.peer_identity());
+        crate::node::session::request_round(&mut connection, &store, group)
+            .await
+            .expect("authorized public sync must retain the original owner rename");
+        drop(store);
+        external.recycle_sync_channel(connection);
+        external.emit_new_messages(group);
+        loop {
+            if reference
+                .channel_shared_reference(group)
+                .is_some_and(|view| {
+                    view.name == "After account rename" && !view.directory_reconciling
+                })
+                && external
+                    .channels
+                    .lock()
+                    .unwrap()
+                    .state(&group)
+                    .is_some_and(|state| state.name() == "After account rename")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("public rename receipt and private directory observation must converge independently");
     let events: Vec<_> = external
         .log
         .lock()

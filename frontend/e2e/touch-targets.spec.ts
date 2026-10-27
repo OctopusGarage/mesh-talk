@@ -115,10 +115,17 @@ test("form inputs and selects keep 44px touch targets", async ({ page }) => {
   await expect(name).toHaveValue("Touch test");
   await channel.getByRole("button", { name: "Cancel" }).click();
 
+  // Finish the modal's exit and deferred trigger focus restoration before
+  // opening a popover that would otherwise be dismissed by that old focus.
+  await expect(channel).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "New channel", exact: true }),
+  ).toBeFocused();
+  const overflow = page.getByTestId("sidebar-overflow");
+  await overflow.click();
+  await expect(overflow).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByTestId("sidebar-overflow-menu")).toBeVisible();
   const linkAction = page.getByTestId("sidebar-action-link");
-  if (!(await linkAction.isVisible())) {
-    await page.getByTestId("sidebar-overflow").click();
-  }
   await linkAction.click();
   const link = page.getByTestId("link-device-dialog");
   for (const control of [

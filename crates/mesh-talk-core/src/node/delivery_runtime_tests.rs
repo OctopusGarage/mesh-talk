@@ -1538,6 +1538,30 @@ async fn private_file_restart(delay: FilePeerDelay) {
     private_file_restart_batch(delay, 1).await;
 }
 
+// Grant the original Manual permissions in order while their best-effort
+// presence publications have real inbound handshakes to finish. No application
+// traffic exists yet, and these borrowed futures cannot outlive this setup.
+async fn grant_file_restart_permissions(a: &Node, b: &Node, al: &TcpListener, bl: &TcpListener) {
+    async fn receive_presence(node: &Node, listener: &TcpListener) {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            // The first publication can legitimately be denied before the
+            // reverse Manual grant. Reject/drop it without serving sync frames.
+            let _ = node.privacy_accept(stream).await;
+        }
+    }
+    tokio::select! {
+        _ = async {
+            a.set_allowed(&b.account_id(), true).await.unwrap();
+            b.set_allowed(&a.account_id(), true).await.unwrap();
+        } => {}
+        _ = receive_presence(a, al) => unreachable!("presence setup accept loop does not return"),
+        _ = receive_presence(b, bl) => unreachable!("presence setup accept loop does not return"),
+    }
+    // select! has dropped both scoped accept/handshake futures and their
+    // channels before file creation or the separately driven card ACK rounds.
+}
+
 async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     let mut case = super::delivery_runtime::TestTiming::new("file-restart-case-setup");
     use crate::eventlog::sync::SyncStore;
@@ -1565,8 +1589,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         .unwrap();
         node.set_invisible(true).await.unwrap();
     }
-    a.set_allowed(&b.account_id(), true).await.unwrap();
-    b.set_allowed(&a.account_id(), true).await.unwrap();
+    grant_file_restart_permissions(&a, &b, &al, &bl).await;
     let bytes = vec![9; crate::file::CHUNK_SIZE * 2 + 1];
     let path = ad.path().join("断点续传.bin");
     std::fs::write(&path, &bytes).unwrap();

@@ -420,20 +420,60 @@ impl AccountDocumentStore {
         include_legacy: bool,
         include_personal: bool,
     ) -> Vec<AccountDocumentMeta> {
-        self.current
-            .values()
-            .filter(|meta| {
-                scope_contains(
-                    &meta.key,
-                    domain,
-                    include_operations,
-                    include_legacy,
-                    include_personal,
-                ) && after.is_none_or(|after| &meta.key > after)
-            })
-            .take(limit.min(64))
-            .cloned()
-            .collect()
+        self.exchange_rows(
+            domain,
+            after,
+            include_operations,
+            include_legacy,
+            include_personal,
+        )
+        .take(limit.min(64))
+        .cloned()
+        .collect()
+    }
+
+    fn exchange_rows<'a>(
+        &'a self,
+        domain: AccountDocumentDomain,
+        after: Option<&'a AccountDocumentKey>,
+        include_operations: bool,
+        include_legacy: bool,
+        include_personal: bool,
+    ) -> impl Iterator<Item = &'a AccountDocumentMeta> {
+        self.current.values().filter(move |meta| {
+            scope_contains(
+                &meta.key,
+                domain,
+                include_operations,
+                include_legacy,
+                include_personal,
+            ) && after.is_none_or(|after| &meta.key > after)
+        })
+    }
+
+    /// A matching access-only digest makes these role rows redundant, not
+    /// unauthorized. Filter them before page limits while preserving key order.
+    pub(super) fn list_operation_patch(
+        &self,
+        after: Option<&AccountDocumentKey>,
+        limit: usize,
+        include_legacy: bool,
+        include_personal: bool,
+        known_roles: [u8; 32],
+    ) -> Vec<AccountDocumentMeta> {
+        let roles_known = known_roles != [0; 32]
+            && known_roles == self.digest_scope(AccountDocumentDomain::GroupControl, false);
+        self.exchange_rows(
+            AccountDocumentDomain::GroupControl,
+            after,
+            true,
+            include_legacy,
+            include_personal,
+        )
+        .filter(|meta| !roles_known || !matches!(meta.key, AccountDocumentKey::GroupControl { .. }))
+        .take(limit.min(64))
+        .cloned()
+        .collect()
     }
     pub(super) fn digest(&self, domain: AccountDocumentDomain) -> [u8; 32] {
         if self.incomplete.iter().any(|key| key.domain() == domain) {

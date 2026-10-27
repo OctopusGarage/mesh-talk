@@ -1308,6 +1308,16 @@ directory work retains a bounded opportunity to progress. Both lanes use the
 same authenticated session pool and eight-slot TCP budget. Aggregate status
 retains either lane's error/upgrade and reports up to date only after both settle.
 
+A negotiated operation exchange may omit role rows only when the request's
+nonzero role-only digest exactly matches the source's current role-only digest.
+The source filters those equivalent rows before applying page row/byte limits;
+operation, legacy-operation and personal-control rows retain their existing
+lexical key order, exclusive continuation and full-scope completion digest.
+Legacy, absent and mismatched role digests keep the complete role scope. The
+receiver settles only when its full local digest matches that completion digest;
+a role change behind a continuation therefore requires a fresh scope rather than
+claiming convergence or skipping unknown authority.
+
 Within the Control slot, locally pending account operations prioritize their
 selected executors by full device identity. An unrelated sibling's metadata read
 may be cancelled and requeued from its exact cursor checkpoint. The replacement

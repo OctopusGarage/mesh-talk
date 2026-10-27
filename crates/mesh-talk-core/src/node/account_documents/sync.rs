@@ -429,6 +429,7 @@ impl Node {
         let personal_cut = self.capture_personal_history_cut(&self.identity.public());
         let enabled = document_enabled(request.domain, policy);
         let domain = request.domain;
+        let known_roles = request.known_digest;
         let operation = request
             .operation
             .filter(|probe| domain == AccountDocumentDomain::GroupControl && probe.supported());
@@ -465,6 +466,14 @@ impl Node {
                 };
                 let rows = if !enabled || (after.is_none() && known != [0; 32] && known == digest) {
                     Vec::new()
+                } else if include_operations {
+                    store.list_operation_patch(
+                        after.as_ref(),
+                        64,
+                        include_legacy,
+                        include_personal,
+                        known_roles,
+                    )
                 } else {
                     store.list_exchange_scope(
                         domain,
@@ -496,18 +505,27 @@ impl Node {
             && let Some(last) = selected.last()
         {
             let key = last.key.clone();
-            let more = self
-                .account_documents
-                .lock()
-                .expect("documents mutex")
-                .list_exchange_scope(
-                    domain,
-                    Some(&key),
-                    1,
-                    include_operations,
-                    include_legacy,
-                    include_personal,
-                );
+            let more = {
+                let store = self.account_documents.lock().expect("documents mutex");
+                if include_operations {
+                    store.list_operation_patch(
+                        Some(&key),
+                        1,
+                        include_legacy,
+                        include_personal,
+                        known_roles,
+                    )
+                } else {
+                    store.list_exchange_scope(
+                        domain,
+                        Some(&key),
+                        1,
+                        include_operations,
+                        include_legacy,
+                        include_personal,
+                    )
+                }
+            };
             if !more.is_empty() {
                 next = Some(key);
             }
@@ -2518,6 +2536,411 @@ mod group_control_tests {
         assert!(fixture.target.account_document(&second).unwrap().is_none());
         fixture.servers.shutdown().await;
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn known_role_digest_does_not_block_a_new_terminal_result_behind_repeated_role_headers() {
+        use crate::node::{AccountGroupOperationPhase, AccountGroupTextInput, SyncCategory};
+        let mut fixture = UpgradeFixture::new().await;
+        for node in [&fixture.source, &fixture.target] {
+            node.set_device_sync_category(SyncCategory::History, false)
+                .unwrap();
+        }
+        let group = fixture
+            .source
+            .create_channel("known role result", vec![])
+            .await
+            .unwrap();
+        fixture
+            .source
+            .maintain_account_channels(
+                &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
+            )
+            .await;
+        fixture.source.publish_account_group_access_for(group);
+        fixture.source.publish_account_group_operations_for(group);
+        let mut cursor = DocumentSyncCursor::control();
+        for _ in 0..16 {
+            fixture
+                .target
+                .pull_account_documents_page(&fixture.peer, &mut cursor)
+                .await
+                .unwrap();
+            if !cursor.pending {
+                break;
+            }
+        }
+        assert!(!cursor.pending && cursor.after.is_none());
+        let roles = fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .digest_scope(AccountDocumentDomain::GroupControl, false);
+        assert_ne!(roles, [0; 32]);
+        assert_eq!(
+            cursor.digests[AccountDocumentDomain::GroupControl as usize],
+            roles
+        );
+        let account = fixture.source.account_id();
+        let id = fixture
+            .source
+            .new_account_group_operation_id(&account)
+            .unwrap();
+        fixture
+            .source
+            .submit_account_group_text_if(
+                &account,
+                id,
+                group,
+                AccountGroupTextInput {
+                    text: b"new terminal copy".to_vec(),
+                    reply_to: None,
+                    expires_at_ms: None,
+                    protection: None,
+                },
+                |commit| commit(),
+            )
+            .unwrap();
+        fixture.source.maintain_account_group_operation_effects();
+        let status = fixture
+            .source
+            .account_group_operation_status(&account, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
+        assert_eq!(status.committed_events.len(), 1);
+        fixture.source.publish_account_group_operations_for(group);
+        assert_eq!(
+            fixture
+                .source
+                .account_documents
+                .lock()
+                .unwrap()
+                .digest_scope(AccountDocumentDomain::GroupControl, false),
+            roles,
+            "a real message result must not invent a different role observation"
+        );
+        let key = AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: fixture.source.user_id(),
+        };
+        let expected = fixture.source.account_document_meta(&key).unwrap();
+        assert_ne!(
+            fixture.target.account_document_meta(&key).as_ref(),
+            Some(&expected)
+        );
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let repeated_roles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let exact = fixture.target.identity.public();
+        *fixture.source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let release = release.clone();
+            let repeated_roles = repeated_roles.clone();
+            move |peer, frame| {
+                let release = release.clone();
+                let repeated_roles = repeated_roles.clone();
+                let exact = exact.clone();
+                Box::pin(async move {
+                    if peer != exact {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentHeader { body } = frame else {
+                        return;
+                    };
+                    let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                    if matches!(meta.key, AccountDocumentKey::GroupControl { .. }) {
+                        repeated_roles.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let _ = release.acquire().await;
+                    }
+                })
+            }
+        }));
+        assert!(cursor.begin_refresh());
+        let target = fixture.target.clone();
+        let peer = fixture.peer.clone();
+        let mut pulling =
+            tokio::spawn(
+                async move { target.pull_account_documents_page(&peer, &mut cursor).await },
+            );
+        let before_release = tokio::time::timeout(Duration::from_secs(3), &mut pulling).await;
+        let received = fixture.target.account_document_meta(&key);
+        release.close();
+        match before_release {
+            Ok(result) => result
+                .unwrap()
+                .expect("the authenticated result page must remain valid"),
+            Err(_) => tokio::time::timeout(Duration::from_secs(5), pulling)
+                .await
+                .unwrap()
+                .unwrap()
+                .expect("the released baseline page must still complete correctly"),
+        }
+        *fixture.source.account_session_test_hook.lock().unwrap() = None;
+        fixture.servers.shutdown().await;
+        assert!(
+            received.as_ref() == Some(&expected),
+            "already known role rows must not delay a new authenticated terminal result"
+        );
+        assert_eq!(repeated_roles.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages() {
+        use crate::eventlog::ConversationId;
+        use crate::node::account_group::operations::legacy_wire::{
+            LegacyOperationFrame, LegacyOperationProjection,
+        };
+        let mut fixture = UpgradeFixture::new().await;
+        let group = fixture
+            .source
+            .create_channel("known page prefix", vec![])
+            .await
+            .unwrap();
+        fixture
+            .source
+            .maintain_account_channels(
+                &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
+            )
+            .await;
+        fixture.source.publish_account_group_access_for(group);
+        let mut cursor = DocumentSyncCursor::control();
+        for _ in 0..16 {
+            fixture
+                .target
+                .pull_account_documents_page(&fixture.peer, &mut cursor)
+                .await
+                .unwrap();
+            if !cursor.pending {
+                break;
+            }
+        }
+        assert!(!cursor.pending);
+        let roles = cursor.digests[AccountDocumentDomain::GroupControl as usize];
+        let mut operation_keys = Vec::new();
+        for value in 1..=65 {
+            operation_keys.push(install_operation_head_at(
+                &fixture,
+                ConversationId::new([value; 32]),
+            ));
+        }
+        let legacy_group = ConversationId::new([90; 32]);
+        let legacy_key = AccountDocumentKey::GroupLegacyOperation {
+            channel: hex::encode(legacy_group.as_bytes()),
+            source_device: fixture.source.user_id(),
+        };
+        let legacy = LegacyOperationFrame::new(
+            &fixture.source,
+            legacy_group,
+            1,
+            LegacyOperationProjection::default(),
+        )
+        .encode();
+        let legacy_meta = AccountDocumentMeta::new(
+            &fixture.source.account,
+            fixture.source.user_id(),
+            legacy_key.clone(),
+            1,
+            &legacy,
+            false,
+        );
+        fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(legacy_meta, &legacy)
+            .unwrap();
+        fixture
+            .source
+            .delete_account_contact_if(
+                &fixture.source.account_id(),
+                &Account::generate().account_id(),
+                false,
+                |commit| commit(),
+            )
+            .unwrap();
+        {
+            let store = fixture.source.account_documents.lock().unwrap();
+            let full = store.list_exchange_scope(
+                AccountDocumentDomain::GroupControl,
+                None,
+                64,
+                true,
+                true,
+                true,
+            );
+            assert!(matches!(
+                full[0].key,
+                AccountDocumentKey::GroupControl { .. }
+            ));
+            assert_eq!(
+                store.list_operation_patch(None, 64, true, true, [0; 32]),
+                full,
+                "an absent digest cannot suppress role observations"
+            );
+            assert_eq!(
+                store.list_operation_patch(None, 64, true, true, [99; 32]),
+                full,
+                "a mismatched digest cannot suppress unknown role observations"
+            );
+            let patch = store.list_operation_patch(None, 64, true, true, roles);
+            assert_eq!(
+                patch.len(),
+                64,
+                "known rows must be filtered before the row ceiling"
+            );
+            assert!(
+                patch
+                    .iter()
+                    .all(|meta| !matches!(meta.key, AccountDocumentKey::GroupControl { .. }))
+            );
+            assert!(patch.windows(2).all(|rows| rows[0].key < rows[1].key));
+        }
+        assert!(cursor.begin_refresh());
+        fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert!(
+            cursor.after.is_some(),
+            "the real 64-row page must retain its continuation"
+        );
+        let copied = operation_keys
+            .iter()
+            .filter(|key| fixture.target.account_document_meta(key).is_some())
+            .count();
+        assert_eq!(
+            copied, 64,
+            "a redundant role prefix cannot consume an operation slot"
+        );
+        let added = fixture
+            .source
+            .create_channel("unknown between pages", vec![])
+            .await
+            .unwrap();
+        fixture
+            .source
+            .maintain_account_channels(
+                &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
+            )
+            .await;
+        fixture.source.publish_account_group_access_for(added);
+        let added_key = AccountDocumentKey::GroupControl {
+            channel: hex::encode(added.as_bytes()),
+            source_device: fixture.source.user_id(),
+        };
+        let added_meta = fixture.source.account_document_meta(&added_key).unwrap();
+        fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert!(cursor.after.is_none());
+        assert!(
+            !cursor.up_to_date,
+            "a changed complete scope cannot falsely settle the old roles"
+        );
+        assert!(
+            fixture.target.account_document_meta(&added_key).is_none(),
+            "a lower role key is repaired by a fresh scope, never hidden behind the operation continuation"
+        );
+        assert!(fixture.target.account_document_meta(&legacy_key).is_some());
+        assert!(
+            fixture
+                .target
+                .account_documents
+                .lock()
+                .unwrap()
+                .personal
+                .keys()
+                .any(|key| matches!(key, AccountDocumentKey::ConversationPersonal { .. }))
+        );
+        for _ in 0..16 {
+            fixture
+                .target
+                .pull_account_documents_page(&fixture.peer, &mut cursor)
+                .await
+                .unwrap();
+            if !cursor.pending {
+                break;
+            }
+        }
+        assert!(
+            !cursor.pending && cursor.up_to_date && cursor.after.is_none(),
+            "repair must finish without an empty continuation loop"
+        );
+        assert_eq!(
+            fixture.target.account_document_meta(&added_key).as_ref(),
+            Some(&added_meta)
+        );
+        assert!(
+            operation_keys
+                .iter()
+                .all(|key| fixture.target.account_document_meta(key).is_some())
+        );
+        fixture.servers.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn access_only_v5_keeps_its_role_scope_when_operation_rows_exist() {
+        let mut fixture = UpgradeFixture::new().await;
+        let group = fixture
+            .source
+            .create_channel("legacy known roles", vec![])
+            .await
+            .unwrap();
+        fixture.source.publish_account_group_access_for(group);
+        install_operation_head(&fixture);
+        let request = DocumentRequest {
+            version: 5,
+            account_id: fixture.target.account_id(),
+            domain: AccountDocumentDomain::GroupControl,
+            after: None,
+            known_digest: [0; 32],
+            operation: None,
+        };
+        let mut channel = fixture
+            .target
+            .begin_account_exchange(
+                &fixture.peer,
+                AccountSyncVersion::V2,
+                AccountHistoryFrame::DocumentsRequest {
+                    body: serde_json::to_vec(&request).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut roles = 0;
+        loop {
+            let bytes = channel.recv().await.unwrap();
+            match AccountHistoryFrame::decode_versioned(&bytes).unwrap().1 {
+                AccountHistoryFrame::DocumentHeader { body } => {
+                    let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                    assert!(matches!(meta.key, AccountDocumentKey::GroupControl { .. }));
+                    roles += 1;
+                }
+                AccountHistoryFrame::DocumentsComplete { body } => {
+                    let complete: DocumentComplete = serde_json::from_slice(&body).unwrap();
+                    assert!(complete.operation.is_none());
+                    assert_eq!(
+                        complete.digest,
+                        fixture
+                            .source
+                            .account_documents
+                            .lock()
+                            .unwrap()
+                            .digest_scope(AccountDocumentDomain::GroupControl, false)
+                    );
+                    break;
+                }
+                AccountHistoryFrame::DocumentChunk { .. } => {}
+                _ => panic!("the legacy role scope must retain its existing frame kinds"),
+            }
+        }
+        assert!(roles > 0);
+        channel.recycle(&fixture.target);
+        fixture.servers.shutdown().await;
+    }
+
     struct UpgradeFixture {
         _directory: tempfile::TempDir,
         source: Arc<Node>,
@@ -3114,11 +3537,13 @@ mod group_control_tests {
         fixture.servers.shutdown().await;
     }
     fn install_operation_head(fixture: &UpgradeFixture) -> AccountDocumentKey {
-        use crate::{
-            eventlog::ConversationId,
-            node::account_group::operations::wire::{OperationFrame, OperationProjection},
-        };
-        let group = ConversationId::new([71; 32]);
+        install_operation_head_at(fixture, crate::eventlog::ConversationId::new([71; 32]))
+    }
+    fn install_operation_head_at(
+        fixture: &UpgradeFixture,
+        group: crate::eventlog::ConversationId,
+    ) -> AccountDocumentKey {
+        use crate::node::account_group::operations::wire::{OperationFrame, OperationProjection};
         let key = AccountDocumentKey::GroupOperation {
             channel: hex::encode(group.as_bytes()),
             source_device: fixture.source.user_id(),

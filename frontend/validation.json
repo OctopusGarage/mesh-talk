@@ -691,7 +691,10 @@
     },
     {
       "id": "frontend-chat-shell",
-      "paths": ["frontend/src/features/chat/ChatApp.tsx"],
+      "paths": [
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/e2e/touch-targets.spec.ts"
+      ],
       "frontend": [
         "src/store/chat.test.ts",
         "src/store/presence.test.ts",
@@ -1966,8 +1969,15 @@
     },
     {
       "id": "frontend-chat-shell-acceptance",
-      "paths": ["frontend/src/features/chat/ChatApp.tsx"],
-      "browser": ["e2e/chat.spec.ts", "e2e/message-lifecycle.spec.ts"]
+      "paths": [
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/e2e/touch-targets.spec.ts"
+      ],
+      "browser": [
+        "e2e/chat.spec.ts",
+        "e2e/message-lifecycle.spec.ts",
+        "e2e/touch-targets.spec.ts"
+      ]
     },
     {
       "id": "frontend-window-controls-acceptance",
