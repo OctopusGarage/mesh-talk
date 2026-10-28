@@ -146,7 +146,11 @@ test("received media recovers when bytes become available with stable fileConv",
       .poll(() =>
         messageRow.evaluate((row) => row.getBoundingClientRect().height),
       )
-      .toBe(receivingHeight);
+      .toBeLessThan(receivingHeight);
+    // This 2px fixture must retain its original size after first decode.
+    const thumbnail = (await page.getByTestId("file-image").boundingBox())!;
+    expect(thumbnail.width).toBeLessThanOrEqual(2);
+    expect(thumbnail.height).toBeLessThanOrEqual(2);
     await page.getByRole("button", { name: "View full size" }).click();
     const lightbox = page.getByTestId("file-image-lightbox");
     await expect(lightbox).toBeVisible();

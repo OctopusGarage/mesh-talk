@@ -103,9 +103,14 @@ their distinct authorization contracts.
 ### Inline media presentation
 
 `ui/features/chat/MediaPreview.tsx` owns ordinary inline image/video presentation.
-Receiving, loading, decoded and unsupported states share a responsive frame
-(up to 320 pixels wide, 4:3 for images and 16:9 for video); artwork is contained
-without cropping, and the lightbox retains full-size access. Transfer readiness
+Receiving, loading and unsupported states use a responsive provisional frame
+(up to 320 pixels wide, 4:3 for images and 16:9 for video). On image decode,
+the frame adopts the original aspect ratio within 320 by 320 pixels without
+upscaling or cropping. Images have no padded text bubble; quoted thumbnails
+fit their original ratio within 64 by 48 pixels. The lightbox retains full-size
+access. Decoded image geometry is cached by live Blob URL (at most 64 entries)
+so virtualized remounts can reserve the known size; initial decode may resize
+a row, with reader anchors and live-edge intent owned by the viewport. Transfer readiness
 must not swap an ordinary preview from a compact file card to an image row.
 Attachment consent remains owned by `FileBubble` and the existing file policy.
 
