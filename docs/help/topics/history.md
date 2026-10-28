@@ -19,6 +19,19 @@ Group messages can arrive after reconnecting through another authorized member o
 
 Opening a conversation does not mark every offscreen message read. Newly recovered content can remain unread even when it was authored before messages you already read. Catch-up notifications summarize recovered messages rather than treating every row as a new live alert. If the app cannot open a tracked message or asks you to review more unread history, use the offered review or explicit mark-read action. See [Channels](channels.md) for recovery and sharing limits.
 
+## Find or clear an unread badge
+
+Open **Unread messages** above **Received files** in the sidebar. The review
+includes hidden conversations, conversations outside the current list and
+messages waiting for their sender to be identified. Select a conversation to
+open it, or use its checkmark to clear that source. **Refresh** checks for updated
+sender information; **Mark all as read** clears the current unread indicators.
+These actions keep your messages and allow later messages to become unread.
+
+If the app badge could not be updated, the review shows a retry action while
+automatic retries continue. A message missing from this device's history is not
+proof that every device has lost it.
+
 ## Keep an unfinished message
 
 Text drafts stay with their conversation when you switch between contacts, groups

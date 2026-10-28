@@ -1746,6 +1746,71 @@
       "escalation": [
         "Verify switching, reload persistence, short-window creation and sidebar/settings layout in Portuguese and Korean. Browser mocks cover interface behavior, not native operating-system menus or translated article content."
       ]
+    },
+    {
+      "id": "frontend-unread-recovery",
+      "paths": [
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/reception.test.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationHistory.test.ts",
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/lib/unreadStorage.test.ts",
+        "frontend/src/lib/badgeSync.ts",
+        "frontend/src/lib/badgeSync.test.ts",
+        "frontend/src/store/unreadBadge.ts",
+        "frontend/src/store/unreadBadge.test.ts",
+        "frontend/src/features/chat/UnreadMessages.tsx",
+        "frontend/src/features/chat/unreadSources.ts",
+        "frontend/src/features/chat/unreadSources.test.ts",
+        "frontend/src/features/chat/ChatApp.tsx",
+        "frontend/src/features/chat/Sidebar.tsx",
+        "frontend/e2e/unread-badge.spec.ts",
+        "docs/group-conversation-reception.md",
+        "frontend/e2e/ui-visual-regression.spec.ts",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-1280x800.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-760x520.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-1280x800.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520.png",
+        "docs/help/topics/history.md"
+      ],
+      "frontend": [
+        "src/store/reception.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/conversationHistory.test.ts",
+        "src/store/unreadBadge.test.ts",
+        "src/lib/badgeSync.test.ts",
+        "src/lib/unreadStorage.test.ts",
+        "src/lib/linkedReadReceipts.test.ts",
+        "src/features/chat/unreadSources.test.ts",
+        "src/features/chat/Sidebar.test.ts",
+        "src/features/chat/sidebar/ConversationRow.test.ts",
+        "src/features/chat/ReceptionStatus.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Every application unread count has a review and explicit clear path; confirmed local suppression reconciles exact unread without claiming viewed content; badge writes retry within the current owner lifetime.",
+        "guide": "docs/group-conversation-reception.md#unread-review-and-badge-recovery",
+        "invariants": [
+          {
+            "name": "Explicit source/global actions cover hidden, missing and unknown senders, preserve later arrivals and persist counters; incomplete history never proves deletion.",
+            "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
+          },
+          {
+            "name": "Confirmed local suppression and known expiry are separate from seen receipts, survive bounded cache eviction and do not manufacture cross-device read evidence.",
+            "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
+          },
+          {
+            "name": "The badge writer coalesces current counts, retries with bounded backoff and native admission, and retires with its exact desktop/account/runtime lifetime.",
+            "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
+          }
+        ]
+      },
+      "escalation": [
+        "Run frontend/e2e/unread-badge.spec.ts and relevant e2e/ui-visual-regression.spec.ts cases for unread review, keyboard focus, narrow/short windows and light/dark layouts. Browser mocks verify IPC requests, not physical Dock/tray appearance; real packaged macOS/Linux badge repaint and logout evidence remain separate native acceptance. Windows count badges retain their documented unsupported behavior."
+      ]
     }
   ],
   "prScenarios": [

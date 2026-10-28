@@ -12,7 +12,7 @@ import { Sidebar } from "./Sidebar";
 import { ConversationView } from "./ConversationView";
 import { CallDialog } from "./CallDialog";
 import { chat as chatApi } from "@/lib/api";
-import { savePendingUnread, saveUnread } from "@/lib/unreadStorage";
+import { startUnreadBadge } from "@/store/unreadBadge";
 import { useChat } from "@/store/chat";
 import { usePresence } from "@/store/presence";
 import { useSettings } from "@/store/settings";
@@ -68,7 +68,6 @@ export function ChatApp() {
       useDrafts.getState().reset();
     };
   }, [owner, generation, ready, accountId, presenceRun, presenceIdentity]);
-  const unreadOwner = useChat((s) => s.unreadOwner);
   useEffect(() => {
     if (owner) void useContactPolicy.getState().load(owner);
     return () => {
@@ -92,20 +91,6 @@ export function ChatApp() {
   const fileSendError =
     error?.startsWith("Couldn't send file: ") ||
     error?.startsWith("This attachment ");
-  const unread = useChat((s) => s.unread);
-  const markLegacyActiveRead = useChat((s) => s.markLegacyActiveRead);
-  const pendingUnknownUnread = useChat((s) => s.pendingUnknownUnread);
-  const totalUnread =
-    Object.values(unread).reduce((sum, count) => sum + count, 0) +
-    Object.values(pendingUnknownUnread).reduce((sum, count) => sum + count, 0);
-
-  useEffect(() => {
-    if (owner && owner === unreadOwner && accountId && ready) {
-      saveUnread(owner, accountId, unread);
-      savePendingUnread(owner, accountId, pendingUnknownUnread);
-    }
-  }, [owner, unreadOwner, accountId, ready, unread, pendingUnknownUnread]);
-
   useEffect(() => {
     useSettings.getState().setOwner(owner ?? null);
     if (owner) void loadSettings();
@@ -142,36 +127,8 @@ export function ChatApp() {
   }, [active, peers, generation]);
 
   useEffect(() => {
-    if (!owner) return;
-    let focusFrame = 0;
-    const syncBadge = () => {
-      void chatApi.setBadge(totalUnread, owner).catch(() => {});
-    };
-    syncBadge();
-    // macOS can clear its Dock badge on activation. Restore the sidebar total.
-    const onFocus = () => {
-      markLegacyActiveRead();
-      cancelAnimationFrame(focusFrame);
-      focusFrame = requestAnimationFrame(markLegacyActiveRead);
-      const count =
-        Object.values(useChat.getState().unread).reduce(
-          (sum, value) => sum + value,
-          0,
-        ) +
-        Object.values(useChat.getState().pendingUnknownUnread).reduce(
-          (sum, value) => sum + value,
-          0,
-        );
-      void chatApi.setBadge(count, owner).catch(() => {});
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onFocus);
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onFocus);
-      cancelAnimationFrame(focusFrame);
-    };
-  }, [totalUnread, owner, generation, markLegacyActiveRead]);
+    if (owner) return startUnreadBadge(owner);
+  }, [owner, generation, accountId, presenceRun, presenceIdentity]);
 
   useEffect(() => {
     if (owner && ready) return startAutomaticDownloads();

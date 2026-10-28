@@ -1,4 +1,27 @@
 {
+  "unread": {
+    "title": "Mensagens não lidas",
+    "description": "Confira a origem das mensagens ou marque-as como lidas. As mensagens serão mantidas.",
+    "badgeFailed": "Não foi possível atualizar o indicador do aplicativo. A atualização será tentada novamente.",
+    "details": "Detalhes",
+    "retryBadge": "Tentar atualizar indicador",
+    "search": "Buscar conversas ou IDs",
+    "empty": "Você está em dia.",
+    "emptyDetail": "Novas mensagens aparecerão aqui.",
+    "noResults": "Nenhuma conversa não lida corresponde à busca.",
+    "unknownSender": "Remetente não identificado",
+    "pendingDetail": "Aguardando identificação do remetente",
+    "unavailable": "Conversa indisponível",
+    "hidden": "Conversa oculta",
+    "channel": "Conversa em grupo",
+    "direct": "Conversa direta",
+    "unavailableDetail": "A conversa não está na lista atual",
+    "clearSource": "Marcar {{name}} como lida",
+    "showMore": "Mostrar mais",
+    "refresh": "Atualizar",
+    "refreshing": "Atualizando…",
+    "markAllRead": "Marcar todas como lidas"
+  },
   "contactDeletion": {
     "title": "Excluir contato?",
     "description": "Remove o contato e exclui permanentemente o histórico de mensagens dele neste dispositivo. Esta ação não pode ser desfeita. Se o contato for descoberto online novamente, ele reaparecerá sem o histórico excluído.",

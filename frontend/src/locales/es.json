@@ -1,4 +1,27 @@
 {
+  "unread": {
+    "title": "Mensajes sin leer",
+    "description": "Revisa el origen de los mensajes o márcalos como leídos. Los mensajes se conservan.",
+    "badgeFailed": "No se pudo actualizar la insignia de la aplicación. Se reintentará automáticamente.",
+    "details": "Detalles",
+    "retryBadge": "Reintentar actualización",
+    "search": "Buscar conversaciones o ID",
+    "empty": "No tienes mensajes sin leer.",
+    "emptyDetail": "Los mensajes nuevos aparecerán aquí.",
+    "noResults": "No hay conversaciones sin leer que coincidan.",
+    "unknownSender": "Remitente sin identificar",
+    "pendingDetail": "Esperando identificar al remitente",
+    "unavailable": "Conversación no disponible",
+    "hidden": "Conversación oculta",
+    "channel": "Conversación de grupo",
+    "direct": "Conversación directa",
+    "unavailableDetail": "La conversación no está en la lista actual",
+    "clearSource": "Marcar {{name}} como leído",
+    "showMore": "Mostrar más",
+    "refresh": "Actualizar",
+    "refreshing": "Actualizando…",
+    "markAllRead": "Marcar todo como leído"
+  },
   "contactDeletion": {
     "title": "¿Eliminar contacto?",
     "description": "Elimina el contacto y su historial de mensajes de forma permanente en este dispositivo. No se puede deshacer. Si vuelve a detectarse en línea, reaparecerá sin recuperar el historial eliminado.",

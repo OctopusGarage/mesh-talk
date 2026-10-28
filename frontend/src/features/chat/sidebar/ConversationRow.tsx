@@ -62,7 +62,7 @@ export function ConversationRow({
     (s) =>
       conv.kind === "channel" &&
       Object.values(s.ledger[convKey(conv)] ?? {}).some(
-        (entry) => !entry.seen && entry.mentioned,
+        (entry) => !entry.seen && !entry.suppressed && entry.mentioned,
       ),
   );
   const history = useChat((s) => s.messages[convKey(conv)]);
