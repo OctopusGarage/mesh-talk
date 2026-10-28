@@ -1544,7 +1544,7 @@
             "reference": "specifications/deployment_guide.md#data-directory-ownership"
           },
           {
-            "name": "The dedicated indexed relay consumes its pre-keystore lease once and cooperatively joins owned maintenance, reconciliation, sessions, discovery and gateway proxies before storage release. Connection-level accept failures retain the listener with persistent 20 ms to 1 s capped backoff and fixed state; unrelated work cannot reset retries or delay shutdown. Permanent accept errors retain their cause and operation context. Windows hard termination retains separate crash-recovery acceptance.",
+            "name": "The dedicated indexed relay consumes its pre-keystore lease once and cooperatively joins owned maintenance, reconciliation, sessions, discovery and gateway proxies before storage release. Aborted or reset accepts discard only that connection and yield before continuing; interrupted or would-block failures without progress retain persistent 20 ms to 1 s capped backoff and fixed state. Unrelated work cannot reset retries or delay shutdown. Permanent accept errors retain their cause and operation context. Windows hard termination retains separate crash-recovery acceptance.",
             "reference": "specifications/deployment_guide.md#data-directory-ownership"
           }
         ]
