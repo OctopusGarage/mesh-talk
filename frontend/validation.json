@@ -1938,9 +1938,13 @@
         "docs/group-conversation-reception.md",
         "frontend/e2e/ui-visual-regression.spec.ts",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-1280x800.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-1280x800-win32.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-760x520.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-light-760x520-win32.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-1280x800.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-1280x800-win32.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/unread-review-dark-760x520-win32.png",
         "docs/help/topics/history.md"
       ],
       "frontend": [

@@ -349,7 +349,7 @@ export function MediaPreview({
           alt={displayName}
           data-testid="file-image"
           onError={() => setImgFailed(true)}
-          className="h-full w-full object-contain"
+          className="h-full w-full select-none object-contain"
         />
       </div>
     );
@@ -371,7 +371,7 @@ export function MediaPreview({
           transition={layoutTransition}
           data-testid="file-image"
           onError={() => setImgFailed(true)}
-          className="h-full w-full object-contain"
+          className="h-full w-full select-none object-contain"
         />
       </button>
       <AnimatePresence>

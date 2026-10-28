@@ -158,13 +158,16 @@ test("received media recovers when bytes become available with stable fileConv",
       "none",
     );
     await enlargedImage.click({ button: "right" });
-    await expect(page.getByTestId("message-context-menu")).toHaveCount(0);
+    await expect(page.getByRole("menu")).toHaveCount(0);
     // Releasing a text-selection drag on the backdrop must keep the preview open.
-    await enlargedImage.dispatchEvent("pointerdown");
-    await lightbox.dispatchEvent("click");
+    await enlargedImage.hover();
+    await page.mouse.down();
+    await page.mouse.move(2, 2);
+    await page.mouse.up();
     await expect(lightbox).toBeVisible();
     await lightbox.getByRole("button", { name: "Close" }).click();
     await expect(lightbox).toHaveCount(0);
+    await expect(page.getByRole("menu")).toHaveCount(0);
     await page.getByRole("button", { name: "View full size" }).click();
     await expect(lightbox).toBeVisible();
     await page.keyboard.press("Escape");

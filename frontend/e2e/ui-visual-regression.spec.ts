@@ -239,9 +239,17 @@ for (const theme of ["light", "dark"] as const) {
         ),
       ).toBe(true);
       await prepareForScreenshot(page);
-      await expect(review).toHaveScreenshot(
-        snapshotName("unread-review", theme, viewport.width, viewport.height),
+      const name = snapshotName(
+        "unread-review",
+        theme,
+        viewport.width,
+        viewport.height,
       );
+      const reference =
+        process.platform === "win32"
+          ? name.replace(".png", "-win32.png")
+          : name;
+      await expect(review).toHaveScreenshot(reference);
       await page.keyboard.press("Escape");
       await expect(page.getByTestId("unread-review-trigger")).toBeFocused();
     });

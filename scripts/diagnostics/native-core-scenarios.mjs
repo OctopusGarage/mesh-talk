@@ -274,11 +274,13 @@ export async function revealLatestNativeMessage({ execute, until, command, now =
 export async function revealHistoricalNativeMessage({ execute, until, command, key }, text) {
   // Virtuoso's real scroller is keyboard-focusable. Native PageUp exercises
   // normal browser scrolling, rather than mutating its virtual-list state.
+  // Receipt captures require the badge itself to clear the log edges; a visible
+  // strip of its message can leave the compact footer clipped under the header.
   await until("restarted message log hydrated", () => execute("return !!document.querySelector('[role=log]');"));
   const log = await command("POST", "/element", { using: "css selector", value: '[role="log"]' });
   await command("POST", `/element/${log["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
   try { await until("historical message visibly rendered after native PageUp", async () => {
-    const visible = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect();return !!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right;", [text]);
+    const visible = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),badge=e?.querySelector('[data-delivery]'),r=(badge??e)?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect();return !!r&&!!l&&r.width>0&&r.height>0&&(badge?r.top>=l.top&&r.bottom<=l.bottom&&r.left>=l.left&&r.right<=l.right:r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right);", [text]);
     if (visible) return true;
     assert.equal(await execute("return document.activeElement===document.querySelector('[role=log]');"), true, "native PageUp targets the focused message log");
     await key("\uE00E");
