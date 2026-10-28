@@ -153,6 +153,21 @@ device starts a new history permission lifetime. Upgrade all participating clien
 before enabling this feature: history controls require version 3 channel sync,
 and older sync versions receive an upgrade response rather than unknown events.
 
+## File delivery
+
+Ordinary files can travel through configured post offices even when members are
+on different networks without a direct connection. The sender deposits encrypted
+file contents; the recipient can approve and download later while the sender is
+offline, provided a reachable post office still holds the needed contents.
+
+Keep the sender available until postal custody has succeeded. A file card or an
+online indicator does not prove that the contents reached a post office or the
+recipient. Before the first chunk arrives, progress says **Waiting for file
+data**; the percentage remains zero. Explicit approval is still required when
+automatic receiving is disabled. Refusal prevents local reception and stops
+further deposits once the sender learns that decision. Both clients need the
+updated file behavior; post-office storage and retention limits still apply.
+
 ## Share retained history
 
 Open the members control and find your own accepted membership. **Stop sharing** disables this device's **Share a copy** participation; **Resume sharing** enables it again. Sharing lets authorized members obtain retained channel history and available attachments from this device. Turning it off does not stop incoming messages or recovery of your own authorized history. Upgrade all members before using these controls with older clients.

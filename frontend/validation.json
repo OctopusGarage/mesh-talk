@@ -1986,6 +1986,26 @@
       "escalation": [
         "Run frontend/e2e/unread-badge.spec.ts and relevant e2e/ui-visual-regression.spec.ts cases for unread review, keyboard focus, narrow/short windows and light/dark layouts. Browser mocks verify IPC requests, not physical Dock/tray appearance; real packaged macOS/Linux badge repaint and logout evidence remain separate native acceptance. Windows count badges retain their documented unsupported behavior."
       ]
+    },
+    {
+      "id": "frontend-file-receive-progress",
+      "paths": [
+        "frontend/src/features/chat/ReceiveProgress.tsx",
+        "frontend/src/features/chat/ReceiveProgress.test.ts"
+      ],
+      "frontend": [
+        "src/features/chat/ReceiveProgress.test.ts"
+      ],
+      "capability": {
+        "summary": "Distinguish waiting for the first file chunk from active chunk reception without changing determinate progress counts.",
+        "guide": "docs/help/topics/channels.md#file-delivery",
+        "invariants": [
+          {
+            "name": "A known zero chunk count remains accessible as zero percent and uses waiting language; receiving language starts after a positive chunk count.",
+            "reference": "docs/help/topics/channels.md#file-delivery"
+          }
+        ]
+      }
     }
   ],
   "prScenarios": [

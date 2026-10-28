@@ -876,10 +876,12 @@ impl Node {
                 plaintext,
             };
             let installed = if is_channel {
-                self.received_files
+                let recorded = self
+                    .received_files
                     .lock()
                     .expect("files lock not poisoned")
-                    .record_durable(&entry)
+                    .record_durable(&entry);
+                recorded.and_then(|_| self.retain_group_file_completion(&event, &entry))
             } else {
                 match self.historical_author(event.author.ed25519_pub()) {
                     Some(proof) => self.accept_manifest_event(&event, &proof, entry),
@@ -953,6 +955,13 @@ impl Node {
     /// Fetch only from the signed sender or accepted sharing members. Work is
     /// bounded across files and sources; an unresponsive holder cannot pin the queue.
     pub async fn pull_pending_files(&self) {
+        tokio::join!(
+            self.pull_pending_files_direct(),
+            self.retry_group_file_delivery()
+        );
+    }
+
+    async fn pull_pending_files_direct(&self) {
         use futures_util::stream::{self, StreamExt};
         let Ok(_pull) = self.file_pull_gate.try_lock() else {
             return;
@@ -1541,7 +1550,9 @@ impl Node {
             .into_iter()
             .filter(|peer| self.verified_dm_pull_peer(&peer.public().user_id()))
             .collect::<Vec<_>>();
+        peers.extend(self.group_mailbox_peers());
         peers.sort_unstable_by_key(|peer| peer.public().user_id());
+        peers.dedup_by_key(|peer| peer.public().user_id());
         peers
     }
 
@@ -1581,7 +1592,9 @@ impl Node {
                 cursors.insert(relay_id.clone(), index.wrapping_add(1));
             }
             let peer = &peers[index];
-            if !self.verified_dm_pull_peer(&peer.public().user_id()) {
+            if !self.verified_dm_pull_peer(&peer.public().user_id())
+                && !self.group_member(&peer.public())
+            {
                 continue;
             }
             let attempt = async {

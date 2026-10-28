@@ -757,8 +757,8 @@ Channel file offers reach directly routed members before optional relay custody.
 For automatic inline images, direct chunk fanout follows that offer before any
 relay replication is awaited. A stalled custody path must not strand a reachable
 receiver with a file offer but no image bytes. Other attachments retain signed
-receive-consent requirements; this ordering does not permit unsolicited chunk
-pushes for files that require approval.
+receive-consent requirements for direct pushes and local installation; encrypted
+post-office custody can precede approval as described below.
 
 A source's local image preview does not complete channel delivery. Channel media
 with other members retains its original signed chunks under the same 64 MiB,
@@ -768,6 +768,52 @@ recovery. Sharing receivers can retain channel media as bounded replicas too.
 An incoming fingerprint probe must not reclaim the source bytes before the next
 chunk-page request. Media in a channel with no other members can still reclaim
 transient chunks after its durable local copy is verified.
+
+### Ordinary file custody
+
+Private and group file sends can deposit recipient-encrypted chunk wrappers in
+eligible post offices before a recipient comes online or approves the offer.
+This is custody of ciphertext, not recipient delivery or permission to install
+file contents. A retained card alone does not prove chunk custody. Existing
+post-office capacity, retention, federation trust and relay direction policy
+still apply. The source must remain available until the needed encrypted chunks
+have actually reached a surviving eligible post office; there is no guarantee
+for a source that disappears before custody succeeds.
+
+Direct chunk pushes and the recipient's durable log admission still require the
+exact local receive decision. An opaque drain defers unapproved or otherwise
+denied wrappers only for that operation, allowing unrelated wrappers to advance;
+after approval a later drain retries the same immutable chunks. Refusal stops
+new deposits once observed, but does not promise deletion of ciphertext already
+held elsewhere. The recipient continues to enforce its own current decision.
+
+Group consent uses the existing signed, pairwise encrypted mailbox controls,
+bound to an exact retained manifest and each recipient device independently.
+Current signed membership, invitation visibility, account binding, expiry,
+recall and local erasure remain authoritative. Sharing a group never grants
+private-DM consent or history access. Incoming group files reserve the existing
+verified-save completion evidence when the author's certified proof is known;
+otherwise valid group-history cards remain visible and proof reservation retries
+when that proof becomes available. Relay custody never substitutes for a saved,
+integrity-checked recipient completion.
+
+`node/group_file_delivery.rs` extends the existing attachment producer rather
+than adding a transport or daemon. Its active index holds at most 10,000 jobs;
+bounded rotating scans of durable source rows refill it, including pre-upgrade
+sends and restarts. A pass launches at most two recipient jobs and races at most
+two relay exchanges at once under the existing whole-file deadline. Rotation
+advances at launch, failed paths do not pin later recipients, and exact durable
+chunk custody suppresses redundant inventory work for 30 seconds. The index
+contains outgoing group files, not historical private consent controls. Pending
+work keeps the producer's existing short retry interval. Payload pages recheck
+current authority, refusal, relay role and managed runtime I/O admission.
+
+This worker deposits the original sender's retained chunks. Existing authorized
+sharing-member recovery still works over reachable application routes; it does
+not promise relay-only recovery from a third-party replica when the original
+sender disappeared before depositing the file. No wire, encrypted record layout,
+manifest identity or chunk cryptography changes are required. Both endpoint
+clients need the updated behavior; existing opaque post offices are reused.
 
 Each accepted member controls **Share a copy**. A receiver can obtain its own authorized events while declining to serve retained history. Recovery automatically selects accepted sharing members from signed group state; users need not inspect individual members or grant separate DM permissions. Lower-frequency reconciliation still checks known non-sharing members so a later sharing change can be learned. The serving peer always enforces current authority and sharing preference.
 

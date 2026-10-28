@@ -1575,6 +1575,65 @@
       "escalation": [
         "Run duplicate device fanout/sibling import, deliberate repeat, signed identity tampering, restart, recall/delete, relay-only and recovery snapshot regressions; test optional metadata fallback with older peers before merge."
       ]
+    },
+    {
+      "id": "core-group-file-relay",
+      "paths": [
+        "crates/mesh-talk-core/src/node/group_file_delivery.rs",
+        "crates/mesh-talk-core/src/node/group_file_delivery_tests.rs",
+        "crates/mesh-talk-core/src/node/file_consent.rs",
+        "crates/mesh-talk-core/src/node/file_consent_store.rs",
+        "crates/mesh-talk-core/src/node/file_completion.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/opaque_relay.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/participant_runtime.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::group_file_delivery_tests::",
+            "node::file_consent_tests::",
+            "node::file_consent::",
+            "node::file_consent_store::",
+            "node::file_completion::",
+            "node::opaque_relay::permission_tests::",
+            "retained_relay_file_exchange_rechecks_signed_consent_and_relay_role",
+            "relay_file_worker_preserves_progress_across_slow_mailbox_exchanges",
+            "relay_custody_releases_slots_for_more_than_eight_pending_files",
+            "stalled_relay_cannot_delay_inline_channel_photo_bytes_to_an_online_member",
+            "channel_media_source_keeps_signed_chunks_when_local_preview_completes",
+            "node::delivery_store::tests::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Stage ordinary private and group attachment ciphertext in recipient-encrypted post-office custody before receiver approval, preserving exact recipient consent and verified completion.",
+        "guide": "docs/network-design-reference.md#ordinary-file-custody",
+        "invariants": [
+          {
+            "name": "Ciphertext custody may precede approval; recipient durable chunk admission and direct pushes still require approval. Only verified recipient completion retires delivery work.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Group controls remain bound to the exact retained offer, current signed membership and recipient device; group permission never grants private-DM access.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          },
+          {
+            "name": "Refusal, removal, expiry, recall and runtime retirement stop further custody publication; bounded rotating jobs keep old controls from starving new work.",
+            "reference": "docs/network-design-reference.md#ordinary-file-custody"
+          }
+        ]
+      },
+      "consumers": [
+        "desktop-chat"
+      ],
+      "escalation": [
+        "Run real loopback two-relay federation with unavailable direct client endpoints, pre-approval custody, sender shutdown, recipient approval/save and exact completion; include independent-recipient replay/compaction and revoke/expiry evidence. Installed Mac-to-Mac acceptance and deployed relay capacity/retention remain separate native requirements."
+      ]
     }
   ],
   "prScenarios": [

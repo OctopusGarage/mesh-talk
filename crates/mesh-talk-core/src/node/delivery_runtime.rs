@@ -2443,6 +2443,18 @@ impl Node {
             && self.known_account_allowed(&binding.device)
     }
 
+    /// Encrypted custody is independent of the recipient's local download
+    /// approval. An explicit refusal still stops further custody publication.
+    fn file_relay_custody_current(
+        &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+    ) -> bool {
+        self.file_destination_current(file, destination)
+            && self.outgoing_file_consent_status(file.id, destination.binding.event_id)
+                != Some(crate::eventlog::sync::FileConsentStatus::Declined)
+    }
+
     pub(in crate::node) async fn retry_file_step(
         &self,
         file: &super::delivery_store::FileCard,
@@ -2617,9 +2629,7 @@ impl Node {
             {
                 candidates.push((false, peer));
             }
-            if self.outgoing_file_consent_status(file.id, binding.event_id)
-                == Some(crate::eventlog::sync::FileConsentStatus::Accepted)
-            {
+            if self.file_relay_custody_current(file, destination) {
                 let relays = {
                     let roster = self.roster.lock().expect("roster lock not poisoned");
                     self.post_office_candidates_for(&roster, &binding.device)
@@ -2780,7 +2790,17 @@ impl Node {
                             transfer.phase = FilePhase::InitialCustody;
                         } else {
                             transfer.channel = None;
-                            transfer.phase = FilePhase::ConsentWait;
+                            transfer.sync = super::session::SyncProgress::default();
+                            // A pending local download must not pin this file on
+                            // its direct route while encrypted custody is available.
+                            if status == crate::eventlog::sync::FileConsentStatus::Pending
+                                && transfer.candidate_cursor + 1 < transfer.candidate_count
+                            {
+                                transfer.candidate_cursor += 1;
+                                transfer.phase = FilePhase::Dial;
+                            } else {
+                                transfer.phase = FilePhase::ConsentWait;
+                            }
                         }
                     }
                     Err(_) => {
@@ -2867,10 +2887,8 @@ impl Node {
             .as_ref()
             .ok_or(SessionError::UnexpectedMessage)?;
         let current = || {
-            self.file_destination_current(file, destination)
+            self.file_relay_custody_current(file, destination)
                 && self.relay_send_allowed(&relay.public)
-                && self.outgoing_file_consent_status(file.id, binding.event_id)
-                    == Some(crate::eventlog::sync::FileConsentStatus::Accepted)
                 && self
                     .roster
                     .lock()
@@ -3005,9 +3023,7 @@ impl Node {
         if direct && let Some(peer) = self.routing_peer(&binding.device.user_id()) {
             candidates.push((false, peer));
         }
-        let consented = self.outgoing_file_consent_status(file.id, binding.event_id)
-            == Some(crate::eventlog::sync::FileConsentStatus::Accepted);
-        if consented {
+        if self.file_relay_custody_current(file, destination) {
             let roster = self.roster.lock().expect("roster lock not poisoned");
             candidates.extend(
                 self.post_office_candidates_for(&roster, &binding.device)
@@ -3038,51 +3054,27 @@ impl Node {
                     return false;
                 }
                 if relay {
-                    if self
-                        .opaque_relay_round(&mut channel, &binding.device, Some(manifest_conv))
-                        .await
-                        .is_err()
-                    {
-                        return false;
-                    }
+                    // Reuse the retained worker's guarded publication state
+                    // machine so refusal/cancellation/relay-role changes are
+                    // rechecked on every opaque payload page in immediate sends.
+                    let mut transfer = FileTransfer::new(file.clone(), destination.clone());
+                    transfer.route = Some((true, peer.clone()));
+                    transfer.channel = Some(channel);
+                    transfer.phase = FilePhase::RelayManifestLegacy;
                     #[cfg(test)]
                     phase.store(6, std::sync::atomic::Ordering::Relaxed);
-                    let Ok(uploaded) = self
-                        .opaque_relay_round(
-                            &mut channel,
-                            &binding.device,
-                            Some(file.file_conversation),
-                        )
-                        .await
-                    else {
-                        return false;
-                    };
-                    let Some(final_chunk) = file.final_chunk else {
-                        return false;
-                    };
-                    let Some((_, outer_id)) = uploaded
-                        .iter()
-                        .find(|(inner_id, _)| *inner_id == final_chunk)
-                    else {
-                        return false;
-                    };
-                    let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
-                        &self.identity,
-                        &binding.device,
-                        &peer.public,
-                    ) else {
-                        return false;
-                    };
+                    while !matches!(transfer.phase, FilePhase::RelayHeld) {
+                        if self
+                            .advance_relay_file_transfer(&mut transfer)
+                            .await
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
                     #[cfg(test)]
                     phase.store(7, std::sync::atomic::Ordering::Relaxed);
-                    return super::session::request_durable_have(
-                        &mut channel,
-                        mailbox.id(),
-                        *outer_id,
-                    )
-                    .await
-                    .unwrap_or(false)
-                        && current();
+                    return self.file_relay_custody_current(file, destination);
                 }
                 let store = self.sync_store(channel.peer_identity());
                 // Publish the manifest first so private recipients/relays can
