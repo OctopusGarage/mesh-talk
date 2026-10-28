@@ -8235,6 +8235,63 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             .unwrap(),
         1
     );
+    // Probe only generated fixture metadata; never attempt decryption or recovery.
+    let linked_plaintext_metadata = |current: &Arc<Node>, id: EventId| {
+        let authorized = current.log.try_lock().ok().map(|log| {
+            crate::node::channel::ChannelBook::project_membership(channel, &log.events(&channel))
+                .authorized
+                .contains(&id)
+        });
+        let stored = current.received.try_lock().ok().map(|received| {
+            received
+                .entries_ref(&channel)
+                .iter()
+                .any(|row| row.event_id == id)
+        });
+        let suppression = current
+            .account_suppression
+            .try_lock()
+            .ok()
+            .map(|suppression| {
+                (
+                    suppression.contains(channel, old_channel_id),
+                    suppression.contains(channel, id),
+                )
+            });
+        let crypto = current.channels.try_lock().ok().and_then(|book| {
+            let state = book.state(&channel)?;
+            let positions: Vec<_> = state
+                .current_receive_distributions()
+                .into_iter()
+                .map(|(author, epoch, mut distribution)| {
+                    let position = distribution.n;
+                    zeroize::Zeroize::zeroize(&mut distribution.chain_key);
+                    (author, epoch, position)
+                })
+                .collect();
+            Some((
+                state.epoch(),
+                state.pending_invite(),
+                state.is_accepted_member(&a1_node.user_id()),
+                positions,
+            ))
+        });
+        let retry_ms = current
+            .pending_channel_plaintext
+            .try_lock()
+            .ok()
+            .map(|pending| {
+                pending.retry_at.map(|deadline| {
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_millis()
+                })
+            });
+        format!(
+            "authorized={authorized:?} received={stored:?} suppression_old_new={suppression:?} crypto={crypto:?} plaintext_retry_ms={retry_ms:?}"
+        )
+    };
+    let before_new_send = linked_plaintext_metadata(&a2_node, old_channel_id);
     let delivery_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let delivery_trace_started = std::time::Instant::now();
     let delivery_trace_omitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -8292,8 +8349,26 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .send_channel_message(channel, b"after sibling joined")
         .await
         .unwrap();
+    let original_new = channel_texts(&a1_node)
+        .into_iter()
+        .find(|row| row.text == b"after sibling joined")
+        .unwrap()
+        .id;
+    let mut first_public_arrival = None;
     let new_channel_delivery = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
+            if first_public_arrival.is_none()
+                && a2_node
+                    .log
+                    .try_lock()
+                    .ok()
+                    .is_some_and(|log| log.get(&original_new).is_some())
+            {
+                first_public_arrival = Some((
+                    delivery_trace_started.elapsed().as_millis(),
+                    linked_plaintext_metadata(&a2_node, original_new),
+                ));
+            }
             if channel_texts(&a2_node)
                 .iter()
                 .any(|item| item.text == b"after sibling joined")
@@ -8305,10 +8380,25 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     })
     .await;
     if new_channel_delivery.is_err() {
+        eprintln!(
+            "linked plaintext branch before_new_send={before_new_send} first_public_arrival={first_public_arrival:?} finish={}",
+            linked_plaintext_metadata(&a2_node, original_new)
+        );
         let original = channel_texts(&a1_node)
             .into_iter()
             .find(|row| row.text == b"after sibling joined")
             .map(|row| row.id);
+        let authorization = [&a1_node, &a2_node].map(|current| {
+            current.log.try_lock().ok().map(|log| {
+                crate::node::channel::ChannelBook::project_membership(
+                    channel,
+                    &log.events(&channel),
+                )
+                .authorized
+                .contains(&original_new)
+            })
+        });
+        eprintln!("linked public event authorization source_sibling={authorization:?}");
         let observations: Vec<_> = [("source", &a1_node), ("sibling", &a2_node)]
             .into_iter()
             .map(|(label, current)| {

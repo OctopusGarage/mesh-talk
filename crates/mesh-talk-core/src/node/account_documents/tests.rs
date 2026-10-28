@@ -299,7 +299,12 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                     trace.pop_front();
                     omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                trace.push_back((custody_trace_started.elapsed().as_millis(), label, phase));
+                trace.push_back((
+                    custody_trace_started.elapsed().as_millis(),
+                    label,
+                    tokio::task::try_id(),
+                    phase,
+                ));
             }));
     }
     let custody_metadata = |current: &Node| {

@@ -1457,6 +1457,158 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }).await.expect("cold authenticated capability exchanges must progress in both directions without submitting work or manual polling");
+    // Observe only the selected route. Task IDs correlate concurrent lanes
+    // without changing the authenticated exchange or adding any traffic.
+    let private_trace =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let private_trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let private_trace_started = std::time::Instant::now();
+    for (label, current, peer) in [
+        ("source", &owner, reference.identity.public()),
+        ("requester", &reference, owner.identity.public()),
+    ] {
+        let trace = private_trace.clone();
+        let omitted = private_trace_omitted.clone();
+        let client_peer = peer.clone();
+        let control_tasks = std::sync::Mutex::new(std::collections::VecDeque::new());
+        let queue_sample = std::sync::Mutex::new(None::<String>);
+        *current.account_client_test_hook.lock().unwrap() =
+            Some(std::sync::Arc::new(move |observed, phase| {
+                let publication = phase.starts_with("operation_local_published");
+                if observed != client_peer && !publication {
+                    return;
+                }
+                let task = tokio::task::try_id();
+                if phase.starts_with("negotiation_begin domain=Some(GroupControl)")
+                    && let Some(task) = task
+                {
+                    let mut tasks = control_tasks.lock().unwrap();
+                    if !tasks.contains(&task) {
+                        if tasks.len() == 16 {
+                            tasks.pop_front();
+                        }
+                        tasks.push_back(task);
+                    }
+                }
+                let selected_task =
+                    task.is_some_and(|task| control_tasks.lock().unwrap().contains(&task));
+                if !publication
+                    && !phase.starts_with("wake_")
+                    && !phase.starts_with("control_")
+                    && !(selected_task
+                        && (phase.starts_with("negotiation_")
+                            || phase.starts_with("session_")
+                            || phase.starts_with("dial_")))
+                {
+                    return;
+                }
+                let safe = phase
+                    .split_ascii_whitespace()
+                    .enumerate()
+                    .filter_map(|(index, token)| {
+                        (index == 0
+                            || [
+                                "outcome=",
+                                "domain=",
+                                "elapsed_ms=",
+                                "retry_ms=",
+                                "pending=",
+                                "after=",
+                                "deferred=",
+                                "reused=",
+                                "priority=",
+                                "revision=",
+                                "selected=",
+                                "hint=",
+                                "ready=",
+                                "active_same=",
+                                "active_other=",
+                                "protected=",
+                            ]
+                            .iter()
+                            .any(|prefix| token.starts_with(prefix)))
+                        .then_some(token)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if phase.starts_with("control_queue") {
+                    let normalized = safe
+                        .split_ascii_whitespace()
+                        .map(|token| {
+                            if token.starts_with("retry_ms=") && token != "retry_ms=0" {
+                                "retry_ms=pending"
+                            } else {
+                                token
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let mut previous = queue_sample.lock().unwrap();
+                    if previous.as_ref() == Some(&normalized) {
+                        return;
+                    }
+                    *previous = Some(normalized);
+                }
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 256 {
+                    trace.pop_front();
+                    omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                trace.push_back((
+                    private_trace_started.elapsed().as_millis(),
+                    label,
+                    task,
+                    safe,
+                ));
+            }));
+        let trace = private_trace.clone();
+        let omitted = private_trace_omitted.clone();
+        let channel_key = hex::encode(group.as_bytes());
+        *current.account_session_test_hook.lock().unwrap() = Some(std::sync::Arc::new(
+            move |observed, frame| {
+                let trace = trace.clone();
+                let omitted = omitted.clone();
+                let channel_key = channel_key.clone();
+                let expected = peer.clone();
+                Box::pin(async move {
+                    if observed != expected {
+                        return;
+                    }
+                    use crate::node::account_sync_wire::AccountHistoryFrame;
+                    let record = match frame {
+                    AccountHistoryFrame::DocumentsRequest { body } => crate::node::account_documents::wire::DocumentRequest::decode(&body)
+                        .filter(|request| request.domain == crate::node::AccountDocumentDomain::GroupControl)
+                        .map(|request| format!("server_request after={} known_zero={} operation_nonce={:?}", request.after.is_some(), request.known_digest == [0;32], request.operation.map(|probe| hex::encode(probe.nonce)))),
+                    AccountHistoryFrame::DocumentHeader { body } => serde_json::from_slice::<crate::node::AccountDocumentMeta>(&body).ok().and_then(|meta| {
+                        let (kind, channel, source_device) = match &meta.key {
+                            crate::node::AccountDocumentKey::GroupOperation { channel, source_device } => ("operation", channel, source_device),
+                            crate::node::AccountDocumentKey::GroupControl { channel, source_device } => ("role", channel, source_device),
+                            _ => return None,
+                        };
+                        (channel == &channel_key).then(|| format!("server_header kind={kind} source={source_device} revision={} hash={}", meta.revision, hex::encode(meta.content_hash)))
+                    }),
+                    AccountHistoryFrame::DocumentsComplete { body } => serde_json::from_slice::<serde_json::Value>(&body).ok()
+                        .filter(|complete| complete["domain"] == "group_control")
+                        .map(|complete| format!("server_complete next={} digest={} operation_nonce={}", !complete["next"].is_null(), complete["digest"], complete["operation"]["nonce"])),
+                    _ => None,
+                };
+                    if let Some(record) = record {
+                        let mut trace = trace.lock().unwrap();
+                        if trace.len() == 256 {
+                            trace.pop_front();
+                            omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        trace.push_back((
+                            private_trace_started.elapsed().as_millis(),
+                            label,
+                            tokio::task::try_id(),
+                            record,
+                        ));
+                    }
+                })
+            },
+        ));
+    }
     let id = reference
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
@@ -1518,11 +1670,23 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
             .unwrap().map(|status| status.phase);
         let requester_projection = reference.operation_projection(group);
         let source_projection = owner.operation_projection(group);
+        let operation_metadata: Vec<_> = [("source", &owner), ("requester", &reference)].into_iter().map(|(label, node)| {
+            let versions: Vec<_> = [("source", owner.user_id()), ("requester", reference.user_id())].into_iter().map(|(writer, source_device)| {
+                let meta = node.account_document_meta(&crate::node::AccountDocumentKey::GroupOperation { channel: hex::encode(group.as_bytes()), source_device });
+                (writer, meta.map(|meta| (meta.revision, meta.content_hash)))
+            }).collect();
+            (label, versions, node.sessions.test_capacity_snapshot())
+        }).collect();
+        eprintln!("owner rename private metadata={operation_metadata:?} omitted={} phases={:?}", private_trace_omitted.load(std::sync::atomic::Ordering::Relaxed), private_trace.lock().unwrap());
         panic!("real owner rename did not converge: requester={requester_phase:?}, source={source_phase:?}, request_heads={}, result_heads={}, requester_ready={}, source_ready={}",
             requester_projection.requests.len(), source_projection.results.len(),
             reference.group_operation_versions.lock().unwrap().contains_key(&owner.user_id()),
             owner.group_operation_versions.lock().unwrap().contains_key(&reference.user_id()));
     });
+    for current in [&owner, &reference] {
+        *current.account_client_test_hook.lock().unwrap() = None;
+        *current.account_session_test_hook.lock().unwrap() = None;
+    }
     eprintln!(
         "owner rename private receipt elapsed_ms={}",
         private_started.elapsed().as_millis()

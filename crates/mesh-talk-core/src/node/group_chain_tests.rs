@@ -878,6 +878,25 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     }
     // Let startup and its immediately-ready interval tick finish before sending.
     tokio::time::sleep(Duration::from_millis(500)).await;
+    let route_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let route_started = std::time::Instant::now();
+    let last_peer = chain.nodes[5].identity.public();
+    let observed_route = route_trace.clone();
+    *chain.nodes[4].account_client_test_hook.lock().unwrap() =
+        Some(Arc::new(move |peer, phase| {
+            if peer != last_peer || !phase.starts_with("dial_") {
+                return;
+            }
+            let mut trace = observed_route.lock().unwrap();
+            if trace.len() == 96 {
+                trace.pop_front();
+            }
+            trace.push_back((
+                route_started.elapsed().as_millis(),
+                tokio::task::try_id(),
+                phase,
+            ));
+        }));
     chain.nodes[0]
         .send_channel_message(group, b"notification-driven background gossip")
         .await
@@ -891,9 +910,10 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         }
     })
     .await;
+    *chain.nodes[4].account_client_test_hook.lock().unwrap() = None;
     if received.is_err() {
-        // Failure-only reads: do not allocate or trace on the two-second
-        // notification path, consume Notify permits, or invoke recovery here.
+        // These additional snapshot reads occur only after the deadline;
+        // do not consume Notify permits or invoke recovery here.
         let original = chain.nodes[0]
             .channel_history(group, 10)
             .into_iter()
@@ -935,6 +955,10 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
             .collect();
         eprintln!(
             "background group gossip metadata original={original:?} observations={observations:?}"
+        );
+        eprintln!(
+            "last-hop dial phases={:?}",
+            route_trace.try_lock().ok().as_deref()
         );
     }
     received.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
