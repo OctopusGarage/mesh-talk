@@ -3644,7 +3644,7 @@ mod tests {
         let channel = fixture
             .invoke(
                 "create_channel",
-                serde_json::json!({"name":"Group metadata", "memberIds":[]}),
+                serde_json::json!({"name":"Group metadata", "memberAccountIds":[]}),
             )
             .unwrap();
         let account = fixture
