@@ -223,6 +223,111 @@ fn control_queue_priority(
     }
 }
 
+// Each certified Control peer can temporarily own two metadata checkpoints,
+// but still has only one admitted page. The parked checkpoint never owns bytes.
+type ControlDemand = std::collections::BTreeSet<super::AccountGroupOperationId>;
+
+struct ControlComparisonPair {
+    parked: super::account_documents::sync::DocumentSyncCursor,
+    foreground: bool,
+    followup: bool,
+    local_requests: ControlDemand,
+    wake: Option<wake::ControlWakeHint>,
+}
+impl ControlComparisonPair {
+    fn new(
+        background: super::account_documents::sync::DocumentSyncCursor,
+        local_requests: ControlDemand,
+        wake: Option<wake::ControlWakeHint>,
+    ) -> Self {
+        Self {
+            parked: background,
+            foreground: true,
+            followup: false,
+            local_requests,
+            wake,
+        }
+    }
+    fn observe(&mut self, local_requests: ControlDemand, wake: Option<&wake::ControlWakeHint>) {
+        if !local_requests.is_subset(&self.local_requests) {
+            self.followup = true;
+        }
+        self.local_requests = local_requests;
+        if let Some(wake) = wake
+            && self.wake.as_ref() != Some(wake)
+        {
+            self.wake = Some(wake.clone());
+            self.followup = true;
+        }
+    }
+    fn deadline(
+        &self,
+        current: Option<&super::account_documents::sync::DocumentSyncCursor>,
+    ) -> Option<std::time::Instant> {
+        self.parked
+            .control_retry_deadline()
+            .into_iter()
+            .chain(current.and_then(|state| state.control_retry_deadline()))
+            .max()
+    }
+    fn finish_page(
+        &mut self,
+        current: &mut super::account_documents::sync::DocumentSyncCursor,
+    ) -> bool {
+        // A rejected admission or failed read did not pay for a page turn.
+        // Keep this owner and its checkpoint until a validated Complete.
+        if !current.control_page_completed() {
+            return false;
+        }
+        let foreground = if self.foreground {
+            &mut *current
+        } else {
+            &mut self.parked
+        };
+        if self.followup && foreground.control_comparison_complete() {
+            let refreshed = foreground.begin_refresh();
+            debug_assert!(refreshed);
+            self.followup = false;
+        }
+        if current.control_comparison_complete() && self.parked.control_comparison_complete() {
+            // Retain the foreground's independently verified comparison, never
+            // combine after keys, digest sets or support booleans.
+            let settled = current.up_to_date && self.parked.up_to_date;
+            if !self.foreground {
+                std::mem::swap(current, &mut self.parked);
+            }
+            current.up_to_date = settled;
+            return true;
+        }
+        if !self.parked.control_comparison_complete() {
+            std::mem::swap(current, &mut self.parked);
+            self.foreground = !self.foreground;
+        }
+        false
+    }
+    fn status(
+        &self,
+        current: &super::account_documents::sync::DocumentSyncCursor,
+        policy: DeviceSyncPolicy,
+    ) -> DocumentStatus {
+        let current = current.status(policy);
+        let parked = self.parked.status(policy);
+        if current.0 == SyncPhase::Error {
+            return (current.0, current.1, current.2 || parked.2);
+        }
+        if parked.0 == SyncPhase::Error {
+            return (parked.0, parked.1, current.2 || parked.2);
+        }
+        if current.0 == SyncPhase::Disabled {
+            return current;
+        }
+        if parked.0 == SyncPhase::Disabled {
+            return parked;
+        }
+        (SyncPhase::CatchingUp, None, current.2 || parked.2)
+    }
+}
+
 fn document_sync_status(
     statuses: &HashMap<DocumentPeer, DocumentStatus>,
     public: &PublicIdentity,
@@ -2466,8 +2571,15 @@ impl Node {
         let mut document_preemptions = HashSet::new();
         let mut document_protected = HashSet::new();
         let mut document_resumes = HashSet::new();
+        let mut control_pairs: HashMap<DocumentPeer, ControlComparisonPair> = HashMap::new();
+        let mut document_selected_at_dispatch: HashMap<tokio::task::Id, ControlDemand> =
+            HashMap::new();
+        let mut same_source_preemptions = HashSet::new();
         let mut foreground_next = None;
-        let mut document_cursors = HashMap::new();
+        let mut document_cursors: HashMap<
+            DocumentPeer,
+            super::account_documents::sync::DocumentSyncCursor,
+        > = HashMap::new();
         let mut document_queues: [VecDeque<(DocumentPeer, PeerRecord)>; DOCUMENT_WORKERS] =
             std::array::from_fn(|_| VecDeque::new());
         let mut document_active: HashSet<DocumentPeer> = HashSet::new();
@@ -2586,14 +2698,43 @@ impl Node {
                     attachment_owners.insert(task.id(), owner);
                 }
             }
-            let selected = self.pending_account_operation_sources();
+            // Reuse the cursor's existing authenticated observation-time rule
+            // before calculating a paired cooldown. A successful newer proof
+            // can retire an older failure without a fresh comparison bypass.
+            {
+                let support = self
+                    .account_group_versions
+                    .lock()
+                    .expect("group versions mutex");
+                let observed = |key: &DocumentPeer| {
+                    support
+                        .get(&key.device_id)
+                        .filter(|value| value.public == key.public())
+                        .map(|value| value.observed_at)
+                };
+                for (key, state) in &mut document_cursors {
+                    state.observe_group_protocol(observed(key));
+                }
+                for (key, pair) in &mut control_pairs {
+                    pair.parked.observe_group_protocol(observed(key));
+                }
+            }
+            let selected_requests = self.pending_account_operation_source_requests();
+            let selected: HashSet<_> = selected_requests.keys().copied().collect();
             let hints = self.pending_control_wakes();
             let control_queue = &mut document_queues[DocumentLane::Control.index()];
             let ready = |key: &DocumentPeer| {
-                document_cursors
+                control_pairs
                     .get(key)
-                    .and_then(
-                        |state: &super::account_documents::sync::DocumentSyncCursor| state.retry_at,
+                    .map_or_else(
+                        || {
+                            document_cursors.get(key).and_then(
+                                |state: &super::account_documents::sync::DocumentSyncCursor| {
+                                    state.retry_at
+                                },
+                            )
+                        },
+                        |pair| pair.deadline(document_cursors.get(key)),
                     )
                     .is_none_or(|at| at <= std::time::Instant::now())
             };
@@ -2618,26 +2759,55 @@ impl Node {
                         .any(|(key, _)| key.public() == hint.public && ready(key))
                 })
                 .map(|hint| wake::wake_identity(&hint.public));
+            for (key, pair) in &mut control_pairs {
+                pair.observe(
+                    selected_requests
+                        .get(&key.identity())
+                        .cloned()
+                        .unwrap_or_default(),
+                    hints.iter().find(|hint| hint.public == key.public()),
+                );
+            }
             for (task, key) in &document_owners {
+                let fresh_same_source = key.lane == DocumentLane::Control
+                    && !control_pairs.contains_key(key)
+                    && !document_protected.contains(task)
+                    && ((selected_requests
+                        .get(&key.identity())
+                        .is_some_and(|generation| {
+                            document_selected_at_dispatch
+                                .get(task)
+                                .is_none_or(|seen| !generation.is_subset(seen))
+                        }))
+                        || hints.iter().any(|hint| hint.public == key.public()));
                 let wake_preempts = control_wake_preempts(
                     key.identity(),
                     document_protected.contains(task),
                     wake_waiting,
                 );
                 if key.lane == DocumentLane::Control
-                    && !selected.contains(&key.identity())
-                    && (selected_waiting || wake_preempts)
+                    && (fresh_same_source
+                        || (!selected.contains(&key.identity())
+                            && (selected_waiting || wake_preempts)))
                     && document_preemptions.insert(*task)
                     && let Some(handle) = document_aborts.get(task)
                 {
-                    if !selected_waiting {
+                    if fresh_same_source {
+                        same_source_preemptions.insert(*task);
+                    } else if !selected_waiting {
                         foreground_next = wake_waiting;
                     }
                     #[cfg(test)]
                     self.trace_account_client(&key.public(), || {
                         format!(
                             "control_owned_abort reason={}",
-                            if selected_waiting { "selected" } else { "wake" }
+                            if fresh_same_source {
+                                "same_source"
+                            } else if selected_waiting {
+                                "selected"
+                            } else {
+                                "wake"
+                            }
                         )
                     });
                     handle.abort();
@@ -2646,8 +2816,10 @@ impl Node {
             control_queue.make_contiguous().sort_by_key(|(key, _)| {
                 control_queue_priority(
                     selected.contains(&key.identity()),
-                    foreground_next == Some(key.identity()),
-                    document_resumes.contains(key),
+                    foreground_next == Some(key.identity())
+                        || control_pairs.get(key).is_some_and(|pair| pair.foreground),
+                    document_resumes.contains(key)
+                        || control_pairs.get(key).is_some_and(|pair| !pair.foreground),
                     hints.iter().position(|hint| hint.public == key.public()),
                 )
             });
@@ -2663,10 +2835,15 @@ impl Node {
                 let Some((key, peer)) = take_ready_mandatory_peer(
                     &mut document_queues[lane.index()],
                     |key| {
-                        document_cursors.get(key).and_then(
-                            |state: &super::account_documents::sync::DocumentSyncCursor| {
-                                state.retry_at
+                        control_pairs.get(key).map_or_else(
+                            || {
+                                document_cursors.get(key).and_then(
+                                    |state: &super::account_documents::sync::DocumentSyncCursor| {
+                                        state.retry_at
+                                    },
+                                )
                             },
+                            |pair| pair.deadline(document_cursors.get(key)),
                         )
                     },
                     std::time::Instant::now(),
@@ -2694,14 +2871,16 @@ impl Node {
                 let owner = key.clone();
                 #[cfg(test)]
                 let control_origin = (
-                    document_resumes.contains(&key),
+                    document_resumes.contains(&key)
+                        || control_pairs.get(&key).is_some_and(|pair| !pair.foreground),
                     foreground_next == Some(key.identity()),
                 );
                 let protected = key.lane == DocumentLane::Control
-                    && control_turn_protected(
+                    && (control_turn_protected(
                         document_resumes.remove(&key),
                         foreground_next == Some(key.identity()),
-                    );
+                    ) || control_pairs.contains_key(&key)
+                        || selected.contains(&key.identity()));
                 if key.lane == DocumentLane::Control {
                     if foreground_next == Some(key.identity()) {
                         foreground_next = None;
@@ -2733,6 +2912,9 @@ impl Node {
                 }));
                 if protected {
                     document_protected.insert(task.id());
+                }
+                if let Some(generation) = selected_requests.get(&owner.identity()) {
+                    document_selected_at_dispatch.insert(task.id(), generation.clone());
                 }
                 document_checkpoints.insert(task.id(), checkpoint);
                 document_aborts.insert(task.id(), task.clone());
@@ -2861,7 +3043,10 @@ impl Node {
                 .filter(|lane| !document_active.iter().any(|key| key.lane == *lane))
                 .filter_map(|lane| {
                     mandatory_retry_deadline(&document_queues[lane.index()], |key| {
-                        document_cursors.get(key).and_then(|state| state.retry_at)
+                        control_pairs.get(key).map_or_else(
+                            || document_cursors.get(key).and_then(|state| state.retry_at),
+                            |pair| pair.deadline(document_cursors.get(key)),
+                        )
                     })
                 })
                 .min();
@@ -2916,12 +3101,31 @@ impl Node {
                             document_active.remove(&key);
                             document_aborts.remove(&error.id());
                             document_protected.remove(&error.id());
+                            document_selected_at_dispatch.remove(&error.id());
+                            let same_source = same_source_preemptions.remove(&error.id());
                             if document_preemptions.remove(&error.id()) {
                                 #[cfg(test)]
                                 self.trace_account_client(&key.public(), || "control_owned_abort_released".into());
                                 if let Some((peer, state)) = document_checkpoints.remove(&error.id())
                                     && self.certified_sibling(&peer.public) {
-                                    document_cursors.insert(key.clone(), state);
+                                    if same_source {
+                                        let foreground = state.fresh_control_comparison();
+                                        control_pairs.insert(key.clone(), ControlComparisonPair::new(state, selected_requests.get(&key.identity()).cloned().unwrap_or_default(), hints.iter().find(|hint| hint.public == key.public()).cloned()));
+                                        document_cursors.insert(key.clone(), foreground);
+                                    } else {
+                                        document_cursors.insert(key.clone(), state);
+                                    }
+                                    if let Some(pair) = control_pairs.get(&key) {
+                                        let projection = pair.status(document_cursors.get(&key).expect("paired current checkpoint"), self.device_sync_policy());
+                                        document_statuses.insert(key.clone(), projection);
+                                        let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
+                                            .get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
+                                        let (phase, error, upgrade) = document_sync_status(&document_statuses, &peer.public);
+                                        status.document_phase = phase;
+                                        status.document_error = error;
+                                        status.document_requires_upgrade = upgrade;
+                                        self.set_account_sync_status(id.clone(), status);
+                                    }
                                     document_resumes.insert(key.clone());
                                     document_queues[key.lane.index()].push_back((key, peer));
                                 }
@@ -2929,6 +3133,8 @@ impl Node {
                             document_checkpoints.remove(&error.id());
                             document_refresh.remove(&key);
                             document_cursors.remove(&key);
+                            control_pairs.remove(&key);
+                            same_source_preemptions.remove(&error.id());
                             if self.certified_sibling(&key.public()) {
                             document_statuses.insert(key.clone(), (SyncPhase::Error,
                                 Some("account document worker terminated".into()), false));
@@ -2947,18 +3153,31 @@ impl Node {
                         document_aborts.remove(&task);
                         document_preemptions.remove(&task);
                         document_protected.remove(&task);
+                        document_selected_at_dispatch.remove(&task);
+                        let same_source = same_source_preemptions.remove(&task);
                         let id = key.device_id.clone();
                         document_owners.remove(&task);
                         document_active.remove(&key);
                         let (policy, current_revision) = self.device_sync_policy_snapshot();
                         if current_revision != revision { enqueue_all = true; }
                         else if self.certified_sibling(&peer.public) {
+                            if same_source {
+                                let foreground = state.fresh_control_comparison();
+                                control_pairs.insert(key.clone(), ControlComparisonPair::new(state, selected_requests.get(&key.identity()).cloned().unwrap_or_default(), hints.iter().find(|hint| hint.public == key.public()).cloned()));
+                                state = foreground;
+                            }
+                            let paired = if same_source { Some(false) } else { control_pairs.get_mut(&key).map(|pair| pair.finish_page(&mut state)) };
+                            if paired == Some(true) {
+                                control_pairs.remove(&key);
+                                #[cfg(test)] self.trace_account_client(&key.public(), || "control_pair_retired".into());
+                            }
                             let refresh = document_refresh.contains(&key);
-                            if refresh && state.begin_refresh() {
+                            if !control_pairs.contains_key(&key) && refresh && state.begin_refresh() {
                                 document_refresh.remove(&key);
                             }
-                            let continuation = (refresh && !state.admission_deferred()) || state.pending;
-                            document_statuses.insert(key.clone(), state.status(policy));
+                            let continuation = control_pairs.contains_key(&key) || (refresh && !state.admission_deferred()) || state.pending;
+                            let projection = control_pairs.get(&key).map_or_else(|| state.status(policy), |pair| pair.status(&state, policy));
+                            document_statuses.insert(key.clone(), projection);
                             let mut status = self.account_sync_status.lock().expect("account sync status mutex not poisoned")
                                 .get(&id).cloned().unwrap_or_else(|| initial_sync_status(id.clone()));
                             let (phase, error, upgrade) = document_sync_status(&document_statuses, &peer.public);
@@ -2974,6 +3193,7 @@ impl Node {
                         } else {
                             document_refresh.remove(&key);
                             document_statuses.remove(&key);
+                            control_pairs.remove(&key);
                         }
                     }
                 }
@@ -3157,6 +3377,9 @@ impl Node {
                 document_preemptions.clear();
                 document_protected.clear();
                 document_resumes.clear();
+                control_pairs.clear();
+                document_selected_at_dispatch.clear();
+                same_source_preemptions.clear();
                 foreground_next = None;
                 self.clear_control_wakes();
                 document_active.clear();
@@ -3190,6 +3413,7 @@ impl Node {
                     .map(|device| (device.public.ed25519_pub, device.public.x25519_pub))
                     .collect();
                 document_cursors.retain(|key, _| document_identities.contains(&key.identity()));
+                control_pairs.retain(|key, _| document_identities.contains(&key.identity()));
                 document_statuses.retain(|key, _| document_identities.contains(&key.identity()));
                 document_resumes.retain(|key| document_identities.contains(&key.identity()));
                 if foreground_next.is_some_and(|identity| !document_identities.contains(&identity))
@@ -3232,7 +3456,8 @@ impl Node {
                             && let Some(peer) = self.routing_peer(&id)
                             && peer.public == device.public
                         {
-                            if let Some(state) = document_cursors.get_mut(&key)
+                            if !control_pairs.contains_key(&key)
+                                && let Some(state) = document_cursors.get_mut(&key)
                                 && !state.begin_refresh()
                             {
                                 document_refresh.insert(key.clone());
@@ -3312,6 +3537,157 @@ impl Node {
 mod tests {
     use super::*;
     use crate::identity::account::Account;
+
+    #[test]
+    fn paired_control_pages_preserve_both_partial_checkpoints_and_alternate() {
+        use super::super::account_documents::{
+            AccountDocumentKey, sync::DocumentSyncCursor as Cursor,
+        };
+        let key = |value: u8| AccountDocumentKey::GroupOperation {
+            channel: hex::encode([value; 32]),
+            source_device: "01".repeat(16),
+        };
+        let mut background = Cursor::control_test_page(Some(key(8)));
+        background.retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
+        let original = background.clone();
+        let mut pair = ControlComparisonPair::new(background, ControlDemand::new(), None);
+        let mut current = Cursor::control_test_page(Some(key(2)));
+        let foreground = current.clone();
+        assert!(!pair.finish_page(&mut current));
+        assert!(!pair.foreground);
+        assert_eq!(
+            current, original,
+            "background resumes its exact original key/digests/retry"
+        );
+        assert_eq!(
+            pair.parked, foreground,
+            "foreground continuation is retained independently"
+        );
+        assert_eq!(pair.deadline(Some(&current)), original.retry_at);
+        let background = current.clone();
+        assert!(!pair.finish_page(&mut current));
+        assert!(pair.foreground);
+        assert_eq!(current, foreground);
+        assert_eq!(pair.parked, background);
+        assert_eq!(
+            pair.status(&current, DeviceSyncPolicy::default()).0,
+            SyncPhase::CatchingUp
+        );
+        current = Cursor::control_test_page(None);
+        assert!(!pair.finish_page(&mut current));
+        assert!(!pair.foreground);
+        current = Cursor::control_test_page(None);
+        assert!(pair.finish_page(&mut current));
+        assert!(current.control_comparison_complete());
+    }
+
+    #[test]
+    fn paired_control_deferral_keeps_owner_and_waits_for_both_retry_deadlines() {
+        use super::super::account_documents::sync::DocumentSyncCursor as Cursor;
+        let mut background = Cursor::control();
+        background.retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
+        let saved = background.clone();
+        let mut current = background.fresh_control_comparison();
+        current.retry_at = Some(std::time::Instant::now() + Duration::from_secs(10));
+        let latest = current.retry_at;
+        let mut pair = ControlComparisonPair::new(background, ControlDemand::new(), None);
+        assert!(
+            !pair.finish_page(&mut current),
+            "no validated page means no fairness turn paid"
+        );
+        assert!(pair.foreground);
+        assert_eq!(pair.parked, saved);
+        assert_eq!(pair.deadline(Some(&current)), latest);
+        assert_eq!(
+            pair.parked.retry_at, saved.retry_at,
+            "shared readiness never overwrites exact parked retry"
+        );
+    }
+
+    #[test]
+    fn paired_control_followup_requires_a_new_admitted_operation_or_wake_token() {
+        use super::super::account_documents::{
+            AccountDocumentKey, sync::DocumentSyncCursor as Cursor,
+        };
+        let partial = AccountDocumentKey::GroupOperation {
+            channel: "08".repeat(32),
+            source_device: "01".repeat(16),
+        };
+        let first = super::super::AccountGroupOperationId::from_hex(&hex::encode([1; 32])).unwrap();
+        let second =
+            super::super::AccountGroupOperationId::from_hex(&hex::encode([2; 32])).unwrap();
+        let initial = ControlDemand::from([first]);
+        let mut pair = ControlComparisonPair::new(
+            Cursor::control_test_page(Some(partial)),
+            initial.clone(),
+            None,
+        );
+        let mut current = Cursor::control_test_page(None);
+        for _ in 0..64 {
+            pair.observe(initial.clone(), None);
+        }
+        assert!(
+            !pair.followup,
+            "polls and unchanged operation IDs do not rearm completed foreground"
+        );
+        assert!(!pair.finish_page(&mut current));
+        assert!(
+            !pair.foreground,
+            "one background page is owed after foreground completion"
+        );
+        pair.observe(ControlDemand::from([first, second]), None);
+        assert!(pair.followup);
+        let background = current.clone();
+        assert!(!pair.finish_page(&mut current));
+        assert!(pair.foreground && !current.control_comparison_complete());
+        assert_eq!(pair.parked, background);
+        assert!(!pair.followup);
+        for _ in 0..64 {
+            pair.observe(ControlDemand::from([first, second]), None);
+        }
+        assert!(
+            !pair.followup,
+            "the same admitted request cannot create a third comparison"
+        );
+        for value in 3..=2048u64 {
+            pair.observe(ControlDemand::new(), None);
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&value.to_be_bytes());
+            let id = super::super::AccountGroupOperationId::from_hex(&hex::encode(bytes)).unwrap();
+            pair.observe(ControlDemand::from([id]), None);
+            assert_eq!(
+                pair.local_requests.len(),
+                1,
+                "terminal/new admission cycles retain only the current bounded journal snapshot"
+            );
+        }
+        let peer = PublicIdentity {
+            ed25519_pub: [3; 32],
+            x25519_pub: [4; 32],
+        };
+        let old = wake::ControlWakeHint::test_token(peer.clone(), [1; 16], 2);
+        pair.wake = Some(old.clone());
+        pair.followup = false;
+        let ids = pair.local_requests.clone();
+        for _ in 0..64 {
+            pair.observe(ids.clone(), Some(&old));
+        }
+        assert!(
+            !pair.followup,
+            "an identical authenticated wake token cannot rearm foreground"
+        );
+        let newer = wake::ControlWakeHint::test_token(peer, [1; 16], 3);
+        pair.observe(ids.clone(), Some(&newer));
+        assert!(
+            pair.followup,
+            "a genuinely newer publication coalesces one follow-up"
+        );
+        pair.followup = false;
+        for _ in 0..64 {
+            pair.observe(ids.clone(), Some(&newer));
+        }
+        assert!(!pair.followup, "the consumed token cannot repeatedly rearm");
+    }
 
     #[test]
     fn incoming_wake_yields_one_natural_turn_but_protects_replacement_and_resume() {

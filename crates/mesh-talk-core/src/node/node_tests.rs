@@ -3474,6 +3474,9 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
 
     slow_task.abort();
     let _ = slow_task.await;
+    // Await destruction of the old accepted connections before replacing their
+    // listener; a completed cached socket must not outlive this fixture stage.
+    slow_node.runtime_work.drain().await;
     let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, slow_port))
         .await
         .unwrap();

@@ -1359,6 +1359,24 @@ executor is not restarted by repeated status polling. Terminal operations retire
 that priority, allowing unrelated sibling metadata to resume. Accepted mutations
 are never cancelled by this scheduling rule, and worker/TCP limits do not increase.
 
+A read dispatched before a new operation selects that same executor cannot
+retroactively become its protected foreground comparison. After owned cancellation
+releases admission, the Control owner parks the exact original metadata checkpoint
+and starts an independent comparison from the beginning. At most one checkpoint is
+parked per certified remote device (at most 63); no response bytes are parked and
+only the existing single Control worker reads pages. The two comparisons alternate
+after validated page completion, preserving their own continuation keys, digests,
+support observations and retry deadlines. Failed or deferred admission does not
+pay for a page turn. Readiness respects both deadlines, and aggregate status cannot
+claim convergence while either comparison remains unfinished.
+
+Only newly admitted immutable operation IDs or a new authenticated Wake token
+coalesce a foreground follow-up; polling and operation status writes do not.
+The owner retains the current bounded pending-ID snapshot rather than an
+ever-growing history. Once the previous operation settles, a newly selected other
+executor retains its priority over resumed background work. Policy or identity
+changes retire both comparisons through the existing worker cleanup.
+
 The same Control owner retains at most 64 authenticated Wake sender tokens, keyed
 by full Ed25519/X25519 identity and current account binding. Fresh tokens coalesce
 in sender FIFO order. A waiting sender may preempt an unrelated ordinary metadata read, including a
@@ -2125,6 +2143,24 @@ acknowledgements and acknowledged failures do not downgrade. Unsupported-state
 entries are capped at 256, expire after sixty seconds, and bind the actual
 authenticated endpoint, full identity and privacy generation. A successful
 negotiation clears that endpoint's negative entry.
+
+Identity-only Noise sessions from unconfigured legacy peers may reuse completed
+generic sync rounds when a current signed announcement names the exact same Ed25519
+and X25519 identity, carries no account certificate, and has no post-office role.
+That compatibility does not infer an account binding: current or historical account
+proofs, durable linked-device pins (including pins without cached announcements),
+and account or role transitions still reject the older identity-only channel.
+Endpoint, privacy generation, I/O admission and conversation scope checks remain
+mandatory, including for bare Noise reuse when no announcement or pin exists.
+These compatibility checks apply to generic sync only. Negotiated account-session
+reuse retains its existing independent certified-sibling admission and account
+scope checks; an identity-only generic session cannot substitute for that owner.
+An SDK peer without an in-band announcement may retain its already negotiated,
+completed Account session when its current signed presence names the exact full
+identity and own account, its durable sibling certificate remains valid, and
+configured account proofs accept that binding. Conflicting account or relay-role
+proofs reject reuse. This does not promote a generic session into an Account
+session or bypass the Account exchange's existing certification checks.
 
 A reusable inbound account session becomes idle only after its authenticated
 request has completed and the terminal response has been written. Completed idle

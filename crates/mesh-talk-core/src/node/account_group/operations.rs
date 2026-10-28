@@ -766,25 +766,41 @@ impl Node {
     /// Only locally requested, nonterminal operations prioritize a remote
     /// executor. Full transport identity prevents a replacement device from
     /// inheriting another executor's scheduling authority.
+    #[cfg(test)]
     pub(in crate::node) fn pending_account_operation_sources(
         &self,
     ) -> std::collections::HashSet<([u8; 32], [u8; 32])> {
-        let own = self.identity.public();
-        self.group_operations
-            .lock()
-            .expect("group operation journal mutex")
-            .entries
-            .values()
-            .filter(|entry| {
-                !entry.terminal()
-                    && entry.reference.origin.public() == own
-                    && entry.reference.executor.device != own
-            })
-            .map(|entry| {
-                let public = &entry.reference.executor.device;
-                (public.ed25519_pub, public.x25519_pub)
-            })
+        self.pending_account_operation_source_requests()
+            .into_keys()
             .collect()
+    }
+
+    /// Immutable admitted operation IDs distinguish new requests from read-only
+    /// status polling and internal phase changes; no additional admission clock.
+    pub(in crate::node) fn pending_account_operation_source_requests(
+        &self,
+    ) -> std::collections::HashMap<
+        ([u8; 32], [u8; 32]),
+        std::collections::BTreeSet<AccountGroupOperationId>,
+    > {
+        let own = self.identity.public();
+        let journal = self
+            .group_operations
+            .lock()
+            .expect("group operation journal mutex");
+        let mut requests = std::collections::HashMap::new();
+        for entry in journal.entries.values().filter(|entry| {
+            !entry.terminal()
+                && entry.reference.origin.public() == own
+                && entry.reference.executor.device != own
+        }) {
+            let public = &entry.reference.executor.device;
+            requests
+                .entry((public.ed25519_pub, public.x25519_pub))
+                .or_insert_with(std::collections::BTreeSet::new)
+                .insert(entry.reference.id);
+        }
+        requests
     }
 
     pub fn account_group_operation_status(

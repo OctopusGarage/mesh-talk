@@ -713,6 +713,13 @@ and public authority. Current peer labels, later account adoption and later
 grants cannot retarget an already prepared effect. Source acceptance preflights
 the complete envelope against the existing journal and transaction budgets.
 
+Each witness row binds its physical membership lifetime, acceptance state and
+corresponding certified identity together. A valid proof or accepted role from a
+different lifetime cannot replace that row. A legacy account leave with a committed
+physical leg rolls forward. When another leg acknowledges cancellation during
+that turn, the next turn replaces the cancelled leg under the original parent
+intent and preserves the committed leg's exact result.
+
 Executor selection requires both a supported operation kind and a current,
 executable source view before preferring the local device. A private authority
 observation can arrive before its public causal events: a reconciling source

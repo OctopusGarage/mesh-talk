@@ -41,6 +41,9 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
+            "local_cancel_ack_during_remote_commit_rolls_forward_without_action_required",
+            "owner_decision_rejects_stale_rejoined_lifetime_with_current_acceptance",
+            "owner_decision_rejects_matching_lifetime_with_false_role_or_wrong_proof",
             "new_account_group_membership_and_ownership_inherit_over_certified_sibling_sync",
             "node::reaction_store::",
             "node::message_actions::",
@@ -100,7 +103,14 @@
             "node::account_sync::wake::tests::control_wake_fifo_coalesces_and_consumes_only_the_captured_generation",
             "node::account_sync::wake::tests::control_wakes_bound_full_identities_and_prune_changed_bindings",
             "a_new_terminal_publication_retries_a_locally_busy_wake_without_remote_cooldown",
-            "local_capacity_retry_requires_a_new_publication_but_remote_failure_keeps_its_cooldown"
+            "local_capacity_retry_requires_a_new_publication_but_remote_failure_keeps_its_cooldown",
+            "selected_source_receipt_overtakes_its_own_preoperation_background_control_read",
+            "selected_source_lower_key_receipt_preserves_both_partial_control_comparisons",
+            "another_selected_executor_overtakes_a_completed_operations_paired_background_page",
+            "paired_control_pages_preserve_both_partial_checkpoints_and_alternate",
+            "paired_control_deferral_keeps_owner_and_waits_for_both_retry_deadlines",
+            "paired_control_followup_requires_a_new_admitted_operation_or_wake_token",
+            "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge"
           ]
         }
       ],
@@ -108,6 +118,10 @@
         "summary": "Apply one account group role across certified devices while preserving public signer authority and explicit execution availability.",
         "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
+          {
+            "name": "A legacy leave with a committed physical leg preserves roll-forward after another leg acknowledges cancellation; owner preparation requires each original physical lifetime, acceptance state and certified proof to match as one complete witness.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
           {
             "name": "Account-target owner controls retain the original signed input and complete accepted/invited lifetime witness; causal replay validates the saved parent view before append, while old delivery bincode discriminants and field shapes remain unchanged.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
@@ -165,7 +179,7 @@
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
-            "name": "A pending account action can preempt only an unrelated Control read, restore its exact checkpoint after owned cancellation and resume it after completion without increasing the four-worker budget or cancelling accepted mutations.",
+            "name": "Newly admitted account operations and authenticated Wake tokens can preempt a preexisting read of the same executor, retaining one bounded parked metadata checkpoint and independent foreground comparison. Validated pages alternate without combining continuation, digest, support or retry state; polling cannot rearm work, other selected executors retain priority, and accepted mutations and existing worker/TCP budgets remain unchanged.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
@@ -309,6 +323,8 @@
         "crates/mesh-talk-core/src/node/privacy_routing.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime_tests.rs",
         "crates/mesh-talk-core/src/node/session_pool.rs",
+        "crates/mesh-talk-core/src/node/session_pool_tests.rs",
+        "crates/mesh-talk-core/src/node/node_tests.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
         "crates/mesh-talk-core/src/transport/channel.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
@@ -325,20 +341,51 @@
             "private_probe_refreshes_public_presence_before_its_lease_expires",
             "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
             "node::session_pool::",
+            "completed_receipt_scope_keeps_the_authenticated_connection_for_the_next_message",
+            "successful_sync_rounds_reuse_one_authenticated_tcp_connection",
+            "accountless_signed_discovery_reuses_five_completed_generic_rounds",
+            "accountless_cached_sync_preserves_identity_role_and_account_pins",
+            "bare_noise_reuse_never_substitutes_for_an_unconfigured_durable_sibling_pin",
+            "outbound_handshakes_are_bounded_and_cancellation_releases_capacity",
+            "duplicate_hung_endpoint_handshakes_do_not_starve_healthy_sync",
+            "concurrent_live_endpoint_dials_keep_independent_authenticated_channels",
+            "sync_pool_does_not_reuse_for_one_shot_or_wrong_identity_and_drops_cancelled_channels",
+            "sync_pool_isolates_endpoint_and_privacy_generation",
+            "sync_pool_reconnects_after_remote_session_close",
+            "shared_tcp_budget_limits_combined_inbound_and_outbound_and_accepts_after_release",
+            "retained_sync_session_expires_without_further_network_work",
+            "sync_pool_reauthenticates_after_verified_account_or_relay_role_change",
+            "sync_pool_rejects_retired_account_before_new_presence_arrives",
+            "fresh_sync_protocol_errors_do_not_trigger_another_connection",
+            "sync_pool_reuses_authenticated_fallback_route_and_mapped_endpoint",
+            "sync_pool_reuses_authenticated_route_after_verified_hint_loses_route_race",
+            "stalled_channel_peer_does_not_delay_healthy_member",
+            "certified_siblings_transfer_large_typed_document_over_existing_account_session",
+            "group_inventory_v4_cooldown_preserves_fallback_while_v5_interruptions_retry",
+            "account_history_pages_reuse_one_authenticated_connection",
+            "account_session_ready_errors_never_retry_a_legacy_request",
+            "account_and_sync_reuse_separate_authenticated_connections",
+            "old_peer_document_probe_has_negative_cooldown_and_history_still_works",
+            "account_legacy_v2_rejects_one_session_probe_then_keeps_one_shot_requests",
             "seven_idle_authenticated_inbound_sessions_do_not_block_a_fresh_control_peer",
             "inbound_capacity_never_retires_an_active_response_and_resumes_after_completion",
             "private_control_noise_handshake_overtakes_queued_background_without_more_capacity",
             "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel",
             "authentication_backpressure_preserves_document_progress_and_recovers",
             "account_worker_retries_local_authentication_contention_without_a_false_sync_error",
-            "offline_dm_delivered_via_post_office_over_loopback"
+            "offline_dm_delivered_via_post_office_over_loopback",
+            "signed_own_account_sdk_presence_reuses_five_typed_document_pages"
           ]
         }
       ],
       "capability": {
-        "summary": "Bound historical route probes and completed account-session reuse under the shared connection budget, preserving canceled probe turns.",
+        "summary": "Bound historical route probes and completed sync-session reuse under the shared connection budget, preserving canceled probe turns.",
         "guide": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance",
         "invariants": [
+          {
+            "name": "Identity-authenticated generic sync may reuse a signed accountless non-relay route only with the same full public identity and no conflicting current, historical or linked account pin; reuse never infers account membership and preserves endpoint, generation, I/O and scope checks.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
           {
             "name": "Only completed reusable account sessions may retire under listener/shared pressure: one oldest-idle retirement remains pending until the owner drops real socket permits; ready frames, handshakes and active responses remain protected under unchanged eight shared/seven directional slots and the existing enclosing idle deadline.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
@@ -358,6 +405,10 @@
           {
             "name": "Local admission backpressure preserves account-sync cursors and verified protocol support, releases bounded workers and resumes through delayed retry without exposing an authentication failure or spinning on coalesced wakes.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Completed negotiated Account sessions from SDK siblings without in-band announcements reuse only under exact full identity, current own-account presence, durable sibling certification and consistent configured proofs; generic Sync reuse never confers Account protocol authority.",
+            "reference": "docs/network-design-reference.md#session-reuse-contract"
           }
         ]
       },

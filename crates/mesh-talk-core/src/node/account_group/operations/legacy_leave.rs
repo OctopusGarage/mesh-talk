@@ -470,6 +470,256 @@ mod tests {
     }
 
     #[test]
+    fn local_cancel_ack_during_remote_commit_rolls_forward_without_action_required() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let coordinator = node(&dir.path().join("coordinator"), &account);
+        let remote = node(&dir.path().join("remote"), &account);
+        let owner = DeviceIdentity::generate();
+        let owner_account = Account::generate();
+        let group = new_channel_id();
+        let genesis = Event::new(
+            &owner,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "durable cancellation versus remote commit".into(),
+                members: vec![
+                    owner.public(),
+                    coordinator.identity.public(),
+                    remote.identity.public(),
+                ],
+                epoch: 0,
+                owner: owner.public().user_id(),
+            }
+            .encode(),
+        );
+        for current in [&coordinator, &remote] {
+            current
+                .log
+                .lock()
+                .unwrap()
+                .append_durable(genesis.clone())
+                .unwrap();
+            current.process_channel(group);
+            for (public, certificate) in [
+                (
+                    coordinator.identity.public(),
+                    account.certify(&coordinator.identity.public().ed25519_pub),
+                ),
+                (
+                    remote.identity.public(),
+                    account.certify(&remote.identity.public().ed25519_pub),
+                ),
+            ] {
+                current
+                    .account_devices
+                    .lock()
+                    .unwrap()
+                    .insert(AccountDevice {
+                        public,
+                        certificate,
+                    })
+                    .unwrap();
+            }
+            for proof in [
+                Announce::new_with_account(&owner, &owner_account, "offline owner", 1),
+                coordinator.own_group_proof(),
+                remote.own_group_proof(),
+            ] {
+                if proof.public() != current.identity.public() {
+                    current.roster.lock().unwrap().update(
+                        &proof,
+                        "127.0.0.1".parse().unwrap(),
+                        &current.user_id(),
+                    );
+                }
+            }
+        }
+        let local_source = Node::public_account_group_source(
+            group,
+            &coordinator.account_group_projection(group),
+            &coordinator.identity.public(),
+            &coordinator.own_group_proof(),
+        )
+        .unwrap();
+        let mut remote_source = Node::public_account_group_source(
+            group,
+            &remote.account_group_projection(group),
+            &remote.identity.public(),
+            &remote.own_group_proof(),
+        )
+        .unwrap();
+        remote_source.execution = AccountGroupExecution::ViaDevice(remote.identity.public());
+        let reference = |source| {
+            OperationReference::new(
+                &coordinator,
+                coordinator
+                    .new_account_group_operation_id(&account.account_id())
+                    .unwrap(),
+                group,
+                &AccountGroupOperation::LeaveAccount,
+                source,
+            )
+        };
+        let parent = reference(local_source.clone());
+        let local = reference(local_source);
+        let other = reference(remote_source);
+        let request = |reference: OperationReference| RequestProjection {
+            reference,
+            body: Some(AccountGroupOperation::LeaveAccount),
+            cancel: false,
+            nonce: [0; 16],
+        };
+        coordinator
+            .admit_source_group_request(request(parent.clone()))
+            .unwrap();
+        {
+            let mut journal = coordinator.group_operations.lock().unwrap();
+            assert!(journal.entries[&parent.id].source);
+            assert_eq!(
+                journal.entries[&parent.id].status.phase,
+                AccountGroupOperationPhase::Accepted
+            );
+            journal
+                .put_legacy_plan(
+                    LegacyLeavePlan {
+                        parent: parent.clone(),
+                        legs: vec![local.clone(), other.clone()],
+                        roll_forward: false,
+                    },
+                    vec![
+                        coordinator.legacy_leave_entry(local.clone()),
+                        coordinator.legacy_leave_entry(other.clone()),
+                    ],
+                )
+                .unwrap();
+        }
+        coordinator
+            .admit_source_group_request(request(local.clone()))
+            .unwrap();
+        remote
+            .group_operations
+            .lock()
+            .unwrap()
+            .put_legacy_child(parent.clone(), remote.legacy_leave_entry(other.clone()))
+            .unwrap();
+        remote
+            .admit_source_group_request(request(other.clone()))
+            .unwrap();
+        // Both cancellation records are real public SDK writes. The local flag
+        // is durable but has not yet been acknowledged by its source executor.
+        coordinator
+            .cancel_account_group_operation(&account.account_id(), parent.id)
+            .unwrap();
+        coordinator
+            .cancel_account_group_operation(&account.account_id(), local.id)
+            .unwrap();
+        assert_eq!(
+            coordinator.group_operations.lock().unwrap().entries[&local.id]
+                .status
+                .phase,
+            AccountGroupOperationPhase::CancellationRequested
+        );
+        // The other original physical member wins its actual WAL-backed leave
+        // before the cancellation request reaches that independent source.
+        remote.execute_source_control(other.id).unwrap();
+        let remote_result = remote.group_operations.lock().unwrap().entries[&other.id]
+            .status
+            .clone();
+        assert_eq!(remote_result.phase, AccountGroupOperationPhase::Committed);
+        assert_eq!(remote_result.committed_events.len(), 1);
+        let effect = remote
+            .log
+            .lock()
+            .unwrap()
+            .get(&remote_result.committed_events[0])
+            .unwrap()
+            .clone();
+        assert!(effect.verify_signature());
+        assert_eq!(effect.kind, EventKind::ChannelLeave);
+        coordinator
+            .log
+            .lock()
+            .unwrap()
+            .append_durable(effect)
+            .unwrap();
+        coordinator.process_channel(group);
+        coordinator
+            .import_group_operation_result_for_test(
+                ResultProjection {
+                    reference: other.clone(),
+                    status: remote_result,
+                    message_event: None,
+                    file_descriptor: None,
+                    recall_mark: None,
+                },
+                &remote.own_group_proof(),
+            )
+            .unwrap();
+        coordinator
+            .try_execute_legacy_leave_coordinator(parent.id)
+            .unwrap();
+        {
+            let journal = coordinator.group_operations.lock().unwrap();
+            assert!(journal.legacy_plans[&parent.id].roll_forward);
+            assert!(journal.entries[&parent.id].cancel);
+            assert_eq!(
+                journal.entries[&local.id].status.phase,
+                AccountGroupOperationPhase::Cancelled
+            );
+            assert!(
+                journal.entries[&local.id]
+                    .status
+                    .committed_events
+                    .is_empty()
+            );
+            assert_eq!(
+                journal.entries[&parent.id].status.phase,
+                AccountGroupOperationPhase::Executing,
+                "a newly acknowledged local cancellation is retried next turn, not a frozen authority rejection"
+            );
+        }
+        coordinator
+            .try_execute_legacy_leave_coordinator(parent.id)
+            .unwrap();
+        let replacement =
+            coordinator.group_operations.lock().unwrap().legacy_plans[&parent.id].legs[0].clone();
+        assert_ne!(replacement.id, local.id);
+        assert_eq!(replacement.executor, local.executor);
+        coordinator
+            .try_execute_legacy_leave_coordinator(parent.id)
+            .unwrap();
+        let journal = coordinator.group_operations.lock().unwrap();
+        assert_eq!(
+            journal.entries[&parent.id].status.phase,
+            AccountGroupOperationPhase::Committed
+        );
+        assert_eq!(journal.entries[&parent.id].status.committed_events.len(), 2);
+        assert_eq!(
+            journal.entries[&local.id].status.phase,
+            AccountGroupOperationPhase::Cancelled
+        );
+        drop(journal);
+        assert_eq!(
+            coordinator
+                .log
+                .lock()
+                .unwrap()
+                .events(&group)
+                .iter()
+                .filter(|event| event.kind == EventKind::ChannelLeave
+                    && event.author.user_id() == coordinator.user_id())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn imported_cancel_race_retries_once_and_rejected_leg_keeps_original_attempt() {
         let dir = tempfile::tempdir().unwrap();
         let account = Account::generate();

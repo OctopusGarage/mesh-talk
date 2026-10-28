@@ -49,7 +49,32 @@ fn local_operation_capabilities() -> u16 {
     .filter(|kind| kind.supported_here())
     .fold(0, |mask, kind| mask | kind.capability_bit())
 }
+#[cfg(test)]
+pub(in crate::node) fn seed_legacy_control_page_for_test(
+    node: &Node,
+    group: crate::eventlog::ConversationId,
+) -> AccountDocumentKey {
+    use crate::node::account_group::operations::legacy_wire::{
+        LegacyOperationFrame, LegacyOperationProjection,
+    };
+    let key = AccountDocumentKey::GroupLegacyOperation {
+        channel: hex::encode(group.as_bytes()),
+        source_device: node.user_id(),
+    };
+    let bytes =
+        LegacyOperationFrame::new(node, group, 1, LegacyOperationProjection::default()).encode();
+    let meta =
+        AccountDocumentMeta::new(&node.account, node.user_id(), key.clone(), 1, &bytes, false);
+    node.account_documents
+        .lock()
+        .unwrap()
+        .merge(meta, &bytes)
+        .unwrap();
+    key
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 enum DocumentSyncScope {
     #[default]
     All,
@@ -74,6 +99,7 @@ impl DocumentSyncScope {
     }
 }
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(in crate::node) struct DocumentSyncCursor {
     scope: DocumentSyncScope,
     pub(super) domain: usize,
@@ -87,6 +113,7 @@ pub(in crate::node) struct DocumentSyncCursor {
     personal_required: bool,
     pub(in crate::node) retry_at: Option<Instant>,
     admission_deferred: bool,
+    page_completed: bool,
     last_failure_at: Option<Instant>,
     pub(in crate::node) error: Option<String>,
     error_domain: Option<AccountDocumentDomain>,
@@ -121,6 +148,7 @@ impl Default for DocumentSyncCursor {
             personal_required: false,
             retry_at: None,
             admission_deferred: false,
+            page_completed: false,
             last_failure_at: None,
             error: None,
             error_domain: None,
@@ -146,6 +174,17 @@ impl Default for DocumentSyncCursor {
 }
 impl DocumentSyncCursor {
     #[cfg(test)]
+    pub(in crate::node) fn control_test_page(after: Option<AccountDocumentKey>) -> Self {
+        let mut cursor = Self::control();
+        cursor.visited = cursor.scope.mask();
+        cursor.pending = after.is_some();
+        cursor.up_to_date = after.is_none();
+        cursor.after = after;
+        cursor.page_completed = true;
+        cursor
+    }
+
+    #[cfg(test)]
     fn client_trace_state(&self) -> String {
         format!(
             "domain={:?} pending={} after={} deferred={} retry_ms={}",
@@ -169,6 +208,57 @@ impl DocumentSyncCursor {
         self.settled = 0;
         self.up_to_date = false;
         true
+    }
+
+    /// Fork only the new comparison; the controller moves the original into
+    /// its bounded parked owner without changing any original checkpoint field.
+    pub(in crate::node) fn fresh_control_comparison(&self) -> Self {
+        debug_assert!(self.scope == DocumentSyncScope::Control);
+        let mut fresh = self.clone();
+        fresh.after = None;
+        fresh.visited = 0;
+        fresh.settled = 0;
+        fresh.pending = false;
+        fresh.up_to_date = false;
+        fresh.page_completed = false;
+        fresh
+    }
+    pub(in crate::node) fn control_page_completed(&self) -> bool {
+        self.page_completed
+    }
+    pub(in crate::node) fn control_comparison_complete(&self) -> bool {
+        debug_assert!(self.scope == DocumentSyncScope::Control);
+        self.after.is_none()
+            && !self.pending
+            && !self.admission_deferred
+            && self.error.is_none()
+            && self.visited & self.scope.mask() == self.scope.mask()
+    }
+    pub(in crate::node) fn observe_group_protocol(&mut self, supported_at: Option<Instant>) {
+        if (self.group_upgrade
+            || self.inventory_upgrade
+            || self.custody_upgrade
+            || self.control_upgrade
+            || self.requires_upgrade)
+            && self
+                .last_failure_at
+                .zip(supported_at)
+                .is_some_and(|(failed, supported)| supported > failed)
+        {
+            self.group_supported();
+            if self.scope != DocumentSyncScope::Optional {
+                self.domain = if self.scope == DocumentSyncScope::Directory {
+                    AccountDocumentDomain::GroupInventory as usize
+                } else {
+                    AccountDocumentDomain::GroupControl as usize
+                };
+                self.after = None;
+            }
+        }
+    }
+
+    pub(in crate::node) fn control_retry_deadline(&self) -> Option<Instant> {
+        self.retry_at.into_iter().chain(self.group_retry_at).max()
     }
 
     pub(in crate::node) fn admission_deferred(&self) -> bool {
@@ -644,6 +734,7 @@ impl Node {
         peer: &PeerRecord,
         cursor: &mut DocumentSyncCursor,
     ) -> Result<(), NodeError> {
+        cursor.page_completed = false;
         #[cfg(test)]
         let started = {
             let enabled = self.account_client_test_hook.lock().unwrap().is_some();
@@ -681,26 +772,7 @@ impl Node {
             .get(&peer.public.user_id())
             .filter(|support| support.public == peer.public)
             .map(|support| support.observed_at);
-        if (cursor.group_upgrade
-            || cursor.inventory_upgrade
-            || cursor.custody_upgrade
-            || cursor.control_upgrade
-            || cursor.requires_upgrade)
-            && cursor
-                .last_failure_at
-                .zip(supported_at)
-                .is_some_and(|(failed, supported)| supported > failed)
-        {
-            cursor.group_supported();
-            if cursor.scope != DocumentSyncScope::Optional {
-                cursor.domain = if cursor.scope == DocumentSyncScope::Directory {
-                    AccountDocumentDomain::GroupInventory as usize
-                } else {
-                    AccountDocumentDomain::GroupControl as usize
-                };
-                cursor.after = None;
-            }
-        }
+        cursor.observe_group_protocol(supported_at);
         if cursor.retry_at.is_some_and(|at| Instant::now() < at) {
             return Ok(());
         }
@@ -1318,6 +1390,7 @@ impl Node {
                             include_legacy,
                             include_personal,
                         );
+                    cursor.page_completed = true;
                     cursor.visited |= 1 << cursor.domain;
                     if complete.enabled {
                         cursor.remotely_disabled &= !(1 << cursor.domain);
@@ -1549,6 +1622,41 @@ mod status_tests {
             directory.digests[AccountDocumentDomain::GroupInventory as usize],
             [7; 32]
         );
+    }
+
+    #[test]
+    fn foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge() {
+        let after = AccountDocumentKey::GroupOperation {
+            channel: "01".repeat(32),
+            source_device: "02".repeat(16),
+        };
+        let mut original = DocumentSyncCursor::control_test_page(Some(after.clone()));
+        original.digests[8] = [7; 32];
+        original.operation_digest = [8; 32];
+        original.retry_at = Some(Instant::now() + Duration::from_secs(5));
+        original.group_retry_at = Some(Instant::now() + Duration::from_secs(10));
+        original.group_upgrade = true;
+        let saved = original.clone();
+        let fresh = original.fresh_control_comparison();
+        assert_eq!(
+            original, saved,
+            "forking must not mutate the saved checkpoint"
+        );
+        assert!(fresh.after.is_none() && !fresh.control_comparison_complete());
+        assert_eq!(fresh.digests, original.digests);
+        assert_eq!(fresh.operation_digest, original.operation_digest);
+        assert_eq!(
+            fresh.control_retry_deadline(),
+            original.control_retry_deadline()
+        );
+        assert_eq!(fresh.group_upgrade, original.group_upgrade);
+        let mut complete = DocumentSyncCursor::control_test_page(None);
+        assert!(complete.control_comparison_complete());
+        complete.admission_deferred = true;
+        assert!(!complete.control_comparison_complete());
+        complete.admission_deferred = false;
+        complete.error = Some("test transport failure".into());
+        assert!(!complete.control_comparison_complete());
     }
 
     #[test]

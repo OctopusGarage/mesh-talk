@@ -1973,3 +1973,5 @@ mod selected_source_control_latency;
 
 #[path = "tests/selected_source_request_latency.rs"]
 mod selected_source_request_latency;
+
+mod selected_same_source_control_latency;

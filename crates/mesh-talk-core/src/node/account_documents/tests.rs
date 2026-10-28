@@ -878,6 +878,206 @@ async fn certified_siblings_transfer_large_typed_document_over_existing_account_
     task.abort();
     let _ = task.await;
 }
+#[tokio::test]
+async fn signed_own_account_sdk_presence_reuses_five_typed_document_pages() {
+    for boundary in [
+        "unchanged",
+        "configured",
+        "identity_x",
+        "other_root",
+        "relay",
+        "historical_relay",
+    ] {
+        sdk_account_reuse_boundary(boundary).await;
+    }
+}
+
+async fn sdk_account_reuse_boundary(boundary: &str) {
+    use crate::discovery::Announce;
+    use crate::node::account_devices::AccountDevice;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    assert!(source.privacy.state.read().unwrap().is_none());
+    assert!(target.privacy.state.read().unwrap().is_none());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    for (current, sibling, port) in [(&source, &target, 9), (&target, &source, address.port())] {
+        current
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: sibling.identity.public(),
+                certificate: account.certify(&sibling.identity.public().ed25519_pub),
+            })
+            .unwrap();
+        current
+            .set_device_sync_category(SyncCategory::Appearance, true)
+            .unwrap();
+        let proof = sibling.signed_announce("Certified SDK sibling", port);
+        assert!(proof.valid_presence() && !proof.post_office);
+        assert_eq!(proof.account_id(), Some(account.account_id()));
+        current
+            .roster
+            .lock()
+            .unwrap()
+            .update(&proof, address.ip(), &current.user_id());
+    }
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = accepted.clone();
+    let serving = source.clone();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let source = serving.clone();
+            connections.spawn(async move {
+                let channel = source.privacy_accept(stream).await.unwrap();
+                assert!(channel.peer_announcement().is_none());
+                source.serve_connection(channel).await;
+            });
+            while connections.try_join_next().is_some() {}
+        }
+    });
+    let peer = target.routing_peer(&source.user_id()).unwrap();
+    let key = AccountDocumentKey::CustomizationPack {
+        pack_id: "sdk-account-reuse".into(),
+    };
+    for revision in 0..5u8 {
+        let payload = vec![revision; 257];
+        source
+            .put_account_document_if(
+                key.clone(),
+                payload.clone(),
+                source
+                    .account_document_meta(&key)
+                    .map(|meta| meta.version()),
+                |commit| commit(),
+            )
+            .unwrap();
+        let expected = source.account_document_meta(&key).unwrap();
+        let mut cursor =
+            sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::CustomizationPack);
+        target
+            .pull_account_documents_page(&peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(target.account_document_meta(&key), Some(expected));
+        assert_eq!(
+            target.account_document(&key).unwrap().unwrap().payload(),
+            payload
+        );
+    }
+    let connections = accepted.load(std::sync::atomic::Ordering::SeqCst);
+    let public = source.identity.public();
+    let mut requested = public.clone();
+    let generation = target
+        .privacy
+        .generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    match boundary {
+        "configured" | "historical_relay" => {
+            target
+                .configure_privacy(
+                    &dir.path().join("target"),
+                    "pw",
+                    &target.signed_announce("Target", 9),
+                    std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+                )
+                .unwrap();
+            if boundary == "historical_relay" {
+                let proof = Announce::new_post_office_with_account(
+                    &source.identity,
+                    &account,
+                    "Relay",
+                    address.port(),
+                );
+                assert!(proof.valid_presence());
+                target
+                    .privacy
+                    .state
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .proofs
+                    .record(&proof)
+                    .unwrap();
+            }
+        }
+        "identity_x" => {
+            requested = DeviceIdentity::from_secret_bytes(
+                source.identity.secret_bytes().0,
+                DeviceIdentity::generate().secret_bytes().1,
+            )
+            .public();
+            assert_eq!(requested.ed25519_pub, public.ed25519_pub);
+            assert_ne!(requested.x25519_pub, public.x25519_pub);
+        }
+        "other_root" | "relay" => {
+            let proof = if boundary == "other_root" {
+                Announce::new_with_account(
+                    &source.identity,
+                    &Account::generate(),
+                    "Rehomed",
+                    address.port(),
+                )
+            } else {
+                Announce::new_post_office_with_account(
+                    &source.identity,
+                    &account,
+                    "Relay",
+                    address.port(),
+                )
+            };
+            assert!(proof.valid_presence());
+            target
+                .roster
+                .lock()
+                .unwrap()
+                .update(&proof, address.ip(), &target.user_id());
+            assert_eq!(
+                target.roster.lock().unwrap().announcement(&public),
+                Some(&proof)
+            );
+        }
+        "unchanged" => {}
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        target
+            .privacy
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst),
+        generation,
+        "presence/pin changes must exercise the retained binding rather than a generation reset"
+    );
+    let retained = target
+        .checkout_reusable_channel(
+            super::super::session_pool::SessionProtocol::Account,
+            address,
+            &requested,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retained.is_some(),
+        matches!(boundary, "unchanged" | "configured"),
+        "boundary={boundary}"
+    );
+    drop(retained);
+    target.sessions.clear();
+    server.abort();
+    let _ = server.await;
+    assert_eq!(
+        connections, 1,
+        "five completed certified Account pages must retain one authenticated SDK socket despite signed own-account discovery"
+    );
+}
+
 #[test]
 fn signatures_conflicts_receipts_and_payload_bounds_fail_closed() {
     let dir = tempfile::tempdir().unwrap();

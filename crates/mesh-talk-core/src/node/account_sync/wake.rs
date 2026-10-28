@@ -56,6 +56,16 @@ pub(super) struct ControlWakeHint {
     epoch: [u8; 16],
     revision: u64,
 }
+#[cfg(test)]
+impl ControlWakeHint {
+    pub(super) fn test_token(public: PublicIdentity, epoch: [u8; 16], revision: u64) -> Self {
+        Self {
+            public,
+            epoch,
+            revision,
+        }
+    }
+}
 #[derive(Default)]
 struct ReceivedWakes {
     seen: HashMap<WakeIdentity, ([u8; 16], u64)>,

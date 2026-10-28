@@ -514,3 +514,137 @@ impl Node {
         }))
     }
 }
+
+#[cfg(test)]
+mod witness_row_regression_tests {
+    use super::*;
+    use crate::channel::ChannelMeta;
+    use crate::node::channels::account_self_control::tests::{Fixture, fixture};
+
+    fn witness(f: &Fixture, projection: &ChannelMembershipProjection) -> OwnerControlWitness {
+        let own = Announce::new_with_account(&f.owner, &f.owner_account, "owner", 1);
+        let mut members = physical_members(projection);
+        for member in &mut members {
+            member.current = Some(if member.lifetime.member == f.owner.public() {
+                own.clone()
+            } else {
+                f.proof.clone()
+            });
+        }
+        OwnerControlWitness {
+            own,
+            members,
+            owner: selected_owner(projection).unwrap(),
+            target_grant: None,
+            parents: vec![f.events.last().unwrap().id],
+        }
+    }
+    fn rename(
+        projection: &ChannelMembershipProjection,
+        witness: &OwnerControlWitness,
+        group: ConversationId,
+    ) -> Result<Option<OwnerControlEffect>, NodeError> {
+        expected_effect(
+            group,
+            projection,
+            &OwnerControlInput::Rename("Canonical rename".into()),
+            witness,
+            HistoryPolicy::Off,
+        )
+    }
+
+    #[test]
+    fn owner_decision_rejects_stale_rejoined_lifetime_with_current_acceptance() {
+        let mut f = fixture(false);
+        f.events.truncate(1); // The actual signed legacy genesis, before format cutover.
+        let before = f.projection();
+        let mut stale = witness(&f, &before);
+        assert!(matches!(
+            rename(&before, &stale, f.group).unwrap(),
+            Some(OwnerControlEffect::Public(EventKind::ChannelRename, _))
+        ));
+        let leave = Event::new(
+            &f.member,
+            f.group,
+            1,
+            vec![f.events[0].id],
+            2,
+            2,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let rejoin = Event::new(
+            &f.owner,
+            f.group,
+            2,
+            vec![leave.id],
+            3,
+            3,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "account self controls".into(),
+                members: vec![f.owner.public(), f.member.public()],
+                epoch: 2,
+                owner: f.owner.user_id(),
+            }
+            .encode(),
+        );
+        f.events.extend([leave.clone(), rejoin.clone()]);
+        let current = f.projection();
+        assert!(current.authorized.contains(&leave.id) && current.authorized.contains(&rejoin.id));
+        let fresh = witness(&f, &current);
+        let old_row = stale
+            .members
+            .iter()
+            .find(|row| row.lifetime.member == f.member.public())
+            .unwrap();
+        let new_row = fresh
+            .members
+            .iter()
+            .find(|row| row.lifetime.member == f.member.public())
+            .unwrap();
+        assert!(old_row.accepted && new_row.accepted);
+        assert!(old_row.current.as_ref().unwrap().valid_presence());
+        assert_ne!(old_row.lifetime, new_row.lifetime);
+        assert_eq!(stale.owner, fresh.owner);
+        // Use the current real parent cut while retaining the stale paired row.
+        stale.parents = fresh.parents.clone();
+        assert!(rename(&current, &fresh, f.group).unwrap().is_some());
+        assert!(
+            rename(&current, &stale, f.group).is_err(),
+            "accepted and certified is insufficient when the physical lifetime changed"
+        );
+    }
+
+    #[test]
+    fn owner_decision_rejects_matching_lifetime_with_false_role_or_wrong_proof() {
+        let f = fixture(false);
+        let projection = f.projection();
+        let valid = witness(&f, &projection);
+        assert!(rename(&projection, &valid, f.group).unwrap().is_some());
+        let index = valid
+            .members
+            .iter()
+            .position(|row| row.lifetime.member == f.member.public())
+            .unwrap();
+        let mut false_role = valid.clone();
+        false_role.members[index].accepted = false;
+        assert!(
+            rename(&projection, &false_role, f.group).is_err(),
+            "matching lifetime cannot replace the signed accepted role"
+        );
+        let mut wrong_proof = valid.clone();
+        wrong_proof.members[index].current = Some(valid.own.clone());
+        assert!(
+            wrong_proof.members[index]
+                .current
+                .as_ref()
+                .unwrap()
+                .valid_presence()
+        );
+        assert!(
+            rename(&projection, &wrong_proof, f.group).is_err(),
+            "a valid other member proof cannot stand in for this exact physical identity"
+        );
+    }
+}

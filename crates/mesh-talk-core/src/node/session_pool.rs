@@ -680,29 +680,78 @@ pub(in crate::node) fn retryable_sync_error(error: &super::session::SessionError
 }
 
 impl Node {
-    fn pooled_presence_current(&self, channel: &SecureChannel<TcpStream>) -> bool {
+    fn pooled_presence_current(
+        &self,
+        protocol: SessionProtocol,
+        channel: &SecureChannel<TcpStream>,
+    ) -> bool {
         let public = channel.peer_identity();
-        let matches = |latest: &crate::discovery::Announce| {
-            channel.peer_announcement().is_some_and(|authenticated| {
-                authenticated.public() == latest.public()
-                    && authenticated.account_id() == latest.account_id()
-                    && authenticated.post_office == latest.post_office
-            })
-        };
-        let roster = self.roster.lock().expect("roster mutex not poisoned");
-        if roster
-            .announcement(public)
-            .is_some_and(|latest| !matches(latest))
-        {
+        let identity_only = channel.peer_announcement().is_none();
+        // Resolve durable membership before taking roster/privacy locks.
+        let certified = identity_only && self.certified_sibling(public);
+        if protocol == SessionProtocol::Sync && certified {
             return false;
         }
-        drop(roster);
+        let matches = |latest: &crate::discovery::Announce| {
+            channel.peer_announcement().map_or_else(
+                || {
+                    latest.public() == *public
+                        && !latest.post_office
+                        && match protocol {
+                            SessionProtocol::Sync => latest.account_id().is_none(),
+                            SessionProtocol::Account => {
+                                certified
+                                    && latest.valid_presence()
+                                    && latest.account_id().as_deref()
+                                        == Some(self.account_id().as_str())
+                            }
+                        }
+                },
+                |authenticated| {
+                    authenticated.public() == latest.public()
+                        && authenticated.account_id() == latest.account_id()
+                        && authenticated.post_office == latest.post_office
+                },
+            )
+        };
+        let latest = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .announcement(public)
+            .cloned();
+        if latest.as_ref().is_some_and(|latest| !matches(latest)) {
+            return false;
+        }
         let state = self
             .privacy
             .state
             .read()
             .expect("privacy lock not poisoned");
         state.as_ref().is_none_or(|state| {
+            // Generic identity-only Noise cannot stand in for a retained account pin,
+            // including a pairing certificate with no cached announcement.
+            if protocol == SessionProtocol::Sync
+                && channel.peer_announcement().is_none()
+                && (state.proofs.account_for(public).is_some()
+                    || latest
+                        .as_ref()
+                        .is_some_and(|latest| !state.proofs.accepts_binding(latest)))
+            {
+                return false;
+            }
+            if protocol == SessionProtocol::Account
+                && identity_only
+                && (latest
+                    .as_ref()
+                    .is_some_and(|latest| !state.proofs.accepts_binding(latest))
+                    || state
+                        .proofs
+                        .account_for(public)
+                        .is_some_and(|account| account != self.account_id()))
+            {
+                return false;
+            }
             channel
                 .peer_announcement()
                 .is_none_or(|authenticated| state.proofs.accepts_binding(authenticated))
@@ -811,7 +860,7 @@ impl Node {
                 .filter(|actual| permitted.contains(actual));
             for addr in std::iter::once(addr).chain(fallback) {
                 if let Some(channel) = self.sessions.checkout(protocol, addr, expected, generation)
-                    && self.pooled_presence_current(&channel)
+                    && self.pooled_presence_current(protocol, &channel)
                 {
                     if !self.account_allowed(expected, channel.peer_announcement())
                         && !self.group_member(expected)
