@@ -271,6 +271,10 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     let b_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let b_clock = std::time::Instant::now();
     let b_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Keep the setup interval too: a natural Control read may legitimately
+    // yield to authenticated publication before either operation is admitted.
+    let abort_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let active_a_page = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let classes = Arc::new(Mutex::new(Vec::new()));
     let aborts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -283,6 +287,8 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         let exact_other = other.as_ref().map(|other| other.identity.public());
         let b_trace = b_trace.clone();
         let b_active = b_active.clone();
+        let abort_trace = abort_trace.clone();
+        let active_a_page = active_a_page.clone();
         move |peer, phase| {
             if b_active.load(std::sync::atomic::Ordering::Relaxed)
                 && (peer == exact_owner
@@ -304,6 +310,31 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
             }
             if peer != exact_owner {
                 return;
+            }
+            let starts_page = phase.starts_with("page_begin domain=GroupControl ");
+            let ends_page =
+                phase.starts_with("page_end ") && phase.contains("domain=GroupControl ");
+            if phase.starts_with("control_dispatch ") {
+                *active_a_page.lock().unwrap() = None;
+            } else if starts_page {
+                *active_a_page.lock().unwrap() = tokio::task::try_id();
+            }
+            if starts_page
+                || ends_page
+                || phase.starts_with("control_turn_origin ")
+                || phase.starts_with("control_dispatch ")
+                || phase.starts_with("control_owned_abort ")
+                || phase == "control_pair_retired"
+            {
+                record_b_trace(
+                    &abort_trace,
+                    b_clock,
+                    "requester_to_A",
+                    format!("page_task={:?} {phase}", *active_a_page.lock().unwrap()),
+                );
+            }
+            if ends_page {
+                *active_a_page.lock().unwrap() = None;
             }
             if phase.starts_with("control_turn_origin") || phase.starts_with("control_dispatch") {
                 let mut rows = classes.lock().unwrap();
@@ -343,6 +374,8 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         let resumed_release = resumed_release.clone();
         let partial_keys = partial_keys.clone();
         let seeded = seeded.clone();
+        let abort_trace = abort_trace.clone();
+        let active_a_page = active_a_page.clone();
         move |peer, frame| {
             let owner_id = owner_id.clone();
             let source = source.clone();
@@ -352,6 +385,8 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
             let resumed_release = resumed_release.clone();
             let partial_keys = partial_keys.clone();
             let seeded = seeded.clone();
+            let abort_trace = abort_trace.clone();
+            let active_a_page = active_a_page.clone();
             let release = release.clone();
             let arrived = arrived.clone();
             let checkpoints = checkpoints.clone();
@@ -472,6 +507,15 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                             "the original case captures a fresh background comparison"
                         );
                     }
+                    record_b_trace(
+                        &abort_trace,
+                        b_clock,
+                        "fixture",
+                        format!(
+                            "A_original_read_held page_task={:?}",
+                            *active_a_page.lock().unwrap()
+                        ),
+                    );
                     let _ = signal.send(());
                     let _ = release.acquire().await;
                 } else if other_selected
@@ -497,6 +541,15 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                                 |phase| phase.starts_with("control_dispatch protected=true")
                             ),
                             "the paired background page must be protected from publication hints"
+                        );
+                        record_b_trace(
+                            &abort_trace,
+                            b_clock,
+                            "fixture",
+                            format!(
+                                "A_paired_resume_held page_task={:?}",
+                                *active_a_page.lock().unwrap()
+                            ),
                         );
                         let _ = signal.send(());
                         let _ = resumed_release.acquire().await;
@@ -526,6 +579,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
     *active_operation.lock().unwrap() = Some(id);
+    record_b_trace(&abort_trace, b_clock, "fixture", "A_admission_begin".into());
     reference
         .submit_account_group_operation_if(
             &account.account_id(),
@@ -537,6 +591,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
             |commit| commit(),
         )
         .unwrap();
+    record_b_trace(&abort_trace, b_clock, "fixture", "A_admitted".into());
     let receipt = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let requester = reference
@@ -571,6 +626,17 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         }
     })
     .await;
+    record_b_trace(
+        &abort_trace,
+        b_clock,
+        "fixture",
+        if receipt.is_ok() {
+            "A_private_receipt"
+        } else {
+            "A_deadline_expired"
+        }
+        .into(),
+    );
     let before_release_requester = reference
         .account_group_operation_status(&account.account_id(), id)
         .unwrap();
@@ -597,6 +663,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
             second_id = Some(second);
             b_active.store(true, std::sync::atomic::Ordering::Relaxed);
             record_b_trace(&b_trace, b_clock, "fixture", "B_admission_begin".into());
+            record_b_trace(&abort_trace, b_clock, "fixture", "B_admission_begin".into());
             *other.account_client_test_hook.lock().unwrap() = Some(Arc::new({
                 let trace = b_trace.clone();
                 let requester = reference.identity.public();
@@ -647,6 +714,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                 )
                 .unwrap();
             record_b_trace(&b_trace, b_clock, "fixture", "B_admitted".into());
+            record_b_trace(&abort_trace, b_clock, "fixture", "B_admitted".into());
             Some(
                 tokio::time::timeout(Duration::from_secs(8), async {
                     loop {
@@ -712,6 +780,19 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     } else {
         None
     };
+    if let Some(result) = &other_receipt {
+        record_b_trace(
+            &abort_trace,
+            b_clock,
+            "fixture",
+            if result.is_ok() {
+                "B_private_receipt"
+            } else {
+                "B_deadline_expired"
+            }
+            .into(),
+        );
+    }
     let aborts_before_release = aborts.load(std::sync::atomic::Ordering::Relaxed);
     let effects = owner
         .log
@@ -806,19 +887,22 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     }
     assert!(
         recovered.is_ok(),
-        "releasing the old metadata read must restore ordinary progress and public receipt: {recovery_snapshot:?}"
+        "releasing the old metadata read must restore ordinary progress and public receipt: {recovery_snapshot:?}; abort_trace={:?}",
+        abort_trace.lock().unwrap()
     );
     assert!(
         before_release_source
             .as_ref()
             .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed),
-        "the real source must commit while its prior read is held"
+        "the real source must commit while its prior read is held; abort_trace={:?}",
+        abort_trace.lock().unwrap()
     );
-    let (requester, source) = receipt.unwrap_or_else(|_| panic!("same-source pre-operation background read blocked its new private receipt: requester={:?} source={:?}", before_release_requester.map(|status| status.phase), before_release_source.map(|status| status.phase)));
+    let (requester, source) = receipt.unwrap_or_else(|_| panic!("same-source pre-operation background read blocked its new private receipt: requester={:?} source={:?} abort_trace={:?}", before_release_requester.map(|status| status.phase), before_release_source.map(|status| status.phase), abort_trace.lock().unwrap()));
     assert_eq!(
         aborts_before_release,
         if other_selected { 2 } else { 1 },
-        "the old background read yields exactly once despite repeated status polling"
+        "the old background read yields exactly once despite repeated status polling; abort_trace={:?}",
+        abort_trace.lock().unwrap()
     );
     assert!(
         preserved,
@@ -826,7 +910,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     );
     if other_selected {
         let events = other_receipt.expect("the second real operation was admitted after A committed")
-            .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}"));
+            .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}; abort_trace={:?}", abort_trace.lock().unwrap()));
         assert_eq!(events.len(), 1);
         let other = other.as_ref().unwrap();
         let event = other.log.lock().unwrap().get(&events[0]).unwrap().clone();

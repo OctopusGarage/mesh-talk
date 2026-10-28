@@ -1423,6 +1423,16 @@ ever-growing history. Once the previous operation settles, a newly selected othe
 executor retains its priority over resumed background work. Policy or identity
 changes retire both comparisons through the existing worker cleanup.
 
+Comparison-start demand travels with the checkpoint through the queue, task
+rollback and paired page swaps. Resuming an old partial page cannot overwrite
+that witness with today's pending IDs or Wake token. A genuinely new demand for
+an already queued peer therefore starts a fresh foreground comparison before
+replaying its old suffix; an unchanged demand continues its existing comparison.
+Successful refresh clears the witness, while refused refresh preserves it.
+Snapshots use the existing pending-operation quota and never accumulate an
+unbounded history; the existing active-task rollback copies remain bounded by
+the same single Control worker.
+
 The same Control owner retains at most 64 authenticated Wake sender tokens, keyed
 by full Ed25519/X25519 identity and current account binding. Fresh tokens coalesce
 in sender FIFO order. A waiting sender may preempt an unrelated ordinary metadata read, including a

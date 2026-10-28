@@ -3421,6 +3421,16 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
     assert_eq!(alice_node.channel_owner(channel), owner);
 }
 
+// Every spawned fixture task is cancelled on assertion failure as well as normal cleanup.
+struct AbortStalledFixtureTasks(Vec<tokio::task::AbortHandle>);
+impl Drop for AbortStalledFixtureTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 #[tokio::test]
 async fn stalled_channel_peer_does_not_delay_healthy_member() {
     let alice = DeviceIdentity::generate();
@@ -3462,8 +3472,11 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
     let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
     let (slow_node, _slow_rx) = open(slow, Arc::new(Mutex::new(Roster::default())), "slow");
     let (fast_node, mut fast_rx) = open(fast, Arc::new(Mutex::new(Roster::default())), "fast");
+    let mut owned_tasks = AbortStalledFixtureTasks(Vec::new());
     let slow_task = tokio::spawn(Arc::clone(&slow_node).run_accept_loop(slow_listener));
+    owned_tasks.0.push(slow_task.abort_handle());
     let fast_task = tokio::spawn(Arc::clone(&fast_node).run_accept_loop(fast_listener));
+    owned_tasks.0.push(fast_task.abort_handle());
     let channel = alice_node
         .create_channel(
             "stalled-peer",
@@ -3472,14 +3485,21 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
         .await
         .unwrap();
 
+    // Reserve a distinct real endpoint while the preparation listener is still bound.
+    // The new signed route cannot reuse a preparation-phase cached connection.
+    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let stalled_port = stalled_listener.local_addr().unwrap().port();
+    assert_ne!(stalled_port, slow_port);
     slow_task.abort();
     let _ = slow_task.await;
-    // Await destruction of the old accepted connections before replacing their
-    // listener; a completed cached socket must not outlive this fixture stage.
     slow_node.runtime_work.drain().await;
-    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, slow_port))
-        .await
-        .unwrap();
+    add_peer(
+        &alice_node.roster,
+        &slow_node.identity,
+        "Slow",
+        stalled_port,
+        &alice_node.user_id(),
+    );
     let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
     let stalled_task = tokio::spawn(async move {
         let (socket, _) = stalled_listener.accept().await.unwrap();
@@ -3488,6 +3508,7 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
         drop(socket);
     });
 
+    owned_tasks.0.push(stalled_task.abort_handle());
     let sender = tokio::spawn({
         let node = Arc::clone(&alice_node);
         async move {
@@ -3495,8 +3516,19 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
                 .await
         }
     });
-    tokio::time::timeout(Duration::from_secs(5), accepted_rx)
-        .await
+    owned_tasks.0.push(sender.abort_handle());
+    let contacted = tokio::time::timeout(Duration::from_secs(5), accepted_rx).await;
+    if !matches!(&contacted, Ok(Ok(()))) {
+        eprintln!(
+            "STALLED_SETUP channel_send sender_finished={} healthy_queue={} alice_pool={:?} slow_pool={:?} fast_pool={:?}",
+            sender.is_finished(),
+            fast_rx.len(),
+            alice_node.sessions.test_capacity_snapshot(),
+            slow_node.sessions.test_capacity_snapshot(),
+            fast_node.sessions.test_capacity_snapshot(),
+        );
+    }
+    contacted
         .expect("sender contacted the stalled peer")
         .expect("stalled listener accepted a connection");
     let received = tokio::time::timeout(Duration::from_secs(5), fast_rx.recv())
@@ -3508,6 +3540,7 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
         let node = Arc::clone(&alice_node);
         async move { node.set_channel_replica_enabled(channel, false).await }
     });
+    owned_tasks.0.push(status_sender.abort_handle());
     tokio::time::timeout(Duration::from_secs(5), async {
         while fast_node.channel_replica_enabled(channel, &alice_node.user_id()) {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3516,9 +3549,12 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
     .await
     .expect("healthy peer must receive a control event despite the stalled peer");
     stalled_task.abort();
+    let _ = stalled_task.await;
     sender.await.unwrap().unwrap();
     status_sender.await.unwrap().unwrap();
     fast_task.abort();
+    let _ = fast_task.await;
+    fast_node.runtime_work.drain().await;
 }
 
 #[tokio::test]
@@ -3562,8 +3598,11 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
     let (alice_node, mut alice_rx) = open(alice, alice_roster, "alice");
     let (slow_node, _slow_rx) = open(slow, Arc::new(Mutex::new(Roster::default())), "slow");
     let (fast_node, _fast_rx) = open(fast, Arc::new(Mutex::new(Roster::default())), "fast");
+    let mut owned_tasks = AbortStalledFixtureTasks(Vec::new());
     let slow_task = tokio::spawn(Arc::clone(&slow_node).run_accept_loop(slow_listener));
+    owned_tasks.0.push(slow_task.abort_handle());
     let fast_task = tokio::spawn(Arc::clone(&fast_node).run_accept_loop(fast_listener));
+    owned_tasks.0.push(fast_task.abort_handle());
     let channel = alice_node
         .create_channel(
             "stalled-peer",
@@ -3572,19 +3611,56 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
         .await
         .unwrap();
 
+    // Both post-setup routes are fresh: no retained preparation socket may bypass
+    // either the stalled handshake or the healthy peer's real admission gate.
+    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let stalled_port = stalled_listener.local_addr().unwrap().port();
+    let healthy_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let healthy_port = healthy_listener.local_addr().unwrap().port();
+    assert_ne!(stalled_port, slow_port);
+    assert_ne!(healthy_port, fast_port);
     slow_task.abort();
     let _ = slow_task.await;
-    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, slow_port))
-        .await
-        .unwrap();
+    slow_node.runtime_work.drain().await;
+    fast_task.abort();
+    let _ = fast_task.await;
+    fast_node.runtime_work.drain().await;
+    add_peer(
+        &alice_node.roster,
+        &slow_node.identity,
+        "Slow",
+        stalled_port,
+        &alice_node.user_id(),
+    );
+    add_peer(
+        &alice_node.roster,
+        &fast_node.identity,
+        "Fast",
+        healthy_port,
+        &alice_node.user_id(),
+    );
+    let (fault_tx, fault_rx) = tokio::sync::oneshot::channel();
+    let fast_task = tokio::spawn({
+        let node = Arc::clone(&fast_node);
+        async move {
+            // The bound TCP backlog is real, but healthy Noise/service cannot
+            // finish until the other listener has positively observed the fault.
+            if fault_rx.await.is_ok() {
+                Box::pin(node.run_accept_loop(healthy_listener)).await;
+            }
+        }
+    });
+    owned_tasks.0.push(fast_task.abort_handle());
     let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
     let stalled_task = tokio::spawn(async move {
         let (socket, _) = stalled_listener.accept().await.unwrap();
         let _ = accepted_tx.send(());
+        let _ = fault_tx.send(());
         tokio::time::sleep(Duration::from_secs(20)).await;
         drop(socket);
     });
 
+    owned_tasks.0.push(stalled_task.abort_handle());
     fast_node
         .send_channel_message(channel, b"recover promptly")
         .await
@@ -3593,10 +3669,19 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
         let node = Arc::clone(&alice_node);
         async move { node.pull_one_channel_from_member(0).await }
     });
-    tokio::time::timeout(Duration::from_secs(5), accepted_rx)
-        .await
-        .unwrap()
-        .unwrap();
+    owned_tasks.0.push(recovery.abort_handle());
+    let contacted = tokio::time::timeout(Duration::from_secs(5), accepted_rx).await;
+    if !matches!(&contacted, Ok(Ok(()))) {
+        eprintln!(
+            "STALLED_SETUP recovery task_finished={} healthy_queue={} alice_pool={:?} slow_pool={:?} fast_pool={:?}",
+            recovery.is_finished(),
+            alice_rx.len(),
+            alice_node.sessions.test_capacity_snapshot(),
+            slow_node.sessions.test_capacity_snapshot(),
+            fast_node.sessions.test_capacity_snapshot(),
+        );
+    }
+    contacted.unwrap().unwrap();
     let received = tokio::time::timeout(Duration::from_secs(5), alice_rx.recv())
         .await
         .expect("healthy recovery must progress before a stalled peer times out")
@@ -3607,7 +3692,10 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
         .expect("successful recovery must free its group lane before the stalled timeout")
         .unwrap();
     stalled_task.abort();
+    let _ = stalled_task.await;
     fast_task.abort();
+    let _ = fast_task.await;
+    fast_node.runtime_work.drain().await;
 }
 
 /// A restarted member recovers from another member when the author and post office

@@ -73,6 +73,23 @@ pub(in crate::node) fn seed_legacy_control_page_for_test(
     key
 }
 
+#[cfg(test)]
+pub(in crate::node) fn publish_legacy_control_page_for_test(
+    node: &Node,
+    count: u8,
+) -> Vec<AccountDocumentKey> {
+    let keys = (1..=count)
+        .map(|value| {
+            seed_legacy_control_page_for_test(
+                node,
+                crate::eventlog::ConversationId::new([value; 32]),
+            )
+        })
+        .collect();
+    node.documents_changed();
+    keys
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
 enum DocumentSyncScope {

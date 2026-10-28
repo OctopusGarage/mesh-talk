@@ -110,7 +110,10 @@
             "paired_control_pages_preserve_both_partial_checkpoints_and_alternate",
             "paired_control_deferral_keeps_owner_and_waits_for_both_retry_deadlines",
             "paired_control_followup_requires_a_new_admitted_operation_or_wake_token",
-            "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge"
+            "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
+            "newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page",
+            "control_checkpoint_preserves_comparison_start_across_partial_pages_and_rollback",
+            "control_checkpoint_refresh_clears_start_only_after_comparison_completion"
           ]
         }
       ],
@@ -184,6 +187,10 @@
           },
           {
             "name": "Wake local-admission capacity failures retain their unacknowledged revision and existing ten-second retry; only a newer local publication bypasses that local cooldown, while remote failure cooldowns and sender/TCP bounds remain unchanged.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Comparison-start immutable demand and consumed authenticated Wake evidence travel with queued checkpoints, owned rollback and paired swaps. New demand starts a separate fresh comparison before an old queued suffix; unchanged demand, refused refresh, cooldowns and full-identity cleanup preserve their existing contracts.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
@@ -380,7 +387,8 @@
             "authentication_backpressure_preserves_document_progress_and_recovers",
             "account_worker_retries_local_authentication_contention_without_a_false_sync_error",
             "offline_dm_delivered_via_post_office_over_loopback",
-            "signed_own_account_sdk_presence_reuses_five_typed_document_pages"
+            "signed_own_account_sdk_presence_reuses_five_typed_document_pages",
+            "stalled_recovery_peer_does_not_delay_healthy_replica"
           ]
         }
       ],

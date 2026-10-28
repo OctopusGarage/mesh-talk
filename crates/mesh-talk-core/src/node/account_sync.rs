@@ -227,8 +227,82 @@ fn control_queue_priority(
 // but still has only one admitted page. The parked checkpoint never owns bytes.
 type ControlDemand = std::collections::BTreeSet<super::AccountGroupOperationId>;
 
+/// Scheduling evidence travels with the protocol checkpoint through queues,
+/// task rollback and paired page swaps. It never authorizes a public effect.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct ControlComparisonStart {
+    requests: ControlDemand,
+    wake: Option<wake::ControlWakeHint>,
+}
+impl ControlComparisonStart {
+    fn predates(&self, requests: &ControlDemand, wake: Option<&wake::ControlWakeHint>) -> bool {
+        !requests.is_subset(&self.requests)
+            || wake.is_some_and(|wake| self.wake.as_ref() != Some(wake))
+    }
+}
+
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct DocumentCheckpoint {
+    cursor: super::account_documents::sync::DocumentSyncCursor,
+    control_start: Option<ControlComparisonStart>,
+}
+impl From<super::account_documents::sync::DocumentSyncCursor> for DocumentCheckpoint {
+    fn from(cursor: super::account_documents::sync::DocumentSyncCursor) -> Self {
+        Self {
+            cursor,
+            control_start: None,
+        }
+    }
+}
+impl std::ops::Deref for DocumentCheckpoint {
+    type Target = super::account_documents::sync::DocumentSyncCursor;
+    fn deref(&self) -> &Self::Target {
+        &self.cursor
+    }
+}
+impl std::ops::DerefMut for DocumentCheckpoint {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cursor
+    }
+}
+impl DocumentCheckpoint {
+    fn begin_refresh(&mut self) -> bool {
+        if !self.cursor.begin_refresh() {
+            return false;
+        }
+        self.control_start = None;
+        true
+    }
+    fn fresh_control_comparison(&self) -> Self {
+        self.cursor.fresh_control_comparison().into()
+    }
+    fn predates_control_demand(
+        &self,
+        requests: &ControlDemand,
+        wake: Option<&wake::ControlWakeHint>,
+    ) -> bool {
+        self.control_start
+            .as_ref()
+            .is_some_and(|start| start.predates(requests, wake))
+    }
+    fn start_control_comparison(
+        &mut self,
+        requests: &ControlDemand,
+        wake: Option<&wake::ControlWakeHint>,
+    ) {
+        if self.control_start.is_none() {
+            self.control_start = Some(ControlComparisonStart {
+                requests: requests.clone(),
+                wake: wake.cloned(),
+            });
+        }
+    }
+}
+
 struct ControlComparisonPair {
-    parked: super::account_documents::sync::DocumentSyncCursor,
+    parked: DocumentCheckpoint,
     foreground: bool,
     followup: bool,
     local_requests: ControlDemand,
@@ -236,7 +310,7 @@ struct ControlComparisonPair {
 }
 impl ControlComparisonPair {
     fn new(
-        background: super::account_documents::sync::DocumentSyncCursor,
+        background: DocumentCheckpoint,
         local_requests: ControlDemand,
         wake: Option<wake::ControlWakeHint>,
     ) -> Self {
@@ -260,20 +334,14 @@ impl ControlComparisonPair {
             self.followup = true;
         }
     }
-    fn deadline(
-        &self,
-        current: Option<&super::account_documents::sync::DocumentSyncCursor>,
-    ) -> Option<std::time::Instant> {
+    fn deadline(&self, current: Option<&DocumentCheckpoint>) -> Option<std::time::Instant> {
         self.parked
             .control_retry_deadline()
             .into_iter()
             .chain(current.and_then(|state| state.control_retry_deadline()))
             .max()
     }
-    fn finish_page(
-        &mut self,
-        current: &mut super::account_documents::sync::DocumentSyncCursor,
-    ) -> bool {
+    fn finish_page(&mut self, current: &mut DocumentCheckpoint) -> bool {
         // A rejected admission or failed read did not pay for a page turn.
         // Keep this owner and its checkpoint until a validated Complete.
         if !current.control_page_completed() {
@@ -305,11 +373,7 @@ impl ControlComparisonPair {
         }
         false
     }
-    fn status(
-        &self,
-        current: &super::account_documents::sync::DocumentSyncCursor,
-        policy: DeviceSyncPolicy,
-    ) -> DocumentStatus {
+    fn status(&self, current: &DocumentCheckpoint, policy: DeviceSyncPolicy) -> DocumentStatus {
         let current = current.status(policy);
         let parked = self.parked.status(policy);
         if current.0 == SyncPhase::Error {
@@ -2559,13 +2623,8 @@ impl Node {
         let mut documents = tokio::task::JoinSet::new();
         let mut document_owners: HashMap<tokio::task::Id, DocumentPeer> = HashMap::new();
         // An aborted read replays its exact checkpoint after resource release.
-        let mut document_checkpoints: HashMap<
-            tokio::task::Id,
-            (
-                PeerRecord,
-                super::account_documents::sync::DocumentSyncCursor,
-            ),
-        > = HashMap::new();
+        let mut document_checkpoints: HashMap<tokio::task::Id, (PeerRecord, DocumentCheckpoint)> =
+            HashMap::new();
         let mut document_aborts: HashMap<tokio::task::Id, tokio::task::AbortHandle> =
             HashMap::new();
         let mut document_preemptions = HashSet::new();
@@ -2576,10 +2635,7 @@ impl Node {
             HashMap::new();
         let mut same_source_preemptions = HashSet::new();
         let mut foreground_next = None;
-        let mut document_cursors: HashMap<
-            DocumentPeer,
-            super::account_documents::sync::DocumentSyncCursor,
-        > = HashMap::new();
+        let mut document_cursors: HashMap<DocumentPeer, DocumentCheckpoint> = HashMap::new();
         let mut document_queues: [VecDeque<(DocumentPeer, PeerRecord)>; DOCUMENT_WORKERS] =
             std::array::from_fn(|_| VecDeque::new());
         let mut document_active: HashSet<DocumentPeer> = HashSet::new();
@@ -2728,11 +2784,9 @@ impl Node {
                     .get(key)
                     .map_or_else(
                         || {
-                            document_cursors.get(key).and_then(
-                                |state: &super::account_documents::sync::DocumentSyncCursor| {
-                                    state.retry_at
-                                },
-                            )
+                            document_cursors
+                                .get(key)
+                                .and_then(|state: &DocumentCheckpoint| state.retry_at)
                         },
                         |pair| pair.deadline(document_cursors.get(key)),
                     )
@@ -2837,11 +2891,9 @@ impl Node {
                     |key| {
                         control_pairs.get(key).map_or_else(
                             || {
-                                document_cursors.get(key).and_then(
-                                    |state: &super::account_documents::sync::DocumentSyncCursor| {
-                                        state.retry_at
-                                    },
-                                )
+                                document_cursors
+                                    .get(key)
+                                    .and_then(|state: &DocumentCheckpoint| state.retry_at)
                             },
                             |pair| pair.deadline(document_cursors.get(key)),
                         )
@@ -2863,7 +2915,33 @@ impl Node {
                 );
                 let mut state = document_cursors
                     .remove(&key)
-                    .unwrap_or_else(|| lane.cursor());
+                    .unwrap_or_else(|| lane.cursor().into());
+                if key.lane == DocumentLane::Control {
+                    let requests = selected_requests
+                        .get(&key.identity())
+                        .cloned()
+                        .unwrap_or_default();
+                    let hint = hints.iter().find(|hint| hint.public == key.public());
+                    if !control_pairs.contains_key(&key)
+                        && state.predates_control_demand(&requests, hint)
+                    {
+                        if state.control_comparison_complete() {
+                            let refreshed = state.begin_refresh();
+                            debug_assert!(refreshed);
+                        } else {
+                            // The old page has already released its resources.
+                            // Move its exact continuation aside rather than
+                            // querying a stale suffix before the new intent.
+                            let foreground = state.fresh_control_comparison();
+                            control_pairs.insert(
+                                key.clone(),
+                                ControlComparisonPair::new(state, requests.clone(), hint.cloned()),
+                            );
+                            state = foreground;
+                        }
+                    }
+                    state.start_control_comparison(&requests, hint);
+                }
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
                     return;
@@ -3539,6 +3617,80 @@ mod tests {
     use crate::identity::account::Account;
 
     #[test]
+    fn control_checkpoint_preserves_comparison_start_across_partial_pages_and_rollback() {
+        use super::super::account_documents::{
+            AccountDocumentKey, sync::DocumentSyncCursor as Cursor,
+        };
+        let first = super::super::AccountGroupOperationId::from_hex(&hex::encode([1; 32])).unwrap();
+        let second =
+            super::super::AccountGroupOperationId::from_hex(&hex::encode([2; 32])).unwrap();
+        let initial = ControlDemand::from([first]);
+        let newer = ControlDemand::from([first, second]);
+        let public = PublicIdentity {
+            ed25519_pub: [3; 32],
+            x25519_pub: [4; 32],
+        };
+        let old = wake::ControlWakeHint::test_token(public.clone(), [1; 16], 2);
+        let next = wake::ControlWakeHint::test_token(public, [1; 16], 3);
+        let key = AccountDocumentKey::GroupOperation {
+            channel: "08".repeat(32),
+            source_device: "01".repeat(16),
+        };
+        let mut queued: DocumentCheckpoint = Cursor::control_test_page(Some(key)).into();
+        queued.retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
+        queued.start_control_comparison(&initial, Some(&old));
+        let saved = queued.clone();
+        for _ in 0..64 {
+            queued.start_control_comparison(&newer, Some(&next));
+            assert!(!queued.predates_control_demand(&initial, Some(&old)));
+            assert!(!queued.predates_control_demand(&ControlDemand::new(), None));
+        }
+        assert_eq!(
+            queued, saved,
+            "continuation/rollback retains the original comparison witness"
+        );
+        assert!(queued.predates_control_demand(&newer, Some(&old)));
+        assert!(queued.predates_control_demand(&initial, Some(&next)));
+        let mut foreground = queued.fresh_control_comparison();
+        assert!(foreground.control_start.is_none());
+        foreground.start_control_comparison(&newer, Some(&next));
+        assert!(!foreground.predates_control_demand(&newer, Some(&next)));
+        assert_eq!(
+            queued, saved,
+            "fresh comparison cannot alter its parked checkpoint or cooldown"
+        );
+    }
+
+    #[test]
+    fn control_checkpoint_refresh_clears_start_only_after_comparison_completion() {
+        use super::super::account_documents::{
+            AccountDocumentKey, sync::DocumentSyncCursor as Cursor,
+        };
+        let requests =
+            ControlDemand::from([
+                super::super::AccountGroupOperationId::from_hex(&hex::encode([1; 32])).unwrap(),
+            ]);
+        let mut state: DocumentCheckpoint =
+            Cursor::control_test_page(Some(AccountDocumentKey::GroupOperation {
+                channel: "08".repeat(32),
+                source_device: "01".repeat(16),
+            }))
+            .into();
+        state.start_control_comparison(&requests, None);
+        let saved = state.clone();
+        assert!(!state.begin_refresh());
+        assert_eq!(
+            state, saved,
+            "refresh cannot reset an unfinished continuation"
+        );
+        state.cursor = Cursor::control_test_page(None);
+        assert!(state.begin_refresh());
+        assert!(state.control_start.is_none());
+        state.start_control_comparison(&ControlDemand::new(), None);
+        assert!(state.predates_control_demand(&requests, None));
+    }
+
+    #[test]
     fn paired_control_pages_preserve_both_partial_checkpoints_and_alternate() {
         use super::super::account_documents::{
             AccountDocumentKey, sync::DocumentSyncCursor as Cursor,
@@ -3547,11 +3699,17 @@ mod tests {
             channel: hex::encode([value; 32]),
             source_device: "01".repeat(16),
         };
-        let mut background = Cursor::control_test_page(Some(key(8)));
+        let mut background: DocumentCheckpoint = Cursor::control_test_page(Some(key(8))).into();
         background.retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
+        background.start_control_comparison(&ControlDemand::new(), None);
         let original = background.clone();
         let mut pair = ControlComparisonPair::new(background, ControlDemand::new(), None);
-        let mut current = Cursor::control_test_page(Some(key(2)));
+        let mut current: DocumentCheckpoint = Cursor::control_test_page(Some(key(2))).into();
+        let demand =
+            ControlDemand::from([
+                super::super::AccountGroupOperationId::from_hex(&hex::encode([1; 32])).unwrap(),
+            ]);
+        current.start_control_comparison(&demand, None);
         let foreground = current.clone();
         assert!(!pair.finish_page(&mut current));
         assert!(!pair.foreground);
@@ -3573,10 +3731,10 @@ mod tests {
             pair.status(&current, DeviceSyncPolicy::default()).0,
             SyncPhase::CatchingUp
         );
-        current = Cursor::control_test_page(None);
+        current = Cursor::control_test_page(None).into();
         assert!(!pair.finish_page(&mut current));
         assert!(!pair.foreground);
-        current = Cursor::control_test_page(None);
+        current = Cursor::control_test_page(None).into();
         assert!(pair.finish_page(&mut current));
         assert!(current.control_comparison_complete());
     }
@@ -3584,7 +3742,7 @@ mod tests {
     #[test]
     fn paired_control_deferral_keeps_owner_and_waits_for_both_retry_deadlines() {
         use super::super::account_documents::sync::DocumentSyncCursor as Cursor;
-        let mut background = Cursor::control();
+        let mut background: DocumentCheckpoint = Cursor::control().into();
         background.retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
         let saved = background.clone();
         let mut current = background.fresh_control_comparison();
@@ -3618,11 +3776,11 @@ mod tests {
             super::super::AccountGroupOperationId::from_hex(&hex::encode([2; 32])).unwrap();
         let initial = ControlDemand::from([first]);
         let mut pair = ControlComparisonPair::new(
-            Cursor::control_test_page(Some(partial)),
+            Cursor::control_test_page(Some(partial)).into(),
             initial.clone(),
             None,
         );
-        let mut current = Cursor::control_test_page(None);
+        let mut current = Cursor::control_test_page(None).into();
         for _ in 0..64 {
             pair.observe(initial.clone(), None);
         }
