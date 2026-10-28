@@ -351,6 +351,7 @@
       "help": "A confirmed copy means an external member reported durable storage to one of your linked devices. Copies can later be lost; this is not a delivery or read receipt."
     },
     "sending": "sending…",
+    "image": "Photo",
     "reply": "Reply",
     "react": "React",
     "retry": "Retry",
@@ -949,7 +950,7 @@
     "trigger": "Members",
     "title": "Members",
     "description": "Everyone in this channel.",
-    "addPeer": "Add a peer",
+    "addPeer": "Add members",
     "owner": "Owner",
     "dissolve": "Dissolve channel",
     "dissolveConfirm": "Dissolve this channel for everyone? Members will keep their history, but no one can send messages or change members afterward.",

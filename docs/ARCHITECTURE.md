@@ -1177,6 +1177,20 @@ geometry and decorations without restoring visibility. Presentation IPC is
 allowed for the locked entry screen, targets only the main window, and admits no
 account data or runtime operation.
 
+Explicit main-window restoration is owned by `window_visibility`: show through
+the existing placement-preserving path, unminimize, then focus. The macOS
+application `Reopen` event (including Dock activation), single-instance activation
+and tray Open/navigation actions share this operation. A tray click restores a
+hidden or minimized window and hides a visible, non-minimized window. Close to
+tray continues receiving in the background; it does not minimize or quit.
+
+On macOS, run `cargo run -p mesh-talk --example native-window-reopen-eval --
+/absolute/disposable/namespace/data --hidden` to check production close handling,
+AppKit reopen dispatch, repeated restoration, minimized restoration and focus.
+The probe uses isolated app data and exits automatically. Also verify physical
+Dock and menu bar clicks in a packaged build; delegate dispatch does not certify
+those system input paths. Preserve locked-entry behavior and hidden autostart.
+
 ### Recent search references
 
 The opt-in core `Node::search_recent` query returns `RecentSearchResults`: matches

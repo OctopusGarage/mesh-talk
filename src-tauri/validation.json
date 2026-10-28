@@ -942,6 +942,7 @@
     {
       "id": "desktop-window",
       "paths": [
+        "src-tauri/examples/native-window-reopen-eval.rs",
         "src-tauri/src/tray.rs",
         "src-tauri/src/window_geometry.rs",
         "src-tauri/src/window_visibility.rs",
@@ -960,6 +961,7 @@
         }
       ],
       "escalation": [
+        "On macOS run the native-window-reopen-eval example with an isolated absolute data root and --hidden. Verify physical packaged Dock and tray Open/click restoration after close-to-tray and minimization, repeated activation, locked entry and hidden autostart. Mock runtime tests do not establish native visibility or focus.",
         "Verify registered main-window presentation IPC, queued hide/ack/fallback ordering and hidden launch. Preserve X11 placement and geometry; require actual packaged first-visible-frame evidence plus browser image/library readiness and unchanged visuals."
       ],
       "capability": {
