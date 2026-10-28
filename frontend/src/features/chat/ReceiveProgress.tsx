@@ -30,19 +30,20 @@ export function ReceiveProgress({
     Number.isFinite(done) && Number.isFinite(total) && done >= 0 && total > 0;
   const ratio = hasProgress ? Math.min(1, done / total) : 0;
   const percent = hasProgress ? Math.floor(ratio * 100) : undefined;
+  const receiving = hasProgress && done > 0;
   return (
     <div
       className="mt-2"
       role="status"
       aria-label={
-        hasProgress
+        receiving
           ? t("transfer.receivingProgress", { percent })
           : t("transfer.waiting")
       }
     >
       <div className="mb-1 flex items-center justify-between gap-3 text-[11px] opacity-75">
         <span>
-          {hasProgress ? t("transfer.receiving") : t("transfer.waiting")}
+          {receiving ? t("transfer.receiving") : t("transfer.waiting")}
         </span>
         {hasProgress && (
           <span className="font-mono tabular-nums">{percent}%</span>
@@ -50,7 +51,7 @@ export function ReceiveProgress({
       </div>
       <div
         role="progressbar"
-        aria-label={t("transfer.receiving")}
+        aria-label={t(receiving ? "transfer.receiving" : "transfer.waiting")}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent}

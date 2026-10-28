@@ -91,7 +91,7 @@ export function useConversationViewport(
   const restoreVisibleAnchor = useCallback(() => {
     const scroller = scrollerRef.current;
     const anchor = anchors.current.get(key);
-    if (!scroller || !anchor) return;
+    if (!scroller || !anchor || pendingScrollIntent.current) return;
     const bounds = scroller.getBoundingClientRect();
     const row = [
       ...scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
@@ -168,7 +168,8 @@ export function useConversationViewport(
     let frame = 0;
     let attempts = 0;
     const restoreAnchor = () => {
-      if (anchors.current.get(key) !== anchor) return;
+      if (anchors.current.get(key) !== anchor || pendingScrollIntent.current)
+        return;
       const row = [
         ...scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
       ].find((element) => element.dataset.messageId === anchor.id);
@@ -515,6 +516,8 @@ export function useConversationViewport(
       return false;
     },
     jumpToLatest() {
+      // Explicit navigation supersedes the recent wheel/pointer momentum window.
+      userInteractionUntil.current = 0;
       pendingUserAnchor.current = false;
       pendingScrollIntent.current = false;
       atBottom.current.set(key, true);

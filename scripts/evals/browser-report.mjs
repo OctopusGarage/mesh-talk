@@ -41,6 +41,13 @@ export function requiredBrowserPaths(tier) {
     ["media-lifecycle.spec.ts", "same-identity disable/re-enable never returns a revoked URL"],
     ["media-lifecycle.spec.ts", "cleanup during an admitted durable read prevents fallback and blob creation"],
     ["media-lifecycle.spec.ts", "same UUID relogin revokes the old owned URL exactly once"],
+    ["media-lifecycle.spec.ts", "ordinary media survives remount and is revoked on relogin and idle logout"],
+    ["media-scroll.spec.ts", "image rows reserve their final geometry before bytes load"],
+    ["media-scroll.spec.ts", "scrolling away and returning to latest reuses media without changing row height"],
+    ["media-scroll.spec.ts", "portrait images retain a stable contained frame in a short window"],
+    ["media-scroll.spec.ts", "panorama images retain a stable contained frame in a short window"],
+    ["media-scroll.spec.ts", "unsupported image retains its loading geometry"],
+    ["media-scroll.spec.ts", "unsupported video retains its loading geometry"],
     ["screenshot-portable.spec.ts", "Enter sends a staged screenshot after capture loses input focus"],
     ["screenshot-portable.spec.ts", "screenshot selection annotation and explicit send produce cropped PNG"],
     ["screenshot-portable.spec.ts", "hidden screenshot capture cancels without sending"],
@@ -73,6 +80,8 @@ export function requiredBrowserPaths(tier) {
     ["unread-badge.spec.ts", "a replacement account does not inherit unread after identity lookup fails"],
     ["unread-badge.spec.ts", "one logical DM remains one unread badge across duplicate live events and history scanning"],
     ["unread-badge.spec.ts", "channel mention indicator survives later traffic and clears when the mention is viewed"],
+    ["unread-badge.spec.ts", "unread review clears undiscovered senders and hidden channels without hiding later arrivals"],
+    ["unread-badge.spec.ts", "unread review exposes failed badge updates and retries the current cleared count"],
   );
   return paths;
 }

@@ -3,6 +3,7 @@ import type { FavoriteSource } from "@/lib/api/messageFavorites";
 export const MAX_FAVORITE_MESSAGES = 100;
 export function canCollect(message: ChatMessage, now = Date.now()) {
   return (
+    !message.announcement &&
     !!message.id &&
     message.id !== "0".repeat(64) &&
     !message.protection &&

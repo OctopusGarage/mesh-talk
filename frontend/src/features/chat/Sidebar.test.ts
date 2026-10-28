@@ -7,6 +7,7 @@ const { chatState, policyState } = vi.hoisted(() => ({
   chatState: {
     active: null as null | { kind: string; id: string; name: string },
     unread: { "account:alice": 2 },
+    pendingUnknownUnread: {},
     ledger: {},
     messages: {
       "account:alice": [{ text: "See you on the LAN" }],
@@ -316,3 +317,21 @@ it("does not reveal contact rows before the visibility policy has loaded", () =>
     policyState.loaded = true;
   }
 });
+
+it.each(["my-account", "alice", "group"])(
+  "uses a localized image preview for conversation %s",
+  async (id) => {
+    await i18n.changeLanguage("zh-Hans");
+    chatState.channels = [
+      { channel_id: "group", name: "Study", owner: "me", member_count: 3 },
+    ];
+    chatState.messages = {
+      [`${id === "group" ? "channel" : "account"}:${id}`]: [
+        { file: { name: "screenshot.png" } },
+      ],
+    };
+    const html = renderToStaticMarkup(createElement(Sidebar));
+    expectConversation(html, id, "", "[图片]");
+    expect(html).not.toContain("screenshot.png");
+  },
+);

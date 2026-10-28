@@ -238,6 +238,7 @@ pub struct ChannelBook {
     activity_emitted: HashSet<EventId>,
     lineage_owner: HashMap<ConversationId, String>,
     history_policies: HashMap<ConversationId, crate::channel::HistoryPolicy>,
+    metadata_versions: HashMap<ConversationId, (usize, Option<EventId>)>,
     replica_preferences: HashMap<(ConversationId, String), (u64, EventId, bool)>,
 }
 
@@ -302,6 +303,7 @@ pub(in crate::node) struct ChannelInfoProjection {
     pending: bool,
     members: Vec<(PublicIdentity, bool, bool)>,
     history_policy: crate::channel::HistoryPolicy,
+    metadata_version: (usize, Option<EventId>),
 }
 
 pub(super) struct ChannelMembershipProjection {
@@ -320,6 +322,11 @@ impl ChannelBook {
     ) -> Option<ChannelInfoProjection> {
         let state = self.state(&channel)?;
         Some(ChannelInfoProjection {
+            metadata_version: self
+                .metadata_versions
+                .get(&channel)
+                .copied()
+                .unwrap_or_default(),
             history_policy: self
                 .history_policies
                 .get(&channel)
@@ -888,6 +895,15 @@ impl ChannelBook {
     ) -> (Vec<ReceivedChannelMessage>, bool) {
         let my_author = Author::from_ed25519(me.public().ed25519_pub);
         if replay.history.is_none() {
+            let mut metadata = replay
+                .events
+                .iter()
+                .filter(|event| event.kind == EventKind::ChannelMetadata)
+                .map(|event| event.id);
+            let first = metadata.next();
+            let count = usize::from(first.is_some()) + metadata.clone().count();
+            let last = metadata.next_back().or(first);
+            self.metadata_versions.insert(channel_id, (count, last));
             self.history_policies
                 .insert(channel_id, super::join_history::policy(&replay.events));
             replay.history =

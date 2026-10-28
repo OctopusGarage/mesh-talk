@@ -1455,10 +1455,14 @@ impl Node {
     }
 
     pub async fn retry_channel_controls(&self) {
-        let released = self.retry_join_history().unwrap_or_else(|error| {
+        let mut released = self.retry_join_history().unwrap_or_else(|error| {
             log::warn!("channel join history retry failed: {error}");
             Vec::new()
         });
+        released.extend(self.retry_group_metadata().unwrap_or_else(|error| {
+            log::warn!("group metadata retry failed: {error}");
+            Vec::new()
+        }));
         let mut pending = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
             let own = self.user_id();

@@ -164,7 +164,8 @@ impl PreparedParticipant {
                 let mut roster = node.roster.lock().expect("roster lock not poisoned").subscribe_changes();
                 let mut delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS);
                 loop {
-                    let pending = !node.pending_files.lock().expect("pending files lock not poisoned").is_empty();
+                    let pending = !node.pending_files.lock().expect("pending files lock not poisoned").is_empty()
+                        || node.group_file_work_pending();
                     tokio::select! {
                         _ = node.pull_pending_files() => {},
                         _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },

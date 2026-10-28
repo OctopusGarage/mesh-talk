@@ -82,7 +82,7 @@ Paths below are relative to the repository root. `core/` abbreviates
 | Durable outgoing delivery                      | `core/node/delivery_store.rs`, `delivery_runtime.rs`, `delivery_receipt.rs`, `delivery_observation.rs`                                                                          | Storage owns persisted transitions; runtime owns bounded direct/relay progress and scheduling; receipts own exact completion evidence. Runtime observations describe exact attempts under the [delivery observation contract](network-design-reference.md#runtime-delivery-observations). |
 | Post-office routing/federation                 | `core/postoffice/` (including signed network membership in `network.rs`), `core/node/postbox.rs`, `opaque_relay.rs`, `bridge_directory.rs`, `bridge_client.rs`, `relay_policy.rs`                                                     | Reuse relay eligibility, opaque projection and incremental mailbox admission; directory participation does not grant relay or conversation authority.                                                                                  |
 | Transport/session reuse                        | `core/transport/`, `core/node/transport.rs`, `session_pool.rs`, `session.rs`, `account_session.rs`                                                                                                    | Reuse authenticated bounded sessions; `session_pool.rs` also owns exact-endpoint authentication admission before TCP permits. Feature modules do not open ad hoc sockets or create their own retry loops.                                                                                                                      |
-| Files/folders                                  | `core/file/`, `core/node/files.rs`, `sticker_media.rs`, `filebook.rs`, `file_consent.rs`, `file_completion.rs`, `file_message_identity.rs`                                                                                      | Consent, chunk integrity and recipient completion remain distinct transitions. Presentation intake belongs to `ui/features/chat/attachments/useAttachmentIntake.ts`; the store retains intent acceptance/retry.                        |
+| Files/folders                                  | `core/file/`, `core/node/files.rs`, `sticker_media.rs`, `filebook.rs`, `file_consent.rs`, `file_completion.rs`, `file_message_identity.rs`, `group_file_delivery.rs`                                                                                      | Consent, chunk integrity and recipient completion remain distinct transitions. Presentation intake belongs to `ui/features/chat/attachments/useAttachmentIntake.ts`; the store retains intent acceptance/retry.                        |
 | History/search/recall/reactions                | `core/node/queries.rs`, `search.rs`, `recall.rs`, `reactions.rs`                                                                                                                | Query through core; [recent-search references](ARCHITECTURE.md#recent-search-references) reuse canonical history identity and coverage. Frontend uses verified account bindings and centralized contact visibility.                                                                                                                                        |
 | Linking and sibling replay                     | `core/node/pairing.rs`, `linking.rs`, `enrollment.rs`, `account_sync*.rs`, `account_preferences.rs`, `account_access.rs`                                                                           | Pairing authority and replay policy stay separate from the dialog. Host adoption belongs to `src-tauri/src/linked_account.rs`; signed-out enrollment belongs to `device_enrollment.rs` and reuses the recovery publication journal; private login application belongs to `shared_account_login.rs`.                                                                                            |
 | Calls                                          | `core/node/call.rs`, `ui/store/calls.ts`, `ui/features/chat/WebRtcTestDialog.tsx`                                                                                               | Core owns authenticated signaling; the call store owns call lifecycle and WebRTC media; the test dialog owns local media diagnostics. Do not reuse mailbox custody as live signaling.                                                  |
@@ -99,6 +99,34 @@ business decision or a real lifecycle seam, not merely by similar syntax. For
 example, discovery TTL and conversation presence need not share a constant just
 because both measure time; session admission and mailbox admission must retain
 their distinct authorization contracts.
+
+### Inline media presentation
+
+`ui/features/chat/MediaPreview.tsx` owns ordinary inline image/video presentation.
+Receiving, loading, decoded and unsupported states share a responsive frame
+(up to 320 pixels wide, 4:3 for images and 16:9 for video); artwork is contained
+without cropping, and the lightbox retains full-size access. Transfer readiness
+must not swap an ordinary preview from a compact file card to an image row.
+Attachment consent remains owned by `FileBubble` and the existing file policy.
+
+`mediaFile.tsx` owns durable-first reads and explicitly opts ordinary previews
+into `mediaObjectUrlCache.ts`. Concurrent consumers share one admitted read and
+Blob URL. Active views hold references; idle reuse is limited to 64 entries,
+32 MiB of Blob bytes, and 30 seconds since the last view released its reference.
+Oversized media is released on last use instead of evicting smaller idle media.
+Auth generation, owner, chat runtime, identity or readiness retirement revokes
+stale URLs and clears video posters; retired reads cannot initiate fallback or
+publish a URL. Protected reveals keep the default per-mount URL lifecycle and
+never opt into ordinary-media reuse.
+
+`useConversationViewport.ts` owns reader anchors and live-edge intent alongside
+Virtuoso's variable-height measurements. Pending user scroll input prevents old
+anchors from writing `scrollTop` during insertions or resize callbacks. Explicit
+navigation to the latest message clears earlier momentum intent so delayed row
+measurements keep following the live edge. Existing message keys remain the
+virtual row identities. Browser scenarios cover stable
+receive/decode geometry, remount reuse and owner cleanup; native trackpad momentum
+and WKWebView decoding still require platform evidence.
 
 ### Coordinated state owners
 
@@ -307,6 +335,8 @@ it does not choose another account or restore a second theme projection.
 visibility precedence and its bounded fallback. Window-state persistence retains
 geometry and decoration, while launch policy owns visibility. A renderer
 acknowledgement is presentation-only and grants no runtime or content authority.
+Explicit main-window restoration also belongs to this owner: Dock reopen,
+single-instance activation and tray actions reuse its show/unminimize/focus path.
 
 ### Focused validation ownership
 
@@ -584,6 +614,44 @@ Desktop `src-tauri/src/message_favorites.rs` owns admitted IPC adaptation;
 `ui/features/chat/favorites/` owns collection/selection/editing. These do not reuse
 contact pin/alias preferences or Message Yourself as a collection store.
 [Favorites](favorites.md) owns the limits, retention and synchronization contract.
+
+## Shared group photos and announcements
+
+`core/node/group_metadata.rs` owns independently versioned owner-published group
+photos and announcements, encrypted publication keys, current-state releases and
+durable clear tombstones. It reuses channel authority and causal ownership
+validation; private account documents never grant authority over shared group
+content. Group sync capability gating and event-log retention preserve this
+contract across replay, offline recovery and accepted-member bootstrap.
+
+`src-tauri/src/chat_commands/channel_metadata.rs` owns exact owner/account/runtime
+admission for reads and edits. Channel summaries project validated current content
+and a bounded recent announcement-card window. `ui/components/GroupAvatar.tsx`
+resolves the existing private override before shared group content and the member
+montage; `AvatarEditMenu` only changes personal overrides. The group editor in
+`ui/features/chat/ChannelMetadataSettings.tsx` publishes shared changes with
+expected revisions and retires requests on group/session/authority replacement.
+`ChannelAnnouncement.tsx` owns current details, publication cards and reminders;
+`ui/lib/groupAnnouncements.ts` owns bounded device-private per-account version
+markers and presentation-only timeline merging. Publication cards never enter
+message delivery, read-receipt or ordinary-message unread ledgers.
+
+The [channel guide](help/topics/channels.md#group-announcements) owns the visible
+workflow and limits. Cover and announcement updates do not rotate membership or
+overwrite each other's revisions. Current-state release cannot become pre-join
+message history access.
+
+## Ordinary file custody
+
+`node/group_file_delivery.rs` owns bounded original-sender group-file postal
+custody and exact group-offer authority, reusing `opaque_relay.rs`, the existing
+attachment producer and `file_consent.rs`. `file_consent_store.rs` isolates signed
+revisions by manifest and recipient device without changing its record encoding.
+`delivery_runtime.rs` owns private-file custody, while direct receive consent
+remains enforced by the existing attachment and guarded-sync owners. Incoming
+group completion reservations reuse `delivery_store.rs` and `file_completion.rs`;
+mailbox draining may use current group principals without granting private-DM
+permission. See [ordinary file custody](network-design-reference.md#ordinary-file-custody).
 
 ## Network cost protection
 

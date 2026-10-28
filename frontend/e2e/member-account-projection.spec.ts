@@ -63,7 +63,9 @@ test("linked devices render as one member and native owner-account authority app
   await page.getByTestId("members-trigger").click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.locator("[data-member-row]")).toHaveCount(2);
-  await expect(dialog.getByRole("heading")).toContainText("2 members");
+  await expect(dialog.getByRole("heading", { level: 2 })).toContainText(
+    "2 members",
+  );
   await expect(dialog.getByTestId("member-owner-badge")).toHaveCount(1);
   await expect(
     dialog.getByTestId("member-profile-device_self_0001"),

@@ -18,6 +18,12 @@ type MediaWindow = Window & {
 test("received media recovers when bytes become available with stable fileConv", async ({
   page,
 }) => {
+  // Chromium exercises the Mac integration wiring, not Apple's recognition engine.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "userAgent", {
+      get: () => "Macintosh; Mac OS X",
+    });
+  });
   await enterChat(page);
   await page.evaluate(() => {
     const w = window as unknown as MediaWindow;
@@ -96,6 +102,12 @@ test("received media recovers when bytes become available with stable fileConv",
   await expect(
     page.getByRole("progressbar", { name: "Receiving file…" }),
   ).toHaveAttribute("aria-valuenow", "50");
+  const messageRow = page.locator(
+    '[data-message-id="early-media-stable-message"]',
+  );
+  const receivingHeight = await messageRow.evaluate(
+    (row) => row.getBoundingClientRect().height,
+  );
   const initialCalls = await page.evaluate(
     () => (window as unknown as MediaWindow).__mediaDiagnostic.calls,
   );
@@ -130,12 +142,32 @@ test("received media recovers when bytes become available with stable fileConv",
         },
       )
       .toBe(true);
+    await expect
+      .poll(() =>
+        messageRow.evaluate((row) => row.getBoundingClientRect().height),
+      )
+      .toBe(receivingHeight);
     await page.getByRole("button", { name: "View full size" }).click();
     const lightbox = page.getByTestId("file-image-lightbox");
     await expect(lightbox).toBeVisible();
-    await expect(lightbox.locator("img")).toBeVisible();
+    const enlargedImage = lightbox.locator("img");
+    await expect(enlargedImage).toBeVisible();
+    await expect(enlargedImage).toHaveCSS("user-select", "text");
+    await expect(page.getByTestId("file-image")).toHaveCSS(
+      "user-select",
+      "none",
+    );
+    await enlargedImage.click({ button: "right" });
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    // Releasing a text-selection drag on the backdrop must keep the preview open.
+    await enlargedImage.hover();
+    await page.mouse.down();
+    await page.mouse.move(2, 2);
+    await page.mouse.up();
+    await expect(lightbox).toBeVisible();
     await lightbox.getByRole("button", { name: "Close" }).click();
     await expect(lightbox).toHaveCount(0);
+    await expect(page.getByRole("menu")).toHaveCount(0);
     await page.getByRole("button", { name: "View full size" }).click();
     await expect(lightbox).toBeVisible();
     await page.keyboard.press("Escape");

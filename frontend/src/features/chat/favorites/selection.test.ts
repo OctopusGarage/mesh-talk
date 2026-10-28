@@ -33,6 +33,14 @@ it("excludes pending, failed, recalled, expired and sentinel messages", () => {
     { failed: true },
     { recalled: true },
     { metadataPending: true },
+    {
+      announcement: {
+        revision: "notice",
+        content: "Notice",
+        author: "account",
+        authored_at: 1,
+      },
+    },
     { expiresAtMs: 1 },
   ])
     expect(canCollect(message("one", extra))).toBe(false);

@@ -10,8 +10,8 @@ const NO_MEMBERS: ChannelMemberInfo[] = [];
 
 /**
  * A WeChat-style group avatar: a square montage of up to 9 account identity glyphs/avatars,
- * derived LIVE from the channel's current members (no stored group photo, no protocol — it
- * always reflects who's in the channel). Each tile is an account's custom avatar if they set
+ * derived LIVE from the channel's current members when no private/shared photo exists.
+ * Each tile is an account's custom avatar if they set
  * one, else their deterministic IdentityGlyph. Falls back to a mesh sigil until members load.
  */
 export function GroupAvatar({
@@ -32,8 +32,23 @@ export function GroupAvatar({
   // A photo explicitly set for this channel (e.g. a club logo from the gallery) wins over
   // the auto-composite — IdentityGlyph(channelId) renders that avatar.
   const custom = useAvatar(channelId);
-  if (custom) {
-    return <IdentityGlyph seed={channelId} size={size} title={title} />;
+  const shared = useChat(
+    (s) =>
+      s.channels.find((channel) => channel.channel_id === channelId)?.metadata
+        ?.cover?.content,
+  );
+  const photo = custom ?? shared;
+  if (photo) {
+    return (
+      <img
+        src={photo}
+        width={size}
+        height={size}
+        alt={title ?? ""}
+        title={title}
+        className="shrink-0 rounded-[28%] object-cover"
+      />
+    );
   }
 
   // Match the header's accepted-account count; invitations remain in the member

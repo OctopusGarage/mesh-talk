@@ -144,6 +144,7 @@ export interface ChannelRecovery {
   checked_at?: number | null;
 }
 export interface ChannelInfo {
+  metadata?: ChannelMetadata | null;
   /** Informational account inventory; never grants membership or management. */
   shared_reference?: boolean;
   legacy_membership?: boolean;
@@ -161,6 +162,22 @@ export interface ChannelInfo {
   dissolved?: boolean;
   left?: boolean;
   pending_invite?: boolean;
+}
+
+/** Validated shared group content; private photo overrides have a separate owner. */
+export interface ChannelMetadataValue {
+  revision: string;
+  content: string | null;
+  author: string;
+  authored_at: number;
+}
+export interface ChannelMetadata {
+  /** A publication is known, but its authorized content key is still catching up. */
+  cover_pending?: boolean;
+  announcement_pending?: boolean;
+  cover: ChannelMetadataValue | null;
+  announcement: ChannelMetadataValue | null;
+  announcement_history: ChannelMetadataValue[];
 }
 
 export interface SearchHitInfo {
@@ -379,6 +396,7 @@ export interface DmReceivedEvent {
 
 export type ArrivalKind = "live" | "catch_up" | "history_sync";
 export interface ReceptionMetadata {
+  expires_at_ms?: number | null;
   event_id?: string;
   authored_at?: number;
   received_at?: number;

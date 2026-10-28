@@ -13,11 +13,41 @@ control to resume the live conversation. A message that has expired, been
 recalled or become unavailable shows an explanation; matching text elsewhere
 does not substitute for the selected message.
 
+## Follow a reply
+
+Replies show their quoted context beneath the main bubble, with the original
+sender's name and an image thumbnail for photos. Filenames stay out of photo
+quotes. The composer uses the same sender and preview while preparing a reply.
+
+Select a quote, or focus it and press Enter, to center and briefly highlight the
+original message. If the source is outside loaded history, the app opens its
+exact local history context. Use **Jump to latest messages** to resume the live
+conversation. A missing, recalled, expired or deleted source shows an explanation
+instead of navigating to similar content. Requests are discarded after switching
+conversations, owners or runtimes. Open the original photo to view it at full size.
+
+Unavailable photos keep a placeholder until their bytes become available.
+Protected, recalled and expired content stays concealed in quotes; oversized
+images keep a photo placeholder without loading their bytes.
+
 ## Read delayed messages
 
 Group messages can arrive after reconnecting through another authorized member or a post office. Their position follows retained conversation history rather than download time. While you read older content, the view keeps your place; use **New messages** or **Earlier messages received** to move to unread content.
 
 Opening a conversation does not mark every offscreen message read. Newly recovered content can remain unread even when it was authored before messages you already read. Catch-up notifications summarize recovered messages rather than treating every row as a new live alert. If the app cannot open a tracked message or asks you to review more unread history, use the offered review or explicit mark-read action. See [Channels](channels.md) for recovery and sharing limits.
+
+## Find or clear an unread badge
+
+Open **Unread messages** above **Received files** in the sidebar. The review
+includes hidden conversations, conversations outside the current list and
+messages waiting for their sender to be identified. Select a conversation to
+open it, or use its checkmark to clear that source. **Refresh** checks for updated
+sender information; **Mark all as read** clears the current unread indicators.
+These actions keep your messages and allow later messages to become unread.
+
+If the app badge could not be updated, the review shows a retry action while
+automatic retries continue. A message missing from this device's history is not
+proof that every device has lost it.
 
 ## Keep an unfinished message
 

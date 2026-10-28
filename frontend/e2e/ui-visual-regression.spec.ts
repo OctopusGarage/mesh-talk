@@ -192,3 +192,65 @@ for (const viewport of VIEWPORTS) {
     }
   });
 }
+
+for (const theme of ["light", "dark"] as const) {
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 760, height: 520 },
+  ]) {
+    test(`unread review ${theme} ${viewport.width}x${viewport.height}`, async ({
+      page,
+    }) => {
+      await seedThemeBeforeLoad(page, theme);
+      await page.setViewportSize(viewport);
+      await enterChat(page);
+      await page.evaluate(() => {
+        const emit = (
+          window as unknown as {
+            __mockEmit: (event: string, payload: unknown) => void;
+          }
+        ).__mockEmit;
+        emit("dm-received", {
+          from: "device_bob_2222",
+          from_name: "bob",
+          text: "An unread message",
+          message_id: "review-dm",
+          from_account: "acc_bob_bbbb2222",
+          reply_to: null,
+        });
+        emit("dm-received", {
+          from: "sender-not-in-directory",
+          from_name: "Unknown",
+          text: "Waiting for discovery",
+          reply_to: null,
+        });
+      });
+      await page.getByTestId("unread-review-trigger").click();
+      const review = page.getByTestId("unread-review");
+      await expect(
+        review.getByText("Waiting to identify sender", { exact: true }),
+      ).toBeVisible();
+      await expect(
+        review.getByRole("button", { name: "Mark all as read", exact: true }),
+      ).toBeInViewport();
+      expect(
+        await review.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth + 1,
+        ),
+      ).toBe(true);
+      await prepareForScreenshot(page);
+      const name = snapshotName(
+        "unread-review",
+        theme,
+        viewport.width,
+        viewport.height,
+      );
+      const reference = ["linux", "win32"].includes(process.platform)
+        ? name.replace(".png", `-${process.platform}.png`)
+        : name;
+      await expect(review).toHaveScreenshot(reference);
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("unread-review-trigger")).toBeFocused();
+    });
+  }
+}

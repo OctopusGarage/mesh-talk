@@ -23,7 +23,7 @@ export function PresenceAvailability() {
           className="h-3.5 w-3.5 shrink-0 group-open:rotate-180"
         />
       </summary>
-      <div className="max-h-[min(9rem,20vh)] overflow-y-auto overscroll-contain px-1 pb-1 pt-1 leading-5 [overflow-wrap:anywhere]">
+      <div className="max-h-[min(9rem,12vh)] overflow-y-auto overscroll-contain px-1 pb-1 pt-1 leading-5 [overflow-wrap:anywhere]">
         <p>{t("presence.unavailableDetail")}</p>
         {failure && (
           <p data-testid="presence-failure-detail" className="mt-2 select-text">

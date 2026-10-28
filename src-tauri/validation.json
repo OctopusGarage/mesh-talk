@@ -2,6 +2,42 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "desktop-group-metadata",
+      "paths": [
+        "src-tauri/src/chat_commands/channel_metadata.rs",
+        "src-tauri/src/chat_commands/channels.rs",
+        "src-tauri/src/owner_commands.rs"
+      ],
+      "capability": {
+        "summary": "Publish owner-authorized encrypted group photos and announcements while preserving private overrides and independently versioned current state.",
+        "guide": "docs/help/topics/channels.md#group-announcements",
+        "invariants": [
+          {
+            "name": "Personal group photos take priority; clearing restores shared content. Only current owner authority can publish, and stale sessions or revisions cannot overwrite newer state.",
+            "reference": "docs/module-boundaries.md#shared-group-photos-and-announcements"
+          },
+          {
+            "name": "Publication cards and private dismissal never fabricate message unread counts, recipient delivery or public read receipts.",
+            "reference": "CONTEXT.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run group-metadata, channel-history and group avatar browser scenarios plus applicable visual regression. Native IPC and encrypted loopback/restart/capability evidence are required; browser mocks do not certify physical peer synchronization."
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "registered_channel_metadata_preserves_versions_and_owner_admission"
+          ]
+        }
+      ],
+      "consumers": [
+        "frontend-group-metadata"
+      ]
+    },
+    {
       "id": "desktop-screenshot-shortcuts",
       "paths": [
         "src-tauri/src/screenshot_shortcuts.rs",
@@ -906,6 +942,7 @@
     {
       "id": "desktop-window",
       "paths": [
+        "src-tauri/examples/native-window-reopen-eval.rs",
         "src-tauri/src/tray.rs",
         "src-tauri/src/window_geometry.rs",
         "src-tauri/src/window_visibility.rs",
@@ -924,6 +961,7 @@
         }
       ],
       "escalation": [
+        "On macOS run the native-window-reopen-eval example with an isolated absolute data root and --hidden. Verify physical packaged Dock and tray Open/click restoration after close-to-tray and minimization, repeated activation, locked entry and hidden autostart. Mock runtime tests do not establish native visibility or focus.",
         "Verify registered main-window presentation IPC, queued hide/ack/fallback ordering and hidden launch. Preserve X11 placement and geometry; require actual packaged first-visible-frame evidence plus browser image/library readiness and unchanged visuals."
       ],
       "capability": {

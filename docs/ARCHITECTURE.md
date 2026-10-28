@@ -175,6 +175,16 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   The `dm.rs` recipient sealed-box (no FS) is now used only
   to distribute channel keys, seal file manifests and encrypt delivery-control
   metadata (the latter has no forward secrecy and contains no message text).
+- **Shared group metadata** — owner-published group photos and announcements use the appended kind-19
+  metadata control, gated by V5 sync envelopes. Each publication encrypts its
+  bounded content under an independent random key sealed to accepted members;
+  eligible current holders can release only a current field's key to an accepted
+  newcomer. This does not export prior sender chains or enable pre-join text
+  history. Causal owner authority, exact device/account bindings and current
+  membership govern publication, replay and release. Independent field revisions
+  and durable clear tombstones preserve offline convergence without coupling
+  updates to membership epochs or ordinary message retention. Private avatar
+  overrides retain their account-document owner. See [group announcements](help/topics/channels.md#group-announcements).
 - **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
   single-use message keys; membership add/remove rotates the **epoch** and re-distributes
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are
@@ -1166,6 +1176,20 @@ Hidden autostart never arms an automatic show. The window-state plugin restores
 geometry and decorations without restoring visibility. Presentation IPC is
 allowed for the locked entry screen, targets only the main window, and admits no
 account data or runtime operation.
+
+Explicit main-window restoration is owned by `window_visibility`: show through
+the existing placement-preserving path, unminimize, then focus. The macOS
+application `Reopen` event (including Dock activation), single-instance activation
+and tray Open/navigation actions share this operation. A tray click restores a
+hidden or minimized window and hides a visible, non-minimized window. Close to
+tray continues receiving in the background; it does not minimize or quit.
+
+On macOS, run `cargo run -p mesh-talk --example native-window-reopen-eval --
+/absolute/disposable/namespace/data --hidden` to check production close handling,
+AppKit reopen dispatch, repeated restoration, minimized restoration and focus.
+The probe uses isolated app data and exits automatically. Also verify physical
+Dock and menu bar clicks in a packaged build; delegate dispatch does not certify
+those system input paths. Preserve locked-entry behavior and hidden autostart.
 
 ### Recent search references
 

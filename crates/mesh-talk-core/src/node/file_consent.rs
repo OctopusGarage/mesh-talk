@@ -112,7 +112,7 @@ impl Node {
         if self
             .delivery_suspended
             .load(std::sync::atomic::Ordering::Acquire)
-            || !self.known_account_allowed(sender)
+            || (!self.known_account_allowed(sender) && !self.group_member(sender))
         {
             return Ok(Vec::new());
         }
@@ -133,19 +133,27 @@ impl Node {
         let mut controls = Vec::new();
         let scope = super::conversation::dm_conversation_id(&self.identity.public(), sender);
         for (file, manifests) in offers {
-            let manifests: Vec<_> = {
+            let candidates: Vec<_> = {
                 let log = self.log.lock().expect("log lock not poisoned");
                 manifests
                     .into_iter()
-                    .filter(|id| {
-                        log.get(id)
-                            .is_some_and(|event| event.conversation_id == scope)
-                    })
+                    .filter_map(|id| log.get(&id).map(|event| (id, event.conversation_id)))
                     .collect()
             };
+            let manifests: Vec<_> = candidates
+                .into_iter()
+                .filter(|(id, parent)| {
+                    (*parent == scope && self.known_account_allowed(sender))
+                        || self.group_file_offer(file, *id, sender).is_some()
+                })
+                .map(|(id, _)| id)
+                .collect();
             let Some(first) = manifests.first() else {
                 continue;
             };
+            if let Some((event, row)) = self.group_file_offer(file, *first, sender) {
+                self.retain_group_file_completion(&event, &row)?;
+            }
             let Some((automatic, account, _, _)) =
                 self.incoming_offer(file, Some(*first), Some(sender))
             else {
@@ -254,13 +262,43 @@ impl Node {
                 .sender_account
                 .as_deref()
                 .is_some_and(|id| id != self.account_id())
-            || !self.known_account_allowed(peer)
+            || (!self.known_account_allowed(peer)
+                && self
+                    .group_file_offer(payload.file, payload.manifest, peer)
+                    .is_none())
             || self.historical_author(&peer.ed25519_pub).is_none_or(|p| {
                 p.public() != *peer
                     || p.account_id()
                         .is_some_and(|id| id != payload.recipient_account)
             })
         {
+            return Ok(true);
+        }
+        if let Some((original, row)) = self.group_file_offer(payload.file, payload.manifest, peer) {
+            if original.author.ed25519_pub() != &self.identity.public().ed25519_pub
+                || payload.completion.is_some_and(|id| {
+                    let log = self.log.lock().expect("log lock");
+                    let chunks = log.events(&payload.file);
+                    let expected = super::files::validated_manifest(&row.plaintext)
+                        .map(|m| m.chunk_count() as usize);
+                    Some(chunks.len()) != expected
+                        || chunks.last().map(|event| event.id) != Some(id)
+                })
+            {
+                return Ok(true);
+            }
+            let accepted = {
+                let mut store = self.file_consent.lock().expect("file consent lock");
+                if direct {
+                    store.receive_direct_control(event.clone())?
+                } else {
+                    store.receive_control(event.clone())?
+                }
+            };
+            if accepted {
+                self.file_pull_notify.notify_one();
+                self.note_file_change();
+            }
             return Ok(true);
         }
         let delivery = self.delivery.lock().expect("delivery lock not poisoned");

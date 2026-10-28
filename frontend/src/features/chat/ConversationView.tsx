@@ -1,3 +1,8 @@
+import {
+  ChannelAnnouncementStrip,
+  AnnouncementPublication,
+} from "./ChannelAnnouncement";
+import { withAnnouncementPublications } from "@/lib/groupAnnouncements";
 import { ConversationBio } from "./ConversationHeaders";
 import { useMessageCollection } from "./favorites/useMessageCollection";
 import {
@@ -37,6 +42,7 @@ import {
   messageRowKey,
   useConversationViewport,
 } from "./useConversationViewport";
+import { openReplySource } from "./replyNavigation";
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
 import { PendingChannelInvite } from "./PendingChannelInvite";
@@ -217,12 +223,28 @@ export function ConversationView() {
               (!message.id || !deletedContextIds.includes(message.id)) &&
               (message.expiresAtMs == null || message.expiresAtMs > expiryNow),
           )
-        : historyMessages,
-    [exactContext, historyMessages, deletedContextIds, expiryNow],
+        : active?.kind === "channel"
+          ? withAnnouncementPublications(
+              historyMessages,
+              channels.find((c) => c.channel_id === active.id)?.metadata
+                ?.announcement_history ?? [],
+              myAccountId,
+            )
+          : historyMessages,
+    [
+      exactContext,
+      historyMessages,
+      deletedContextIds,
+      expiryNow,
+      active?.kind,
+      active?.id,
+      channels,
+      myAccountId,
+    ],
   );
   const savedMessageIds = useFavoriteMembership(
     active,
-    messages,
+    messages.filter((message) => !message.announcement),
     `${owner}:${authGeneration}:${receptionScope}:${key}`,
   );
   const closeSearchContext = () => {
@@ -242,6 +264,32 @@ export function ConversationView() {
     searchTarget,
     exactContext ? undefined : markMessagesViewed,
   );
+
+  const replyNavigationRequest = useRef(0);
+  const [replyNavigation, setReplyNavigation] = useState<{
+    key: string;
+    id: string | null;
+    unavailable: boolean;
+  } | null>(null);
+  useEffect(() => {
+    replyNavigationRequest.current++;
+    setReplyNavigation(null);
+  }, [key, owner, authGeneration, receptionScope]);
+  const navigateReply = async (id: string) => {
+    const request = ++replyNavigationRequest.current;
+    setReplyNavigation({ key, id, unavailable: false });
+    const result = await openReplySource(
+      id,
+      viewport.jumpToMessage,
+      () => replyNavigationRequest.current === request,
+    );
+    if (replyNavigationRequest.current !== request) return;
+    setReplyNavigation({
+      key,
+      id: null,
+      unavailable: result === "unavailable",
+    });
+  };
 
   const unreadNavigationRequest = useRef(0);
   const [unreadNavigation, setUnreadNavigation] = useState<{
@@ -323,6 +371,26 @@ export function ConversationView() {
     m.arrivalKind !== "catch_up" &&
     m.arrivalKind !== "history_sync" &&
     !seenKeys.current.has(messageRowKey(m, i));
+
+  const replyAuthorName = (message: ChatMessage) =>
+    message.fromMe
+      ? myName
+      : displayIdentity({
+          accountId:
+            active?.kind === "channel"
+              ? roster.accountForMember(
+                  memberByDevice.get(message.who) ?? { user_id: message.who },
+                )
+              : active?.id,
+          deviceId: message.who,
+          fallbackName:
+            active?.kind === "channel"
+              ? memberByDevice.get(message.who)?.name
+              : active?.name,
+          accounts,
+          peers,
+          favorites,
+        }).name;
 
   const byId = useMemo(() => {
     const m = new Map<string, ChatMessage>();
@@ -509,6 +577,12 @@ export function ConversationView() {
           )
         )}
       </header>
+      {isChannel && !sharedReference && (
+        <ChannelAnnouncementStrip
+          key={`${owner}:${authGeneration}:${receptionScope}:${active.id}`}
+          channelId={active.id}
+        />
+      )}
       {notificationReminder.visible && (
         <NotificationPermissionNotice
           onDismiss={notificationReminder.dismiss}
@@ -584,14 +658,17 @@ export function ConversationView() {
             </button>
           </div>
         )}
-        {!loading && !historyError && viewport.searchMiss && (
-          <div
-            role="status"
-            className="absolute inset-x-4 top-3 z-10 mx-auto max-w-[38rem] rounded-md border bg-card px-4 py-2 text-center text-[13px] shadow-elevation"
-          >
-            {t("search.contextUnavailable")}
-          </div>
-        )}
+        {!loading &&
+          !historyError &&
+          (viewport.searchMiss ||
+            (replyNavigation?.key === key && replyNavigation.unavailable)) && (
+            <div
+              role="status"
+              className="absolute inset-x-4 top-3 z-10 mx-auto max-w-[38rem] rounded-md border bg-card px-4 py-2 text-center text-[13px] shadow-elevation"
+            >
+              {t("search.contextUnavailable")}
+            </div>
+          )}
         {exactContext && (
           <div className="absolute right-4 top-3 z-10 rounded-md border bg-card px-3 py-2 text-sm shadow-elevation">
             <button
@@ -662,10 +739,18 @@ export function ConversationView() {
             atBottomThreshold={48}
             increaseViewportBy={400}
             itemContent={(i, m) => {
+              if (m.announcement)
+                return (
+                  <AnnouncementPublication
+                    channelId={active.id}
+                    value={m.announcement}
+                  />
+                );
               const prev = messages[i - 1];
               const next = messages[i + 1];
               const joins = (neighbor?: ChatMessage) =>
                 !!neighbor &&
+                !neighbor.announcement &&
                 neighbor.who === m.who &&
                 neighbor.fromMe === m.fromMe &&
                 formatDay(neighbor.wallClock) === formatDay(m.wallClock) &&
@@ -742,6 +827,14 @@ export function ConversationView() {
                     collected={!!m.id && savedMessageIds.has(m.id)}
                     m={m}
                     parent={parent}
+                    onNavigateToParent={(id) => void navigateReply(id)}
+                    parentNavigationPending={
+                      replyNavigation?.key === key &&
+                      replyNavigation.id === m.replyTo
+                    }
+                    parentAuthorName={
+                      parent ? replyAuthorName(parent) : undefined
+                    }
                     showAuthor={showAuthor}
                     grouped={grouped}
                     showTime={showTime}
@@ -918,6 +1011,7 @@ export function ConversationView() {
           mentionNames={mentionNames}
           myName={myName}
           replyTo={replyTo}
+          replyAuthorName={replyTo ? replyAuthorName(replyTo) : undefined}
           prefill={prefill?.key === draftKey ? prefill : null}
           onSendSticker={(id, fallback) => {
             void sendSticker(id, fallback, expiresAtSend());

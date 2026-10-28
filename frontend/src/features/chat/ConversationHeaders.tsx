@@ -156,7 +156,7 @@ export function ChannelHeader({
       <div className="relative">
         <AvatarEditMenu
           id={id}
-          ariaLabel={t("avatar.editGroup")}
+          ariaLabel={t("groupMetadata.privatePhoto")}
           category="group"
         >
           <GroupAvatar channelId={id} size={36} title={name} />

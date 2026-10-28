@@ -56,8 +56,9 @@ import {
   markUnavailableFileError,
 } from "@/store/fileAvailability";
 import { stickerSummary } from "@/lib/stickerMedia";
-import { messageSticker, messageSummary } from "@/lib/messagePresentation";
+import { messageSticker } from "@/lib/messagePresentation";
 import { MediaSticker } from "./MediaSticker";
+import { ReplyPreview } from "./ReplyPreview";
 import { MediaPreview } from "./MediaPreview";
 import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
@@ -160,7 +161,7 @@ function FileBubble({
   // below, so it stays visible and savable instead of rendering an empty bubble.
   if (
     !metadataPending &&
-    available &&
+    !approvalNeeded &&
     file.fileConv &&
     file.media &&
     withinInlineCap(file.name, file.size)
@@ -172,6 +173,7 @@ function FileBubble({
           name={file.name}
           size={file.size}
           mime={file.mime}
+          readOnly={readOnly}
         />
         {uploadKey && (
           <TransferBar
@@ -310,6 +312,9 @@ function FileBubble({
 export function MessageBubble({
   m,
   parent,
+  onNavigateToParent,
+  parentAuthorName,
+  parentNavigationPending = false,
   showAuthor,
   grouped,
   showTime,
@@ -339,6 +344,9 @@ export function MessageBubble({
   collected?: boolean;
   m: ChatMessage;
   parent: ChatMessage | null;
+  onNavigateToParent?: (id: string) => void;
+  parentAuthorName?: string;
+  parentNavigationPending?: boolean;
   showAuthor: boolean;
   /** Adjacent message from the same person within a short interval. */
   grouped?: boolean;
@@ -612,23 +620,6 @@ export function MessageBubble({
                   m.pending && "opacity-75",
                 )}
               >
-                {parent && (
-                  <div
-                    data-testid="message-parent-snippet"
-                    className={cn(
-                      "mb-1 flex items-center gap-1 rounded-md border px-2 py-1 text-xs",
-                      mine
-                        ? "border-primary-foreground/40 bg-primary-foreground/10"
-                        : "border-signal/50 bg-muted/50",
-                    )}
-                  >
-                    <CornerUpLeft className="h-3 w-3 shrink-0 opacity-70" />
-                    <span className="truncate opacity-80">
-                      {messageSummary(parent, t, installedPacks) ||
-                        t("composer.message")}
-                    </span>
-                  </div>
-                )}
                 {m.protection ? (
                   <ProtectedMessage
                     id={m.id}
@@ -767,6 +758,27 @@ export function MessageBubble({
           )}
         </div>
 
+        {m.replyTo && (
+          <button
+            type="button"
+            data-testid="message-parent-snippet"
+            aria-label={t("messageFavorites.viewOriginal")}
+            title={t("messageFavorites.viewOriginal")}
+            aria-busy={parentNavigationPending}
+            disabled={!onNavigateToParent || parentNavigationPending}
+            onClick={() => m.replyTo && onNavigateToParent?.(m.replyTo)}
+            className="mt-1 flex min-h-9 max-w-full items-center gap-2 rounded-md bg-muted px-2.5 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default motion-reduce:transition-none"
+          >
+            {parentNavigationPending ? (
+              <span role="status">{t("common.loading")}</span>
+            ) : parent ? (
+              <ReplyPreview message={parent} authorName={parentAuthorName} />
+            ) : (
+              <span>{t("messageFavorites.viewOriginal")}</span>
+            )}
+          </button>
+        )}
+
         {/* reaction chips */}
         {reactions.length > 0 && (
           <div
@@ -807,7 +819,6 @@ export function MessageBubble({
           isChannel={isChannel}
           isPersonal={isPersonal}
           showTime={showTime}
-          compact={isSticker}
         />
 
         {m.failed && (
