@@ -161,6 +161,15 @@ producers, clears idle sessions, drains admitted writers and joins every owned
 thread, including panic cleanup. A same-source topology comparison diagnoses a
 fixture constraint; it does not establish the cause of every CI timing failure.
 
+Modern self-control fixtures allow thirty seconds for cold, bidirectional
+capability and role readiness before admission, matching the existing owner-rename
+setup boundary. This is a bounded setup watchdog, not an operation latency claim:
+retain every full-identity capability and signed-provenance predicate, record
+setup duration and complete/capacity diagnostics, and keep the independent
+admitted-action deadline at eight seconds. The archive-marker setup and dedicated
+held-traffic latency assertions also retain their existing eight-second bounds.
+Cold authentication and control exchanges keep their production network limits.
+
 Role-bootstrap helpers bind readiness to the requested group, the exact full source identity and a signed head floor captured when invoked. If none exists yet, pin the first non-tombstone source head observed within the same setup deadline. Accept that exact metadata or a strictly newer signed revision for the same key and full source; reject older, tombstoned or same-revision conflicting records. A later concurrent publication must not move an already satisfied snapshot barrier. Helpers may observe that durable role through the existing local document watch while an unrelated page tail remains in flight. A prior completed capability response for the exact full source identity is required before cancelling that redundant read. Preserve the setup deadline, current-binding validation and completed protocol-error checks; an incomplete first capability page cannot establish readiness.
 
 Pagination fixtures distinguish a completed comparison sweep from a settled full
@@ -179,6 +188,27 @@ deferred does not prove a completed exchange. Other errors fail immediately;
 History-off, exact signed negative versions and repaired-positive assertions stay
 unchanged. Do not clear cooldowns, create a new cursor or warm the connection to
 avoid this boundary.
+
+File retry fixtures that require the initial best-effort attempt to fail can
+accept the real privacy handshake and immediately close before any application
+frame. Keep the original sending API, durable pending work, relay custody,
+consent and complete-byte assertions. Borrow the fixture listener only during
+that setup call; drop its responder before starting the normal production accept
+owner. This models an actual authenticated transport failure without spending
+unrelated handshake deadlines at an unserviced listening socket.
+
+For manifest frame boundaries, binary search a monotonic encoded-size predicate
+within the original range. Check the immediately preceding fitting case, the
+first protected overflow and ordinary-frame compatibility, then pass the original
+prospective manifest shape to the production selector. Keep real serialization,
+proof/expiry overhead and frame limits.
+
+Mutation timing comparisons must retain the actual package/workspace command,
+test inventory and process count. A package-only baseline does not establish
+that a larger workspace mutation run fits the same deadline. Improve measured
+fixture overhead without narrowing test scope or changing worker/deadline limits.
+A resource-bound argument may explain an equivalent surviving guard mutation;
+it cannot turn an interrupted or timed-out run into a completed advisory survivor.
 
 ## Change-aware development plans
 

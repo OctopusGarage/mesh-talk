@@ -286,6 +286,9 @@ mod tests {
         events
     }
     fn bound_fixture() -> BoundFixture {
+        bound_fixture_with_allocation(3, 3)
+    }
+    fn bound_fixture_with_allocation(seq: u64, lamport: u64) -> BoundFixture {
         let f = fixture();
         let projection = f.base.projection();
         let state = projection.state.as_ref().unwrap();
@@ -301,9 +304,9 @@ mod tests {
         let invitation = Event::new(
             &f.base.owner,
             f.base.group,
-            3,
+            seq,
             f.witness.parents.clone(),
-            3,
+            lamport,
             3,
             EventKind::MembershipChange,
             meta.encode_invitation(),
@@ -329,9 +332,9 @@ mod tests {
         let authority = Event::new(
             &f.base.owner,
             f.base.group,
-            4,
+            seq + 1,
             vec![invitation.id],
-            4,
+            lamport + 1,
             3,
             EventKind::ChannelAccountAuthority,
             authority.signed_encode(f.base.group, &f.base.owner_account),
@@ -368,7 +371,7 @@ mod tests {
             senders: vec![],
             sent: crate::node::sentlog::SentEntry {
                 conversation: f.base.group,
-                seq: 4,
+                seq: seq + 1,
                 wall_clock: 3,
                 plaintext: vec![],
             },
@@ -438,6 +441,40 @@ mod tests {
         f.input.target_account_id = "ab".repeat(16);
         assert!(validate_bound(&f.operation, &f.request, &f.input, &f.witness, &f.body).is_err());
     }
+    #[test]
+    fn invitation_causal_allocation_rejects_independent_lamport_and_sequence_drift() {
+        for (seq, lamport, accepted) in [(3, 3, true), (3, 4, false), (4, 3, false)] {
+            let f = bound_fixture_with_allocation(seq, lamport);
+            // Every batch still carries authentic, contiguous event/account
+            // signatures and the exact original request. Only its allocation
+            // against the saved signed parents can reject the drift cases.
+            validate_bound(&f.operation, &f.request, &f.input, &f.witness, &f.body).unwrap();
+            validate_direct(&f.input, &f.witness, &f.body).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let mut log = PersistentEventLog::open(&dir.path().join("events"), "pw").unwrap();
+            for parent in &f.parents {
+                assert!(parent.verify_integrity() && parent.verify_signature());
+                log.append_durable(parent.clone()).unwrap();
+            }
+            assert_eq!(
+                validate_parent_view(
+                    &f.operation,
+                    &f.request,
+                    &f.input,
+                    &f.witness,
+                    &f.body,
+                    &log
+                )
+                .is_ok(),
+                accepted
+            );
+            assert_eq!(
+                validate_direct_parent_view(&f.input, &f.witness, &f.body, &log).is_ok(),
+                accepted
+            );
+        }
+    }
+
     #[test]
     fn invitation_rejects_missing_causal_parent_before_public_append() {
         let f = bound_fixture();

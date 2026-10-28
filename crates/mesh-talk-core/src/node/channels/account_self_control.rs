@@ -1022,14 +1022,18 @@ pub(in crate::node) mod tests {
         }
     }
     async fn wait_self_control_noise(ready: impl FnMut() -> bool, message: &str) {
-        wait_self_control_noise_diagnosed(ready, || message.to_owned()).await;
+        wait_self_control_noise_diagnosed(std::time::Duration::from_secs(8), ready, || {
+            message.to_owned()
+        })
+        .await;
     }
 
     async fn wait_self_control_noise_diagnosed(
+        budget: std::time::Duration,
         mut ready: impl FnMut() -> bool,
         diagnosis: impl Fn() -> String,
     ) {
-        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        tokio::time::timeout(budget, async {
             while !ready() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -1118,16 +1122,51 @@ pub(in crate::node) mod tests {
         }
         let trace = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let trace_started = std::time::Instant::now();
+        let trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let peer_labels: std::collections::HashMap<_, _> = nodes
             .iter()
             .map(|(label, node)| (node.identity.public().user_id(), *label))
             .collect();
         for &(label, ref node) in &nodes {
+            let client_trace = trace.clone();
+            let client_labels = peer_labels.clone();
+            let client_omitted = trace_omitted.clone();
+            let weak = std::sync::Arc::downgrade(node);
+            *node.account_client_test_hook.lock().unwrap() =
+                Some(std::sync::Arc::new(move |peer, event| {
+                    if event.starts_with("control_")
+                        || event.starts_with("negotiation_begin domain=Some(GroupControl)")
+                        || event.starts_with("negotiation_end domain=Some(GroupControl)")
+                        || event.starts_with("page_end")
+                    {
+                        let peer_label = client_labels
+                            .get(&peer.user_id())
+                            .copied()
+                            .unwrap_or("unknown");
+                        let busy = weak
+                            .upgrade()
+                            .map(|node| node.account_sync_commit.try_lock().is_err());
+                        let mut trace = client_trace.lock().unwrap();
+                        if trace.len() >= 128 {
+                            trace.pop_front();
+                            client_omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        trace.push_back((
+                            trace_started.elapsed().as_millis(),
+                            label,
+                            format!(
+                                "client peer={peer_label} {event} sampled_sync_commit_busy={busy:?}"
+                            ),
+                        ));
+                    }
+                }));
             let trace = trace.clone();
+            let omitted = trace_omitted.clone();
             let peer_labels = peer_labels.clone();
             *node.account_session_test_hook.lock().unwrap() = Some(std::sync::Arc::new(
                 move |peer, frame| {
                     let trace = trace.clone();
+                    let omitted = omitted.clone();
                     let peer_label = peer_labels
                         .get(&peer.user_id())
                         .copied()
@@ -1145,12 +1184,13 @@ pub(in crate::node) mod tests {
                                 crate::node::account_documents::wire::DocumentRequest::decode(&body)
                                     .map(|request| {
                                         format!(
-                                            "request from={peer_label} v={} domain={:?} after={} zero={} probe={}",
+                                            "request from={peer_label} v={} domain={:?} after={} zero={} probe={} nonce_prefix={}",
                                             request.version,
                                             request.domain,
                                             request.after.as_ref().map_or("none", key_kind),
                                             request.known_digest == [0; 32],
                                             request.operation.is_some(),
+                                            request.operation.as_ref().map(|probe| hex::encode(&probe.nonce[..4])).unwrap_or_else(|| "none".into()),
                                         )
                                     })
                             }
@@ -1165,12 +1205,24 @@ pub(in crate::node) mod tests {
                                         )
                                     })
                             }
+                            AccountHistoryFrame::DocumentsComplete { body } => {
+                                serde_json::from_slice::<serde_json::Value>(&body).ok()
+                                    .filter(|complete| complete["domain"] == "group_control")
+                                    .map(|complete| {
+                                        let nonce = serde_json::from_value::<[u8;32]>(complete["operation"]["nonce"].clone()).ok();
+                                        format!("complete_before_send to={peer_label} operation={} next={} kinds={:?} nonce_prefix={}",
+                                            !complete["operation"].is_null(), !complete["next"].is_null(),
+                                            complete["operation"]["supported_kinds"].as_u64(),
+                                            nonce.map(|nonce| hex::encode(&nonce[..4])).unwrap_or_else(|| "none".into()))
+                                    })
+                            }
                             _ => None,
                         };
                         if let Some(event) = event {
                             let mut trace = trace.lock().unwrap();
                             if trace.len() >= 128 {
                                 trace.pop_front();
+                                omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             trace.push_back((trace_started.elapsed().as_millis(), label, event));
                         }
@@ -1318,7 +1370,32 @@ pub(in crate::node) mod tests {
             });
             [role_ready, capability_ready, reverse_ready, old_head_ready]
         };
-        wait_self_control_noise_diagnosed(|| readiness().into_iter().all(|ready| ready), || {
+        let online_label = nodes
+            .iter()
+            .find(|(_, node)| node.user_id() == online.user_id())
+            .unwrap()
+            .0;
+        let mut observed_caps = None;
+        // Match owner-rename cold setup; the admitted action retains its own 8s deadline.
+        let readiness_started = std::time::Instant::now();
+        wait_self_control_noise_diagnosed(std::time::Duration::from_secs(30), || {
+            let forward = reference.group_operation_versions.lock().unwrap().get(&online.user_id())
+                .map(|support| (support.public == online.identity.public(), support.kinds));
+            let reverse = online.group_operation_versions.lock().unwrap().get(&reference.user_id())
+                .map(|support| (support.public == reference.identity.public(), support.kinds));
+            let caps = [forward, reverse];
+            if observed_caps != Some(caps) {
+                observed_caps = Some(caps);
+                let mut trace = trace.lock().unwrap();
+                if trace.len() >= 128 {
+                    trace.pop_front();
+                    trace_omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                trace.push_back((trace_started.elapsed().as_millis(), "reference",
+                    format!("sampled_caps online={online_label} forward_reverse={caps:?}")));
+            }
+            readiness().into_iter().all(|ready| ready)
+        }, || {
             let forward = reference.group_operation_versions.lock().unwrap().get(&online.user_id()).map(|support| (
                 support.public == online.identity.public(), support.kinds & kind.capability_bit() != 0,
             ));
@@ -1328,13 +1405,20 @@ pub(in crate::node) mod tests {
                 node.group_control_heads(group).iter().any(|head| head.proof.public() == *public
                     && head.access.observation.role == AccountGroupRole::Member)
             }));
-            format!("real private role/capability and old Member provenance must arrive before self-control admission: ready_role_forward_reverse_old={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; bounded_request_header_trace_tail={:?}",
-                readiness(), forward, reverse, old_heads,
+            format!("real private role/capability and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_forward_reverse_old={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}",
+                readiness_started.elapsed().as_millis(), readiness(), forward, reverse, old_heads,
                 [reference.certified_sibling(&online.identity.public()), online.certified_sibling(&reference.identity.public())],
                 [reference.routing_peer(&online.user_id()).is_some_and(|peer| peer.public == online.identity.public()),
                  online.routing_peer(&reference.user_id()).is_some_and(|peer| peer.public == reference.identity.public())],
+                trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
                 trace.lock().unwrap().iter().cloned().collect::<Vec<_>>())
         }).await;
+        eprintln!(
+            "self control readiness completed chosen_online={online_label} readiness_elapsed_ms={} trace_omitted={} bounded_trace={:?}",
+            readiness_started.elapsed().as_millis(),
+            trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            trace.lock().unwrap().iter().cloned().collect::<Vec<_>>()
+        );
         if let Some(index) = offline_index {
             let offline = offline.as_ref().unwrap();
             offline.runtime_work.close();

@@ -5915,13 +5915,30 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
     std::fs::write(&src, &payload).unwrap();
 
     let bob_uid = bob_node.user_id();
-    let file_conv = alice_node
-        .send_file_dm(&bob_uid, &src, crate::file::FileKind::File)
-        .await
-        .unwrap();
+    // Keep the initial best-effort send unsuccessful without paying unrelated
+    // handshake deadlines. Authenticate each original direct attempt, then close
+    // before serving any application frame. These borrowed futures end before
+    // the normal accept workers below can import the durable file card/chunks.
+    let setup_eof = std::cell::Cell::new(0usize);
+    let file_conv = tokio::select! {
+        result = alice_node.send_file_dm(&bob_uid, &src, crate::file::FileKind::File) => result.unwrap(),
+        _ = async {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let channel = bob_node.privacy_accept(stream).await.unwrap();
+                assert_eq!(channel.peer_identity(), &alice_node.identity.public());
+                drop(channel);
+                setup_eof.set(setup_eof.get() + 1);
+            }
+        } => unreachable!("the scoped authenticated-EOF responder does not return"),
+    };
+    assert_eq!(
+        setup_eof.get(),
+        3,
+        "the card, receipt and file best-effort legs each close after real authentication"
+    );
 
-    // The initial best-effort dial has no accepting worker. Resume the durable
-    // pending work rather than depending on it fitting the 400ms operation.
+    // Resume the same durable pending work after those actual transport failures.
     assert_eq!(
         alice_node
             .delivery

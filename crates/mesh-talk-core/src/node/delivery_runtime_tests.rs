@@ -4918,7 +4918,28 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
         .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
         .await
         .unwrap();
-    a.flush_delivery(card).await;
+    // The recipient does not serve application frames yet: both original
+    // direct card/receipt attempts must fail, leaving the live relay to carry
+    // the offer. Complete real Noise handshakes and close immediately instead
+    // of stalling at listeners until two unrelated authentication deadlines.
+    let setup_eof = std::cell::Cell::new(0usize);
+    tokio::select! {
+        _ = a.flush_delivery(card) => {}
+        _ = async {
+            loop {
+                let (stream, _) = bl.accept().await.unwrap();
+                let channel = b.privacy_accept(stream).await.unwrap();
+                assert_eq!(channel.peer_identity(), &a.identity.public());
+                drop(channel);
+                setup_eof.set(setup_eof.get() + 1);
+            }
+        } => unreachable!("the scoped authenticated-EOF responder does not return"),
+    }
+    assert_eq!(
+        setup_eof.get(),
+        2,
+        "both direct best-effort legs closed before the relay supplies the offer"
+    );
     b.drain_from_post_office().await;
     let offer = tokio::time::timeout(std::time::Duration::from_secs(5), offers.recv())
         .await

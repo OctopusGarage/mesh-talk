@@ -1534,6 +1534,112 @@ mod tests {
         );
     }
     #[test]
+    fn local_publication_frontier_accepts_exact_limit_and_rejects_empty_or_larger_replacements() {
+        use crate::node::account_group::wire::GroupControlHead;
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let node = super::super::tests::node(&dir.path().join("source"), &account);
+        let source = node.identity.public();
+        let group = ConversationId::new([23; 32]);
+        let genesis = crate::eventlog::Event::new(
+            &node.identity,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            crate::eventlog::EventKind::MembershipChange,
+            crate::channel::ChannelMeta {
+                name: "Local publication index boundary".into(),
+                members: vec![source.clone()],
+                epoch: 0,
+                owner: source.user_id(),
+            }
+            .encode(),
+        );
+        node.log.lock().unwrap().append_durable(genesis).unwrap();
+        node.process_channel(group);
+        node.publish_account_group_access_for(group);
+        let mut head = node
+            .group_control_heads(group)
+            .into_iter()
+            .find(|head| head.proof.public() == source)
+            .unwrap();
+        // A conservative partial publication retains the authentic role and
+        // bounded public anchors. Only its private receipt exercises the limit.
+        head.access.complete_frontier = false;
+        let key = AccountDocumentKey::GroupControl {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let publication = |revision| {
+            let signed = GroupControlHead::new(
+                &node.identity,
+                group,
+                revision,
+                head.proof.clone(),
+                head.access.clone(),
+            );
+            let payload = signed.encode();
+            let meta = AccountDocumentMeta::new(
+                &account,
+                source.user_id(),
+                key.clone(),
+                revision,
+                &payload,
+                false,
+            );
+            assert!(super::super::group_control::valid_payload(&meta, &payload));
+            (meta, payload)
+        };
+        // Local receipt IDs are storage-boundary input, not imported public
+        // events or additional authority. They remain distinct and sorted.
+        let frontier: Vec<_> = (1..=MAX_LOCAL_FRONTIER)
+            .map(|index| {
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                EventId::new(bytes)
+            })
+            .collect();
+        let (meta, payload) = publication(1);
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        assert!(
+            store
+                .merge_local_group_control(meta.clone(), &payload, frontier.clone())
+                .unwrap()
+        );
+        assert_eq!(
+            store.local_publication_frontier(&meta, &source).as_ref(),
+            Some(&frontier)
+        );
+        drop(store);
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        assert_eq!(
+            store.local_publication_frontier(&meta, &source).as_ref(),
+            Some(&frontier)
+        );
+        let mut over_limit = frontier.clone();
+        let mut last = [0; 32];
+        last[..8].copy_from_slice(&((MAX_LOCAL_FRONTIER + 1) as u64).to_be_bytes());
+        over_limit.push(EventId::new(last));
+        for (index, invalid) in [Vec::new(), over_limit].into_iter().enumerate() {
+            let (replacement, payload) = publication(2 + index as u64);
+            assert!(
+                store
+                    .merge_local_group_control(replacement, &payload, invalid)
+                    .is_err()
+            );
+            assert_eq!(store.meta(&key).as_ref(), Some(&meta));
+            assert_eq!(
+                store.local_publication_frontier(&meta, &source).as_ref(),
+                Some(&frontier)
+            );
+        }
+    }
+
+    #[test]
     fn publication_receipts_bind_exact_metadata_and_reject_invalid_frontiers() {
         let account = Account::generate();
         let device = DeviceIdentity::generate().public();

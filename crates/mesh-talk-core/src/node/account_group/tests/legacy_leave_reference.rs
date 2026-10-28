@@ -120,3 +120,45 @@ async fn reference_only_legacy_account_leave_uses_original_source_over_noise_wit
     }
     tasks.shutdown().await;
 }
+
+#[test]
+fn legacy_leave_readiness_requires_exact_current_capability_and_full_identity() {
+    use crate::node::account_documents::sync::GroupOperationSupport;
+    use crate::node::account_group::operations::legacy_wire::LEGACY_LEAVE_CAPABILITY;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let observer = node(&dir.path().join("observer"), &account);
+    let source = node(&dir.path().join("source"), &account);
+    let public = source.identity.public();
+    assert!(observer.legacy_group_leave_ready(&observer.identity.public()));
+    assert!(!observer.legacy_group_leave_ready(&public));
+    for (has_capability, changed_exchange_key, expired, expected) in [
+        (true, false, false, true),
+        (false, false, false, false),
+        (true, true, false, false),
+        (true, false, true, false),
+    ] {
+        let mut advertised = public.clone();
+        if changed_exchange_key {
+            advertised.x25519_pub[0] ^= 1;
+        }
+        observer.group_operation_versions.lock().unwrap().insert(
+            public.user_id(),
+            GroupOperationSupport {
+                public: advertised,
+                kinds: if has_capability {
+                    LEGACY_LEAVE_CAPABILITY
+                } else {
+                    0
+                },
+                observed_at: std::time::Instant::now()
+                    - std::time::Duration::from_secs(if expired { 61 } else { 0 }),
+            },
+        );
+        assert_eq!(
+            observer.legacy_group_leave_ready(&public),
+            expected,
+            "identity, legacy capability and freshness are independent admission requirements"
+        );
+    }
+}
