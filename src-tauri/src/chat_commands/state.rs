@@ -298,13 +298,15 @@ impl RuntimeAuthority {
         let serialization = self.node.1.clone().lock_owned().await;
         self.current(|_| ())?;
         let old = self.node.0.write().await.take();
-        if let Some(old) = old {
-            old.stop().await;
-        }
+        let retired = match old {
+            Some(old) => Some(old.stop_for_storage().await),
+            None => None,
+        };
         let display_name = self.current(|info| info.user.display_name.clone())?;
         Ok(StartupPermit {
             authority: self.clone(),
-            _serialization: serialization,
+            _serialization: std::sync::Arc::new(serialization),
+            retired,
             display_name,
         })
     }
@@ -345,11 +347,24 @@ impl Drop for StartupObservationLifetime {
 
 pub(crate) struct StartupPermit {
     authority: RuntimeAuthority,
-    _serialization: tokio::sync::OwnedMutexGuard<()>,
+    retired: Option<mesh_talk_core::node::RetiredNode>,
     pub(crate) display_name: String,
+    // Retained profile handles must drop before replacement admission opens.
+    _serialization: std::sync::Arc<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl StartupPermit {
+    pub(crate) fn take_retired(&mut self) -> Option<mesh_talk_core::node::RetiredNode> {
+        self.retired.take()
+    }
+
+    pub(crate) fn track_startup(&self, completion: mesh_talk_core::node::StartupCompletion) {
+        let serialization = self._serialization.clone();
+        tokio::spawn(async move {
+            completion.wait().await;
+            drop(serialization);
+        });
+    }
     pub(crate) async fn install(self, runtime: NodeRuntime) -> bool {
         let mut guard = self.authority.node.0.write().await;
         let mut runtime = Some(runtime);

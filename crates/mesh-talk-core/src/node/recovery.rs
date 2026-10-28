@@ -212,23 +212,40 @@ impl Node {
         profile_dir: &Path,
         password: &str,
     ) -> Result<Arc<Self>, BackupError> {
+        let lease = crate::storage::profile::ProfileStorageLease::acquire(profile_dir)
+            .map_err(|_| SnapshotError::Io)?;
+        Self::open_recovery_profile_with_lease(lease, password)
+    }
+
+    /// Offline callers that already acquired ownership pass it exactly once.
+    pub fn open_recovery_profile_with_lease(
+        lease: crate::storage::profile::ProfileStorageLease,
+        password: &str,
+    ) -> Result<Arc<Self>, BackupError> {
+        let profile_dir = lease.canonical_root().to_owned();
+        lease
+            .validate_identity_sources(&profile_dir.join("identity.keystore"))
+            .map_err(|_| SnapshotError::Io)?;
         let identity = keystore::load(&profile_dir.join("identity.keystore"), password)
             .map_err(|_| SnapshotError::Io)?;
         let account = account_keystore::load(&profile_dir.join("account.keystore"), password)
             .map_err(|_| SnapshotError::Io)?;
-        let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
-        let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
-        let (file_tx, _file_rx) = mpsc::unbounded_channel();
-        Ok(Self::open_with_account(
-            identity,
-            account,
-            Arc::new(Mutex::new(Roster::default())),
-            dm_tx,
-            channel_tx,
-            file_tx,
-            &profile_dir.join("messages.log"),
-            &profile_dir.join("sent.log"),
-            password,
+        let (dm_tx, _) = mpsc::unbounded_channel();
+        let (channel_tx, _) = mpsc::unbounded_channel();
+        let (file_tx, _) = mpsc::unbounded_channel();
+        Ok(Self::open_with_profile_lease(
+            lease,
+            super::NodeOpenRequest {
+                identity,
+                account,
+                roster: Arc::new(Mutex::new(Roster::default())),
+                incoming: dm_tx,
+                channel_incoming: channel_tx,
+                file_incoming: file_tx,
+                log_path: &profile_dir.join("messages.log"),
+                sent_path: &profile_dir.join("sent.log"),
+                password,
+            },
         )
         .map_err(|_| SnapshotError::Io)?)
     }
@@ -325,6 +342,8 @@ impl Node {
         }
         std::fs::create_dir(staging_dir).map_err(|_| SnapshotError::Io)?;
         let result = (|| {
+            let lease = crate::storage::profile::ProfileStorageLease::acquire(staging_dir)
+                .map_err(|_| SnapshotError::Io)?;
             let identity = DeviceIdentity::generate();
             let account = Account::from_secret_bytes_with_created_at(
                 header.account_secret,
@@ -366,16 +385,19 @@ impl Node {
             let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
             let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
             let (file_tx, _file_rx) = mpsc::unbounded_channel();
-            let node = Self::open_with_account(
-                identity,
-                account,
-                Arc::new(Mutex::new(Roster::default())),
-                dm_tx,
-                channel_tx,
-                file_tx,
-                &staging_dir.join("messages.log"),
-                &staging_dir.join("sent.log"),
-                new_password,
+            let node = Self::open_with_profile_lease(
+                lease,
+                super::NodeOpenRequest {
+                    identity,
+                    account,
+                    roster: Arc::new(Mutex::new(Roster::default())),
+                    incoming: dm_tx,
+                    channel_incoming: channel_tx,
+                    file_incoming: file_tx,
+                    log_path: &staging_dir.join("messages.log"),
+                    sent_path: &staging_dir.join("sent.log"),
+                    password: new_password,
+                },
             )
             .map_err(|_| SnapshotError::Io)?;
             // Keep staged paths, not open handles: a valid archive can retain
@@ -581,7 +603,8 @@ impl Node {
             }
             // The node was opened before records were installed, so its cached
             // channel/file views are stale. Return a verified fresh view.
-            drop(node);
+            drop(contacts_log);
+            node.close_profile().map_err(|_| SnapshotError::Io)?;
             Self::open_recovery_profile(staging_dir, new_password).map_err(|_| SnapshotError::Io)
         })();
         if result.is_err() {

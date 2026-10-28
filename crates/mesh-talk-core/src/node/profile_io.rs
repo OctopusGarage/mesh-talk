@@ -331,14 +331,15 @@ impl Node {
             let Some(work) = self.runtime_work.admit() else {
                 return;
             };
-            match tokio::task::spawn_blocking(move || {
-                let _work = work;
-                if node.cache_discovered_peers().is_err() {
-                    log::warn!("verified discovery cache update failed; will retry");
-                }
-                node.drain_profile_compaction()
-            })
-            .await
+            match work
+                .spawn_blocking(move || {
+                    if node.cache_discovered_peers().is_err() {
+                        log::warn!("verified discovery cache update failed; will retry");
+                    }
+                    node.drain_profile_compaction()
+                })
+                .await
+                .map(|value| value.into_inner())
             {
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => {

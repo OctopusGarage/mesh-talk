@@ -53,7 +53,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
     let observation = authority.observation_lifetime();
     tauri::async_runtime::spawn(async move {
         let _observation = observation;
-        let Ok(permit) = authority.begin().await else {
+        let Ok(mut permit) = authority.begin().await else {
             return;
         };
         let display_name = permit.display_name.clone();
@@ -75,7 +75,10 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 post_office_enabled: false,
                 ..Default::default()
             });
-        match mesh_talk_core::node::NodeRuntime::start_configured_guarded_with_network_cost_observed(
+        // A replacement releases the retired context before reacquiring. A
+        // retained external SDK handle keeps the profile busy by design.
+        drop(permit.take_retired());
+        let startup = mesh_talk_core::node::RuntimeStartup::new(
             mesh_talk_core::node::RuntimeConfig {
                 base_dir: &base_dir,
                 account_id: &account_id,
@@ -137,12 +140,16 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     });
                 }),
             },
-            mesh_talk_core::node::RuntimeNetworkOptions {
-                post_office_send_enabled: relay_settings.post_office_send_enabled,
-                post_office_receive_enabled: relay_settings.post_office_receive_enabled,
-                physical_lan_only: relay_settings.physical_lan_only,
-            },
-            mesh_talk_core::node::NetworkCost::Unknown,
+        )
+        .with_network(mesh_talk_core::node::RuntimeNetworkOptions {
+            post_office_send_enabled: relay_settings.post_office_send_enabled,
+            post_office_receive_enabled: relay_settings.post_office_receive_enabled,
+            physical_lan_only: relay_settings.physical_lan_only,
+        })
+        .with_network_cost(mesh_talk_core::node::NetworkCost::Unknown);
+        permit.track_startup(startup.completion());
+        match mesh_talk_core::node::NodeRuntime::start_owned(
+            startup,
             |identity| {
                 authority.observe_identity(identity).map_err(|_| {
                     mesh_talk_core::node::RuntimeError::Io(std::io::Error::new(

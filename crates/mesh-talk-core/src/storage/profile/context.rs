@@ -32,12 +32,100 @@ pub(crate) struct ProfileCleanupProgress {
 // The database drops before the OS lease. No password or derived key is copied
 // outside SQLCipher, and production repositories cannot own a bare database Arc.
 pub(crate) struct ProfileStorage {
-    database: EncryptedDatabase,
+    database: OnceLock<EncryptedDatabase>,
+    participant: Option<super::participant::ParticipantOwner>,
     lease: ProfileStorageLease,
     federation_owner_epoch: OnceLock<i64>,
     federation_cancellations: crate::postoffice::storage::federation::CancellationQueue,
 }
 impl ProfileStorage {
+    pub(crate) fn open_participant(
+        mut lease: ProfileStorageLease,
+        identity: &PublicIdentity,
+        account: &crate::identity::account::AccountPublic,
+        events: &Path,
+        sent: &Path,
+        password: &str,
+    ) -> Result<Arc<Self>, LogError> {
+        let paths = super::participant::paths(&mut lease, account, events, sent)?;
+        let owner = super::participant::ParticipantOwner {
+            identity: identity.clone(),
+            account: account.clone(),
+            paths,
+        };
+        let database = OnceLock::new();
+        if let Some(existing) = super::participant::open_existing(&lease, &owner, password)? {
+            database
+                .set(existing)
+                .map_err(|_| manifest::invalid("participant database already initialized"))?;
+        }
+        Ok(Arc::new(Self {
+            database,
+            participant: Some(owner),
+            lease,
+            federation_owner_epoch: OnceLock::new(),
+            federation_cancellations: Default::default(),
+        }))
+    }
+    pub(crate) fn close(self) -> Result<(), LogError> {
+        match self.database.into_inner() {
+            Some(database) => database.checkpoint_and_close(),
+            None => Err(manifest::invalid("participant bootstrap has not completed")),
+        }
+    }
+    pub(crate) fn participant_database(&self) -> Option<&EncryptedDatabase> {
+        self.database.get()
+    }
+    pub(crate) fn validate_participant_request(
+        &self,
+        identity: &PublicIdentity,
+        account: &crate::identity::account::AccountPublic,
+        events: &Path,
+        sent: &Path,
+    ) -> Result<(), LogError> {
+        let owner = self
+            .participant
+            .as_ref()
+            .ok_or_else(|| manifest::invalid("not a participant context"))?;
+        let canonical = |path: &Path| -> Result<std::path::PathBuf, LogError> {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            Ok(std::fs::canonicalize(parent)?.join(
+                path.file_name()
+                    .ok_or_else(|| manifest::invalid("source must name a file"))?,
+            ))
+        };
+        if &owner.identity != identity
+            || &owner.account != account
+            || canonical(events)? != owner.paths.events
+            || canonical(sent)? != owner.paths.sent
+        {
+            return Err(manifest::invalid(
+                "participant inputs differ from owned context",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn complete_participant(
+        &self,
+        password: &str,
+        legacy_previous: Option<&str>,
+    ) -> Result<(), LogError> {
+        if self.database.get().is_none() {
+            let owner = self
+                .participant
+                .as_ref()
+                .ok_or_else(|| manifest::invalid("not a participant context"))?;
+            let database =
+                super::participant::bootstrap(&self.lease, owner, password, legacy_previous)?;
+            self.database
+                .set(database)
+                .map_err(|_| manifest::invalid("participant database already initialized"))?;
+        }
+        Ok(())
+    }
     pub(crate) fn open_relay(
         lease: ProfileStorageLease,
         identity: &PublicIdentity,
@@ -51,13 +139,14 @@ impl ProfileStorage {
         binding.extend_from_slice(&identity.x25519_pub);
         let database = publication::open_database(&lease, &paths, password, &binding)?;
         let profile = Arc::new(Self {
-            database,
+            database: OnceLock::from(database),
+            participant: None,
             lease,
             federation_owner_epoch: OnceLock::new(),
             federation_cancellations: Default::default(),
         });
-        manifest::validate(&profile.database, &paths)?;
-        EventRepository::validate_existing_domain(&profile.database, RELAY_EVENTS)?;
+        manifest::validate(profile.database(), &paths)?;
+        EventRepository::validate_existing_domain(profile.database(), RELAY_EVENTS)?;
         publication::complete(&profile, password, now)?;
         let epoch = crate::postoffice::storage::federation::start_owner(profile.database())?;
         profile
@@ -78,17 +167,19 @@ impl ProfileStorage {
             .ok_or_else(|| manifest::invalid("federation owner is not started"))
     }
     pub(crate) fn database(&self) -> &EncryptedDatabase {
-        &self.database
+        self.database
+            .get()
+            .expect("indexed repositories require initialized profile storage")
     }
     pub(crate) fn root(&self) -> &Path {
         self.lease.canonical_root()
     }
     pub(crate) fn events(self: &Arc<Self>) -> Result<EventRepository, LogError> {
-        manifest::require_published(&self.database)?;
+        manifest::require_published(self.database())?;
         EventRepository::from_profile(self.clone(), RELAY_EVENTS)
     }
     pub(crate) fn cleanup_pending(&self) -> Result<bool, LogError> {
-        self.database.read(|c| {
+        self.database().read(|c| {
             Ok(c.query_row(
                 "SELECT staging_pending OR EXISTS(SELECT 1 FROM relay_sources WHERE cleanup_pending=1) FROM relay_publication WHERE singleton=1",
                 [], |r| r.get(0),
@@ -104,7 +195,7 @@ impl ProfileStorage {
         publication::resume_cleanup_step(self, archive_due)
     }
     pub(super) fn archive_cleanup_pending(&self) -> Result<bool, LogError> {
-        self.database.read(|c| {
+        self.database().read(|c| {
             Ok(c.query_row(
                 "SELECT EXISTS(SELECT 1 FROM relay_sources WHERE cleanup_pending=1)",
                 [],

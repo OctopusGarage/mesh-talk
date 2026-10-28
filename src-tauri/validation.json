@@ -554,6 +554,10 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
+            "name": "Startup serialization outlives canceled construction and actual blocking captures/results; retired profile handles drop before replacement admission opens. Runtime handoffs retain the original non-cryptographic host local-user label.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
+          },
+          {
             "name": "Stalled network producers allow observations and unrelated sends while blocking runtime retirement",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
@@ -740,6 +744,10 @@
           {
             "name": "Every archive retains a fresh salt and original key compatibility; verified restoration installs its supplied key with the new local credentials.",
             "reference": "docs/backup-recovery.md#restore-after-losing-a-device"
+          },
+          {
+            "name": "Export reuses joined retired storage and checks both original host local-user label and canonical profile root before any temporary/archive write; equal mesh account identity never authorizes another local profile. Staged restore/enrollment close every handle and the checked SQL connection before relocation.",
+            "reference": "docs/ARCHITECTURE.md#manual-encrypted-backup-and-recovery"
           }
         ]
       },

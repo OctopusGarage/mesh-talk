@@ -2466,11 +2466,18 @@ async fn trusted_local_account_adoption_reopens_without_relaxing_foreign_binding
         )
         .unwrap();
     original.set_invisible(true).await.unwrap();
+    let new_account = crate::identity::account::Account::generate();
+    original
+        .persist_account_adoption(
+            &new_account.public(),
+            || Ok(()),
+            || Ok(original.account.public()),
+        )
+        .unwrap();
     drop(original);
     let (tx, _) = mpsc::unbounded_channel();
     let (ctx, _) = mpsc::unbounded_channel();
     let (ftx, _) = mpsc::unbounded_channel();
-    let new_account = crate::identity::account::Account::generate();
     let node = Node::open_with_account(
         DeviceIdentity::from_secret_bytes(keys.0, keys.1),
         new_account,

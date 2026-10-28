@@ -209,8 +209,10 @@ fn stage_enrolled(
             reopened.set_device_sync_category(category, true)?;
         }
     }
-    drop(reopened);
     crate::shared_account_login::stage_applied_login(&directory, enrolled.access_snapshot())?;
+    reopened
+        .close_profile()
+        .map_err(|_| CommandError::Crypto("Linked profile still has active storage work".into()))?;
     publish(stage.path(), &credentials.login_name, &user.user_id)?;
     Ok(credentials)
 }

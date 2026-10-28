@@ -265,24 +265,38 @@
       "id": "core-startup-identity",
       "paths": [
         "crates/mesh-talk-core/src/node/runtime.rs",
-        "crates/mesh-talk-core/src/node/runtime_retirement_tests.rs"
+        "crates/mesh-talk-core/src/node/runtime_startup.rs",
+        "crates/mesh-talk-core/src/node/runtime_work.rs",
+        "crates/mesh-talk-core/src/node/runtime_retirement_tests.rs",
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/participant_storage_tests.rs",
+        "crates/mesh-talk-core/src/storage/profile.rs",
+        "crates/mesh-talk-core/src/storage/profile/context.rs",
+        "crates/mesh-talk-core/src/storage/profile/participant.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
             "startup_identity_precedes_blocked_durable_store_and_matches_runtime",
-            "startup_identity_rejection_stops_before_listener_and_durable_stores"
+            "startup_identity_rejection_stops_before_listener_and_durable_stores",
+            "node::node::participant_storage_tests::",
+            "node::runtime::retirement_tests::",
+            "node::runtime_work::"
           ]
         }
       ],
       "capability": {
-        "summary": "Observe verified public device and account identity after the existing keystore unlocks without starting participant producers.",
+        "summary": "Own exclusive participant construction and observe verified public identity after keystore unlocks without starting participant producers.",
         "guide": "docs/ARCHITECTURE.md",
         "invariants": [
           {
             "name": "The optional synchronous identity observer runs before durable stores open, grants no runtime authority and can abort stale startup before producers launch. Existing constructors retain their behavior.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Shared ownership precedes runtime keystore initialization; construction and admitted blocking captures plus undelivered outputs retain replacement admission until their actual destruction. Returned runtimes retain their consuming stop contract.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -290,7 +304,7 @@
         "desktop-startup-identity"
       ],
       "escalation": [
-        "Verify blocked-store ordering, failed unlock and observer rejection, plus packaged desktop cold-start behavior."
+        "Verify blocked-store ordering, failed unlock and observer rejection, subprocess exclusion before key creation, cancellation before and during later blocking work, retained handles, exact external/bare source paths and alias-byte preservation. Require real loopback enrollment/linking, staged recovery integration and native Windows close-before-relocation plus desktop lifecycle evidence; metadata ownership does not certify demand-loaded history or production-KDF startup performance."
       ]
     },
     {
@@ -1062,6 +1076,14 @@
           },
           {
             "name": "Shared profile repositories retain device-bound ownership and one encrypted connection; authenticated streaming relay publication preserves legacy sources before freeze, resolves ancestry on disk, publishes mandatory domains together and rejects barrier mismatches without replaying archives on normal reopen.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Participant control metadata publishes only after actual legacy validation and cannot reinterpret relay authority; wrong keys/accounts, corrupt sources or orphan WAL/SHM never initialize conflicting authority. Participant history/crypto sources remain legacy without a migration barrier or bounded-memory claim.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Account adoption prepares delivery and SQL intent before keystore replacement, reloads ambiguous saves under ownership and admits only exact old/next recovery. Pre-SQL adoption retains honest legacy ID provenance through idempotent publication, delivery finalization and intent cleanup.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

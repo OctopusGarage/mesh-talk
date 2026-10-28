@@ -268,13 +268,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.post_office {
         return run_post_office(args, network_configuration, data_dir_lock).await;
     }
-    let _data_dir_lock = data_dir_lock;
     let password = args
         .password
         .as_deref()
         .expect("Clap requires a password source");
 
     // Persistent identity (created on first run).
+    data_dir_lock.validate_identity_sources(std::path::Path::new(&args.keystore))?;
     let identity = mesh_talk_core::identity::keystore::load_or_create(
         std::path::Path::new(&args.keystore),
         password,
@@ -308,16 +308,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = keystore_path.parent().unwrap_or(std::path::Path::new("."));
     let log_path = data_dir.join("messages.log");
     let sent_path = data_dir.join("sent.log");
-    let node = Node::open_with_account(
-        identity,
-        account,
-        Arc::clone(&roster),
-        incoming_tx,
-        channel_tx,
-        file_tx,
-        &log_path,
-        &sent_path,
-        password,
+    let node = Node::open_with_profile_lease(
+        data_dir_lock,
+        mesh_talk_core::node::NodeOpenRequest {
+            identity,
+            account,
+            roster: Arc::clone(&roster),
+            incoming: incoming_tx,
+            channel_incoming: channel_tx,
+            file_incoming: file_tx,
+            log_path: &log_path,
+            sent_path: &sent_path,
+            password,
+        },
     )?;
     node.set_profile_display_name(&args.name)?;
     let verified_path = verified_peer_path(data_dir);
@@ -570,6 +573,7 @@ async fn run_post_office(
         .password
         .as_deref()
         .expect("Clap requires a password source");
+    lease.validate_identity_sources(std::path::Path::new(&args.keystore))?;
     let identity = mesh_talk_core::identity::keystore::load_or_create(
         std::path::Path::new(&args.keystore),
         password,

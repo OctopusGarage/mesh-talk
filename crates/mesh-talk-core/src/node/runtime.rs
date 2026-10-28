@@ -33,6 +33,11 @@ static NAMES_OPEN_HOOKS: std::sync::LazyLock<
     Mutex<std::collections::HashMap<std::path::PathBuf, InitializationHook>>,
 > = std::sync::LazyLock::new(Default::default);
 
+#[cfg(test)]
+static PRIVACY_OPEN_HOOKS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<std::path::PathBuf, InitializationHook>>,
+> = std::sync::LazyLock::new(Default::default);
+
 struct ProfilePublication {
     revision: u64,
     conversation: ConversationId,
@@ -171,6 +176,8 @@ pub struct NodeRuntime {
     names: Arc<Mutex<NameDirectory>>,
     user_id: String,
     account_id: String,
+    /// Exact host local-user namespace, independent of cryptographic account ID.
+    host_owner: String,
     /// The display name this node advertises (for the diagnostics page).
     display_name: Mutex<String>,
     participant: ParticipantRuntime,
@@ -179,6 +186,29 @@ pub struct NodeRuntime {
     account_path: std::path::PathBuf,
     /// The session password, to re-encrypt the keystore when adopting a linked account.
     password: String,
+}
+
+/// Joined runtime producers with the original storage owner retained for a
+/// host-serialized offline export. External SDK calls remain host responsibility.
+pub struct RetiredNode {
+    node: Arc<Node>,
+    host_owner: String,
+}
+impl RetiredNode {
+    /// Originating host local-user label; never a cryptographic account ID.
+    pub fn host_account_id(&self) -> &str {
+        &self.host_owner
+    }
+    /// Physical locator used by the serialized host to match a retired handoff.
+    pub fn profile_root(&self) -> &Path {
+        self.node.storage.root()
+    }
+    pub fn node(&self) -> &Node {
+        &self.node
+    }
+    pub fn close(self) -> Result<(), LogError> {
+        self.node.close_profile()
+    }
 }
 
 impl NodeRuntime {
@@ -207,7 +237,15 @@ impl NodeRuntime {
     /// This does not cancel arbitrary SDK calls through externally held Node
     /// references; hosts must also serialize their own profile operations.
     pub async fn stop(self) {
+        drop(self.stop_for_storage().await);
+    }
+
+    pub async fn stop_for_storage(self) -> RetiredNode {
         self.participant.stop().await;
+        RetiredNode {
+            node: self.node,
+            host_owner: self.host_owner,
+        }
     }
     /// Compatibility constructor with positional startup arguments.
     /// New hosts should use [`Self::start_configured`] or
@@ -368,6 +406,60 @@ impl NodeRuntime {
             &mut dyn FnMut(&str) -> NodeRuntime,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_owned(
+            super::RuntimeStartup::new(config, events)
+                .with_network(network)
+                .with_network_cost(network_cost),
+            observe_identity,
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Construct with concrete startup ownership and optional handed profile
+    /// lease. Completion joins real initializer work even if this future drops.
+    pub async fn start_owned(
+        startup: super::RuntimeStartup<'_>,
+        observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
+        let super::RuntimeStartup {
+            config,
+            events,
+            network,
+            network_cost,
+            lease,
+            work,
+            root,
+        } = startup;
+        root.track(Self::start_profile_inner(
+            config,
+            events,
+            network,
+            network_cost,
+            lease,
+            work,
+            observe_identity,
+            authorize_launch,
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_profile_inner(
+        config: RuntimeConfig<'_>,
+        events: RuntimeEvents,
+        network: RuntimeNetworkOptions,
+        network_cost: super::NetworkCost,
+        supplied_lease: Option<crate::storage::profile::ProfileStorageLease>,
+        startup_work: Arc<super::runtime_work::RuntimeWork>,
+        observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> NodeRuntime,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
         let RuntimeConfig {
             base_dir,
             account_id,
@@ -384,25 +476,46 @@ impl NodeRuntime {
             on_profile,
             on_call_signal,
         } = events;
+        let host_owner = account_id.to_owned();
         let dir = base_dir.join("accounts").join(account_id);
         std::fs::create_dir_all(&dir)?;
 
         // The two keystore unlocks run sequential 600k-PBKDF2/Argon2 KDFs (~seconds of CPU,
         // the bulk of cold start). Offload them to the blocking pool so they don't monopolize
         // a tokio worker; the result is identical (same files, same ordering).
-        let (identity, account) = {
+        let (identity, account, lease) = {
+            let profile_dir = dir.clone();
+            let permit = startup_work.admit().expect("startup root admitted");
             let identity_path = dir.join("identity.keystore");
             let account_path = dir.join("account.keystore");
             let password = password.to_string();
-            tokio::task::spawn_blocking(move || {
-                let identity = keystore::load_or_create(&identity_path, &password)
-                    .map_err(|e| RuntimeError::Open(e.into()))?;
-                let account = account_keystore::load_or_create(&account_path, &password)
-                    .map_err(|e| RuntimeError::Open(e.into()))?;
-                Ok::<_, RuntimeError>((identity, account))
-            })
-            .await
-            .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??
+            permit
+                .spawn_blocking(move || {
+                    let lease = match supplied_lease {
+                        Some(lease)
+                            if lease.canonical_root() == std::fs::canonicalize(&profile_dir)? =>
+                        {
+                            lease
+                        }
+                        Some(_) => {
+                            return Err(RuntimeError::Io(std::io::Error::other(
+                                "supplied profile lease has another root",
+                            )));
+                        }
+                        None => {
+                            crate::storage::profile::ProfileStorageLease::acquire(&profile_dir)?
+                        }
+                    };
+                    lease.validate_identity_sources(&identity_path)?;
+                    let identity = keystore::load_or_create(&identity_path, &password)
+                        .map_err(|e| RuntimeError::Open(e.into()))?;
+                    let account = account_keystore::load_or_create(&account_path, &password)
+                        .map_err(|e| RuntimeError::Open(e.into()))?;
+                    Ok::<_, RuntimeError>((identity, account, lease))
+                })
+                .await
+                .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))?
+                .into_inner()?
         };
         let self_uid = identity.public().user_id();
         let account_id = account.account_id();
@@ -428,55 +541,77 @@ impl NodeRuntime {
         // the behavior (and result) is identical — just off the reactor.
         // Open the durable name directory in parallel with the node (its own password KDF),
         // so it doesn't add a serial step to cold start.
-        let names_handle = {
-            let names_path = dir.join("names.log");
-            let password = password.to_string();
-            tokio::task::spawn_blocking(move || {
-                #[cfg(test)]
-                {
-                    let hook = NAMES_OPEN_HOOKS.lock().unwrap().remove(&names_path);
-                    if let Some(hook) = hook {
-                        hook();
-                    }
-                }
-                NameDirectory::open(&names_path, &password)
-            })
-        };
-        let node_result = {
+        let (node, names) = {
             let roster = Arc::clone(&roster);
             let messages_log = dir.join("messages.log");
             let sent_log = dir.join("sent.log");
+            let names_path = dir.join("names.log");
             let password = password.to_string();
             let initial_display_name = display_name.to_owned();
-            tokio::task::spawn_blocking(move || {
-                let node = Node::open_with_account(
-                    identity,
-                    account,
-                    roster,
-                    incoming_tx,
-                    channel_tx,
-                    file_tx,
-                    &messages_log,
-                    &sent_log,
-                    &password,
-                )?;
-                // The keystore already durably records creation metadata. Repeating
-                // initialization after a failed launch cannot invent or lose a date.
-                if node.account_profile(&node.account_id()).is_none()
-                    && node.linked_devices().len() == 1
-                {
-                    node.set_profile_display_name(&initial_display_name)
-                        .map_err(|e| LogError::Io(std::io::Error::other(e.to_string())))?;
-                }
-                Ok::<_, LogError>(node)
-            })
-            .await
+            let permit = startup_work.admit().expect("startup root admitted");
+            permit
+                .spawn_blocking(move || {
+                    let storage =
+                        crate::storage::profile::context::ProfileStorage::open_participant(
+                            lease,
+                            &identity.public(),
+                            &account.public(),
+                            &messages_log,
+                            &sent_log,
+                            &password,
+                        )?;
+                    // Scoped children finish before this owner can return or unwind.
+                    // Both results are joined before either failure is propagated.
+                    let (node, names) = std::thread::scope(|scope| {
+                        let names_storage = storage.clone();
+                        let names_password = &password;
+                        let names = scope.spawn(move || {
+                            #[cfg(test)]
+                            if let Some(hook) = NAMES_OPEN_HOOKS.lock().unwrap().remove(&names_path)
+                            {
+                                hook();
+                            }
+                            NameDirectory::open_in_storage(
+                                &names_path,
+                                names_password,
+                                names_storage,
+                            )
+                        });
+                        let node = scope.spawn(|| {
+                            let node = Node::open_in_storage(
+                                storage.clone(),
+                                super::NodeOpenRequest {
+                                    identity,
+                                    account,
+                                    roster,
+                                    incoming: incoming_tx,
+                                    channel_incoming: channel_tx,
+                                    file_incoming: file_tx,
+                                    log_path: &messages_log,
+                                    sent_path: &sent_log,
+                                    password: &password,
+                                },
+                            )?;
+                            if node.account_profile(&node.account_id()).is_none()
+                                && node.linked_devices().len() == 1
+                            {
+                                node.set_profile_display_name(&initial_display_name)
+                                    .map_err(|e| {
+                                        LogError::Io(std::io::Error::other(e.to_string()))
+                                    })?;
+                            }
+                            Ok::<_, LogError>(node)
+                        });
+                        (node.join(), names.join())
+                    });
+                    let node = node.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                    let names = names.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                    Ok::<_, LogError>((node, names))
+                })
+                .await
+                .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))?
+                .into_inner()?
         };
-        // Both blocking writers must finish even when either initializer fails.
-        // Dropping a JoinHandle would detach a writer into the replacement profile.
-        let names_result = names_handle.await;
-        let node = node_result
-            .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??;
         node.set_post_office_permissions(
             network.post_office_send_enabled,
             network.post_office_receive_enabled,
@@ -484,9 +619,7 @@ impl NodeRuntime {
         node.set_post_office_enabled(post_office_enabled);
         node.initialize_physical_lan_only(network.physical_lan_only);
         node.set_network_cost(network_cost);
-        let names = Arc::new(Mutex::new(names_result.map_err(|e| {
-            RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
-        })??));
+        let names = Arc::new(Mutex::new(names));
         // Load policy and verified account proofs before discovery or accept/drain tasks.
         let visibility = Arc::new(crate::discovery::visibility::DiscoveryVisibility::new(
             false,
@@ -497,13 +630,20 @@ impl NodeRuntime {
             let password = password.to_string();
             let own = node.signed_announce(display_name, tcp_port);
             let visibility = visibility.clone();
-            tokio::task::spawn_blocking(move || {
-                node.configure_privacy(&directory, &password, &own, visibility)
-            })
-            .await
-            .map_err(|_| {
-                RuntimeError::Io(std::io::Error::other("privacy initialization failed"))
-            })??;
+            let permit = startup_work.admit().expect("startup root admitted");
+            permit
+                .spawn_blocking(move || {
+                    #[cfg(test)]
+                    if let Some(hook) = PRIVACY_OPEN_HOOKS.lock().unwrap().remove(&directory) {
+                        hook();
+                    }
+                    node.configure_privacy(&directory, &password, &own, visibility)
+                })
+                .await
+                .map_err(|_| {
+                    RuntimeError::Io(std::io::Error::other("privacy initialization failed"))
+                })?
+                .into_inner()?;
         }
         visibility
             .set_public(!node.privacy_snapshot().invisible)
@@ -652,6 +792,7 @@ impl NodeRuntime {
                 names,
                 user_id: self_uid,
                 account_id,
+                host_owner,
                 display_name: Mutex::new(current_name.to_string()),
                 participant,
                 account_path: dir.join("account.keystore"),
@@ -750,7 +891,7 @@ impl NodeRuntime {
 
     /// Local host account namespace used for this runtime's persistent stores.
     pub fn host_account_id(&self) -> Option<&str> {
-        self.account_path.parent()?.file_name()?.to_str()
+        Some(&self.host_owner)
     }
 
     pub fn privacy_snapshot(&self) -> crate::node::PrivacySnapshot {
@@ -1029,15 +1170,22 @@ impl NodeRuntime {
     /// other good devices must be re-linked.
     pub fn rekey_account(&self) -> Result<String, NodeError> {
         let account = crate::identity::account::Account::generate();
-        self.node
-            .persist_account_adoption(&account.account_id(), || {
+        self.node.persist_account_adoption(
+            &account.public(),
+            || {
                 crate::identity::account_keystore::save(
                     &self.account_path,
                     &self.password,
                     &account,
                 )
                 .map_err(|e| NodeError::Channel(format!("persist new account: {e}")))
-            })?;
+            },
+            || {
+                crate::identity::account_keystore::load(&self.account_path, &self.password)
+                    .map(|account| account.public())
+                    .map_err(|e| NodeError::Channel(e.to_string()))
+            },
+        )?;
         Ok(account.account_id())
     }
 
@@ -1148,15 +1296,22 @@ impl NodeRuntime {
                     .map_err(NodeError::Log)?;
             }
             self.node.prepare_account_transition(&account)?;
-            self.node
-                .persist_account_adoption(&account.account_id(), || {
+            self.node.persist_account_adoption(
+                &account.public(),
+                || {
                     crate::identity::account_keystore::save(
                         &self.account_path,
                         &self.password,
                         &account,
                     )
                     .map_err(|e| NodeError::Channel(format!("persist linked account: {e}")))
-                })?;
+                },
+                || {
+                    crate::identity::account_keystore::load(&self.account_path, &self.password)
+                        .map(|account| account.public())
+                        .map_err(|e| NodeError::Channel(e.to_string()))
+                },
+            )?;
             adopted = true;
             Ok(())
         })?;

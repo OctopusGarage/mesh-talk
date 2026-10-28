@@ -60,6 +60,10 @@ pub(super) fn inspect_regular(path: &Path) -> Result<bool, LogError> {
         if metadata.file_attributes() & 0x400 != 0 {
             return Err(invalid("publication path must not be a reparse point"));
         }
+        let mut options = OpenOptions::new();
+        use std::os::windows::fs::OpenOptionsExt;
+        options.read(true).custom_flags(0x0020_0000);
+        super::require_single_link(&options.open(path)?)?;
     }
     #[cfg(unix)]
     {
@@ -295,6 +299,50 @@ pub(super) fn publish_absent(source: &Path, target: &Path) -> Result<(), LogErro
         let _ = (source, target);
         Err(invalid(
             "atomic absent database publication unsupported on this platform",
+        ))
+    }
+}
+
+/// Existing source identity, independent of path spelling. Callers also reject
+/// portable case aliases for absent leaves before opening any legacy writer.
+pub(super) fn same_file(left: &Path, right: &Path) -> Result<bool, LogError> {
+    if !inspect_regular(left)? || !inspect_regular(right)? {
+        return Ok(false);
+    }
+    let left = reader(left)?;
+    let right = reader(right)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let left = left.metadata()?;
+        let right = right.metadata()?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let identity = |file: &File| -> Result<(u32, u32, u32), LogError> {
+            let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: a live borrowed file handle and valid output are supplied.
+            if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info) } == 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            Ok((
+                info.dwVolumeSerialNumber,
+                info.nFileIndexHigh,
+                info.nFileIndexLow,
+            ))
+        };
+        Ok(identity(&left)? == identity(&right)?)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (left, right);
+        Err(invalid(
+            "platform cannot verify existing profile source aliases",
         ))
     }
 }

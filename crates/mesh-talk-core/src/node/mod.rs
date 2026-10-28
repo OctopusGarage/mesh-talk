@@ -104,7 +104,9 @@ pub(crate) mod recovery;
 mod relay_policy;
 mod route_timing;
 pub(crate) mod runtime;
+mod runtime_startup;
 mod runtime_work;
+pub use runtime_startup::{RuntimeStartup, StartupCompletion};
 mod search;
 pub(crate) mod sentlog;
 pub(crate) mod serving;
@@ -145,8 +147,8 @@ pub use files::{FileProgress, OutgoingFileProgress};
 pub use linking::LinkingError;
 pub use message::{MessageBody, MessageProtection};
 pub use node::{
-    ChannelSummary, FileHistoryInfo, HistoryEntry, LinkedAccount, Node, NodeError, ReceivedDm,
-    ReceivedProfile, SearchHit,
+    ChannelSummary, FileHistoryInfo, HistoryEntry, LinkedAccount, Node, NodeError, NodeOpenRequest,
+    ReceivedDm, ReceivedProfile, SearchHit,
 };
 pub use pairing::{BackfillRecord, PairingCode, PairingRequest, PairingResponse};
 pub use participant_runtime::{
@@ -164,7 +166,8 @@ pub use ratchet_sessions::RatchetSessions;
 pub use reaction::{ReactionPayload, ReactionView, aggregate};
 pub use received_log::{ReceivedEntry, ReceivedLog};
 pub use runtime::{
-    NodeRuntime, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeIdentity, RuntimeNetworkOptions,
+    NodeRuntime, RetiredNode, RuntimeConfig, RuntimeError, RuntimeEvents, RuntimeIdentity,
+    RuntimeNetworkOptions,
 };
 pub use search::{RecentSearchResults, ReferencedSearchHit, SearchContext, SearchReference};
 

@@ -249,6 +249,8 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) peer_snapshot_hook: BlockingTestHook,
     #[cfg(test)]
+    pub(in crate::node) expiry_cleanup_hook: BlockingTestHook,
+    #[cfg(test)]
     pub(in crate::node) remember_peer_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) file_transfer_peak: std::sync::atomic::AtomicUsize,
@@ -434,9 +436,44 @@ pub struct Node {
     pub(in crate::node) profiles_emitted: Mutex<HashSet<EventId>>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
     pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::ReactionStore>,
+    // Declared last so every legacy handle drops before the connection and lease.
+    pub(in crate::node) storage: Arc<crate::storage::profile::context::ProfileStorage>,
+}
+
+/// Explicit participant inputs for a caller that already owns the profile lease.
+/// Exact event and sent paths are preserved, including external sent roots.
+pub struct NodeOpenRequest<'a> {
+    pub identity: DeviceIdentity,
+    pub account: Account,
+    pub roster: Arc<Mutex<Roster>>,
+    pub incoming: mpsc::UnboundedSender<ReceivedDm>,
+    pub channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
+    pub file_incoming: mpsc::UnboundedSender<ReceivedFile>,
+    pub log_path: &'a Path,
+    pub sent_path: &'a Path,
+    pub password: &'a str,
 }
 
 impl Node {
+    /// Close every legacy handle and the encrypted connection before directory
+    /// relocation. Independently retained Node/facade owners prevent publication.
+    pub fn close_profile(self: Arc<Self>) -> Result<(), LogError> {
+        let node = Arc::try_unwrap(self).map_err(|_| {
+            LogError::Io(std::io::Error::other(
+                "profile still has retained Node handles",
+            ))
+        })?;
+        let storage = node.storage.clone();
+        drop(node);
+        Arc::try_unwrap(storage)
+            .map_err(|_| {
+                LogError::Io(std::io::Error::other(
+                    "profile still has retained storage work",
+                ))
+            })?
+            .close()
+    }
+
     /// Open a node backed by a durable event log at `log_path` and a sent-plaintext
     /// sidecar at `sent_path` (both encrypted with `password`). Restored history is
     /// seeded into the already-emitted set so it is NOT re-streamed — only events
@@ -482,9 +519,70 @@ impl Node {
         sent_path: &Path,
         password: &str,
     ) -> Result<Arc<Self>, LogError> {
+        crate::storage::profile::participant::validate_authority_leaves(log_path, sent_path)?;
         let dir = log_path
             .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let lease = crate::storage::profile::ProfileStorageLease::acquire(dir)?;
+        Self::open_with_profile_lease(
+            lease,
+            NodeOpenRequest {
+                identity,
+                account,
+                roster,
+                incoming,
+                channel_incoming,
+                file_incoming,
+                log_path,
+                sent_path,
+                password,
+            },
+        )
+    }
+
+    /// Consume a pre-keystore owner once. Compatibility constructors acquire
+    /// their own lease and never bypass exclusion for the current process.
+    pub fn open_with_profile_lease(
+        lease: crate::storage::profile::ProfileStorageLease,
+        request: NodeOpenRequest<'_>,
+    ) -> Result<Arc<Self>, LogError> {
+        let storage = crate::storage::profile::context::ProfileStorage::open_participant(
+            lease,
+            &request.identity.public(),
+            &request.account.public(),
+            request.log_path,
+            request.sent_path,
+            request.password,
+        )?;
+        Self::open_in_storage(storage, request)
+    }
+
+    pub(crate) fn open_in_storage(
+        storage: Arc<crate::storage::profile::context::ProfileStorage>,
+        request: NodeOpenRequest<'_>,
+    ) -> Result<Arc<Self>, LogError> {
+        let NodeOpenRequest {
+            identity,
+            account,
+            roster,
+            incoming,
+            channel_incoming,
+            file_incoming,
+            log_path,
+            sent_path,
+            password,
+        } = request;
+        storage.validate_participant_request(
+            &identity.public(),
+            &account.public(),
+            log_path,
+            sent_path,
+        )?;
+        let dir = log_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         // Each store does its own slow, CPU-bound password KDF over an independent
         // file. Open them on scoped threads so the KDFs run in parallel: on a
         // multi-core machine the wall-clock cost collapses to roughly one KDF.
@@ -616,11 +714,20 @@ impl Node {
             recovered_ids_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut dm_ratchet = DmRatchet::new(sessions);
         let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
-        delivery.bind_profile(
+        let previous_account = storage
+            .participant_database()
+            .map(|database| {
+                crate::storage::profile::participant::previous_account(database, &account.public())
+            })
+            .transpose()?
+            .flatten();
+        let legacy_previous = delivery.bind_profile_authorized(
             log_path,
             password,
             &identity.public(),
             &account.account_id(),
+            previous_account.as_deref(),
+            storage.participant_database().is_none(),
         )?;
         delivery.validate_owner(&identity.public(), &account.account_id())?;
         while delivery
@@ -824,7 +931,11 @@ impl Node {
         )?;
         let account_document_updates = tokio::sync::watch::channel(0).0;
         let opaque_seen = opaque_receive_cache.restored(&log);
+        let privacy = Arc::new(super::privacy_runtime::PrivacyControl::with_storage(
+            storage.clone(),
+        ));
         let node = Arc::new(Self {
+            storage,
             expiry_clock_start: (std::time::Instant::now(), now_millis()),
             expiry_first_seen: Mutex::new(HashMap::new()),
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
@@ -839,6 +950,8 @@ impl Node {
             #[cfg(test)]
             peer_snapshot_hook: Mutex::new(None),
             #[cfg(test)]
+            expiry_cleanup_hook: Mutex::new(None),
+            #[cfg(test)]
             remember_peer_hook: Mutex::new(None),
             #[cfg(test)]
             file_transfer_peak: std::sync::atomic::AtomicUsize::new(0),
@@ -846,7 +959,7 @@ impl Node {
             empty_file_cache_self_wakes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             accepted_hook: Mutex::new(None),
-            privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
+            privacy,
             identity,
             account,
             account_devices: Mutex::new(account_devices),
@@ -955,6 +1068,18 @@ impl Node {
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
         node.queue_approved_incomplete_files();
+        node.storage
+            .complete_participant(password, legacy_previous.as_deref())?;
+        node.delivery
+            .lock()
+            .expect("delivery lock not poisoned")
+            .finish_profile_binding()?;
+        crate::storage::profile::publication::cut("participant-after-legacy-binding")?;
+        crate::storage::profile::participant::finish_adoption(
+            node.storage.database(),
+            &node.account.public(),
+        )?;
+        crate::storage::profile::publication::cut("participant-after-adoption-clear")?;
         Ok(node)
     }
 
@@ -1316,3 +1441,7 @@ pub(in crate::node) fn random_msg_id() -> [u8; 32] {
 #[cfg(test)]
 #[path = "node_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "participant_storage_tests.rs"]
+mod participant_storage_tests;

@@ -1128,12 +1128,11 @@ impl Node {
         let path = path.to_path_buf();
         // The async sender may be aborted during retirement. Keep admission in
         // the actual writer, whose blocking operation cannot be canceled.
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            node.stage_file(&path, kind, on_progress)
-        })
-        .await
-        .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
+        permit
+            .spawn_blocking(move || node.stage_file(&path, kind, on_progress))
+            .await
+            .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
+            .into_inner()
     }
 
     async fn stage_file_for_host_blocking(
@@ -1158,28 +1157,29 @@ impl Node {
             .ok_or_else(|| NodeError::File("participant runtime is stopping".into()))?;
         let node = Arc::clone(self);
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let bytes = super::sticker_media::snapshot(&path, kind)?
-                .ok_or_else(|| NodeError::InvalidInput("invalid sticker name".into()))?;
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
-            if let Some(manifest) =
-                node.reusable_sticker(host, account.as_deref(), name, &bytes, deadline)?
-            {
-                on_progress(FileProgress {
-                    done: manifest.v2.chunk_count,
-                    total: manifest.v2.chunk_count,
-                });
-                let file = manifest.v2.file_conv;
-                return Ok((manifest, file));
-            }
-            node.stage_sticker_snapshot(name, &bytes, on_progress)
-        })
-        .await
-        .map_err(|error| NodeError::File(format!("stage join error: {error}")))?
+        permit
+            .spawn_blocking(move || {
+                let bytes = super::sticker_media::snapshot(&path, kind)?
+                    .ok_or_else(|| NodeError::InvalidInput("invalid sticker name".into()))?;
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                if let Some(manifest) =
+                    node.reusable_sticker(host, account.as_deref(), name, &bytes, deadline)?
+                {
+                    on_progress(FileProgress {
+                        done: manifest.v2.chunk_count,
+                        total: manifest.v2.chunk_count,
+                    });
+                    let file = manifest.v2.file_conv;
+                    return Ok((manifest, file));
+                }
+                node.stage_sticker_snapshot(name, &bytes, on_progress)
+            })
+            .await
+            .map_err(|error| NodeError::File(format!("stage join error: {error}")))?
+            .into_inner()
     }
 
     /// Stream `path` from disk, sealing each `CHUNK_SIZE` piece (deterministic-nonce v2

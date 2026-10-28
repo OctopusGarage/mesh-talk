@@ -2749,6 +2749,9 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
     assert!(source.channel_owner_account_id(modern).is_some());
     let old_document = group_inventory_source_document(&source, legacy);
     source.prepare_account_transition(&current).unwrap();
+    source
+        .persist_account_adoption(&current.public(), || Ok(()), || Ok(source.account.public()))
+        .unwrap();
     let secret = source.identity.secret_bytes();
     drop(source);
     let adopted = node_with_identity(

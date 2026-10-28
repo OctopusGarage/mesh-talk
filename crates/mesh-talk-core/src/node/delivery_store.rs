@@ -346,6 +346,7 @@ pub(crate) struct DeliveryStore {
     limits: DeliveryLimits,
     outbox_records: usize,
     needs_sync: bool,
+    deferred_profile_binding: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +362,7 @@ impl DeliveryStore {
         self.journal.fail_appends_for_test(enabled)
     }
 
+    #[cfg(test)]
     pub(crate) fn bind_profile(
         &mut self,
         log_path: &Path,
@@ -368,6 +370,19 @@ impl DeliveryStore {
         own: &PublicIdentity,
         account: &str,
     ) -> Result<(), LogError> {
+        self.bind_profile_authorized(log_path, password, own, account, None, true)
+            .map(|_| ())
+    }
+
+    pub(crate) fn bind_profile_authorized(
+        &mut self,
+        log_path: &Path,
+        password: &str,
+        own: &PublicIdentity,
+        account: &str,
+        previous_account: Option<&str>,
+        legacy_bootstrap: bool,
+    ) -> Result<Option<String>, LogError> {
         let mut path = log_path.as_os_str().to_os_string();
         path.push(".delivery-owner");
         let accepted = !self.pending.is_empty()
@@ -393,6 +408,10 @@ impl DeliveryStore {
         }) {
             return Err(invalid("invalid delivery profile binding"));
         }
+        let previous = entries
+            .first()
+            .filter(|entry| entry.account != account)
+            .map(|entry| entry.account.clone());
         if entries.is_empty() {
             file.append_durable(&expected)?;
         } else if entries.len() != 1 || entries[0].device != *own {
@@ -402,6 +421,11 @@ impl DeliveryStore {
             // device only after secret intents are resolved. Old account work
             // loses network/status eligibility; accepted history is retained.
             if entries[0].account != account {
+                if (!legacy_bootstrap && previous_account != Some(entries[0].account.as_str()))
+                    || entries[0].adoption.as_deref() != Some(account)
+                {
+                    return Err(invalid("unprepared delivery account change"));
+                }
                 if !self.pending.is_empty() {
                     return Err(invalid("recover old account delivery before adoption"));
                 }
@@ -414,10 +438,29 @@ impl DeliveryStore {
                     self.cancel(conversation, id)?;
                 }
             }
-            file.rewrite(std::slice::from_ref(&expected))?;
+            if legacy_bootstrap && previous.is_some() {
+                // Keep the old exact-device intent recoverable until SQL
+                // metadata durably records its legacy previous-account ID.
+                self.deferred_profile_binding = true;
+            } else {
+                file.rewrite(std::slice::from_ref(&expected))?;
+            }
         }
         file.sync()?;
         self.profile = Some((file, expected));
+        Ok(previous)
+    }
+
+    pub(crate) fn finish_profile_binding(&mut self) -> Result<(), LogError> {
+        if self.deferred_profile_binding {
+            let (file, profile) = self
+                .profile
+                .as_mut()
+                .ok_or_else(|| invalid("delivery owner is unbound"))?;
+            file.rewrite(std::slice::from_ref(profile))?;
+            file.sync()?;
+            self.deferred_profile_binding = false;
+        }
         Ok(())
     }
 
@@ -630,6 +673,7 @@ impl DeliveryStore {
             limits,
             outbox_records: records.len(),
             needs_sync: false,
+            deferred_profile_binding: false,
         };
         for record in records {
             store.validate_record(&record)?;

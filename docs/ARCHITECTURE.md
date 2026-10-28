@@ -501,8 +501,18 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   blocking profile rewrites, delivery recovery, peer-cache writes and file staging
   to finish.
   Runtime Drop only requests cancellation and cannot provide that retirement barrier.
-  This is in-process runtime ownership; external SDK operations and host file staging
-  require the host's own lifecycle serialization, and no cross-process lease is implied.
+  Participant constructors also retain the cooperating
+  [profile lease](#storage-replay-and-query-budgets). External SDK operations and
+  host file staging still require the host's own lifecycle serialization; an
+  independently retained Node keeps its profile busy after runtime retirement.
+
+  `RuntimeStartup` owns construction admission before keystore work begins.
+  `StartupCompletion` waits for the construction future and every admitted
+  blocking initializer, including canceled waiters. Blocking captures and
+  undelivered results release their resources before completion admission ends.
+  The desktop retains replacement serialization through this completion.
+  A successfully returned runtime retains the ordinary consuming stop contract;
+  construction completion does not retire that runtime or grant session authority.
 
   The desktop host serializes authentication operations separately from runtime
   replacement. Every published session has a private owner/generation lease; a
@@ -1311,12 +1321,23 @@ hard total disk or I/O cap. Physical maintenance removes only already-free pages
 and does not change live signed events, counters, local suppression or retention.
 
 The shared core profile lease retains the operating-system lock on persistent
-`node.lock`. The CLI acquires it before opening keystores and retains it through
-participant or relay retirement. Acquisition rejects unsafe lock entries and
-live legacy PID holders; release clears the PID while holding the lock and never
-unlinks its path. Canonical root aliases cannot create a second cooperating
-writer. This primitive does not by itself add cross-process ownership to hosts
-that have not yet adopted it.
+`node.lock`. CLI, central participant startup and offline recovery acquire it
+before opening keystores; public Node constructors acquire it for their
+caller-owned identities. Handed ownership moves into the context once and lasts
+through all retained stores, admitted work and retirement. Acquisition rejects
+unsafe aliases, unrecognized nonempty lock data and live legacy PID holders
+before mutation. Empty and stale numeric diagnostics retain compatibility.
+Release clears the PID while holding the lock and never unlinks its path.
+Canonical root aliases and same-process callers cannot create a second cooperating
+owner. Standalone legacy store APIs do not acquire a profile lease implicitly.
+
+Exact event and sent locators remain explicit. Bare filenames normalize their
+empty parent to the current directory; safe Unicode leaves are preserved.
+Reserved source namespaces, case aliases and existing file identities are
+checked before conflicting writers open. An explicit external sent parent has
+its own immediate, nonwaiting guard under the same owner; no ancestor directory
+or cryptographic account is inferred from a filename. Internal source locators
+remain relative; external sources require their explicit mappings on relocation.
 
 Database relocation requires explicit checked retirement: truncate-checkpoint
 the WAL, reject busy or incomplete results, and check connection close before
@@ -1330,6 +1351,30 @@ public keys and a versioned profile class, separately from mutable account
 membership. Explicit role and source-domain manifests prevent filename-based
 ownership inference. Source locators inside the profile are relative to its
 leased root, preserving closed-profile relocation.
+
+Participant control metadata uses that same physical device binding and an
+authenticated participant role, exact source layout and active/pending account
+identity. A relay-only authority cannot be reinterpreted as a participant.
+For an absent main database, the lease-backed context first runs the actual
+legacy Node validation. Only successful validation permits authenticated private
+candidate publication and connection initialization. A wrong password, unrelated
+account or corrupt legacy source cannot publish conflicting authority; header-only
+legacy sources retain their existing semantics. Existing unreadable authority
+or orphan canonical WAL/SHM never selects fresh initialization.
+
+Account adoption extends the delivery owner: durable delivery and SQL intent
+precede account-keystore replacement. An ambiguous save reloads the authenticated
+key under ownership. The exact old key cancels, the exact prepared next key
+completes, and any third key or unreadable result fails closed. Recovery is
+idempotent across delivery binding and SQL completion. A pre-SQL delivery intent
+can preserve its exact previous account ID through bootstrap without inventing
+an unavailable full public key. Old history retains its original provenance.
+Security rekey does not manufacture a signed linking-continuity proof.
+
+This participant context currently owns **control metadata only**. Participant
+events, transcripts, crypto and projection stores remain legacy and eager under
+its lease; it publishes no participant history-migration barrier. It does not
+establish demand-loaded participant startup or bounded historical memory.
 
 Relay source publication validates independent encrypted legacy archives before
 replacing source paths with manifest-bound downgrade barriers. A private database
@@ -1351,9 +1396,9 @@ Published opens inspect manifests and fixed barriers rather than rehashing or
 decrypting archived history. Replaced or missing barriers cannot trigger empty
 creation or automatic legacy merging. Published migration archives are retired
 through durable cleanup intent after successful publication; a cleanup failure
-does not make them an alternate history source. This storage capability alone
-does not switch the existing post-office or participant runtime to indexed
-serving; bounded sync consumers must adopt it before that cutover.
+does not make them an alternate history source. The dedicated post-office CLI
+uses the indexed runtime described below. Legacy participant and collecting SDK
+stores retain their separate migration and bounded-consumer adoption boundary.
 
 The domain-owned indexed event repository keeps immutable signed event bytes,
 parent edges, author sequences, frontier and conversation metadata in the same
@@ -1636,8 +1681,13 @@ rejected before a restored profile can be published.
 
 The desktop export command takes the same consuming runtime barrier as account
 replacement: it stops producers and drains admitted work, opens the existing
-profile offline, streams the snapshot to a restrictive sibling temporary file,
+profile offline only when no retired owner is available, streams the snapshot to a restrictive sibling temporary file,
 verifies it, then atomically publishes it without overwriting an existing file.
+`stop_for_storage` hands the joined Node and its existing context to export rather
+than reacquiring a live lease. Before any temporary/archive write, the desktop
+checks both the originating host local-user label and the canonical profile root
+against current authority; equal mesh account keys alone are insufficient.
+Raw SDK snapshot export remains caller-serialized.
 It restarts the runtime even when export fails or the IPC caller disappears.
 The local last-export summary is password encrypted; it contains the path, time,
 size, and counts, but never the key.
@@ -1645,8 +1695,13 @@ size, and counts, but never the key.
 Restore is available while signed out. Inspection decrypts to private scratch,
 checks the full archive and snapshot, and returns only a preview. Installation
 creates fresh local auth credentials and a fresh device identity in an unpublished
-directory, re-encrypts supported stores under the new password, then reopens both
-auth and node stores for verification. A publication marker makes the two directory
+directory, re-encrypts supported stores under the new password, then verifies both
+auth and node stores under staged ownership. Enrollment uses the same standard
+`messages.log` source. Before relocation, every staged handle is dropped and the
+encrypted connection is explicitly checkpointed and closed; retained handles or
+busy/faulted close prevent publication. The lease is released before the move,
+including on Windows. Private staging, host namespace serialization and the
+publication journal protect this cooperative gap. A publication marker makes the two directory
 renames recoverable: startup removes an incomplete pair or retains a completed pair
 before auth initializes. Startup also removes orphan staging and decrypted scratch.
 The recovered account fingerprint remains the same; the new device fingerprint

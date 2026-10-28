@@ -1,6 +1,8 @@
 //! Operate a separate bot identity or a scoped desktop-local integration.
 use clap::{Parser, Subcommand};
-use mesh_talk_core::node::{NodeRuntime, RuntimeConfig, RuntimeEvents, RuntimeNetworkOptions};
+use mesh_talk_core::node::{
+    NodeRuntime, RuntimeConfig, RuntimeEvents, RuntimeNetworkOptions, RuntimeStartup,
+};
 use mesh_talk_integrations::{
     Destination, IntegrationError, IntegrationService,
     client::{ClientConfig, EndpointManifest, LocalClient, endpoint_reference},
@@ -398,6 +400,8 @@ async fn serve(options: ServeOptions) -> Result<(), IntegrationError> {
     reserve_bot_root(&data_dir)?;
     let profile_dir = data_dir.join("accounts").join(&profile);
     private_directory(&profile_dir)?;
+    let storage_lease =
+        mesh_talk_core::storage::profile::ProfileStorageLease::acquire(&profile_dir)?;
     let _profile_lock = lock_profile(&profile_dir)?;
     let endpoint_manifest = std::path::absolute(profile_dir.join("integration-endpoint.json"))?;
     let endpoint_ref = endpoint_reference(&endpoint_manifest)?;
@@ -415,28 +419,32 @@ async fn serve(options: ServeOptions) -> Result<(), IntegrationError> {
         .or_else(|| temporary_runtime.as_ref().map(|dir| dir.path()))
         .ok_or_else(|| invalid("Missing runtime directory"))?;
     let server = LocalServer::bind(runtime_dir).await?;
-    let runtime = NodeRuntime::start_configured_guarded_with_network(
-        RuntimeConfig {
-            base_dir: &data_dir,
-            account_id: &profile,
-            display_name: &name,
-            password: &password.password,
-            discovery_port,
-            post_office_enabled: false,
-            candidate_source: None,
-        },
-        RuntimeEvents {
-            on_dm: Box::new(|_| {}),
-            on_channel: Box::new(|_| {}),
-            on_file: Box::new(|_| {}),
-            on_profile: Box::new(|_| {}),
-            on_call_signal: Box::new(|_| {}),
-        },
-        RuntimeNetworkOptions {
+    let runtime = NodeRuntime::start_owned(
+        RuntimeStartup::new(
+            RuntimeConfig {
+                base_dir: &data_dir,
+                account_id: &profile,
+                display_name: &name,
+                password: &password.password,
+                discovery_port,
+                post_office_enabled: false,
+                candidate_source: None,
+            },
+            RuntimeEvents {
+                on_dm: Box::new(|_| {}),
+                on_channel: Box::new(|_| {}),
+                on_file: Box::new(|_| {}),
+                on_profile: Box::new(|_| {}),
+                on_call_signal: Box::new(|_| {}),
+            },
+        )
+        .with_lease(storage_lease)
+        .with_network(RuntimeNetworkOptions {
             post_office_send_enabled: use_post_office,
             post_office_receive_enabled: use_post_office,
             physical_lan_only: false,
-        },
+        }),
+        |_| Ok(()),
         |launch| Ok(launch(&name)),
     )
     .await

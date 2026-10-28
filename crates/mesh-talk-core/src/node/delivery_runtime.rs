@@ -649,14 +649,40 @@ impl Node {
     }
     pub(in crate::node) fn persist_account_adoption<T>(
         &self,
-        account: &str,
+        account: &crate::identity::account::AccountPublic,
         save: impl FnOnce() -> Result<T, NodeError>,
+        reload: impl FnOnce() -> Result<crate::identity::account::AccountPublic, NodeError>,
     ) -> Result<T, NodeError> {
         let mut store = self.delivery.lock().expect("delivery lock not poisoned");
+        if self
+            .delivery_suspended
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(NodeError::Channel(
+                "account adoption requires runtime restart".into(),
+            ));
+        }
+        if account == &self.account.public() {
+            return save();
+        }
         self.recover_delivery(&mut store).map_err(NodeError::Log)?;
         store
-            .prepare_profile_adoption(account)
+            .prepare_profile_adoption(&account.account_id())
             .map_err(NodeError::Log)?;
+        let database = self.storage.participant_database().ok_or_else(|| {
+            NodeError::Log(LogError::CorruptFile(
+                "participant bootstrap has not completed".into(),
+            ))
+        })?;
+        if let Err(error) = crate::storage::profile::participant::prepare_adoption(
+            database,
+            &self.account.public(),
+            account,
+        ) {
+            self.delivery_suspended
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(NodeError::Log(error));
+        }
         match save() {
             Ok(result) => {
                 self.delivery_suspended
@@ -664,8 +690,50 @@ impl Node {
                 Ok(result)
             }
             Err(error) => {
-                if store.cancel_profile_adoption().is_err() {
-                    log::warn!("account adoption marker cleanup deferred");
+                // Durable replacement may have happened before a sync/save error.
+                // Only an authenticated reload of the exact old key permits cancel.
+                match reload() {
+                    Ok(loaded) if loaded == self.account.public() => {
+                        let cleanup = store
+                            .cancel_profile_adoption()
+                            .and_then(|()| {
+                                self.account_transitions
+                                    .lock()
+                                    .expect("account transition lock not poisoned")
+                                    .discard_pending(&self.identity.public(), &loaded.ed25519_pub)
+                            })
+                            .and_then(|()| {
+                                crate::storage::profile::participant::finish_adoption(
+                                    database, &loaded,
+                                )
+                            });
+                        if let Err(cleanup) = cleanup {
+                            self.delivery_suspended
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            return Err(NodeError::Channel(format!(
+                                "{error}; account adoption cleanup: {cleanup}"
+                            )));
+                        }
+                    }
+                    Ok(loaded) => {
+                        self.delivery_suspended
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        if &loaded != account {
+                            return Err(NodeError::Channel(format!(
+                                "{error}; account keystore has an unrelated identity"
+                            )));
+                        }
+                        return Err(NodeError::Channel(format!(
+                            "{error}; saved account changed; restart runtime to recover adoption"
+                        )));
+                    }
+                    Err(reload) => {
+                        self.delivery_suspended
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        return Err(NodeError::Channel(format!(
+                            "{error}; reload account keystore: {reload}"
+                        )));
+                    }
                 }
                 Err(error)
             }
@@ -1957,51 +2025,52 @@ impl Node {
             let Some(work) = self.runtime_work.admit() else {
                 return;
             };
-            let snapshot = tokio::task::spawn_blocking(move || {
-                let _work = work;
-                #[cfg(test)]
-                if let Some(hook) = node.delivery_snapshot_hook.lock().unwrap().take() {
-                    hook();
-                }
-                let mut store = node.delivery.lock().expect("delivery lock not poisoned");
-                node.recover_delivery(&mut store)?;
-                let next = destination_capacity
-                    .then(|| store.next_destination(destination_cursor))
-                    .flatten();
-                let destination = if let Some((id, reference)) = next {
-                    let event = node
-                        .log
-                        .lock()
-                        .expect("log lock not poisoned")
-                        .get(&reference.event_id)?;
-                    let Some(event) = event else {
-                        return Ok::<_, crate::eventlog::LogError>(None);
+            let snapshot = work
+                .spawn_blocking(move || {
+                    #[cfg(test)]
+                    if let Some(hook) = node.delivery_snapshot_hook.lock().unwrap().take() {
+                        hook();
+                    }
+                    let mut store = node.delivery.lock().expect("delivery lock not poisoned");
+                    node.recover_delivery(&mut store)?;
+                    let next = destination_capacity
+                        .then(|| store.next_destination(destination_cursor))
+                        .flatten();
+                    let destination = if let Some((id, reference)) = next {
+                        let event = node
+                            .log
+                            .lock()
+                            .expect("log lock not poisoned")
+                            .get(&reference.event_id)?;
+                        let Some(event) = event else {
+                            return Ok::<_, crate::eventlog::LogError>(None);
+                        };
+                        Some((
+                            id,
+                            DeliveryDestination {
+                                device: reference.device,
+                                account: reference.account,
+                                event,
+                                receipt_eligible: reference.receipt_eligible,
+                            },
+                        ))
+                    } else {
+                        None
                     };
-                    Some((
-                        id,
-                        DeliveryDestination {
-                            device: reference.device,
-                            account: reference.account,
-                            event,
-                            receipt_eligible: reference.receipt_eligible,
-                        },
-                    ))
-                } else {
-                    None
-                };
-                let receipt = if receipt_capacity {
-                    store
-                        .retry_receipts_after(receipt_cursor, 1)
-                        .into_iter()
-                        .next()
-                        .or_else(|| store.retry_receipts_after(None, 1).into_iter().next())
-                } else {
-                    None
-                };
-                let (files, cursor) = file_scan.read(&store);
-                Ok(Some((destination, receipt, files, cursor)))
-            })
-            .await;
+                    let receipt = if receipt_capacity {
+                        store
+                            .retry_receipts_after(receipt_cursor, 1)
+                            .into_iter()
+                            .next()
+                            .or_else(|| store.retry_receipts_after(None, 1).into_iter().next())
+                    } else {
+                        None
+                    };
+                    let (files, cursor) = file_scan.read(&store);
+                    Ok(Some((destination, receipt, files, cursor)))
+                })
+                .await
+                .map(|value| value.into_inner());
             let (destination, receipt, files, cursor) = match snapshot {
                 Ok(Ok(Some(snapshot))) => snapshot,
                 Ok(Err(error)) => {

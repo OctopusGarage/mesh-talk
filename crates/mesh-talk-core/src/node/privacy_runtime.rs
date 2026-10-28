@@ -54,6 +54,18 @@ pub(in crate::node) struct PrivacyControl {
     pub gate: Arc<tokio::sync::RwLock<()>>,
     pub generation: AtomicU64,
     pub route_probe_cursor: AtomicU64,
+    // Last: legacy privacy files and admission captures drop before storage.
+    _storage: Option<Arc<crate::storage::profile::context::ProfileStorage>>,
+}
+impl PrivacyControl {
+    pub(in crate::node) fn with_storage(
+        storage: Arc<crate::storage::profile::context::ProfileStorage>,
+    ) -> Self {
+        Self {
+            _storage: Some(storage),
+            ..Self::default()
+        }
+    }
 }
 fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "privacy operation denied")
@@ -1070,7 +1082,8 @@ impl Node {
     }
 
     /// Async hosts persist the captured snapshot on the blocking pool. No roster
-    /// guard or Node reference is carried into the filesystem operation.
+    /// guard or Node reference is carried into the filesystem operation. The
+    /// privacy facade retains its profile context through actual destruction.
     pub async fn cached_peer_snapshot_async(
         &self,
     ) -> io::Result<Vec<crate::discovery::PeerRecord>> {
@@ -1082,8 +1095,7 @@ impl Node {
             .ok_or_else(|| io::Error::other("node runtime retired"))?;
         #[cfg(test)]
         let hook = self.peer_snapshot_hook.lock().unwrap().take();
-        tokio::task::spawn_blocking(move || {
-            let _work = work;
+        work.spawn_blocking(move || {
             #[cfg(test)]
             if let Some(hook) = hook {
                 hook();
@@ -1092,6 +1104,7 @@ impl Node {
         })
         .await
         .map_err(|_| io::Error::other("peer cache task failed"))?
+        .into_inner()
     }
 
     fn persist_discovery_snapshot(

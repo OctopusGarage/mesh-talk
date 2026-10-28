@@ -324,8 +324,21 @@ impl Node {
     async fn run_expiry_loop(self: Arc<Self>) {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(work) = self.runtime_work.admit() else {
+                return;
+            };
             let node = Arc::clone(&self);
-            match tokio::task::spawn_blocking(move || node.prune_expired_received()).await {
+            match work
+                .spawn_blocking(move || {
+                    #[cfg(test)]
+                    if let Some(hook) = node.expiry_cleanup_hook.lock().unwrap().take() {
+                        hook();
+                    }
+                    node.prune_expired_received()
+                })
+                .await
+                .map(|value| value.into_inner())
+            {
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => log::warn!("message expiry cleanup failed: {error}"),
                 Err(error) => log::warn!("message expiry task failed: {error}"),

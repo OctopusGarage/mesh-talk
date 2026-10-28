@@ -585,7 +585,7 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
         .unwrap();
     assert_eq!(a.delivery_status(pending), Some(DeliveryStatus::Awaiting));
     let adopted = Account::generate();
-    b.persist_account_adoption(&adopted.account_id(), || Ok(()))
+    b.persist_account_adoption(&adopted.public(), || Ok(()), || Ok(b.account.public()))
         .unwrap();
     drop(b);
     let bob = DeviceIdentity::from_secret_bytes(secret.0, secret.1);
@@ -1938,7 +1938,7 @@ fn erased_static_manifest_reopen(adopt: bool) {
     );
     if adopt {
         let account = Account::generate();
-        b.persist_account_adoption(&account.account_id(), || Ok(()))
+        b.persist_account_adoption(&account.public(), || Ok(()), || Ok(b.account.public()))
             .unwrap();
         account_secret = account.secret_bytes();
     }
@@ -5633,9 +5633,9 @@ async fn historical_completion_requires_current_exact_origin_and_owner_and_permi
             .unwrap()
     );
     let account = Account::generate();
-    let owner = account.account_id();
     let keys = b.identity.secret_bytes();
-    b.persist_account_adoption(&owner, || Ok(())).unwrap();
+    b.persist_account_adoption(&account.public(), || Ok(()), || Ok(b.account.public()))
+        .unwrap();
     assert!(
         !b.historical_file_completion(file, final_chunk, &ap.public())
             .unwrap()
@@ -6164,15 +6164,19 @@ async fn failed_account_save_preserves_queue_and_successful_adoption_suspends_ol
     let blocked_keystore = dir.path().join("blocked.keystore");
     std::fs::create_dir(&blocked_keystore).unwrap();
     assert!(
-        a.persist_account_adoption(&new_account.account_id(), || {
-            crate::identity::account_keystore::save(&blocked_keystore, "pw", &new_account)
-                .map_err(|e| NodeError::Channel(e.to_string()))
-        })
+        a.persist_account_adoption(
+            &new_account.public(),
+            || {
+                crate::identity::account_keystore::save(&blocked_keystore, "pw", &new_account)
+                    .map_err(|e| NodeError::Channel(e.to_string()))
+            },
+            || Ok(a.account.public())
+        )
         .is_err()
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     assert_eq!(a.delivery.lock().unwrap().retry_messages(10).len(), 1);
-    a.persist_account_adoption(&new_account.account_id(), || Ok(()))
+    a.persist_account_adoption(&new_account.public(), || Ok(()), || Ok(a.account.public()))
         .unwrap();
     assert!(
         a.enqueue_to_account(&bob_account.account_id(), b"old runtime must stop", None)
@@ -6687,10 +6691,22 @@ async fn private_receipts_remain_projectable_after_clear_restart_and_account_ado
     assert_eq!(a.delivery_status(second), Some(DeliveryStatus::Delivered));
     let stale_bp = bp.clone();
     let adopted = Account::generate();
-    b.persist_account_adoption(&adopted.account_id(), || {
-        crate::identity::account_keystore::save(&bd.path().join("account.keystore"), "pw", &adopted)
+    b.persist_account_adoption(
+        &adopted.public(),
+        || {
+            crate::identity::account_keystore::save(
+                &bd.path().join("account.keystore"),
+                "pw",
+                &adopted,
+            )
             .map_err(|e| NodeError::Channel(e.to_string()))
-    })
+        },
+        || {
+            crate::identity::account_keystore::load(&bd.path().join("account.keystore"), "pw")
+                .map(|account| account.public())
+                .map_err(|e| NodeError::Channel(e.to_string()))
+        },
+    )
     .unwrap();
     bt.abort();
     let _ = bt.await;

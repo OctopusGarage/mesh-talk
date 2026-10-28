@@ -115,6 +115,18 @@ its finalization transaction. Policy-bearing reads qualify current eligibility;
 physical diagnostics alone cannot qualify custody. Runtime and paced worker
 adoption remain separate. See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
 
+`core/storage/profile/participant.rs` owns participant control metadata, explicit
+source locators and recoverable account-adoption intent on the shared connection.
+`core/node/delivery_runtime.rs` remains the account-adoption decision owner and
+coordinates its existing delivery journal with that intent. Participant history
+domains remain legacy until their coordinated cutover; metadata ownership does
+not establish demand-loaded history. `core/node/runtime_startup.rs` composes
+startup inputs and completion through `runtime_work.rs`; blocking captures and
+undelivered results remain admitted until their resources are destroyed.
+The desktop startup permit retains replacement serialization, and backup consumes
+the retired owner only after matching its host local-user label and physical
+profile root. Core does not derive desktop authority from account keys or paths.
+
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary
 projections omit the content. The explicit exact-message content lookup is for

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub struct ProfileStorageLease {
     root: PathBuf,
     file: std::fs::File,
+    external: Vec<ProfileStorageLease>,
 }
 
 impl ProfileStorageLease {
@@ -67,6 +68,7 @@ impl ProfileStorageLease {
                 "node.lock must be a regular file",
             ));
         }
+        require_single_link(&file)?;
         match file.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => return Err(busy()),
@@ -88,6 +90,12 @@ impl ProfileStorageLease {
                     .ok()
             })
             .flatten();
+        if metadata.len() != 0 && holder.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "node.lock contains unrecognized nonempty data",
+            ));
+        }
         if holder.is_some_and(pid_is_alive) {
             return Err(busy());
         }
@@ -96,13 +104,116 @@ impl ProfileStorageLease {
         file.set_len(0)?;
         file.rewind()?;
         write!(file, "{}", std::process::id())?;
-        Ok(ProfileStorageLease { file, root })
+        Ok(ProfileStorageLease {
+            file,
+            root,
+            external: Vec::new(),
+        })
     }
 
     /// The canonical root whose persistent lock this lease owns.
     pub fn canonical_root(&self) -> &Path {
         &self.root
     }
+
+    /// Validate the actual device keystore and its account-keystore sibling
+    /// before either load-or-create can follow or replace a redirected source.
+    pub fn validate_identity_sources(
+        &self,
+        identity_path: &Path,
+    ) -> Result<(), crate::eventlog::LogError> {
+        let parent = identity_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let leaf = identity_path
+            .file_name()
+            .ok_or_else(|| manifest::invalid("identity source must name a file"))?;
+        if std::fs::canonicalize(parent)? != self.root {
+            return Err(manifest::invalid(
+                "identity source parent is not owned by profile lease",
+            ));
+        }
+        let standard_identity = leaf
+            .to_str()
+            .is_some_and(|leaf| leaf.eq_ignore_ascii_case("identity.keystore"));
+        let default_source = leaf.to_str().is_some_and(|leaf| {
+            ["messages.log", "sent.log", "relay.log", "relay.retention"]
+                .iter()
+                .any(|name| leaf.eq_ignore_ascii_case(name))
+        });
+        if (!standard_identity && participant::reserved_sidecar_name(leaf))
+            || default_source
+            || participant::reserved_directory_name(leaf)
+        {
+            return Err(manifest::invalid(
+                "identity source collides with profile authority",
+            ));
+        }
+        publication_files::inspect_regular(&self.root.join(leaf))?;
+        publication_files::inspect_regular(&self.root.join("account.keystore"))?;
+        Ok(())
+    }
+
+    /// Extend this same owner to an explicitly supplied source parent. Never
+    /// wait while holding another root, nor infer ownership of an ancestor.
+    pub(crate) fn claim_source(
+        &mut self,
+        path: &Path,
+    ) -> Result<PathBuf, crate::eventlog::LogError> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let leaf = path
+            .file_name()
+            .ok_or_else(|| manifest::invalid("source must name a file"))?;
+        std::fs::create_dir_all(parent)?;
+        let parent = std::fs::canonicalize(parent)?;
+        if parent != self.root && !self.external.iter().any(|owner| owner.root == parent) {
+            self.external.push(Self::acquire(&parent)?);
+        }
+        let path = parent.join(leaf);
+        publication_files::inspect_regular(&path)?;
+        Ok(path)
+    }
+}
+
+/// Reject file aliases before mutating a lock or admitting a legacy source.
+pub(super) fn require_single_link(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if file.metadata()?.nlink() != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "profile file must have exactly one filesystem link",
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: the live borrowed handle and output structure remain valid.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if info.nNumberOfLinks != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "profile file must have exactly one filesystem link",
+            ));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+    }
+    Ok(())
 }
 
 /// Whether a process with `pid` is currently alive (signal 0 probe). Used only to decide
@@ -271,7 +382,7 @@ mod tests {
 
     #[test]
     fn profile_lock_reuses_persistent_file_and_releases_on_drop() {
-        for content in ["", "malformed", "4294967295"] {
+        for content in ["", "4294967295"] {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("node.lock");
             std::fs::write(&path, content).unwrap();
@@ -407,9 +518,27 @@ mod tests {
 
 pub(crate) mod context;
 pub(crate) mod manifest;
+pub(crate) mod participant;
 pub(crate) mod publication;
 #[cfg(test)]
 mod publication_acceptance_tests;
 mod publication_files;
 #[cfg(test)]
 mod publication_tests;
+
+#[cfg(all(test, unix))]
+mod lock_alias_regression {
+    use super::*;
+    #[test]
+    fn hardlinked_lock_does_not_truncate_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("identity.keystore");
+        std::fs::write(&source, b"private source must survive").unwrap();
+        std::fs::hard_link(&source, directory.path().join("node.lock")).unwrap();
+        assert!(ProfileStorageLease::acquire(directory.path()).is_err());
+        assert_eq!(
+            std::fs::read(source).unwrap(),
+            b"private source must survive"
+        );
+    }
+}
