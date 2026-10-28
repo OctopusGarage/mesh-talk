@@ -807,7 +807,6 @@ export function MessageBubble({
           isChannel={isChannel}
           isPersonal={isPersonal}
           showTime={showTime}
-          compact={isSticker}
         />
 
         {m.failed && (

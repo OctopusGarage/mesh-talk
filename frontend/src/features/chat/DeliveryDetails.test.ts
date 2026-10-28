@@ -39,7 +39,6 @@ it("keeps sticker receipts compact and accessible while retaining delivery detai
       createElement(DeliveryFooter, {
         message: base,
         isChannel: false,
-        compact: true,
       }),
     ),
   );
@@ -448,6 +447,105 @@ it("keeps recovery settings open after recipient confirmation removes the disclo
   expect(
     document.querySelector('[data-testid="recovery-settings"]'),
   ).toBeNull();
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+it("keeps copy and delivered states icon-only until explicitly expanded inline", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  await i18n.changeLanguage("en");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const variants = [
+    {
+      message: { ...base, replicas: undefined },
+      isChannel: true,
+      label: "Copy status unavailable",
+      detail: "Another linked device may have newer information.",
+      count: "?",
+    },
+    {
+      message: { ...base, replicas: 0 },
+      isChannel: true,
+      label: "No member copy confirmed",
+      detail: "not a delivery or read receipt",
+      count: "",
+    },
+    {
+      message: { ...base, replicas: 1 },
+      isChannel: true,
+      label: "Last confirmed: 1 member copy",
+      detail: "not a delivery or read receipt",
+      count: "1",
+    },
+    {
+      message: { ...base, replicas: 8 },
+      isChannel: true,
+      label: "Last confirmed: 2+ member copies",
+      detail: "not a delivery or read receipt",
+      count: "2+",
+    },
+    {
+      message: { ...base, replicas: 0, postOfficeCopies: 1 },
+      isChannel: true,
+      label: "Post office confirmed a stored copy",
+      detail: "Recipient delivery, downloads and reading are separate.",
+      count: "",
+    },
+    {
+      message: { ...base, delivery: "delivered" as const },
+      isChannel: false,
+      label: "Delivered",
+      detail: "Not a read receipt.",
+      count: "",
+    },
+  ];
+  for (const [index, variant] of variants.entries()) {
+    await act(async () =>
+      root.render(
+        createElement(DeliveryFooter, {
+          message: { ...variant.message, id: `status-${index}` },
+          isChannel: variant.isChannel,
+        }),
+      ),
+    );
+    const button = host.querySelector<HTMLButtonElement>(
+      "button[aria-expanded]",
+    )!;
+    expect(button).not.toBeNull();
+    expect(button.getAttribute("aria-label")).toBe(variant.label);
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(button.getAttribute("title")).toBeNull();
+    expect(host.querySelector('[role="tooltip"]')).toBeNull();
+    expect(host.textContent).not.toContain(variant.detail);
+    expect(button.querySelector("svg")).not.toBeNull();
+    expect(button.querySelector("[data-status-count]")?.textContent ?? "").toBe(
+      variant.count,
+    );
+    if (variant.isChannel)
+      expect(button.querySelector(".lucide-check")).toBeNull();
+    button.focus();
+    button.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => button.click());
+    const panel = document.getElementById(
+      button.getAttribute("aria-controls")!,
+    )!;
+    expect(panel).not.toBeNull();
+    expect(panel.tabIndex).toBe(0);
+    expect(host.contains(panel)).toBe(true);
+    expect(panel.parentElement).toBe(button.parentElement);
+    expect(panel.textContent).toContain(variant.label);
+    expect(panel.textContent).toContain(variant.detail);
+    await act(async () =>
+      panel.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(button);
+  }
   await act(async () => root.unmount());
   host.remove();
 });
