@@ -132,12 +132,14 @@
         "frontend/src/features/chat/deliveryFooter.test.ts",
         "frontend/src/store/outgoingIntent.ts",
         "frontend/src/store/outgoingIntent.test.ts",
-        "frontend/e2e/automatic-delivery.spec.ts"
+        "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/src/features/chat/MessageStatus.tsx"
       ],
       "frontend": [
         "src/features/chat/deliveryFooter.test.ts",
         "src/store/outgoingIntent.test.ts",
-        "src/store/chat.test.ts"
+        "src/store/chat.test.ts",
+        "src/features/chat/DeliveryDetails.test.ts"
       ],
       "capability": {
         "summary": "Render unknown, zero, external-member and post-office copy observations distinctly across linked devices.",
@@ -145,6 +147,10 @@
         "invariants": [
           {
             "name": "Absent status never becomes a zero or positive claim; omitted rows retire stale counts only within the requested message/runtime scope.",
+            "reference": "docs/help/topics/channels.md#understand-message-copy-status"
+          },
+          {
+            "name": "Copy signals use distinct icons and explicit inline details, never delivery/read check marks or hover overlays.",
             "reference": "docs/help/topics/channels.md#understand-message-copy-status"
           }
         ]
@@ -440,7 +446,8 @@
         "frontend/src/features/chat/deliveryFooter.test.ts",
         "frontend/src/store/conversationModel.ts",
         "frontend/src/store/conversationState.ts",
-        "frontend/src/store/outgoingIntent.ts"
+        "frontend/src/store/outgoingIntent.ts",
+        "frontend/src/features/chat/MessageStatus.tsx"
       ],
       "frontend": [
         "src/features/chat/DeliveryDetails.test.ts",
@@ -1904,7 +1911,8 @@
         "frontend/src/store/conversationModel.ts",
         "frontend/src/store/conversationState.ts",
         "frontend/src/store/outgoingIntent.ts",
-        "frontend/e2e/automatic-delivery.spec.ts"
+        "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/src/features/chat/MessageStatus.tsx"
       ],
       "browser": ["e2e/automatic-delivery.spec.ts"]
     },
