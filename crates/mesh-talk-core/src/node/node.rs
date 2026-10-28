@@ -322,6 +322,7 @@ pub struct Node {
     pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
+    pub(in crate::node) group_metadata_cache: Mutex<super::group_metadata::MetadataCache>,
     #[cfg(test)]
     pub(in crate::node) channel_projection_replays: std::sync::atomic::AtomicUsize,
     /// Fixed read-only summaries recovered from previous devices at open time.
@@ -357,6 +358,7 @@ pub struct Node {
     pub(in crate::node) file_pull_notify: tokio::sync::Notify,
     pub(in crate::node) file_pull_cursor: std::sync::atomic::AtomicUsize,
     pub(in crate::node) file_pull_gate: tokio::sync::Mutex<()>,
+    pub(super) group_file_delivery: super::group_file_delivery::GroupFileDelivery,
     pub(in crate::node) relay_retry_after: Mutex<HashMap<String, std::time::Instant>>,
     pub(in crate::node) relay_drain_cursor: Mutex<HashMap<String, usize>>,
     pub(in crate::node) ui_changes: tokio::sync::watch::Sender<u64>,
@@ -941,6 +943,7 @@ impl Node {
             channel_senders: Mutex::new(channel_senders),
             channel_custody: Mutex::new(channel_custody),
             channel_projection_cache: Mutex::new(Default::default()),
+            group_metadata_cache: Mutex::new(Default::default()),
             #[cfg(test)]
             channel_projection_replays: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -953,6 +956,7 @@ impl Node {
             file_pull_notify: tokio::sync::Notify::new(),
             file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),
             file_pull_gate: tokio::sync::Mutex::new(()),
+            group_file_delivery: Default::default(),
             relay_retry_after: Mutex::new(HashMap::new()),
             relay_drain_cursor: Mutex::new(HashMap::new()),
             ui_changes: tokio::sync::watch::channel(0).0,

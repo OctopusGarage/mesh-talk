@@ -182,6 +182,9 @@ impl PersistentEventLog {
     pub fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
         self.log.requires_channel_v3(conversation)
     }
+    pub fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v5(conversation)
+    }
     pub fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
         self.log.requires_channel_v4(conversation)
     }
@@ -488,6 +491,9 @@ const COMPACT_PROFILE_MIN: usize = 8;
 impl SyncStore for PersistentEventLog {
     fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
         PersistentEventLog::requires_channel_v3(self, conversation)
+    }
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        self.requires_channel_v5(conversation)
     }
     fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
         PersistentEventLog::requires_channel_v4(self, conversation)

@@ -337,6 +337,7 @@
       "paths": [
         "frontend/e2e/portable-core.spec.ts",
         "frontend/e2e/automatic-delivery.spec.ts",
+        "frontend/e2e/media-scroll.spec.ts",
         "frontend/e2e/media-recovery.spec.ts",
         "frontend/e2e/media-lifecycle.spec.ts",
         "frontend/e2e/screenshot-portable.spec.ts",

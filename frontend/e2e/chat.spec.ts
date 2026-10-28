@@ -539,6 +539,11 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(
       page.getByTestId("message-parent-snippet").first(),
     ).toBeVisible();
+    const quote = page.getByTestId("message-parent-snippet").first();
+    await expect(quote).toHaveRole("button");
+    await quote.focus();
+    await page.keyboard.press("Enter");
+    await expect(firstBubble.locator("xpath=..")).toHaveClass(/bg-signal\/10/);
   });
 
   test("search opens, queries, shows results, and navigates", async ({

@@ -103,7 +103,9 @@ test("installing a group pack cannot replace a personal pack with the same ID", 
   );
   await enterChat(page);
   await page.getByTestId("conversation-row-chan_team_dddd4444").click();
-  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page
+    .getByRole("button", { name: "My group photo", exact: true })
+    .click();
   await page.getByText(/Choose from gallery/).click();
   const manager = page.getByTestId("pack-manager-avatar");
   await manager.locator('input[type="file"]').setInputFiles({
@@ -125,7 +127,9 @@ test("installs a channel avatar library from ZIP", async ({ page }) => {
   await seedMarketPacks(page, ["clubs"]);
   await enterChat(page);
   await page.getByTestId("conversation-row-chan_team_dddd4444").click();
-  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page
+    .getByRole("button", { name: "My group photo", exact: true })
+    .click();
   await page.getByText(/Choose from gallery/).click();
   await expect(
     page.getByRole("button", { name: "Clubs", exact: true }),

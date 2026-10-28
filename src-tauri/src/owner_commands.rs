@@ -679,6 +679,9 @@ mod tests {
                     crate::chat_commands::set_channel_replica_enabled,
                     crate::chat_commands::set_group_file_sharing_override,
                     crate::chat_commands::set_channel_history_policy,
+                    crate::chat_commands::channel_metadata,
+                    crate::chat_commands::set_channel_cover,
+                    crate::chat_commands::set_channel_announcement,
                     crate::chat_commands::list_channels,
                     crate::chat_commands::get_presence,
                     crate::chat_commands::channel_members,
@@ -3632,6 +3635,74 @@ mod tests {
             .unwrap();
         // The writer releases session and runtime guards before retirement proceeds.
         drop(fixture.node.0.blocking_write());
+    }
+
+    #[test]
+    fn registered_channel_metadata_preserves_versions_and_owner_admission() {
+        use tauri::Manager;
+        let fixture = Fixture::new();
+        let channel = fixture
+            .invoke(
+                "create_channel",
+                serde_json::json!({"name":"Group metadata", "memberIds":[]}),
+            )
+            .unwrap();
+        let account = fixture
+            .node
+            .0
+            .blocking_read()
+            .as_ref()
+            .unwrap()
+            .account_id()
+            .to_owned();
+        let args =
+            serde_json::json!({"owner":"alice", "expectedAccount":account, "channelId":channel});
+        let initial = fixture.invoke("channel_metadata", args.clone()).unwrap();
+        assert!(initial["announcement"].is_null());
+        let mut publish = args.clone();
+        publish["content"] = "Welcome".into();
+        publish["expectedRevision"] = serde_json::Value::Null;
+        let saved = fixture
+            .invoke("set_channel_announcement", publish.clone())
+            .unwrap();
+        assert_eq!(saved["announcement"]["content"], "Welcome");
+        assert!(
+            fixture
+                .invoke("set_channel_announcement", publish.clone())
+                .is_err(),
+            "a stale editor cannot overwrite a published version"
+        );
+        let mut wrong = args.clone();
+        wrong["expectedAccount"] = "another-account".into();
+        assert_eq!(
+            fixture.invoke("channel_metadata", wrong).unwrap_err()["kind"],
+            "authorization"
+        );
+        publish["expectedRevision"] = saved["announcement"]["revision"].clone();
+        publish["content"] = serde_json::Value::Null;
+        let cleared = fixture
+            .invoke("set_channel_announcement", publish.clone())
+            .unwrap();
+        assert!(cleared["announcement"]["content"].is_null());
+        assert_ne!(
+            cleared["announcement"]["revision"],
+            saved["announcement"]["revision"]
+        );
+        crate::app_lock::lock_app(
+            fixture.webview.state::<AppState>(),
+            fixture.webview.state::<crate::app_lock::AppLock>(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.invoke("channel_metadata", args).unwrap_err()["kind"],
+            "authorization"
+        );
+        assert_eq!(
+            fixture
+                .invoke("set_channel_announcement", publish)
+                .unwrap_err()["kind"],
+            "authorization"
+        );
     }
 
     #[test]

@@ -5,6 +5,9 @@ export interface ReceptionEntry {
   messageAliases?: string[];
   /** Content-free evidence that this external message mentioned the local user. */
   mentioned?: boolean;
+  /** Confirmed local removal; never published as a viewed receipt. */
+  suppressed?: boolean;
+  expiresAtMs?: number;
   seen: boolean;
   late: boolean;
   receivedAt?: number;
@@ -70,11 +73,16 @@ export function boundLedger(ledger: ReceptionLedger): ReceptionLedger {
   // Viewed-only conversation caches yield before conversations with unread work.
   const conversations = ordered
     .filter(
-      ([, entries]) => !Object.values(entries).some((entry) => !entry.seen),
+      ([, entries]) =>
+        !Object.values(entries).some(
+          (entry) => !entry.seen && !entry.suppressed,
+        ),
     )
     .concat(
       ordered.filter(([, entries]) =>
-        Object.values(entries).some((entry) => !entry.seen),
+        Object.values(entries).some(
+          (entry) => !entry.seen && !entry.suppressed,
+        ),
       ),
     )
     .slice(-LEDGER_CONVERSATIONS);
@@ -84,7 +92,11 @@ export function boundLedger(ledger: ReceptionLedger): ReceptionLedger {
       Object.entries(entries).map(([id, entry]) => ({ key, id, entry })),
     )
     .reverse();
-  candidates.sort((a, b) => Number(a.entry.seen) - Number(b.entry.seen));
+  candidates.sort(
+    (a, b) =>
+      Number(Boolean(a.entry.seen || a.entry.suppressed)) -
+      Number(Boolean(b.entry.seen || b.entry.suppressed)),
+  );
   const result: ReceptionLedger = Object.fromEntries(
     conversations.map(([key]) => [key, {}]),
   );
@@ -132,6 +144,7 @@ export function emptyReception(
     const dropped = Object.entries(entries).filter(
       ([id, entry]) =>
         !entry.seen &&
+        !entry.suppressed &&
         !Object.prototype.hasOwnProperty.call(bounded[key] ?? {}, id),
     ).length;
     if (dropped)
@@ -148,14 +161,17 @@ export function emptyReception(
     unreadIds: Object.fromEntries(
       Object.entries(bounded).map(([key, entries]) => [
         key,
-        Object.keys(entries).filter((id) => !entries[id].seen),
+        Object.keys(entries).filter(
+          (id) => !entries[id].seen && !entries[id].suppressed,
+        ),
       ]),
     ),
     lateUnreadIds: Object.fromEntries(
       Object.entries(bounded).map(([key, entries]) => [
         key,
         Object.keys(entries).filter(
-          (id) => !entries[id].seen && entries[id].late,
+          (id) =>
+            !entries[id].seen && !entries[id].suppressed && entries[id].late,
         ),
       ]),
     ),
@@ -194,6 +210,8 @@ export function mergeReception(
                       ...incoming,
                       ...old,
                       seen: old.seen || incoming.seen,
+                      suppressed: old.suppressed || incoming.suppressed,
+                      expiresAtMs: old.expiresAtMs ?? incoming.expiresAtMs,
                       late: old.late || incoming.late,
                       mentioned: old.mentioned || incoming.mentioned,
                       messageAliases: validMessageAliases(
@@ -332,6 +350,7 @@ export function receiveIdentity(
     let next = state;
     if (
       (old.receivedAt === undefined && event.received_at !== undefined) ||
+      (old.expiresAtMs === undefined && event.expires_at_ms != null) ||
       (mentioned && !old.mentioned && !event.own_device)
     ) {
       next = {
@@ -342,6 +361,7 @@ export function receiveIdentity(
             ...state.ledger[key],
             [id]: {
               ...old,
+              expiresAtMs: old.expiresAtMs ?? event.expires_at_ms ?? undefined,
               mentioned: !event.own_device && (old.mentioned || mentioned),
               receivedAt: old.receivedAt ?? event.received_at,
               arrivalKind: event.arrival_kind ?? old.arrivalKind,
@@ -369,6 +389,9 @@ export function receiveIdentity(
       seen:
         event.own_device === true ||
         state.accountSeen?.[key]?.includes(id) === true,
+      ...(Number.isFinite(event.expires_at_ms)
+        ? { expiresAtMs: event.expires_at_ms! }
+        : {}),
       late: kind !== "live",
       receivedAt: event.received_at,
       arrivalKind: kind,
@@ -445,6 +468,8 @@ export function reconcileHistory(
     fromMe: boolean;
     mentioned?: boolean;
     fileMessageAliases?: string[];
+    expiresAtMs?: number | null;
+    suppressed?: boolean;
   }[],
   discover: boolean,
 ): ReceptionState {
@@ -478,6 +503,18 @@ export function reconcileHistory(
         (row.mentioned || related.some((entry) => entry.mentioned))
           ? { mentioned: true }
           : {}),
+        ...(row.suppressed || related.some((entry) => entry.suppressed)
+          ? { suppressed: true }
+          : {}),
+        ...(Number.isFinite(row.expiresAtMs)
+          ? { expiresAtMs: row.expiresAtMs! }
+          : related.some((entry) => entry.expiresAtMs !== undefined)
+            ? {
+                expiresAtMs: related.find(
+                  (entry) => entry.expiresAtMs !== undefined,
+                )!.expiresAtMs,
+              }
+            : {}),
         seen: row.fromMe || knownRead || (!related.length && !discover),
         late: related.length ? related.some((entry) => entry.late) : true,
         ...(receivedAt === undefined ? {} : { receivedAt }),
@@ -554,4 +591,99 @@ export function receptionPatch(
     );
   }
   return { ...next, unread };
+}
+
+/** Clear explicit sources in one pass so ledger bounding cannot reintroduce overflow. */
+export function markConversationsRead(
+  state: ReceptionState & { unread: Record<string, number> },
+  keys: string[],
+) {
+  const selected = new Set(keys);
+  const ledger = Object.fromEntries(
+    Object.entries(state.ledger).map(([key, entries]) => [
+      key,
+      selected.has(key)
+        ? Object.fromEntries(
+            Object.entries(entries).map(([id, entry]) => [
+              id,
+              entry.seen || entry.suppressed ? entry : { ...entry, seen: true },
+            ]),
+          )
+        : entries,
+    ]),
+  );
+  const next = emptyReception(
+    ledger,
+    Object.fromEntries(
+      Object.entries(state.overflowUnread).filter(
+        ([key]) => !selected.has(key),
+      ),
+    ),
+    state.accountSeen,
+  );
+  return {
+    ...next,
+    reception: state.reception,
+    unread: {
+      ...state.unread,
+      ...Object.fromEntries(keys.map((key) => [key, 0])),
+    },
+  };
+}
+
+/** Keep bounded removal evidence so delayed live/history replay cannot restore unread. */
+export function suppressIdentities(
+  state: ReceptionState,
+  key: string,
+  ids: string[],
+): ReceptionState {
+  const entries = { ...state.ledger[key] };
+  let changed = false;
+  for (const requested of ids) {
+    const id = receptionIdentity(entries, requested);
+    const entry = Object.prototype.hasOwnProperty.call(entries, id)
+      ? entries[id]
+      : undefined;
+    if (!entry || entry.suppressed) continue;
+    entries[id] = { ...entry, suppressed: true };
+    changed = true;
+  }
+  if (!changed) return state;
+  return {
+    ...emptyReception(
+      { ...state.ledger, [key]: entries },
+      state.overflowUnread,
+      state.accountSeen,
+    ),
+    reception: state.reception,
+  };
+}
+
+/** Expiry evidence survives message-cache eviction; absence from a page proves nothing. */
+export function expireReception(
+  state: ReceptionState,
+  now: number,
+): ReceptionState {
+  let changed = false;
+  const ledger = Object.fromEntries(
+    Object.entries(state.ledger).map(([key, entries]) => {
+      const expired = Object.keys(entries).filter(
+        (id) =>
+          !entries[id].suppressed &&
+          entries[id].expiresAtMs !== undefined &&
+          entries[id].expiresAtMs! <= now,
+      );
+      if (!expired.length) return [key, entries];
+      changed = true;
+      const next = { ...entries };
+      for (const id of expired) next[id] = { ...entries[id], suppressed: true };
+      return [key, next];
+    }),
+  );
+  return changed
+    ? {
+        ...emptyReception(ledger, state.overflowUnread, state.accountSeen),
+        reception: state.reception,
+      }
+    : state;
 }

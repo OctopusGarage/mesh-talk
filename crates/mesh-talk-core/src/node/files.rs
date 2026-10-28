@@ -1083,6 +1083,7 @@ impl Node {
             None,
             &mut authorize,
         )?;
+        self.queue_group_file_delivery(file_conv, id);
         Ok((id, file_conv))
     }
 

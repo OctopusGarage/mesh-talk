@@ -22,6 +22,8 @@ import { contactPolicy, favorites as favoritesApi } from "@/lib/api/contacts";
 import { errorMessage } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import {
+  saveUnread,
+  savePendingUnread,
   loadPendingUnread,
   loadUnread,
   loadReceptionLedger,
@@ -33,6 +35,9 @@ import {
 } from "@/lib/unreadStorage";
 import {
   emptyReception,
+  markConversationsRead,
+  suppressIdentities,
+  expireReception,
   applyAccountSeen,
   mergeReception,
   receiveIdentity,
@@ -162,12 +167,17 @@ function applyVerifiedIdentity(
     const replacedScope =
       invalidateScope ||
       (state.myAccountId !== "" && state.myAccountId !== acct);
-    const reception = sameScope
+    const hydrated = sameScope
       ? state
       : mergeReception(
           { ...persistedReception, unread: persistedUnread },
           replacedScope ? { ...emptyReception(), unread: {} } : state,
         );
+    const expiryPatch = receptionPatch(
+      hydrated,
+      expireReception(hydrated, Date.now()),
+    );
+    const reception = { ...hydrated, ...expiryPatch };
     const unread = reception.unread;
     const pendingUnknownUnread = sameScope
       ? state.pendingUnknownUnread
@@ -180,6 +190,7 @@ function applyVerifiedIdentity(
         );
     return {
       ...(invalidateScope ? invalidateConversationIdentity(state) : {}),
+      ...expiryPatch,
       ...(!sameScope
         ? {
             ...reception,
@@ -414,6 +425,9 @@ export interface ChatState
   deleteLeftChannel: (channelId: string) => Promise<boolean>;
   open: (c: Conversation, target?: SearchTarget) => Promise<void>;
   markActiveRead: () => void;
+  markConversationRead: (key: string) => void;
+  markAllRead: () => void;
+  dismissPendingUnread: (sender: string) => void;
   applyAccountReadReceipts: (
     owner: string,
     accountId: string,
@@ -1021,6 +1035,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       );
       set((state) => ({
         ...expireConversationMessages(state, now),
+        ...receptionPatch(state, expireReception(state, now)),
         incomingFiles: state.incomingFiles.filter(
           (file) => file.expiresAtMs == null || file.expiresAtMs > now,
         ),
@@ -1364,10 +1379,36 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     )
       return;
     const key = convKey(active);
+    rawSet((state) => markConversationsRead(state, [key]));
+  },
+
+  markConversationRead: (key) => {
+    if (!canReviewUnread(get()) || !/^(account|channel):.+/u.test(key)) return;
+    rawSet((state) => markConversationsRead(state, [key]));
+  },
+
+  markAllRead: () => {
+    if (!canReviewUnread(get())) return;
     rawSet((state) => ({
-      ...viewIdentities(state, key, Object.keys(state.ledger[key] ?? {})),
-      overflowUnread: { ...state.overflowUnread, [key]: 0 },
-      unread: { ...state.unread, [key]: 0 },
+      ...markConversationsRead(state, [
+        ...new Set([
+          ...Object.keys(state.unread),
+          ...Object.keys(state.ledger),
+          ...Object.keys(state.overflowUnread),
+        ]),
+      ]),
+      pendingUnknownUnread: {},
+    }));
+  },
+
+  dismissPendingUnread: (sender) => {
+    if (!canReviewUnread(get())) return;
+    rawSet((state) => ({
+      pendingUnknownUnread: Object.fromEntries(
+        Object.entries(state.pendingUnknownUnread).filter(
+          ([id]) => id !== sender,
+        ),
+      ),
     }));
   },
 
@@ -1386,7 +1427,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       (state.messages[key] ?? []).flatMap((row) => (row.id ? [row.id] : [])),
     );
     const viewed = ids.filter(
-      (id) => present.has(id) && state.ledger[key]?.[id]?.seen !== true,
+      (id) =>
+        present.has(id) &&
+        state.ledger[key]?.[id]?.seen !== true &&
+        !state.ledger[key]?.[id]?.suppressed,
     );
     if (!viewed.length) return;
     rawSet((state) =>
@@ -1581,7 +1625,10 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     try {
       await chat.deleteMessage(c.id, target, isChannelConv(c));
       if (!lease.current()) return;
-      set((state) => deleteConversationMessage(state, key, target));
+      set((state) => ({
+        ...deleteConversationMessage(state, key, target),
+        ...receptionPatch(state, suppressIdentities(state, key, [target])),
+      }));
       if (get().active && convKey(get().active!) === key) await get().reload();
     } catch (e) {
       set({ error: `Couldn't delete message: ${errorMessage(e)}` });
@@ -1621,10 +1668,44 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const c = get().active;
     if (!c) return false;
     const key = convKey(c);
+    const snapshot = get();
+    const ids = Object.keys(snapshot.ledger[key] ?? {});
+    const overflow = snapshot.overflowUnread[key] ?? 0;
+    const legacy = Math.max(
+      0,
+      (snapshot.unread[key] ?? 0) -
+        (snapshot.unreadIds[key]?.length ?? 0) -
+        overflow,
+    );
     try {
       await chat.clearConversation(c.id, isChannelConv(c));
       if (!lease.current()) return false;
-      set((state) => clearConversationMessages(state, key));
+      set((state) => {
+        const next = suppressIdentities(state, key, ids);
+        const remainingOverflow = Math.max(
+          0,
+          (state.overflowUnread[key] ?? 0) - overflow,
+        );
+        const patch = receptionPatch(state, {
+          ...emptyReception(
+            next.ledger,
+            { ...next.overflowUnread, [key]: remainingOverflow },
+            next.accountSeen,
+          ),
+          reception: next.reception,
+        });
+        return {
+          ...clearConversationMessages(state, key),
+          ...patch,
+          unread: {
+            ...(patch.unread ?? state.unread),
+            [key]: Math.max(
+              0,
+              (patch.unread?.[key] ?? state.unread[key] ?? 0) - legacy,
+            ),
+          },
+        };
+      });
       if (get().active && convKey(get().active!) === key) await get().reload();
       return true;
     } catch (e) {
@@ -1799,6 +1880,14 @@ function bump(set: Set, key: string, active: boolean) {
   }
 }
 
+function canReviewUnread(state: ChatState): boolean {
+  return (
+    Boolean(state.myAccountId) &&
+    state.unreadOwner === useAuth.getState().user?.id &&
+    isConversationVisible()
+  );
+}
+
 function isConversationVisible(): boolean {
   return (
     typeof document !== "undefined" &&
@@ -1935,7 +2024,10 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
     set((state) =>
       receptionPatch(
         state,
-        receiveIdentity(state, key, { ...e, own_device: own }),
+        expireReception(
+          receiveIdentity(state, key, { ...e, own_device: own }),
+          Math.max(Date.now(), state.expiryNow),
+        ),
       ),
     );
   if (!e.event_id && knownTray) return;
@@ -1973,6 +2065,16 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
 }
 
 useChat.subscribe((state, previous) => {
+  if (state.unreadOwner && state.myAccountId) {
+    if (state.unread !== previous.unread)
+      saveUnread(state.unreadOwner, state.myAccountId, state.unread);
+    if (state.pendingUnknownUnread !== previous.pendingUnknownUnread)
+      savePendingUnread(
+        state.unreadOwner,
+        state.myAccountId,
+        state.pendingUnknownUnread,
+      );
+  }
   if (
     state.ledger !== previous.ledger &&
     state.unreadOwner &&

@@ -4,6 +4,10 @@ import { beforeEach, expect, it, vi } from "vitest";
 
 const { chatState, avatars } = vi.hoisted(() => ({
   chatState: {
+    channels: [] as Array<{
+      channel_id: string;
+      metadata?: { cover?: { content: string | null } | null };
+    }>,
     channelMembersById: {
       channel: [
         { user_id: "me", name: "Me", account_id: "my-account" },
@@ -34,6 +38,7 @@ import { GroupAvatar } from "./GroupAvatar";
 
 beforeEach(() => {
   Object.assign(chatState, {
+    channels: [],
     channelMembersById: {
       channel: [
         { user_id: "me", name: "Me", account_id: "my-account" },
@@ -46,6 +51,36 @@ beforeEach(() => {
     },
     peers: [],
   });
+});
+
+it("inherits the owner-published group photo without a personal override", () => {
+  chatState.channels = [
+    {
+      channel_id: "channel",
+      metadata: { cover: { content: "data:image/png;base64,SHARED" } },
+    },
+  ];
+  const html = renderToStaticMarkup(
+    createElement(GroupAvatar, { channelId: "channel" }),
+  );
+  expect(html).toContain('src="data:image/png;base64,SHARED"');
+});
+
+it("preserves a personal group photo and follows the owner again after clearing it", () => {
+  chatState.channels = [
+    {
+      channel_id: "channel",
+      metadata: { cover: { content: "data:image/png;base64,SHARED" } },
+    },
+  ];
+  avatars.channel = "data:image/png;base64,PRIVATE";
+  expect(
+    renderToStaticMarkup(createElement(GroupAvatar, { channelId: "channel" })),
+  ).toContain('src="data:image/png;base64,PRIVATE"');
+  delete avatars.channel;
+  expect(
+    renderToStaticMarkup(createElement(GroupAvatar, { channelId: "channel" })),
+  ).toContain('src="data:image/png;base64,SHARED"');
 });
 
 it("shows a channel member's saved avatar after the member leaves the live roster", () => {

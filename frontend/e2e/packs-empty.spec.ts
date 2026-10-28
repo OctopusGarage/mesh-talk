@@ -20,7 +20,9 @@ test("starts without avatar and theme libraries but accepts ZIPs", async ({
 
   await page.keyboard.press("Escape");
   await page.getByTestId("conversation-row-chan_team_dddd4444").click();
-  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page
+    .getByRole("button", { name: "My group photo", exact: true })
+    .click();
   await page.getByText(/Choose from gallery/).click();
   await expect(
     page.getByTestId("avatar-gallery").locator("button"),

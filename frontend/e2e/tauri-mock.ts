@@ -13,6 +13,7 @@ import type {
   AccountGroupOperationKind,
   AccountGroupOperationStatus,
   ChannelHistoryPolicy,
+  ChannelMetadata,
   PeerInfo,
   PresenceInfo,
 } from "../src/lib/types";
@@ -210,8 +211,41 @@ export const test = base.extend({
           pending_invite: dataMode === "invite",
         },
       ];
+      const groupMetadata: Record<string, ChannelMetadata> = {};
+      let groupMetadataRevision = 0;
       const channelHistoryPolicies: Record<string, ChannelHistoryPolicy> = {};
       let channelOwner = dataMode === "invite" ? BOB.device_id : SELF.device;
+      function saveGroupMetadata(
+        a: Record<string, unknown>,
+        field: "cover" | "announcement",
+      ) {
+        if (channelOwner !== SELF.device || a.expectedAccount !== SELF.account)
+          throw new Error("Permission denied");
+        const id = String(a.channelId);
+        const data = groupMetadata[id] ?? {
+          cover: null,
+          announcement: null,
+          announcement_history: [],
+        };
+        if ((data[field]?.revision ?? null) !== (a.expectedRevision ?? null))
+          throw new Error("Version conflict");
+        const value = {
+          revision: String(++groupMetadataRevision),
+          content: a.content == null ? null : String(a.content),
+          author: SELF.account,
+          authored_at: Date.now(),
+        };
+        const updated = {
+          ...data,
+          [field]: value,
+          announcement_history:
+            field === "announcement"
+              ? [...data.announcement_history, value]
+              : data.announcement_history,
+        };
+        groupMetadata[id] = updated;
+        return updated;
+      }
 
       (window as unknown as Record<string, unknown>).__mockClearRoster = () => {
         peers.length = 0;
@@ -1464,7 +1498,15 @@ export const test = base.extend({
             clearConversation(`ch:${a.channelId}`);
             channels.splice(channels.indexOf(channel), 1);
           },
-          list_channels: () => channels.map((channel) => ({ ...channel })),
+          list_channels: () =>
+            channels.map((channel) => ({
+              ...channel,
+              metadata: groupMetadata[channel.channel_id] ?? {
+                cover: null,
+                announcement: null,
+                announcement_history: [],
+              },
+            })),
           // The test user (SELF) is the channel owner, so the member-management controls
           // (add/remove) stay visible to the existing e2e flow.
           channel_members: (a) => ({
@@ -1554,6 +1596,14 @@ export const test = base.extend({
 
           // channels
           create_channel: () => "chan_new_eeee5555",
+          channel_metadata: (a) =>
+            groupMetadata[String(a.channelId)] ?? {
+              cover: null,
+              announcement: null,
+              announcement_history: [],
+            },
+          set_channel_cover: (a) => saveGroupMetadata(a, "cover"),
+          set_channel_announcement: (a) => saveGroupMetadata(a, "announcement"),
           set_channel_history_policy: (a) => {
             if (channelOwner !== SELF.device)
               throw new Error(

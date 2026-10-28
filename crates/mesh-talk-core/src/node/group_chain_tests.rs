@@ -22,6 +22,62 @@ struct Chain {
     servers: Vec<Option<JoinHandle<()>>>,
 }
 
+#[tokio::test]
+async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut chain = Chain::new().await;
+        let group = chain.nodes[0]
+            .create_channel_invited("metadata", vec![chain.nodes[1].identity.public()])
+            .await
+            .unwrap();
+        chain.round(1, 0, group).await;
+        chain.nodes[1].accept_channel_invite(group).await.unwrap();
+        chain.round(1, 0, group).await;
+        chain.nodes[0]
+            .set_channel_history_policy(group, crate::channel::HistoryPolicy::Off)
+            .await
+            .unwrap();
+        chain.nodes[0]
+            .set_channel_announcement_if(group, Some("Current announcement"), None, |commit| {
+                commit()
+            })
+            .await
+            .unwrap();
+        chain.nodes[0]
+            .add_channel_member(group, chain.nodes[2].identity.public())
+            .await
+            .unwrap();
+        chain.round(1, 0, group).await;
+        chain.round(2, 1, group).await;
+        assert!(chain.nodes[2].channel_metadata(group).is_err());
+        chain.nodes[2].accept_channel_invite(group).await.unwrap();
+        chain.round(1, 2, group).await;
+        chain.servers[0].take().unwrap().abort();
+        assert!(
+            chain.nodes[2]
+                .channel_metadata(group)
+                .unwrap()
+                .announcement
+                .is_none()
+        );
+        assert_eq!(chain.nodes[1].retry_group_metadata().unwrap(), vec![group]);
+        chain.round(2, 1, group).await;
+        assert_eq!(
+            chain.nodes[2]
+                .channel_metadata(group)
+                .unwrap()
+                .announcement
+                .unwrap()
+                .content
+                .as_deref(),
+            Some("Current announcement")
+        );
+        assert!(chain.nodes[2].channel_history(group, 100).is_empty());
+    })
+    .await
+    .expect("group metadata must converge over a reachable accepted holder");
+}
+
 impl Drop for Chain {
     fn drop(&mut self) {
         for server in self.servers.iter().flatten() {

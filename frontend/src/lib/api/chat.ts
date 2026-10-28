@@ -74,6 +74,7 @@ export interface DeviceSyncStatus {
 import type {
   AccountInfo,
   ChannelInfo,
+  ChannelMetadata,
   ChannelMembersInfo,
   ChannelHistoryPolicy,
   ChannelActivityInfo,
@@ -542,6 +543,44 @@ export const chat = {
     invoke<string>("send_file_to_account", { account, path, media }),
 
   // Channels
+  channelMetadata: (
+    owner: string,
+    expectedAccount: string,
+    channelId: string,
+  ) =>
+    invoke<ChannelMetadata>("channel_metadata", {
+      owner,
+      expectedAccount,
+      channelId,
+    }),
+  setChannelCover: (
+    owner: string,
+    expectedAccount: string,
+    channelId: string,
+    content: string | null,
+    expectedRevision: string | null,
+  ) =>
+    invoke<ChannelMetadata>("set_channel_cover", {
+      owner,
+      expectedAccount,
+      channelId,
+      content,
+      expectedRevision,
+    }),
+  setChannelAnnouncement: (
+    owner: string,
+    expectedAccount: string,
+    channelId: string,
+    content: string | null,
+    expectedRevision: string | null,
+  ) =>
+    invoke<ChannelMetadata>("set_channel_announcement", {
+      owner,
+      expectedAccount,
+      channelId,
+      content,
+      expectedRevision,
+    }),
   createChannelForOwner: (
     owner: string,
     expectedAccount: string,

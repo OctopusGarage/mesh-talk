@@ -561,3 +561,61 @@ it("ignores malformed stored aliases while preserving canonical unread state", (
     "canonical",
   ]);
 });
+
+it("suppresses confirmed removals without claiming they were viewed or resurrecting on replay", async () => {
+  const { suppressIdentities } = await import("./reception");
+  let state = receiveIdentity(emptyReception(), "account:a", {
+    event_id: "gone",
+  });
+  state = suppressIdentities(state, "account:a", ["gone"]);
+  expect(state.unreadIds["account:a"]).toEqual([]);
+  expect(state.ledger["account:a"].gone).toMatchObject({
+    seen: false,
+    suppressed: true,
+  });
+  state = reconcileHistory(
+    state,
+    "account:a",
+    [{ id: "gone", fromMe: false }],
+    true,
+  );
+  expect(state.unreadIds["account:a"]).toEqual([]);
+  saveReceptionLedger("host", "account", state.ledger);
+  expect(
+    emptyReception(loadReceptionLedger("host", "account")).unreadIds[
+      "account:a"
+    ],
+  ).toEqual([]);
+});
+
+it("expires retained unread evidence after cache eviction without clearing other messages", async () => {
+  const { expireReception } = await import("./reception");
+  const state = reconcileHistory(
+    emptyReception(),
+    "channel:a",
+    [
+      { id: "expired", fromMe: false, expiresAtMs: 100 },
+      { id: "future", fromMe: false, expiresAtMs: 200 },
+      { id: "ordinary", fromMe: false },
+    ],
+    true,
+  );
+  const next = expireReception(state, 150);
+  expect(next.unreadIds["channel:a"]).toEqual(["future", "ordinary"]);
+  expect(next.ledger["channel:a"].expired.seen).toBe(false);
+  expect(expireReception(next, 150)).toBe(next);
+});
+
+it("does not create overflow unread from suppressed entries when bounding the ledger", async () => {
+  const { suppressIdentities } = await import("./reception");
+  const state = suppressIdentities(
+    receiveIdentity(emptyReception(), "channel:a", { event_id: "gone" }),
+    "channel:a",
+    ["gone"],
+  );
+  const ledger = { ...state.ledger };
+  for (let i = 0; i < 70; i++)
+    ledger[`channel:${i}`] = { row: { seen: true, late: false } };
+  const next = emptyReception(ledger);
+  expect(next.overflowUnread["channel:a"] ?? 0).toBe(0);
+});

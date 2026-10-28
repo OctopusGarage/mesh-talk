@@ -22,6 +22,7 @@ import { usePacks } from "@/store/packs";
 import { CreateChannelDialog } from "./CreateChannelDialog";
 import { SearchDialog } from "./SearchDialog";
 import { FilesTray } from "./FilesTray";
+import { UnreadMessages } from "./UnreadMessages";
 import { OfflineConnectDialog } from "./OfflineConnectDialog";
 import { useContactPolicy } from "@/store/contactPolicy";
 import { ProfileDialog } from "./ProfileDialog";
@@ -400,6 +401,7 @@ export function Sidebar() {
         className="sidebar-tools border-t px-2 py-1.5"
         aria-label={t("redesign.tools")}
       >
+        <UnreadMessages key={`${owner}:${generation}:${favoritesScope}`} />
         <FilesTray navigation />
       </div>
 

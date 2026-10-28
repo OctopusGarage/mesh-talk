@@ -228,12 +228,12 @@ pub(super) fn account_release_admitted(
         && valid_account_acceptance(acceptance, grant, authority, graph)
 }
 
-struct View<'a> {
+pub(super) struct View<'a> {
     events: Vec<&'a Event>,
     by_id: HashMap<EventId, &'a Event>,
 }
 impl<'a> View<'a> {
-    fn new(events: &[&'a Event]) -> Self {
+    pub(super) fn new(events: &[&'a Event]) -> Self {
         let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
         let events = super::timeline::ordered_ids(events, &[], true)
             .iter()
@@ -241,7 +241,7 @@ impl<'a> View<'a> {
             .collect();
         Self { events, by_id }
     }
-    fn before(&self, event: &Event) -> Option<crate::channel::ChannelState> {
+    pub(super) fn before(&self, event: &Event) -> Option<crate::channel::ChannelState> {
         // Only ancestors establish authority; concurrent control events cannot
         // grant permission to a snapshot or release that did not observe them.
         let mut ancestors = HashSet::new();
@@ -261,7 +261,7 @@ impl<'a> View<'a> {
             .collect();
         ChannelBook::membership_view(event.conversation_id, &ancestors, None, &self.by_id).0
     }
-    fn canonical_before(&self, event: &Event) -> Option<crate::channel::ChannelState> {
+    pub(super) fn canonical_before(&self, event: &Event) -> Option<crate::channel::ChannelState> {
         ChannelBook::membership_view(
             event.conversation_id,
             &self.events,
@@ -283,7 +283,7 @@ impl<'a> View<'a> {
         )
         .0
     }
-    fn owner_authorized(&self, event: &Event) -> bool {
+    pub(super) fn owner_authorized(&self, event: &Event) -> bool {
         let author = event.author.user_id();
         let Some(current) = self.canonical_before(event) else {
             return false;

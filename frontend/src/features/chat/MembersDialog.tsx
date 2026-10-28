@@ -2,6 +2,7 @@ import { DeleteChatDialog } from "./DeleteChatDialog";
 import { GroupControlStatus, PendingGroupControls } from "./GroupControlStatus";
 import { useGroupControlOperation } from "./useGroupControlOperation";
 import { canManageChannel, canParticipateChannel } from "./channelPermissions";
+import { ChannelMetadataSettings } from "./ChannelMetadataSettings";
 import {
   channelMemberAccounts,
   channelInviteAccounts,
@@ -441,6 +442,18 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
               <ArrowLeft className="h-4 w-4" />
               {t("members.backToMembers")}
             </Button>
+            {!sharedReference && open && channelId && (
+              <ChannelMetadataSettings
+                key={`${channelId}:${localOwner}:${authGeneration}:${runtimeScope}:${myId}:metadata`}
+                channelId={channelId}
+                canManage={
+                  isOwner &&
+                  !channel?.archived &&
+                  !channel?.left &&
+                  !channel?.pending_invite
+                }
+              />
+            )}
             {channelId && (
               <GroupPreferences
                 key={`${channelId}:${localOwner}:${authGeneration}:${runtimeScope}:${myId}`}

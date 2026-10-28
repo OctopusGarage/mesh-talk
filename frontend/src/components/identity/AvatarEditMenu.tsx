@@ -63,7 +63,12 @@ export function AvatarEditMenu({
       lifetime.active = false;
     };
   }, [id]);
-  const hasPhoto = useAvatar(id) !== undefined;
+  const effectivePhoto = useAvatar(id);
+  const privatePhoto = useAvatars((s) => s.local?.[id]);
+  const hasPhoto =
+    category === "group"
+      ? privatePhoto !== undefined
+      : effectivePhoto !== undefined;
   const setAvatar = useAvatars((s) => s.setAvatar);
 
   const save = async (dataUrl: string | null) => {
@@ -146,13 +151,26 @@ export function AvatarEditMenu({
           </button>
         </PopoverTrigger>
         <PopoverContent align="start" className="w-48 p-1">
+          {category === "group" && (
+            <p className="px-2.5 py-2 text-xs text-muted-foreground">
+              {t("groupMetadata.privateHelp")}
+            </p>
+          )}
           <button
             type="button"
             onClick={() => void choose()}
             className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent"
           >
             <ImagePlus className="h-4 w-4 text-muted-foreground" />
-            {hasPhoto ? t("avatar.change") : t("avatar.set")}
+            {category === "group"
+              ? t(
+                  hasPhoto
+                    ? "groupMetadata.changePrivate"
+                    : "groupMetadata.setPrivate",
+                )
+              : hasPhoto
+                ? t("avatar.change")
+                : t("avatar.set")}
           </button>
           {category && (
             <button
@@ -177,7 +195,11 @@ export function AvatarEditMenu({
               className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-destructive hover:bg-accent"
             >
               <Trash2 className="h-4 w-4" />
-              {t("avatar.remove")}
+              {t(
+                category === "group"
+                  ? "groupMetadata.followGroup"
+                  : "avatar.remove",
+              )}
             </button>
           )}
           {saveFailed && (

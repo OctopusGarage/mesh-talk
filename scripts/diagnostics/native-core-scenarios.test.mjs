@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Writable } from "node:stream";
+import { runInNewContext } from "node:vm";
 import { writeChildCommand } from "./native-core-scenarios.mjs";
 test("Windows native helper only emits bounded owned-PID control keys with ABI-sized SendInput", async () => {
   const { nativeWindowsKeyboardScript } = await import("./native-core-scenarios.mjs");
@@ -383,4 +384,22 @@ test("native attachment fixture never writes settings without a current account"
     await assert.rejects(prepareNativeDownloadFixture({ fixture, owner: "fixture-user", invoke: async (command) => { calls.push(command); return undefined; } }), /requires the current account/);
     assert.deepEqual(calls, ["account_id"]);
   } finally { await rm(fixture, { recursive: true, force: true }); }
+});
+
+
+test("native historical receipts keep scrolling when a visible message has a clipped badge", async () => {
+  const { revealHistoricalNativeMessage } = await import("./native-core-scenarios.mjs");
+  let offset = 0;
+  const log = { getBoundingClientRect: () => ({ top: 102, bottom: 624, left: 284, right: 1040 }) };
+  const badge = { getBoundingClientRect: () => ({ top: 93 + offset, bottom: 117 + offset, left: 986, right: 1010, width: 24, height: 24 }) };
+  const bubble = { textContent: "receipt-text", getBoundingClientRect: () => ({ top: 38 + offset, bottom: 119 + offset, left: 284, right: 1030, width: 746, height: 81 }), querySelectorAll: () => [badge] };
+  const document = { activeElement: log, querySelector: () => log, querySelectorAll: () => [bubble] };
+  const keys = [];
+  await revealHistoricalNativeMessage({
+    execute: async (script, args = []) => runInNewContext(`(function(){${script}})(...args)`, { document, args, innerWidth: 1040, innerHeight: 720 }),
+    command: async () => ({ "element-6066-11e4-a52e-4f735466cecf": "log" }),
+    key: async key => { keys.push(key); offset = 300; },
+    until: async (_label, poll) => { for (let i = 0; i < 3; i++) if (await poll()) return true; throw new Error("badge remains clipped"); },
+  }, "receipt-text");
+  assert.deepEqual(keys, ["\uE00E"], "a partially visible message cannot certify its clipped receipt");
 });

@@ -1641,6 +1641,14 @@ impl DeliveryStore {
         self.files.get(&id)
     }
 
+    pub(crate) fn retain_incoming_group_file(&mut self, file: FileCard) -> Result<(), LogError> {
+        if !file.destinations.is_empty() || file.completion_binding.is_none() {
+            return Err(invalid("invalid incoming group file reservation"));
+        }
+        self.check_file_slot(&file)?;
+        self.install_record(OutboxRecord::FileCard(file))
+    }
+
     pub(crate) fn complete_file(
         &mut self,
         card: EventId,

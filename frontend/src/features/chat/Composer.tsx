@@ -26,7 +26,7 @@ import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
 import { installedStickers } from "@/lib/stickerPacks";
 import { usePacks } from "@/store/packs";
-import { messageSummary } from "@/lib/messagePresentation";
+import { ReplyPreview } from "./ReplyPreview";
 import { PackManager } from "@/components/PackManager";
 import type { ChatMessage } from "@/store/chat";
 import { clipboardFiles } from "./clipboardFiles";
@@ -117,6 +117,7 @@ export function Composer({
   stagedScreenshot,
   placeholder,
   replyTo,
+  replyAuthorName,
   onCancelReply,
   mentionNames,
   myName,
@@ -152,6 +153,7 @@ export function Composer({
   stagedScreenshot?: File | null;
   placeholder: string;
   replyTo?: ChatMessage | null;
+  replyAuthorName?: string;
   onCancelReply?: () => void;
   mentionNames: string[];
   /** The current user's display name — excluded from mention suggestions (can't @ yourself). */
@@ -553,12 +555,11 @@ export function Composer({
           className="mx-auto mb-2 flex max-w-[820px] items-center gap-2 rounded-md bg-muted px-3 py-1.5 text-[13px]"
         >
           <CornerUpLeft className="h-3.5 w-3.5 shrink-0 text-signal" />
-          <span className="min-w-0 flex-1 truncate text-muted-foreground">
-            {t("composer.replyingTo")}{" "}
-            <span className="text-foreground">
-              {messageSummary(replyTo, t, installedPacks) ||
-                t("composer.message")}
+          <span className="min-w-0 flex-1">
+            <span className="mb-0.5 block text-xs text-muted-foreground">
+              {t("composer.replyingTo")}
             </span>
+            <ReplyPreview message={replyTo} authorName={replyAuthorName} />
           </span>
           <button
             onClick={onCancelReply}

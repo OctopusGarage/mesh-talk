@@ -334,6 +334,16 @@ sender-chain keys, attachment access or complete conversation history.
 _Avoid_: full history sync, original-author signature on the copied plaintext.
 See [channel history settings](docs/help/topics/channels.md#history-for-new-members).
 
+**Shared group photo**: Owner-published image shared with authorized group
+members. A private group-photo override takes priority for its account; neither
+setting changes the owner's personal profile photo. See [group photos](docs/help/topics/channels.md#group-photo-and-personal-overrides).
+
+**Group announcement**: Versioned owner-published current group content,
+independent of ordinary message retention and optional pre-join chat history.
+Publication cards and device-private reminder dismissal are distinct from
+recipient delivery, public read receipts and explicit acknowledgement.
+See [group announcements](docs/help/topics/channels.md#group-announcements).
+
 ## Peer trust evidence
 
 - **Public profile signature**: authenticates the Account publishing a profile,

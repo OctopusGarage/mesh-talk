@@ -2,6 +2,57 @@
 
 Start a group conversation and review its members from the conversation header.
 
+## Group photo and personal overrides
+
+Open the member control in the conversation header to see **Group photo**.
+The current owner account can publish or remove the photo shared with members.
+An uploaded image is cropped to 256 pixels and must fit within 32 KiB after
+cropping. Choose a simpler image if the size limit is exceeded.
+
+Click the photo in the conversation header for **My group photo**. This choice
+is private to your account and follows your appearance synchronization policy.
+Your personal photo takes priority over the owner-published group photo. Choose
+**Use group photo** to remove your override and follow future group photo changes.
+If neither photo exists, the app shows the existing member montage.
+Removing the shared photo does not remove anyone's personal override. Ownership
+transfer preserves the shared photo for the next owner to manage. Existing private
+photos are never automatically published to the group.
+
+## Group announcements
+
+Open the member control and find **Group announcement**. Members can read the
+current text; the current owner account can choose **Write announcement** or
+**Edit announcement**, then **Preview** and **Publish**. Canceling leaves the
+published announcement unchanged. Announcements are plain text, preserve line
+breaks and allow up to 4 KiB of UTF-8 text. This byte limit accommodates different
+languages without treating character count as wire size.
+
+Publishing adds a card to the conversation from the same accepted group event.
+A new announcement from another account also appears as a compact reminder and
+a sidebar label. Open it to see the full text, or dismiss that version's reminder.
+This device-private action neither deletes the announcement nor sends a read
+receipt. Notification preferences remain in effect. A later version can remind
+you again. Publishing unchanged text with its current revision does not create
+another card or reminder. Earlier cards open the current announcement; removed announcements
+show a removal state. Recent publication cards are a bounded presentation window,
+not an unlimited announcement archive.
+
+The owner can choose **Delete announcement** and confirm the removal. Deleted
+versions retain a tombstone, preventing an offline device from restoring stale
+text. A stale editor must refresh and review current information before retrying;
+announcement and photo revisions are independent. Ownership transfer preserves
+the current announcement and ends the former owner's editing authority.
+
+Current shared photos and announcements are encrypted group content and remain
+available independently of ordinary chat retention. After accepting an invitation,
+a new member can receive the current group information from an eligible existing
+member even when the owner is offline and pre-join message history is off. This
+does not release old chat keys or grant access to earlier announcements. Until the current content key arrives, the app reports that it is waiting for
+group information rather than reporting that no announcement exists. As with
+other peer-to-peer content, an authorized reachable copy is needed for catch-up.
+Pending invitations and descriptive shared references do not grant access to the
+content or permission to publish it.
+
 ## Start a channel
 
 1. Use the sidebar's **New channel** control.
@@ -118,6 +169,21 @@ If no eligible holder is reachable, delivery waits. Removing and re-inviting a
 device starts a new history permission lifetime. Upgrade all participating clients
 before enabling this feature: history controls require version 3 channel sync,
 and older sync versions receive an upgrade response rather than unknown events.
+
+## File delivery
+
+Ordinary files can travel through configured post offices even when members are
+on different networks without a direct connection. The sender deposits encrypted
+file contents; the recipient can approve and download later while the sender is
+offline, provided a reachable post office still holds the needed contents.
+
+Keep the sender available until postal custody has succeeded. A file card or an
+online indicator does not prove that the contents reached a post office or the
+recipient. Before the first chunk arrives, progress says **Waiting for file
+data**; the percentage remains zero. Explicit approval is still required when
+automatic receiving is disabled. Refusal prevents local reception and stops
+further deposits once the sender learns that decision. Both clients need the
+updated file behavior; post-office storage and retention limits still apply.
 
 ## Share retained history
 

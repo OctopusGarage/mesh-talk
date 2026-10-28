@@ -5627,3 +5627,176 @@ describe("imported account-personal deletion", () => {
     );
   });
 });
+
+it("marks all unread sources read, persists the result, and preserves later arrivals", async () => {
+  vi.stubGlobal("document", {
+    visibilityState: "visible",
+    hasFocus: () => true,
+  });
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (k: string) => values.get(k) ?? null,
+    setItem: (k: string, v: string) => values.set(k, v),
+  });
+  try {
+    useChat.setState({
+      ...emptyReception(
+        { "channel:hidden": { old: { seen: false, late: true } } },
+        { "channel:hidden": 8 },
+      ),
+      unreadOwner: "host",
+      myAccountId: "myacct",
+      ready: true,
+      unread: { "channel:hidden": 9, "account:orphan": 3 },
+      pendingUnknownUnread: { ghost: 2 },
+      active: null,
+    });
+    useChat.getState().markAllRead();
+    expect(
+      Object.values(useChat.getState().unread).reduce((a, b) => a + b, 0),
+    ).toBe(0);
+    expect(useChat.getState().pendingUnknownUnread).toEqual({});
+    const { loadUnread, loadPendingUnread } =
+      await import("@/lib/unreadStorage");
+    expect(loadUnread("host", "myacct")).toEqual({});
+    expect(loadPendingUnread("host", "myacct")).toEqual({});
+    expect(useChat.getState().ledger["channel:hidden"].old.seen).toBe(true);
+    useChat.setState((state) => ({
+      ...emptyReception({
+        ...state.ledger,
+        "channel:hidden": {
+          ...state.ledger["channel:hidden"],
+          newer: { seen: false, late: false },
+        },
+      }),
+      unread: { "channel:hidden": 1 },
+    }));
+    expect(useChat.getState().unreadIds["channel:hidden"]).toEqual(["newer"]);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("clears one unavailable source during history failure while preserving other unread", () => {
+  vi.stubGlobal("document", {
+    visibilityState: "visible",
+    hasFocus: () => true,
+  });
+  try {
+    useChat.setState({
+      ready: true,
+      unreadOwner: "host",
+      myAccountId: "myacct",
+      loading: true,
+      historyError: "account:gone",
+      unread: { "account:gone": 3, "channel:other": 2 },
+      pendingUnknownUnread: { ghost: 4, other: 1 },
+    });
+    useChat.getState().markConversationRead("account:gone");
+    useChat.getState().dismissPendingUnread("ghost");
+    expect(useChat.getState().unread).toMatchObject({
+      "account:gone": 0,
+      "channel:other": 2,
+    });
+    expect(useChat.getState().pendingUnknownUnread).toEqual({ other: 1 });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("does not clear unread through a stale or unfocused owner action", () => {
+  vi.stubGlobal("document", {
+    visibilityState: "visible",
+    hasFocus: () => true,
+  });
+  try {
+    useChat.setState({
+      ready: true,
+      unreadOwner: "retired",
+      unread: { "account:a": 2 },
+      pendingUnknownUnread: { ghost: 1 },
+    });
+    useChat.getState().markAllRead();
+    expect(useChat.getState().unread["account:a"]).toBe(2);
+    useChat.setState({ unreadOwner: "host" });
+    vi.stubGlobal("document", {
+      visibilityState: "hidden",
+      hasFocus: () => false,
+    });
+    useChat.getState().markAllRead();
+    expect(useChat.getState().pendingUnknownUnread).toEqual({ ghost: 1 });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("confirmed local deletion clears only that message's unread without a read receipt", async () => {
+  invoke.mockResolvedValue([]);
+  useChat.setState({
+    ...emptyReception({
+      "account:a": {
+        gone: { seen: false, late: false },
+        keep: { seen: false, late: false },
+      },
+    }),
+    active: { kind: "account", id: "a", name: "A" },
+    unread: { "account:a": 2 },
+  });
+  await useChat.getState().deleteMessage("gone");
+  expect(useChat.getState().unreadIds["account:a"]).toEqual(["keep"]);
+  expect(useChat.getState().unread["account:a"]).toBe(1);
+  expect(useChat.getState().ledger["account:a"].gone.seen).toBe(false);
+});
+
+it("conversation clearing preserves an unread arrival admitted while the clear request is pending", async () => {
+  let finish!: () => void;
+  invoke.mockImplementation((command: string) =>
+    command === "clear_conversation"
+      ? new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+      : Promise.resolve([]),
+  );
+  useChat.setState({
+    ...emptyReception({ "account:a": { old: { seen: false, late: false } } }),
+    active: { kind: "account", id: "a", name: "A" },
+    unread: { "account:a": 1 },
+  });
+  const clearing = useChat.getState().clearConversation();
+  await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+  useChat.setState((state) => ({
+    ...emptyReception({
+      ...state.ledger,
+      "account:a": {
+        ...state.ledger["account:a"],
+        newer: { seen: false, late: false },
+      },
+    }),
+    unread: { "account:a": 2 },
+  }));
+  finish();
+  await clearing;
+  expect(useChat.getState().unreadIds["account:a"]).toEqual(["newer"]);
+  expect(useChat.getState().unread["account:a"]).toBe(1);
+});
+
+it("allows explicit clearing during a node outage after account ownership was verified", () => {
+  vi.stubGlobal("document", {
+    visibilityState: "visible",
+    hasFocus: () => true,
+  });
+  try {
+    useChat.setState({
+      ready: false,
+      unreadOwner: "host",
+      myAccountId: "myacct",
+      unread: { "account:orphan": 2 },
+      pendingUnknownUnread: { ghost: 1 },
+    });
+    useChat.getState().markAllRead();
+    expect(useChat.getState().unread["account:orphan"]).toBe(0);
+    expect(useChat.getState().pendingUnknownUnread).toEqual({});
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

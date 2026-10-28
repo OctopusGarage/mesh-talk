@@ -59,6 +59,7 @@ impl AccountGroupAccessInfo {
 /// A channel as shown in the chat UI.
 #[derive(Serialize)]
 pub struct ChannelInfo {
+    pub metadata: Option<mesh_talk_core::node::ChannelMetadata>,
     pub channel_id: String, // hex
     pub name: String,
     pub member_count: usize,
@@ -93,7 +94,7 @@ pub async fn list_channels(
 ) -> Result<Vec<ChannelInfo>, CommandError> {
     let admission = RuntimeAdmission::capture_current(&app, &state)?;
     admission
-        .with_runtime(move |rt| {
+        .blocking(move |rt, _| {
             let node = rt.handle();
             Ok(rt
                 .list_channels()
@@ -109,6 +110,12 @@ pub async fn list_channels(
                 .map(|c| {
                     let reference = node.channel_shared_reference(c.id);
                     ChannelInfo {
+                        metadata: node.channel_metadata(c.id).ok().map(|mut metadata| {
+                            // The summary serves recent publication cards; detailed IPC retains the bounded history.
+                            let remove = metadata.announcement_history.len().saturating_sub(20);
+                            metadata.announcement_history.drain(..remove);
+                            metadata
+                        }),
                         channel_id: hex::encode(c.id.as_bytes()),
                         name: c.name,
                         member_count: c.member_count,

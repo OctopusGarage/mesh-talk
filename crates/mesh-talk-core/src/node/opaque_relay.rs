@@ -495,11 +495,16 @@ impl Node {
                 .lock()
                 .expect("projection lock not poisoned")
                 .ingest(event);
-            if matches!(admission, Err(LogError::MissingParents(_))) {
+            if matches!(admission, Err(LogError::MissingParents(_)))
+                || matches!(&admission, Err(LogError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+            {
                 // Opaque IDs have no causal order. A child can fill a page
                 // before its parent; requesting it again would pin that page
                 // forever. Skip it for this operation only, fetch later pages,
                 // and retry admission in the next drain with its parents held.
+                // Encrypted custody may also precede local receive approval.
+                // Defer denied wrappers only within this operation so a later
+                // approval can retry them without a repeated-page busy loop.
                 // It is deliberately absent from the durable/global seen set.
                 progress.defer_event(outer_id)?;
             } else if admission.is_ok() {
