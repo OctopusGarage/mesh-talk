@@ -6,6 +6,7 @@ import {
 } from "./stickerMedia";
 import { stickerById } from "./stickerPacks";
 import { attachmentLabel } from "./directoryAttachment";
+import { isImage } from "./mediaTypes";
 
 /** A presentation input shared by live messages, history and saved excerpts. */
 interface MessageContent {
@@ -54,6 +55,8 @@ export function messageSummary(
   if (message.protection) return t("protectedMessage.label");
   const sticker = messageSticker(message, packs, now);
   if (sticker) return stickerSummary(sticker, t("message.sticker"));
+  if (!message.text && message.file && isImage(message.file.name))
+    return `[${t("message.image")}]`;
   return (
     message.text ||
     (message.file

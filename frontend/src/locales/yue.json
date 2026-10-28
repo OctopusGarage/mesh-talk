@@ -950,7 +950,7 @@
     "trigger": "成員",
     "title": "成員",
     "description": "此頻道中的所有人。",
-    "addPeer": "新增對方",
+    "addPeer": "新增成員",
     "owner": "群主",
     "dissolve": "解散群組",
     "dissolveConfirm": "確定要為所有成員解散呢個群組？成員會保留聊天記錄，但之後唔可以再傳送訊息或更改成員。",

@@ -950,7 +950,7 @@
     "trigger": "成员",
     "title": "成员",
     "description": "此频道中的所有成员。",
-    "addPeer": "添加对端",
+    "addPeer": "添加成员",
     "owner": "群主",
     "dissolve": "解散群组",
     "dissolveConfirm": "确定为所有成员解散此群组吗？成员将保留聊天记录，但此后无法发送消息或更改成员。",

@@ -950,7 +950,7 @@
     "trigger": "Miembros",
     "title": "Miembros",
     "description": "Todos los del canal.",
-    "addPeer": "Añadir un contacto",
+    "addPeer": "Añadir miembros",
     "owner": "Propietario",
     "dissolve": "Disolver canal",
     "dissolveConfirm": "¿Disolver este canal para todos? Los miembros conservarán el historial, pero ya no podrán enviar mensajes ni cambiar los miembros.",

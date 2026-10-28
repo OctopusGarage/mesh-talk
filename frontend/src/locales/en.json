@@ -950,7 +950,7 @@
     "trigger": "Members",
     "title": "Members",
     "description": "Everyone in this channel.",
-    "addPeer": "Add a peer",
+    "addPeer": "Add members",
     "owner": "Owner",
     "dissolve": "Dissolve channel",
     "dissolveConfirm": "Dissolve this channel for everyone? Members will keep their history, but no one can send messages or change members afterward.",
