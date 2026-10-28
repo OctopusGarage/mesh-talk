@@ -1,4 +1,27 @@
 {
+  "unread": {
+    "title": "읽지 않은 메시지",
+    "description": "읽지 않은 메시지의 출처를 확인하거나 읽음으로 표시하세요. 메시지는 유지됩니다.",
+    "badgeFailed": "앱 배지를 업데이트하지 못했습니다. 자동으로 다시 시도합니다.",
+    "details": "세부 정보",
+    "retryBadge": "배지 업데이트 재시도",
+    "search": "대화 또는 ID 검색",
+    "empty": "읽지 않은 메시지가 없습니다.",
+    "emptyDetail": "새 메시지가 여기에 표시됩니다.",
+    "noResults": "일치하는 읽지 않은 대화가 없습니다.",
+    "unknownSender": "확인되지 않은 발신자",
+    "pendingDetail": "발신자 확인 대기 중",
+    "unavailable": "사용할 수 없는 대화",
+    "hidden": "숨긴 대화",
+    "channel": "그룹 대화",
+    "direct": "개인 대화",
+    "unavailableDetail": "현재 목록에 없는 대화입니다",
+    "clearSource": "{{name}} 읽음으로 표시",
+    "showMore": "더 보기",
+    "refresh": "새로고침",
+    "refreshing": "새로고침 중…",
+    "markAllRead": "모두 읽음으로 표시"
+  },
   "contactDeletion": {
     "title": "연락처를 삭제할까요?",
     "description": "이 기기에서 연락처와 메시지 기록을 영구적으로 삭제합니다. 이 작업은 취소할 수 없습니다. 온라인 상태에서 다시 발견되면 연락처가 추가되지만, 삭제한 기록은 복원되지 않습니다.",

@@ -90,3 +90,16 @@ it("rejects a delayed account page after runtime retirement", async () => {
   expect(ports.apply).not.toHaveBeenCalled();
   expect(ports.mark).not.toHaveBeenCalled();
 });
+
+it.each([false, true])(
+  "never publishes confirmed local suppression as a read receipt (seen=%s)",
+  async (seen) => {
+    const { ports, sync } = fixture();
+    const ledger = {
+      [key]: { removed: { seen, late: false, suppressed: true } },
+    };
+    ports.ledger = () => ledger as unknown as ReturnType<typeof ports.ledger>;
+    await sync.poll();
+    expect(ports.mark).not.toHaveBeenCalledWith(expect.anything(), "removed");
+  },
+);

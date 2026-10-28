@@ -1,4 +1,27 @@
 {
+  "unread": {
+    "title": "未讀訊息",
+    "description": "查看未讀來源或標記已讀，訊息內容會保留。",
+    "badgeFailed": "應用程式角標更新失敗，稍後會自動重試。",
+    "details": "詳細資訊",
+    "retryBadge": "重試更新角標",
+    "search": "搜尋對話或識別碼",
+    "empty": "未讀訊息已全部處理。",
+    "emptyDetail": "新訊息會顯示在這裡。",
+    "noResults": "沒有符合的未讀對話。",
+    "unknownSender": "待識別的傳送者",
+    "pendingDetail": "正在等待識別傳送者",
+    "unavailable": "暫時無法使用的對話",
+    "hidden": "已隱藏的對話",
+    "channel": "群組對話",
+    "direct": "私人對話",
+    "unavailableDetail": "此對話不在目前的清單中",
+    "clearSource": "將 {{name}} 標記為已讀",
+    "showMore": "顯示更多",
+    "refresh": "重新整理",
+    "refreshing": "正在重新整理…",
+    "markAllRead": "全部標記已讀"
+  },
   "contactDeletion": {
     "title": "刪除聯絡人？",
     "description": "從此裝置移除聯絡人並永久刪除其聊天記錄，此操作無法復原。再次發現對方上線時會重新顯示聯絡人，但不會還原已刪除的記錄。",

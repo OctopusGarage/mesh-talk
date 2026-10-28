@@ -153,6 +153,10 @@ export function loadReceptionLedger(
         valid[id] = {
           ...(aliases.length ? { messageAliases: aliases } : {}),
           ...(e.mentioned === true ? { mentioned: true } : {}),
+          ...(e.suppressed === true ? { suppressed: true } : {}),
+          ...(Number.isFinite(e.expiresAtMs)
+            ? { expiresAtMs: e.expiresAtMs }
+            : {}),
           seen: e.seen,
           late: e.late,
           ...(Number.isFinite(e.receivedAt)

@@ -80,6 +80,8 @@ export function requiredBrowserPaths(tier) {
     ["unread-badge.spec.ts", "a replacement account does not inherit unread after identity lookup fails"],
     ["unread-badge.spec.ts", "one logical DM remains one unread badge across duplicate live events and history scanning"],
     ["unread-badge.spec.ts", "channel mention indicator survives later traffic and clears when the mention is viewed"],
+    ["unread-badge.spec.ts", "unread review clears undiscovered senders and hidden channels without hiding later arrivals"],
+    ["unread-badge.spec.ts", "unread review exposes failed badge updates and retries the current cleared count"],
   );
   return paths;
 }

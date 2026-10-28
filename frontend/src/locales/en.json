@@ -1,4 +1,27 @@
 {
+  "unread": {
+    "title": "Unread messages",
+    "description": "Review unread sources or mark them as read. Your messages stay in place.",
+    "badgeFailed": "The app badge could not be updated. Updates will retry automatically.",
+    "details": "Details",
+    "retryBadge": "Retry badge update",
+    "search": "Search conversations or IDs",
+    "empty": "You're all caught up.",
+    "emptyDetail": "New messages will appear here.",
+    "noResults": "No matching unread conversations.",
+    "unknownSender": "Unidentified sender",
+    "pendingDetail": "Waiting to identify sender",
+    "unavailable": "Unavailable conversation",
+    "hidden": "Hidden conversation",
+    "channel": "Group conversation",
+    "direct": "Direct conversation",
+    "unavailableDetail": "Conversation is not in the current list",
+    "clearSource": "Mark {{name}} as read",
+    "showMore": "Show more",
+    "refresh": "Refresh",
+    "refreshing": "Refreshing…",
+    "markAllRead": "Mark all as read"
+  },
   "contactDeletion": {
     "title": "Delete contact?",
     "description": "This removes the contact and permanently deletes its message history on this device. This cannot be undone. Fresh online discovery will add the contact back without restoring deleted history.",

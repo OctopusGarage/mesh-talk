@@ -7,6 +7,7 @@ const { chatState, policyState } = vi.hoisted(() => ({
   chatState: {
     active: null as null | { kind: string; id: string; name: string },
     unread: { "account:alice": 2 },
+    pendingUnknownUnread: {},
     ledger: {},
     messages: {
       "account:alice": [{ text: "See you on the LAN" }],

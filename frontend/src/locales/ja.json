@@ -1,4 +1,27 @@
 {
+  "unread": {
+    "title": "未読メッセージ",
+    "description": "未読の送信元を確認し、既読にできます。メッセージは保持されます。",
+    "badgeFailed": "アプリのバッジを更新できませんでした。自動的に再試行します。",
+    "details": "詳細",
+    "retryBadge": "バッジ更新を再試行",
+    "search": "会話またはIDを検索",
+    "empty": "未読メッセージはありません。",
+    "emptyDetail": "新しいメッセージはここに表示されます。",
+    "noResults": "一致する未読の会話はありません。",
+    "unknownSender": "未確認の送信者",
+    "pendingDetail": "送信者の識別を待っています",
+    "unavailable": "利用できない会話",
+    "hidden": "非表示の会話",
+    "channel": "グループの会話",
+    "direct": "個別の会話",
+    "unavailableDetail": "現在のリストにない会話です",
+    "clearSource": "{{name}} を既読にする",
+    "showMore": "さらに表示",
+    "refresh": "更新",
+    "refreshing": "更新中…",
+    "markAllRead": "すべて既読にする"
+  },
   "contactDeletion": {
     "title": "連絡先を削除しますか？",
     "description": "このデバイスから連絡先とメッセージ履歴を完全に削除します。この操作は取り消せません。再びオンラインで検出されると連絡先は再表示されますが、削除した履歴は復元されません。",

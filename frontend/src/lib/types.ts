@@ -396,6 +396,7 @@ export interface DmReceivedEvent {
 
 export type ArrivalKind = "live" | "catch_up" | "history_sync";
 export interface ReceptionMetadata {
+  expires_at_ms?: number | null;
   event_id?: string;
   authored_at?: number;
   received_at?: number;
