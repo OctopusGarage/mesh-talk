@@ -307,6 +307,8 @@ it does not choose another account or restore a second theme projection.
 visibility precedence and its bounded fallback. Window-state persistence retains
 geometry and decoration, while launch policy owns visibility. A renderer
 acknowledgement is presentation-only and grants no runtime or content authority.
+Explicit main-window restoration also belongs to this owner: Dock reopen,
+single-instance activation and tray actions reuse its show/unminimize/focus path.
 
 ### Focused validation ownership
 

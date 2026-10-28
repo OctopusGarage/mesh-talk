@@ -31,7 +31,7 @@ The user manual is currently authored in English. The help interface follows the
 
 ## Startup and closing
 
-General also contains launch-at-OS-login and close-to-tray choices. Operating-system startup integration is a computer-wide choice. Closing to the tray keeps the app running; use **Quit Mesh-Talk** in the tray menu to exit.
+General also contains launch-at-OS-login and close-to-tray choices. Operating-system startup integration is a computer-wide choice. Closing to the tray keeps the app running; use **Quit Mesh-Talk** in the tray menu to exit. On macOS, the red close button hides the window when close to tray is enabled; the yellow button minimizes it. Click the Dock icon or choose **Open Mesh-Talk** from the menu bar icon to restore the window.
 
 On macOS, the native window controls differ from the Windows and Linux window chrome. Help describes named controls instead of relying on screen coordinates.
 

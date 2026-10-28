@@ -177,10 +177,8 @@ pub fn run_tauri_configured(
         // so we surface the existing window instead of spawning a duplicate that would
         // fight over the keystore + discovery port.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
-                let _ = window.unminimize();
-                let _ = crate::window_visibility::show(&window);
-                let _ = window.set_focus();
+            if let Err(error) = crate::window_visibility::restore_main(app) {
+                log::warn!("Cannot restore main window on repeated launch: {error}");
             }
         }));
     // Extensions come after single-instance, which must remain the first plugin.
@@ -553,10 +551,20 @@ pub fn run_tauri_configured(
                 }
             }
         })
-        .run(context)
+        .build(context)
         .unwrap_or_else(|e| {
             // A failed launch must be a non-zero exit, not a silent success.
             log::error!("Error while running tauri application: {e}");
             std::process::exit(1);
+        })
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. })
+                && let Err(error) = crate::window_visibility::restore_main(app)
+            {
+                log::warn!("Cannot restore main window on macOS reopen: {error}");
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
         });
 }
