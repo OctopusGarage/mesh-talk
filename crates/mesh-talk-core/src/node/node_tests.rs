@@ -8235,11 +8235,64 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             .unwrap(),
         1
     );
+    let delivery_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let delivery_trace_started = std::time::Instant::now();
+    let delivery_trace_omitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for (label, current, peer) in [
+        ("source", &a1_node, a2_node.identity.public()),
+        ("sibling", &a2_node, a1_node.identity.public()),
+    ] {
+        let trace = delivery_trace.clone();
+        let omitted = delivery_trace_omitted.clone();
+        *current.account_client_test_hook.lock().unwrap() =
+            Some(Arc::new(move |observed, phase| {
+                if observed != peer
+                    || !(phase.starts_with("dial_")
+                        || phase.starts_with("session_")
+                        || phase.starts_with("negotiation_")
+                        || phase.starts_with("page_")
+                        || phase.starts_with("wake_"))
+                {
+                    return;
+                }
+                let safe_phase = phase
+                    .split_ascii_whitespace()
+                    .enumerate()
+                    .filter_map(|(index, token)| {
+                        (index == 0
+                            || [
+                                "outcome=",
+                                "domain=",
+                                "retry_ms=",
+                                "pending=",
+                                "after=",
+                                "deferred=",
+                                "reused=",
+                                "priority=",
+                            ]
+                            .iter()
+                            .any(|prefix| token.starts_with(prefix)))
+                        .then_some(token)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 128 {
+                    trace.pop_front();
+                    omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                trace.push_back((
+                    delivery_trace_started.elapsed().as_millis(),
+                    label,
+                    safe_phase,
+                ));
+            }));
+    }
     a1_node
         .send_channel_message(channel, b"after sibling joined")
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let new_channel_delivery = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if channel_texts(&a2_node)
                 .iter()
@@ -8250,8 +8303,75 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .expect("new channel messages still arrive");
+    .await;
+    if new_channel_delivery.is_err() {
+        let original = channel_texts(&a1_node)
+            .into_iter()
+            .find(|row| row.text == b"after sibling joined")
+            .map(|row| row.id);
+        let observations: Vec<_> = [("source", &a1_node), ("sibling", &a2_node)]
+            .into_iter()
+            .map(|(label, current)| {
+                let (events, present) = {
+                    let log = current.log.lock().unwrap();
+                    (
+                        log.events(&channel).len(),
+                        original.is_some_and(|id| log.get(&id).is_some()),
+                    )
+                };
+                let surfaced = original
+                    .is_some_and(|id| channel_texts(current).iter().any(|row| row.id == id));
+                let queued = current
+                    .channel_recovery_pending
+                    .lock()
+                    .unwrap()
+                    .contains(&channel);
+                let recovery = current
+                    .channel_recovery
+                    .lock()
+                    .unwrap()
+                    .get(&channel)
+                    .cloned();
+                let role = current
+                    .account_group_access(channel)
+                    .map(|access| access.role);
+                let sync: Vec<_> = current
+                    .device_sync_status()
+                    .into_iter()
+                    .map(|status| {
+                        (
+                            status.device_id,
+                            status.phase,
+                            status.document_phase,
+                            status.error.is_some(),
+                            status.document_error.is_some(),
+                        )
+                    })
+                    .collect();
+                (
+                    label,
+                    events,
+                    present,
+                    surfaced,
+                    queued,
+                    recovery,
+                    role,
+                    current.sessions.test_capacity_snapshot(),
+                    sync,
+                )
+            })
+            .collect();
+        eprintln!(
+            "linked channel delivery metadata elapsed_ms={} original={original:?} observations={observations:?} omitted={} phases={:?}",
+            delivery_trace_started.elapsed().as_millis(),
+            delivery_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            delivery_trace.lock().unwrap()
+        );
+    }
+    for current in [&a1_node, &a2_node] {
+        *current.account_client_test_hook.lock().unwrap() = None;
+    }
+    new_channel_delivery.expect("new channel messages still arrive");
     tokio::time::sleep(Duration::from_secs(11)).await;
     let history = channel_texts(&a2_node);
     assert_eq!(

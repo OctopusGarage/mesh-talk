@@ -271,6 +271,66 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     })
     .await
     .expect("sibling imports the exact outgoing message");
+    // Bounded metadata-only diagnostics for this one source/sibling route.
+    let custody_trace =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let custody_trace_started = std::time::Instant::now();
+    let custody_trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for (label, current, peer) in [
+        ("source", &a, sibling.identity.public()),
+        ("sibling", &sibling, a.identity.public()),
+    ] {
+        let trace = custody_trace.clone();
+        let omitted = custody_trace_omitted.clone();
+        *current.account_client_test_hook.lock().unwrap() =
+            Some(std::sync::Arc::new(move |observed, phase| {
+                if observed != peer
+                    || !(phase.starts_with("page_")
+                        || phase.starts_with("negotiation_")
+                        || phase.starts_with("session_")
+                        || phase.starts_with("dial_authentication_")
+                        || phase.starts_with("dial_outbound_")
+                        || phase.starts_with("wake_"))
+                {
+                    return;
+                }
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 128 {
+                    trace.pop_front();
+                    omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                trace.push_back((custody_trace_started.elapsed().as_millis(), label, phase));
+            }));
+    }
+    let custody_metadata = |current: &Node| {
+        current
+            .channel_custody_observations(channel, event)
+            .iter()
+            .map(|meta| (meta.revision, meta.content_hash, meta.content_len))
+            .collect::<Vec<_>>()
+    };
+    let custody_status = |current: &Node| {
+        current
+            .device_sync_status()
+            .into_iter()
+            .map(|status| {
+                (
+                    status.device_id,
+                    status.phase,
+                    status.document_phase,
+                    status.error.is_some(),
+                    status.document_error.is_some(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let custody_start = (
+        a.channel_custody_count(channel, event),
+        custody_metadata(&a),
+        custody_metadata(&sibling),
+        custody_status(&a),
+        custody_status(&sibling),
+    );
     let expected = usize::from(external_online);
     let mut final_expected = expected;
     let actual = tokio::time::timeout(Duration::from_secs(8), async {
@@ -279,6 +339,23 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         }
     })
     .await;
+    if actual.is_err() {
+        eprintln!(
+            "custody observation start={custody_start:?} finish elapsed_ms={} source_count={:?} target_count={:?} source_meta={:?} target_meta={:?} source_status={:?} target_status={:?} omitted={} phases={:?}",
+            custody_trace_started.elapsed().as_millis(),
+            a.channel_custody_count(channel, event),
+            sibling.channel_custody_count(channel, event),
+            custody_metadata(&a),
+            custody_metadata(&sibling),
+            custody_status(&a),
+            custody_status(&sibling),
+            custody_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            custody_trace.lock().unwrap()
+        );
+    }
+    for current in [&a, &sibling] {
+        *current.account_client_test_hook.lock().unwrap() = None;
+    }
     assert!(
         actual.is_ok(),
         "authenticated external custody must converge before restart: count={:?}, channels={:?}, own_history={}, observations={:?}, sync={:?}",
@@ -2541,10 +2618,7 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
     let before = source.account_document_meta(&key).unwrap();
     let source_peer = sibling.routing_peer(&source.user_id()).unwrap();
     let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
-    sibling
-        .pull_account_documents_page(&source_peer, &mut cursor)
-        .await
-        .unwrap();
+    pull_custody_page(&sibling, &source_peer, &mut cursor).await;
     assert_eq!(sibling.channel_custody_count(channel, event), Some(2));
     for (holder, address) in [(&bob, addresses[2]), (&bob2, addresses[3])] {
         source.roster.lock().unwrap().update(
@@ -2570,10 +2644,7 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         "unchanged positive rechecks do not churn revisions"
     );
     let mut cursor = sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
-    sibling
-        .pull_account_documents_page(&source_peer, &mut cursor)
-        .await
-        .unwrap();
+    pull_custody_page(&sibling, &source_peer, &mut cursor).await;
     assert_eq!(
         sibling.channel_custody_count(channel, event),
         Some(1),

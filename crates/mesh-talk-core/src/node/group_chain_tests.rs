@@ -885,11 +885,59 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let sender = chain.servers[0].take().unwrap();
     sender.abort();
     let _ = sender.await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let received = tokio::time::timeout(Duration::from_secs(2), async {
         while !chain.has_text(5, group, b"notification-driven background gossip") {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
+    })
+    .await;
+    if received.is_err() {
+        // Failure-only reads: do not allocate or trace on the two-second
+        // notification path, consume Notify permits, or invoke recovery here.
+        let original = chain.nodes[0]
+            .channel_history(group, 10)
+            .into_iter()
+            .find(|row| row.text == b"notification-driven background gossip")
+            .map(|row| row.id);
+        let observations: Vec<_> = chain
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let (events, present) = {
+                    let log = node.log.lock().unwrap();
+                    (
+                        log.events(&group).len(),
+                        original.is_some_and(|id| log.get(&id).is_some()),
+                    )
+                };
+                let surfaced = original.is_some_and(|id| {
+                    node.channel_history(group, 10)
+                        .iter()
+                        .any(|row| row.id == id)
+                });
+                let queued = node
+                    .channel_recovery_pending
+                    .lock()
+                    .unwrap()
+                    .contains(&group);
+                let recovery = node.channel_recovery.lock().unwrap().get(&group).cloned();
+                (
+                    index,
+                    events,
+                    present,
+                    surfaced,
+                    queued,
+                    recovery,
+                    node.sessions.test_capacity_snapshot(),
+                )
+            })
+            .collect();
+        eprintln!(
+            "background group gossip metadata original={original:?} observations={observations:?}"
+        );
+    }
+    received.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
     for index in 1..6 {
         assert!(chain.has_text(index, group, b"notification-driven background gossip"));
     }
