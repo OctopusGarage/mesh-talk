@@ -245,10 +245,9 @@ for (const theme of ["light", "dark"] as const) {
         viewport.width,
         viewport.height,
       );
-      const reference =
-        process.platform === "win32"
-          ? name.replace(".png", "-win32.png")
-          : name;
+      const reference = ["linux", "win32"].includes(process.platform)
+        ? name.replace(".png", `-${process.platform}.png`)
+        : name;
       await expect(review).toHaveScreenshot(reference);
       await page.keyboard.press("Escape");
       await expect(page.getByTestId("unread-review-trigger")).toBeFocused();
