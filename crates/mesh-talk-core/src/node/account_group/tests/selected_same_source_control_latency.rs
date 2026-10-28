@@ -4,6 +4,63 @@ use crate::node::account_sync_wire::AccountHistoryFrame;
 use std::time::Duration;
 use tokio::sync::{Semaphore, oneshot};
 
+type BTrace =
+    Arc<Mutex<std::collections::VecDeque<(u128, &'static str, Option<tokio::task::Id>, String)>>>;
+fn record_b_trace(trace: &BTrace, started: std::time::Instant, side: &'static str, phase: String) {
+    let mut rows = trace.lock().unwrap();
+    if rows.len() == 384 {
+        rows.pop_front();
+    }
+    rows.push_back((
+        started.elapsed().as_millis(),
+        side,
+        tokio::task::try_id(),
+        phase,
+    ));
+}
+fn b_operation_snapshot(
+    node: &Node,
+    peer: &Node,
+    group: crate::eventlog::ConversationId,
+    id: AccountGroupOperationId,
+) -> serde_json::Value {
+    use crate::node::account_documents::AccountDocumentKey;
+    // Lifecycle list reads never advance the pending-query nonce or Notify.
+    let status = node
+        .list_account_group_operations(
+            &node.account_id(),
+            AccountGroupOperationQuery {
+                group: Some(group),
+                pending_only: false,
+                after: None,
+                limit: 64,
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .find(|status| status.id == id);
+    let metadata = [node.user_id(), peer.user_id()].into_iter().map(|writer| {
+        let key = AccountDocumentKey::GroupOperation { channel: hex::encode(group.as_bytes()), source_device: writer.clone() };
+        let meta = node.account_document_meta(&key);
+        let frame = node.account_document(&key).unwrap().and_then(|document| crate::node::account_group::operations::wire::OperationFrame::decode(document.payload(), &node.account.public().ed25519_pub));
+        serde_json::json!({"writer_local": writer==node.user_id(), "revision":meta.as_ref().map(|meta|meta.revision),
+            "hash":meta.as_ref().map(|meta|hex::encode(&meta.content_hash[..4])),
+            "request":frame.as_ref().is_some_and(|frame|frame.projection.requests.iter().any(|row|row.reference.id==id)),
+            "result":frame.as_ref().and_then(|frame|frame.projection.results.iter().find(|row|row.reference.id==id)).map(|row|row.status.phase.clone())})
+    }).collect::<Vec<_>>();
+    let ready = node
+        .group_operation_versions
+        .lock()
+        .unwrap()
+        .get(&peer.user_id())
+        .is_some_and(|support| {
+            support.public == peer.identity.public()
+                && support.kinds & AccountGroupOperationKind::Rename.capability_bit() != 0
+        });
+    serde_json::json!({"phase": status.as_ref().map(|status|status.phase.clone()), "execution_devices":status.as_ref().map(|status|status.executions.iter().map(|row|row.device_id.clone()).collect::<Vec<_>>()), "exact_capability":ready,
+        "selected_peer":node.pending_account_operation_sources().contains(&(peer.identity.public().ed25519_pub,peer.identity.public().x25519_pub)),"capacity":format!("{:?}",node.sessions.test_capacity_snapshot()),"metadata":metadata})
+}
+
 struct ReleaseReadOnDrop(Arc<Semaphore>);
 impl Drop for ReleaseReadOnDrop {
     fn drop(&mut self) {
@@ -211,6 +268,9 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     assert!(reference.channel_members(group).is_empty());
     assert!(reference.pending_account_operation_sources().is_empty());
 
+    let b_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let b_clock = std::time::Instant::now();
+    let b_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let classes = Arc::new(Mutex::new(Vec::new()));
     let aborts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -219,7 +279,29 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         let aborts = aborts.clone();
         let retired = retired.clone();
         let exact_owner = owner.identity.public();
+        let exact_requester = reference.identity.public();
+        let exact_other = other.as_ref().map(|other| other.identity.public());
+        let b_trace = b_trace.clone();
+        let b_active = b_active.clone();
         move |peer, phase| {
+            if b_active.load(std::sync::atomic::Ordering::Relaxed)
+                && (peer == exact_owner
+                    || exact_other.as_ref() == Some(&peer)
+                    || peer == exact_requester)
+            {
+                record_b_trace(
+                    &b_trace,
+                    b_clock,
+                    if peer == exact_owner {
+                        "requester_to_A"
+                    } else if peer == exact_requester {
+                        "requester_publication"
+                    } else {
+                        "requester_to_B"
+                    },
+                    phase.clone(),
+                );
+            }
             if peer != exact_owner {
                 return;
             }
@@ -513,6 +595,46 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                 .new_account_group_operation_id(&account.account_id())
                 .unwrap();
             second_id = Some(second);
+            b_active.store(true, std::sync::atomic::Ordering::Relaxed);
+            record_b_trace(&b_trace, b_clock, "fixture", "B_admission_begin".into());
+            *other.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+                let trace = b_trace.clone();
+                let requester = reference.identity.public();
+                let own = other.identity.public();
+                move |peer, phase| {
+                    if peer == requester || peer == own {
+                        record_b_trace(&trace, b_clock, "B_client", phase);
+                    }
+                }
+            }));
+            for (side, target, expected) in [
+                ("B_server", other, reference.identity.public()),
+                ("requester_server", &reference, other.identity.public()),
+            ] {
+                *target.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+                    let trace = b_trace.clone();
+                    move |peer, frame| {
+                        let trace = trace.clone();
+                        let expected = expected.clone();
+                        Box::pin(async move {
+                            if peer != expected {
+                                return;
+                            }
+                            use crate::node::account_documents::wire::DocumentRequest;
+                            let phase = match frame {
+                            AccountHistoryFrame::DocumentsRequest{body} => DocumentRequest::decode(&body).filter(|request|request.domain==AccountDocumentDomain::GroupControl).map(|request| format!("Control_request version={} partial={} nonce={:?}",request.version,request.after.is_some() || request.operation.as_ref().is_some_and(|probe|probe.after.is_some()),request.operation.as_ref().map(|probe|hex::encode(&probe.nonce[..4])))),
+                            AccountHistoryFrame::DocumentHeader{body} => serde_json::from_slice::<crate::node::AccountDocumentMeta>(&body).ok().filter(|meta|matches!(&meta.key,crate::node::AccountDocumentKey::GroupOperation{channel,..} if *channel==hex::encode(other_group.as_bytes()))).map(|meta|format!("B_operation_header revision={} hash={}",meta.revision,hex::encode(&meta.content_hash[..4]))),
+                            AccountHistoryFrame::DocumentsComplete{body} => serde_json::from_slice::<serde_json::Value>(&body).ok().filter(|value|value.get("domain").and_then(|v|v.as_str())==Some("group_control")).map(|value|format!("Control_complete next={} enabled={}",!value["next"].is_null(),value["enabled"])),
+                            _ => None,
+                        };
+                            if let Some(phase) = phase {
+                                record_b_trace(&trace, b_clock, side, phase);
+                            }
+                        })
+                    }
+                }));
+            }
+
             reference
                 .submit_account_group_operation_if(
                     &account.account_id(),
@@ -524,6 +646,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                     |commit| commit(),
                 )
                 .unwrap();
+            record_b_trace(&b_trace, b_clock, "fixture", "B_admitted".into());
             Some(
                 tokio::time::timeout(Duration::from_secs(8), async {
                     loop {
@@ -561,6 +684,31 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         } else {
             None
         }
+    } else {
+        None
+    };
+    if let Some(result) = &other_receipt {
+        record_b_trace(
+            &b_trace,
+            b_clock,
+            "fixture",
+            if result.is_ok() {
+                "B_private_receipt"
+            } else {
+                "B_deadline_expired"
+            }
+            .into(),
+        );
+    }
+    let b_failure_snapshot = if other_receipt.as_ref().is_some_and(Result::is_err) {
+        second_id.map(|second| {
+            (
+                b_operation_snapshot(&reference, other.as_ref().unwrap(), other_group, second),
+                b_operation_snapshot(other.as_ref().unwrap(), &reference, other_group, second),
+                classes.lock().unwrap().clone(),
+                b_trace.lock().unwrap().clone(),
+            )
+        })
     } else {
         None
     };
@@ -638,6 +786,11 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     );
     *owner.account_session_test_hook.lock().unwrap() = None;
     *reference.account_client_test_hook.lock().unwrap() = None;
+    *reference.account_session_test_hook.lock().unwrap() = None;
+    if let Some(other) = &other {
+        *other.account_client_test_hook.lock().unwrap() = None;
+        *other.account_session_test_hook.lock().unwrap() = None;
+    }
     let preserved = {
         let rows = checkpoints.lock().unwrap();
         rows.len() >= 2 && rows[0] == rows[1]
@@ -673,7 +826,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     );
     if other_selected {
         let events = other_receipt.expect("the second real operation was admitted after A committed")
-            .expect("a new selected executor must overtake A's held paired background within its unchanged eight seconds");
+            .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}"));
         assert_eq!(events.len(), 1);
         let other = other.as_ref().unwrap();
         let event = other.log.lock().unwrap().get(&events[0]).unwrap().clone();

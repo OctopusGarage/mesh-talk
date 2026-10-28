@@ -10,13 +10,13 @@ for (const theme of ["light", "dark"] as const) {
       ({ account, theme }) => {
         document.documentElement.classList.toggle("dark", theme === "dark");
         const canvas = document.createElement("canvas");
-        canvas.width = 160;
-        canvas.height = 100;
+        canvas.width = 1600;
+        canvas.height = 200;
         const ctx = canvas.getContext("2d")!;
         ctx.fillStyle = "#197c87";
-        ctx.fillRect(0, 0, 80, 100);
+        ctx.fillRect(0, 0, 800, 200);
         ctx.fillStyle = "#e7b46f";
-        ctx.fillRect(80, 0, 80, 100);
+        ctx.fillRect(800, 0, 800, 200);
         const png = Uint8Array.from(
           atob(canvas.toDataURL().split(",")[1]),
           (c) => c.charCodeAt(0),
@@ -99,7 +99,15 @@ for (const theme of ["light", "dark"] as const) {
           .locator("img")
           .evaluate((img: HTMLImageElement) => img.naturalWidth),
       )
-      .toBe(160);
+      .toBe(1600);
+    const thumbnail = (await quote.locator("img").boundingBox())!;
+    expect(thumbnail.width / thumbnail.height).toBeCloseTo(8, 1);
+    expect(thumbnail.width).toBeLessThanOrEqual(64);
+    const thumbnailFrame = (await quote
+      .locator("img")
+      .locator("..")
+      .boundingBox())!;
+    expect(thumbnailFrame.height).toBeCloseTo(thumbnail.height, 0);
     await expect(
       page.locator('[data-message-id="photo-original"]'),
     ).toHaveCount(0);

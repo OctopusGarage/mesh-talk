@@ -172,7 +172,7 @@ function FileBubble({
     withinInlineCap(file.name, file.size)
   ) {
     return (
-      <div className="max-w-xs">
+      <div data-inline-media="" className="max-w-xs">
         <MediaPreview
           fileConv={file.fileConv}
           name={file.name}
@@ -612,11 +612,12 @@ export function MessageBubble({
                 data-context-menu=""
                 className={cn(
                   "min-w-0 text-[14px] leading-[1.55]",
-                  // Stickers float without a bubble; everything else gets the chat bubble.
+                  // Stickers float; actual inline media removes its text-bubble shell.
+                  // File cards and consent prompts retain the ordinary bubble.
                   isSticker
                     ? ""
                     : cn(
-                        "rounded-xl px-3.5 py-2.5",
+                        "rounded-xl px-3.5 py-2.5 [&:has([data-inline-media])]:border-0 [&:has([data-inline-media])]:bg-transparent [&:has([data-inline-media])]:p-0",
                         mine
                           ? "rounded-br-sm bg-bubble-own text-[hsl(var(--bubble-own-foreground))]"
                           : "rounded-bl-sm border border-border bg-muted text-foreground",

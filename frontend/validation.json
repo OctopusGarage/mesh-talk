@@ -1920,11 +1920,11 @@
         "src/features/chat/protectedImage.test.ts"
       ],
       "capability": {
-        "summary": "Keep inline media geometry stable during receive, decode and virtualized remounts while reusing ordinary media within bounded session ownership.",
+        "summary": "Fit decoded images to their original proportions within bounded thumbnails and reuse known geometry on virtualized remounts within bounded session ownership.",
         "guide": "docs/module-boundaries.md#inline-media-presentation",
         "invariants": [
           {
-            "name": "Receiving, loading, decoded and unsupported inline previews keep a responsive frame; user scroll intent prevents stale anchor restoration.",
+            "name": "Receiving and unsupported previews keep a responsive placeholder; decoded images fit their original ratio without upscaling, and user scroll intent prevents stale anchor restoration.",
             "reference": "docs/module-boundaries.md#inline-media-presentation"
           },
           {
