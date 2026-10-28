@@ -19,6 +19,8 @@ const APPLICATION_ID: i64 = 0x4d544442;
 const SCHEMA_VERSION: i64 = 1;
 // This is a per-connection page-cache budget, not a bound on process memory.
 const PAGE_CACHE_KIB: i64 = 4096;
+// Newly enabled VM reuse has a separate fixed bound from the page cache.
+const PREPARED_STATEMENTS: usize = 16;
 const WAL_CHECKPOINT_PAGES: i64 = 256;
 const JOURNAL_BYTES: i64 = 4 * 1024 * 1024;
 #[cfg(any(test, feature = "fast-test-kdf"))]
@@ -231,6 +233,7 @@ impl EncryptedDatabase {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
         connection.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
+        connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENTS);
         connection.pragma_update(None, "mmap_size", 0)?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         // Validate provenance before changing the journal mode of an existing DB.

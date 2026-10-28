@@ -49,6 +49,166 @@ fn finish(state: &IndexedRelayState) -> (usize, usize) {
     }
     panic!("preparation did not finish")
 }
+// Observe actual SQLite compilation without enabling a production hooks feature.
+struct MetadataCompiles<'a> {
+    database: &'a crate::storage::database::EncryptedDatabase,
+    count: Option<Box<std::sync::atomic::AtomicUsize>>,
+}
+impl<'a> MetadataCompiles<'a> {
+    fn install(database: &'a crate::storage::database::EncryptedDatabase) -> Self {
+        let count = Box::new(std::sync::atomic::AtomicUsize::new(0));
+        database
+            .read(|c| {
+                // SAFETY: the owner holds its connection mutex; the boxed atomic's
+                // address is stable until Drop unregisters this callback.
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_set_authorizer(
+                        c.handle(),
+                        Some(metadata_compile),
+                        (&*count as *const std::sync::atomic::AtomicUsize)
+                            .cast_mut()
+                            .cast(),
+                    )
+                };
+                assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+                Ok(())
+            })
+            .unwrap();
+        Self {
+            database,
+            count: Some(count),
+        }
+    }
+    fn reset(&self) {
+        self.count
+            .as_ref()
+            .unwrap()
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn count(&self) -> usize {
+        self.count
+            .as_ref()
+            .unwrap()
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+impl Drop for MetadataCompiles<'_> {
+    fn drop(&mut self) {
+        let unregistered = self.database.read(|c| {
+            // SAFETY: the callback is removed under the owner's connection lock
+            // before its boxed userdata is released.
+            let rc = unsafe {
+                rusqlite::ffi::sqlite3_set_authorizer(c.handle(), None, std::ptr::null_mut())
+            };
+            assert_eq!(rc, rusqlite::ffi::SQLITE_OK);
+            Ok(())
+        });
+        if unregistered.is_err() {
+            // A faulted owner cannot be entered even for cleanup. Keep userdata
+            // alive until the connection closes instead of leaving a dangling
+            // authorizer pointer during a failing test's unwind.
+            Box::leak(self.count.take().unwrap());
+        }
+    }
+}
+unsafe extern "C" fn metadata_compile(
+    userdata: *mut std::ffi::c_void,
+    action: std::ffi::c_int,
+    table: *const std::ffi::c_char,
+    column: *const std::ffi::c_char,
+    _database: *const std::ffi::c_char,
+    _view: *const std::ffi::c_char,
+) -> std::ffi::c_int {
+    if action == rusqlite::ffi::SQLITE_READ && !table.is_null() && !column.is_null() {
+        // SAFETY: SQLite supplies live NUL-terminated strings for SQLITE_READ;
+        // install keeps this atomic userdata alive for the callback's lifetime.
+        let (table, column, count) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(table).to_bytes(),
+                std::ffi::CStr::from_ptr(column).to_bytes(),
+                &*userdata.cast::<std::sync::atomic::AtomicUsize>(),
+            )
+        };
+        if matches!(
+            table,
+            b"event_conversations" | b"event_retirement_jobs" | b"relay_federation_digests"
+        ) || (table == b"relay_mailboxes" && column == b"first_seen")
+        {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    rusqlite::ffi::SQLITE_OK
+}
+#[test]
+fn warmed_inventory_metadata_compilation_is_constant_across_mailboxes() {
+    let (_root, identity, state) = fixture();
+    for n in 1..=32 {
+        state
+            .record(&event(&identity, conversation(n), 1), 100, None)
+            .unwrap();
+    }
+    state.request_preparation_at(100).unwrap();
+    finish(&state);
+    let view = state.inventory_view_at(100).unwrap();
+    let database = state.profile.database();
+    // Install before warmup: changing SQLite's authorizer itself expires VMs.
+    let compiles = MetadataCompiles::install(database);
+    // Page operations run outside the connection lock held by installation.
+    let warm = state.inventory_page_at(&view, None, 512, 100).unwrap();
+    assert_eq!(warm.entries.len(), 32);
+    compiles.reset();
+    let repeated = state.inventory_page_at(&view, None, 512, 100).unwrap();
+    assert_eq!(
+        repeated
+            .entries
+            .iter()
+            .map(|e| (e.id, e.digest, e.first_seen_secs))
+            .collect::<Vec<_>>(),
+        warm.entries
+            .iter()
+            .map(|e| (e.id, e.digest, e.first_seen_secs))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        compiles.count() <= 4,
+        "warmed metadata recompiled per mailbox: {} read authorizations",
+        compiles.count()
+    );
+    let retained_statements = |c: &Connection| {
+        let mut count = 0;
+        let mut statement = std::ptr::null_mut();
+        loop {
+            // SAFETY: enumerate SQLite-owned statements under the connection's
+            // owner lock; no statement is executed or freed through this pointer.
+            statement = unsafe { rusqlite::ffi::sqlite3_next_stmt(c.handle(), statement) };
+            if statement.is_null() {
+                break;
+            }
+            count += 1;
+        }
+        count
+    };
+    let cached = database.read(|c| Ok(retained_statements(c))).unwrap();
+    assert!(
+        (8..=16).contains(&cached),
+        "hot metadata VM cache must be bounded: {cached}"
+    );
+    let saturated = database
+        .read(|c| {
+            for value in 0..32i64 {
+                // Controlled constants intentionally create distinct cache keys.
+                // Each scoped statement drops before the next one is prepared.
+                let mut statement = c.prepare_cached(&format!("SELECT {value}"))?;
+                assert_eq!(statement.query_row([], |r| r.get::<_, i64>(0))?, value);
+            }
+            Ok(retained_statements(c))
+        })
+        .unwrap();
+    assert_eq!(
+        saturated, 16,
+        "distinct statements must evict older cached VMs"
+    );
+}
 #[test]
 fn exact_federation_and_count_prefixed_wire_digests_and_idle_zero_work() {
     let (_root, identity, state) = fixture();

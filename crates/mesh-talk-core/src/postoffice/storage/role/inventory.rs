@@ -131,7 +131,7 @@ impl IndexedRelayState {
             }
             Err(e) => return Err(e),
         };
-        let (revision,epoch):(i64,i64)=c.query_row("SELECT revision,destructive_epoch FROM event_conversations WHERE domain=?1 AND conversation=?2",params![RELAY_EVENTS.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let (revision,epoch):(i64,i64)=c.prepare_cached("SELECT revision,destructive_epoch FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![RELAY_EVENTS.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
         if revision < 0 || epoch < 0 {
             return Err(invalid("invalid digest repository binding"));
         }
@@ -148,7 +148,7 @@ impl IndexedRelayState {
         conv: &ConversationId,
         binding: Binding,
     ) -> Result<Option<CachedDigest>, LogError> {
-        let row:Option<(i64,i64,Vec<u8>,Vec<u8>)>=c.query_row("SELECT revision,destructive_epoch,digest,wire_fingerprint FROM relay_federation_digests WHERE conversation=?1",[conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        let row:Option<(i64,i64,Vec<u8>,Vec<u8>)>=c.prepare_cached("SELECT revision,destructive_epoch,digest,wire_fingerprint FROM relay_federation_digests WHERE conversation=?1")?.query_row([conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
         let Some((revision, epoch, digest, wire)) = row else {
             return Ok(None);
         };

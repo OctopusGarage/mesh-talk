@@ -138,8 +138,7 @@ impl IndexedRelayState {
         c: &Connection,
         conversation: &ConversationId,
     ) -> Result<Option<ArrivalState>, LogError> {
-        let arrival: Option<(Vec<u8>,Vec<u8>,i64)> = c.query_row(
-            "SELECT first_seen,touched,pending FROM relay_mailboxes WHERE domain=?1 AND conversation=?2",
+        let arrival: Option<(Vec<u8>,Vec<u8>,i64)> = c.prepare_cached("SELECT first_seen,touched,pending FROM relay_mailboxes WHERE domain=?1 AND conversation=?2")?.query_row(
             params![RELAY_ARRIVALS.as_slice(),conversation.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         arrival
             .map(|(first, touched, pending)| {

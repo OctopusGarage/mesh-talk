@@ -76,7 +76,7 @@ impl EventRepository {
         c: &Connection,
         conv: &ConversationId,
     ) -> Result<Option<Scope>, LogError> {
-        let scope = c.query_row("SELECT lifecycle,destructive_epoch,revision,event_count FROM event_conversations WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok(Scope{lifecycle:r.get(0)?,epoch:r.get(1)?,revision:r.get(2)?,count:r.get(3)?})).optional()?;
+        let scope = c.prepare_cached("SELECT lifecycle,destructive_epoch,revision,event_count FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok(Scope{lifecycle:r.get(0)?,epoch:r.get(1)?,revision:r.get(2)?,count:r.get(3)?})).optional()?;
         let job = self.retirement_job_on(c, conv, scope.as_ref())?;
         if let Some(s) = &scope {
             nonnegative(s.epoch)?;
@@ -96,7 +96,7 @@ impl EventRepository {
         conv: &ConversationId,
         scope: Option<&Scope>,
     ) -> Result<Option<Job>, LogError> {
-        let mut stmt=c.prepare("SELECT store_uuid,epoch,revision,phase,vertex,vertex_commit,auxiliary,edges,vertices,work_bytes,reclaimed_estimate,deleted_body_bytes,deleted_auxiliary,deleted_vertices FROM event_retirement_jobs WHERE domain=?1 AND conversation=?2")?;
+        let mut stmt=c.prepare_cached("SELECT store_uuid,epoch,revision,phase,vertex,vertex_commit,auxiliary,edges,vertices,work_bytes,reclaimed_estimate,deleted_body_bytes,deleted_auxiliary,deleted_vertices FROM event_retirement_jobs WHERE domain=?1 AND conversation=?2")?;
         let mut rows = stmt.query(params![
             self.domain.0.as_slice(),
             conv.as_bytes().as_slice()
@@ -192,7 +192,7 @@ impl EventRepository {
     ) -> Result<Option<ConversationChargeMetadata>, LogError> {
         let scope = self.scope_on(c, conv)?;
         let Some(scope) = scope else { return Ok(None) };
-        let (stored,estimate):(i64,i64)=c.query_row("SELECT stored_bytes,estimated_bytes FROM event_conversations WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let (stored,estimate):(i64,i64)=c.prepare_cached("SELECT stored_bytes,estimated_bytes FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
         Ok(Some(ConversationChargeMetadata {
             count: scope.count as u64,
             stored_bytes: nonnegative(stored)? as u64,

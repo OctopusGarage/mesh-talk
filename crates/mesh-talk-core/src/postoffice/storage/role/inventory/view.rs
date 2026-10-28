@@ -41,11 +41,11 @@ impl IndexedRelayState {
         if !Arc::ptr_eq(&self.profile, &view.owner) {
             return Err(LogError::StaleCursor);
         }
-        let visibility: i64 = c.query_row(
-            "SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?;
+        let visibility: i64 = c
+            .prepare_cached(
+                "SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",
+            )?
+            .query_row([], |r| r.get(0))?;
         if visibility != view.visibility || cutoff != view.cutoff {
             return Err(LogError::StaleCursor);
         }
@@ -101,14 +101,14 @@ impl IndexedRelayState {
         }
         self.session_derived_transaction(now,session,false,|c,cutoff|{
             self.validate_inventory_on(c,cutoff,view)?;
-            let rows={let mut q=c.prepare("SELECT conversation FROM relay_mailboxes WHERE domain=?1 AND conversation>?2 AND conversation<=?3 ORDER BY conversation LIMIT ?4")?;
+            let rows={let mut q=c.prepare_cached("SELECT conversation FROM relay_mailboxes WHERE domain=?1 AND conversation>?2 AND conversation<=?3 ORDER BY conversation LIMIT ?4")?;
                 q.query_map(params![RELAY_ARRIVALS.as_slice(),after.map_or(&[][..],|a|a.after.as_slice()),view.upper,examined as i64],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?};
             let mut entries=Vec::new();
             for row in &rows {
                 let conv=id(row.clone())?;
                 if !super::super::super::super::opaque::RelayMailbox::is_federated_id(&conv){continue}
                 let Some(binding)=self.digest_binding_on(c,&conv,cutoff)? else{continue};
-                let commits:(Option<i64>,Option<i64>)=c.query_row("SELECT (SELECT commit_ordinal FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2 ORDER BY commit_ordinal LIMIT 1),(SELECT commit_ordinal FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2 ORDER BY commit_ordinal DESC LIMIT 1)",params![RELAY_EVENTS.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                let commits:(Option<i64>,Option<i64>)=c.prepare_cached("SELECT (SELECT commit_ordinal FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2 ORDER BY commit_ordinal LIMIT 1),(SELECT commit_ordinal FROM retained_events INDEXED BY retained_events_commit WHERE domain=?1 AND conversation=?2 ORDER BY commit_ordinal DESC LIMIT 1)")?.query_row(params![RELAY_EVENTS.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
                 let (Some(first),Some(last))=commits else{return Err(invalid("eligible inventory mailbox lacks events"))};
                 if first>=view.commit {continue}
                 if last>=view.commit{return Err(LogError::StaleCursor)}

@@ -1286,7 +1286,11 @@ Authenticated legacy publication creates its new database with this policy.
 
 Connection policy disables mmap, keeps temporary data in memory, suggests a
 4 MiB page cache, and uses FULL synchronization with a 256-page automatic WAL
-checkpoint trigger and a 4 MiB retained-journal target. These are connection budgets,
+checkpoint trigger and a 4 MiB retained-journal target. A connection also retains
+at most 16 prepared SQL statements. Repeated relay inventory and retirement
+metadata reads reuse compiled statements while executing every eligibility,
+revision and lifecycle check against the current transaction. Query results are
+not cached, and returned statements clear their bound values. These are connection budgets,
 not a global RAM or disk cap: query results, concurrent domain work, long readers
 and historical data require their own bounds. Failed commits, failed rollbacks
 and fatal storage errors invalidate the handle until reopening. Read failures

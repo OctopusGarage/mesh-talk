@@ -28,7 +28,7 @@ name = "mesh-talk-node"
 path = "src/bin/mesh-talk-node.rs"
 
 [dependencies]
-rusqlite = { version = "0.41.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "0.41.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "cache"] }
 serde_json = "1"
 tokio = { workspace = true }
 futures-util = "0.3"
