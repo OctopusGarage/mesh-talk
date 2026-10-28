@@ -330,7 +330,7 @@ jobs:
           fi
 
           BUNDLE_FILE="${ZIP_NAME}.bundle"
-          cosign sign-blob --yes --bundle "$BUNDLE_FILE" "$ZIP_NAME"
+          node scripts/release/sign-blob.mjs "$ZIP_NAME" "$BUNDLE_FILE"
 
           echo "✅ Bundle signature generated: $BUNDLE_FILE"
           ls -lh release_zips
@@ -340,7 +340,7 @@ jobs:
         run: |
           set -euo pipefail
           archive="$(bash scripts/release/package-post-office.sh '${{ matrix.target }}' "$ARTIFACT_TAG")"
-          cosign sign-blob --yes --bundle "${archive}.bundle" "$archive"
+          node scripts/release/sign-blob.mjs "$archive" "${archive}.bundle"
 
       # 🔏 SLSA build provenance: a GitHub-native, signed attestation of exactly which
       # repo/commit/workflow produced this artifact. Verified by `gh attestation verify`.

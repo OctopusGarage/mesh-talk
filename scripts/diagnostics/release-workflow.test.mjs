@@ -106,3 +106,15 @@ test("Nightly preflight waits within a bounded job while publication retains imm
   const publication = workflow.split("  preflight:\n")[1].split("  build-release:\n")[1];
   assert.doesNotMatch(publication, /check-source-checks\.mjs[^\n]*--wait/);
 });
+
+test("both release archive roles use the bounded signing owner before mandatory verification", () => {
+  for (const name of ["Package and sign artifacts", "Package and sign post-office node"]) {
+    const step = workflow.split(/^      - /m).find((value) => value.startsWith(`name: ${name}\n`));
+    assert.ok(step, name);
+    assert.match(step, /node scripts\/release\/sign-blob\.mjs/);
+    assert.doesNotMatch(step, /cosign sign-blob/);
+  }
+  const verifier = readFileSync(new URL("../release/verify-release.sh", import.meta.url), "utf8");
+  assert.match(verifier, /cosign verify-blob --bundle/);
+  assert.match(verifier, /--certificate-identity/);
+});

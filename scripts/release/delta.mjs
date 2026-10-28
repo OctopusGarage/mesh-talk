@@ -153,10 +153,18 @@ export function rawWindowsTarget({ canonical, destination, target, work }) {
   const release = resolve("target", target, "release");
   const bundle = join(release, "bundle");
   const binary = join(release, "mesh-talk.exe");
-  const savedBundle = join(work, "saved-bundle");
-  const savedBinary = join(work, "saved-mesh-talk.exe");
-  cpSync(bundle, savedBundle, { recursive: true });
-  copyFileSync(binary, savedBinary);
+  // Windows runners can keep TEMP on C: and the workspace on D:. Keep the
+  // snapshot beside the build so restoration never renames across volumes.
+  const snapshot = mkdtempSync(join(release, ".mesh-delta-"));
+  const savedBundle = join(snapshot, "saved-bundle");
+  const savedBinary = join(snapshot, "saved-mesh-talk.exe");
+  try {
+    cpSync(bundle, savedBundle, { recursive: true });
+    copyFileSync(binary, savedBinary);
+  } catch (error) {
+    rmSync(snapshot, { recursive: true, force: true });
+    throw error;
+  }
   try {
     // Multi-bundle builds can leave the MSI marker in the build executable.
     const executable = readFileSync(binary);
@@ -199,6 +207,7 @@ export function rawWindowsTarget({ canonical, destination, target, work }) {
     copyFileSync(savedBinary, binary);
     rmSync(bundle, { recursive: true, force: true });
     renameSync(savedBundle, bundle);
+    rmSync(snapshot, { recursive: true, force: true });
   }
 }
 
