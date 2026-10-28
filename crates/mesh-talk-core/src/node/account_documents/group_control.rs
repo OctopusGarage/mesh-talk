@@ -153,7 +153,9 @@ impl Node {
                 proof.clone(),
                 access.clone(),
             );
-            if head.encode().len() > crate::node::account_group::wire::MAX_HEAD_BYTES {
+            if access.controls.len() > crate::node::account_group::wire::MAX_PROVENANCE_CONTROLS
+                || head.encode().len() > crate::node::account_group::wire::MAX_HEAD_BYTES
+            {
                 access.make_unavailable();
                 head = GroupControlHead::new(
                     &self.identity,

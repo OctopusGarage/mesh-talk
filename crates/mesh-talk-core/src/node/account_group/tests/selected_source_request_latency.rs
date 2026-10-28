@@ -187,11 +187,33 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
             Box::pin(async {})
         }
     }));
+    let diagnostic_started = std::time::Instant::now();
+    let diagnostic_tail = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
     *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let passive = passive_dispatch.clone();
         let other_public = other.identity.public();
         let natural_origin = natural_origin.clone();
+        let reference_public = reference.identity.public();
+        let diagnostic_tail = diagnostic_tail.clone();
         move |peer, event| {
+            if event.starts_with("page_end") || event.starts_with("control_owned_abort") {
+                let peer_label = if peer == other_public {
+                    "other"
+                } else if peer == reference_public {
+                    "reference"
+                } else {
+                    "unknown"
+                };
+                let mut tail = diagnostic_tail.lock().unwrap();
+                if tail.len() == 64 {
+                    tail.pop_front();
+                }
+                tail.push_back((
+                    diagnostic_started.elapsed().as_millis(),
+                    peer_label,
+                    event.clone(),
+                ));
+            }
             if peer != other_public {
                 return;
             }
@@ -397,6 +419,37 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
             }
         })
         .await;
+    let error_snapshot = || {
+        owner
+            .device_sync_status()
+            .into_iter()
+            .map(|status| {
+                let peer = if status.device_id == other.user_id() {
+                    "other"
+                } else if status.device_id == reference.user_id() {
+                    "reference"
+                } else {
+                    "unknown"
+                };
+                let error = match status.document_error.as_deref() {
+                    None => "none",
+                    Some("account document exchange interrupted") => "exchange_interrupted",
+                    Some("account document worker terminated") => "worker_terminated",
+                    Some(_) => "other_error",
+                };
+                (
+                    peer,
+                    status.document_phase,
+                    error,
+                    status.document_requires_upgrade,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    eprintln!(
+        "selected-request before_teardown errors={:?}",
+        error_snapshot()
+    );
     for node in [&owner, &reference, &external, &other] {
         node.runtime_work.close();
     }
@@ -410,6 +463,11 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
             .await
             .expect("the released fixture must drain its owned work");
     }
+    eprintln!(
+        "selected-request after_teardown errors={:?} bounded_peer_domain_outcomes={:?}",
+        error_snapshot(),
+        diagnostic_tail.lock().unwrap()
+    );
     assert!(
         wakes_while_held > 0,
         "the requester must send an actual authenticated wake while passive Control is held"

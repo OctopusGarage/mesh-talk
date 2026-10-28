@@ -718,6 +718,33 @@ new controls; older envelopes receive an upgrade response before unknown kinds
 are transferred. Group counts and composite avatars use the same accepted
 account projection; pending invitations and duplicate devices do not add people.
 
+Initial account migration preserves departures from the exact original legacy
+membership and acceptance lifetimes. A cut produced after a known departure omits
+that inactive accepted binding while retaining current invitation bindings. Old
+signed initial cuts containing historical bindings remain readable: a validated
+legacy departure from the original parent cut cannot silently restore that initial
+account incarnation. Another original certified member of the same account keeps
+it accepted until that original cohort has departed; later inheritance does not
+extend the initial cohort. Fresh accepted invitations create a different grant
+incarnation and are not revoked by an old departure.
+
+Structural replay retains signed grant rows so unrelated valid owner controls do
+not disappear. Permission, administration, content export and key recipients use
+the effective membership view. Transfer to a closed initial member cannot create
+an ownerless valid authority. Epoch accounting deduplicates physical lifetime
+forks, records which departures the initial ancestor cut already counted, and
+avoids counting an overlapping modern revocation twice. It remains monotonic when
+new evidence or a fresh grant arrives.
+
+Negative group-state proofs preserve the exact departed source lifetime and the
+complete closure cut, including the initial authority and all required original
+departures. A source omitted from the initial cut can retain its earlier cleanup
+provenance only within that same initial incarnation; newer grant history blocks
+that fallback. Later unrelated controls remain current without being appended to
+a misleading post-departure proof. Existing proof bounds remain unchanged: when a
+complete proof cannot fit, publish explicit unavailability instead of retaining
+stale positive metadata or granting authority from incomplete evidence.
+
 The desktop reuses one unresolved account Leave intent per group across dialog
 remounts and navigation. Reopening the member list must not mint a second Leave.
 A format rejection before journal admission is a definite input rejection, not
@@ -2098,6 +2125,25 @@ acknowledgements and acknowledged failures do not downgrade. Unsupported-state
 entries are capped at 256, expire after sixty seconds, and bind the actual
 authenticated endpoint, full identity and privacy generation. A successful
 negotiation clears that endpoint's negative entry.
+
+A reusable inbound account session becomes idle only after its authenticated
+request has completed and the terminal response has been written. Completed idle
+sessions cannot consume all listener or shared admission indefinitely: the existing
+session owner may retire the oldest such session under capacity pressure, before
+waiting for the listener's connection reservation. At most one retirement is
+pending until the owning server future drops its actual socket and TCP permits.
+No permit is manufactured or released early, and the eight shared/seven directional
+budgets remain unchanged.
+
+Non-consuming readiness ends the idle registration before framed reception starts;
+ready bytes win a simultaneous retirement signal. Handshakes, frame reads and active
+responses are never retired by this policy. Cancellation removes the registration,
+and waiting for readiness plus the next frame retains the existing enclosing
+thirty-second deadline. Ordinary event-log sync is not classified as completed idle
+between its request/followup frames, because those boundaries do not establish that
+its logical exchange has finished. Retiring an account idle session changes neither
+peer authority nor receipt semantics; subsequent requests use existing authenticated
+fresh-session recovery.
 
 Pool lookup preserves explicit listener isolation. Up to 256 bounded route
 affinities remember an actually authenticated fallback for the same requested

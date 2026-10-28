@@ -475,7 +475,11 @@ impl Node {
             let routing = self.routing_peers();
             let mut bindings = Vec::new();
             let mut grants = BTreeMap::new();
-            for member in &projection.accepted {
+            for member in projection
+                .accepted
+                .iter()
+                .filter(|member| state.is_accepted_member(&member.public.user_id()))
+            {
                 let proof = if member.public == me {
                     Some(own.clone())
                 } else {

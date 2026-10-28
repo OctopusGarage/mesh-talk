@@ -110,7 +110,23 @@ pub(in crate::node) fn expected_invitation(
         epoch: state.epoch().checked_add(1).ok_or_else(invalid)?,
         owner: state.owner().into(),
     };
-    let mut grants = projection.authority.grants();
+    let mut grants = projection.authority.control_grants();
+    let target_account = witness
+        .target
+        .account_cert
+        .as_ref()
+        .ok_or_else(invalid)?
+        .account_ed25519_pub;
+    let revoked = grants
+        .iter()
+        .filter(|grant| {
+            grant
+                .id()
+                .is_some_and(|id| id.account_pub == target_account)
+        })
+        .filter_map(crate::node::channel_account_authority::AccountGrant::id)
+        .collect();
+    grants.retain(|grant| grant.id().is_none_or(|id| id.account_pub != target_account));
     grants.push(crate::node::channel_account_authority::AccountGrant {
         incarnation: witness.incarnation,
         pending: true,
@@ -127,7 +143,7 @@ pub(in crate::node) fn expected_invitation(
             issuer: witness.own.clone(),
             owner_account: account.account_ed25519_pub,
             grants,
-            revoked: vec![],
+            revoked,
             legacy_bindings: vec![],
             account_signature: vec![],
         },

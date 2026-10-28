@@ -200,7 +200,7 @@ pub(in crate::node) fn expected_effect(
                         .as_ref()
                         .expect("validated proof")
                         .account_ed25519_pub,
-                    grants: projection.authority.grants(),
+                    grants: projection.authority.control_grants(),
                     revoked: Vec::new(),
                     legacy_bindings: Vec::new(),
                     account_signature: Vec::new(),

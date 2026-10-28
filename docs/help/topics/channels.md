@@ -38,6 +38,9 @@ Your linked devices share the group directory and known member details even
 when a legacy group has not completed its format upgrade. Group names are labels:
 two groups with similar names remain separate when their IDs differ.
 
+An automatic group-format update preserves completed departures. Rejoining
+requires a fresh invitation and acceptance.
+
 A shared reference makes the group visible while its verified group state is
 being obtained. It does not grant membership or copy sending keys. The app keeps
 that reference read-only and explains the group-format requirement; it must not

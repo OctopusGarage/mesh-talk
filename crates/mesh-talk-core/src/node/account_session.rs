@@ -3,7 +3,7 @@
 use super::Node;
 use super::account_sync_wire::{AccountHistoryFrame, AccountSessionRequest, AccountSyncVersion};
 use super::node::NodeError;
-use super::session_pool::{SessionProtocol, retryable_transport_error};
+use super::session_pool::{InboundReuse, SessionProtocol, retryable_transport_error};
 use crate::discovery::PeerRecord;
 use crate::transport::{SecureChannel, TransportError};
 use rand_core::RngCore;
@@ -444,8 +444,20 @@ impl Node {
             if !complete {
                 return;
             }
-            let bytes = match tokio::time::timeout(SESSION_IDLE_TIMEOUT, channel.recv()).await {
-                Ok(Ok(bytes)) => bytes,
+            let bytes = match tokio::time::timeout(
+                SESSION_IDLE_TIMEOUT,
+                self.recv_inbound_reuse(&mut channel),
+            )
+            .await
+            {
+                Ok(Ok(InboundReuse::Frame(bytes))) => bytes,
+                Ok(Ok(InboundReuse::Retired(retirement))) => {
+                    // Keep pressure coalesced until the actual socket/permits
+                    // have been released by their owning channel.
+                    drop(channel);
+                    drop(retirement);
+                    return;
+                }
                 _ => return,
             };
             match AccountHistoryFrame::decode_versioned(&bytes) {

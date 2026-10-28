@@ -3621,6 +3621,446 @@ async fn sequential_legacy_departures_retain_only_a_whole_account_closed_source(
 }
 
 #[tokio::test]
+async fn captured_initial_account_upgrade_never_resurrects_a_completed_legacy_departure() {
+    use crate::{
+        eventlog::EventKind,
+        node::{
+            AccountGroupRole,
+            channel_account_authority::{AccountAuthorityControl, AccountGrant},
+        },
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let owner_account = Account::generate();
+    let member_account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &owner_account);
+    let member = node(&dir.path().join("member"), &member_account);
+    let group = owner
+        .create_channel("Captured legacy cutover", vec![member.identity.public()])
+        .await
+        .unwrap();
+    let initial = owner
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for event in &initial {
+        member.log.lock().unwrap().append(event.clone()).unwrap();
+    }
+    member.process_channel(group);
+    assert!(
+        member
+            .account_group_projection(group)
+            .authority
+            .current_event()
+            .is_none()
+    );
+    assert_eq!(
+        member.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member
+    );
+    // Capture an actual owner-signed initial cut on its own causal branch.
+    // A later owner rename makes its clock strictly greater than the member's
+    // departure without inserting that cut into the member's local history.
+    owner
+        .rename_channel(group, "Owner comparison branch")
+        .await
+        .unwrap();
+    let legacy = owner.account_group_projection(group);
+    let mut grants = std::collections::BTreeMap::new();
+    let mut bindings = Vec::new();
+    for accepted in &legacy.accepted {
+        let (source, incarnation) = if accepted.public == owner.identity.public() {
+            (&owner, [1; 16])
+        } else {
+            assert_eq!(accepted.public, member.identity.public());
+            (&member, [2; 16])
+        };
+        let proof = source.own_group_proof();
+        grants.insert(
+            source.account.public().ed25519_pub,
+            AccountGrant {
+                incarnation,
+                pending: false,
+                original: proof.clone(),
+                membership_event: accepted.membership_event,
+                acceptance_event: accepted.acceptance_event,
+            },
+        );
+        bindings.push(proof);
+    }
+    let cut = AccountAuthorityControl {
+        version: 1,
+        previous: None,
+        issuer: owner.own_group_proof(),
+        owner_account: owner.account.public().ed25519_pub,
+        grants: grants.into_values().collect(),
+        revoked: vec![],
+        legacy_bindings: bindings,
+        account_signature: vec![],
+    };
+    owner
+        .append_event(
+            group,
+            EventKind::ChannelAccountAuthority,
+            cut.signed_encode(group, &owner.account),
+        )
+        .unwrap();
+    let upgrade_id = owner
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .into_iter()
+        .find(|event| event.kind == EventKind::ChannelAccountAuthority)
+        .unwrap()
+        .id;
+    owner.process_channel(group);
+    assert_eq!(
+        owner
+            .account_group_projection(group)
+            .authority
+            .current_event(),
+        Some(upgrade_id),
+        "the captured cutover must be an actually admitted owner decision"
+    );
+    let captured = owner
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        member
+            .account_group_projection(group)
+            .authority
+            .current_event()
+            .is_none(),
+        "the real departure must use the legacy protocol, not an altered modern payload"
+    );
+    member.leave_channel(group).await.unwrap();
+    let before = member.account_group_access_with_closed(group).unwrap();
+    assert_eq!(before.role, AccountGroupRole::Left);
+    assert_eq!(before.sources.len(), 1);
+    let closed = before.sources[0].lifetime.clone();
+    member
+        .delete_left_group_if(&member.account_id(), group, |commit| commit())
+        .unwrap();
+    assert!(
+        member
+            .conversation_personal_state(&DocumentConversation::Channel(hex::encode(
+                group.as_bytes()
+            )))
+            .local_cleanup_complete
+    );
+    // Deliver the valid captured owner branch only after the completed departure.
+    for event in captured {
+        member.log.lock().unwrap().append(event).unwrap();
+    }
+    member.process_channel(group);
+    let after = member.account_group_access_with_closed(group).unwrap();
+    assert_eq!(
+        after.role,
+        AccountGroupRole::Left,
+        "an automatic format cutover cannot rejoin a departed account"
+    );
+    assert!(!after.sources.is_empty());
+    assert!(after.sources.iter().all(|source| source.lifetime == closed));
+    member
+        .delete_left_group_if(&member.account_id(), group, |commit| commit())
+        .unwrap();
+}
+
+#[tokio::test]
+async fn initial_upgrade_after_observed_departure_preserves_legacy_cleanup_provenance() {
+    use crate::{
+        eventlog::EventKind,
+        node::{
+            AccountGroupRole,
+            account_group::wire::GroupControlHead,
+            channel_account_authority::{AccountAuthorityControl, AccountGrant},
+        },
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let member = node(&dir.path().join("member"), &Account::generate());
+    let group = owner
+        .create_channel("Already observed departure", vec![member.identity.public()])
+        .await
+        .unwrap();
+    copy_public_group(&owner, &member, group);
+    member.leave_channel(group).await.unwrap();
+    let closed = member
+        .account_group_access_with_closed(group)
+        .unwrap()
+        .sources[0]
+        .lifetime
+        .clone();
+    copy_public_group(&member, &owner, group);
+    let projection = owner.account_group_projection(group);
+    assert!(projection.authority.current_event().is_none());
+    let accepted = projection
+        .accepted
+        .iter()
+        .find(|accepted| accepted.public == owner.identity.public())
+        .unwrap();
+    let proof = owner.own_group_proof();
+    let cut = AccountAuthorityControl {
+        version: 1,
+        previous: None,
+        issuer: proof.clone(),
+        owner_account: owner.account.public().ed25519_pub,
+        grants: vec![AccountGrant {
+            incarnation: [1; 16],
+            pending: false,
+            original: proof.clone(),
+            membership_event: accepted.membership_event,
+            acceptance_event: accepted.acceptance_event,
+        }],
+        revoked: vec![],
+        legacy_bindings: vec![proof],
+        account_signature: vec![],
+    };
+    owner
+        .append_event(
+            group,
+            EventKind::ChannelAccountAuthority,
+            cut.signed_encode(group, &owner.account),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    assert!(
+        owner
+            .account_group_projection(group)
+            .authority
+            .current_event()
+            .is_some(),
+        "only proven departed accepted bindings may be omitted from the initial cut"
+    );
+    copy_public_group(&owner, &member, group);
+    let after = member.account_group_access_with_closed(group).unwrap();
+    assert_eq!(after.role, AccountGroupRole::Left);
+    assert!(after.sources.iter().any(|source| source.lifetime == closed));
+    member
+        .delete_left_group_if(&member.account_id(), group, |commit| commit())
+        .unwrap();
+    let document = group_control_source_document(&member, group);
+    let head =
+        GroupControlHead::decode(document.payload(), &member.account.public().ed25519_pub).unwrap();
+    assert!(head.valid(&member.account.public().ed25519_pub));
+    assert_eq!(head.access.observation.role, AccountGroupRole::Left);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn initial_upgrade_whole_cohort_closure_reaches_a_history_free_certified_reference() {
+    initial_upgrade_whole_cohort_closure_case(false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn initial_upgrade_partly_observed_cohort_closure_reaches_a_history_free_reference() {
+    initial_upgrade_whole_cohort_closure_case(true).await;
+}
+async fn initial_upgrade_whole_cohort_closure_case(observed_first: bool) {
+    use crate::{
+        discovery::roster::PeerRecord,
+        eventlog::EventKind,
+        node::{
+            AccountGroupRole, SyncCategory,
+            account_devices::AccountDevice,
+            account_group::wire::GroupControlHead,
+            channel_account_authority::{AccountAuthorityControl, AccountGrant},
+        },
+    };
+    use std::{sync::Arc, time::Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let first = node(&dir.path().join("first"), &account);
+    let second = node(&dir.path().join("second"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = owner
+        .create_channel(
+            "Initial cohort closure",
+            vec![first.identity.public(), second.identity.public()],
+        )
+        .await
+        .unwrap();
+    copy_public_group(&owner, &first, group);
+    copy_public_group(&owner, &second, group);
+    if observed_first {
+        first.leave_channel(group).await.unwrap();
+        copy_public_group(&first, &owner, group);
+    }
+    let legacy = owner.account_group_projection(group);
+    let mut grants = std::collections::BTreeMap::new();
+    let mut bindings = vec![];
+    for accepted in legacy.accepted.iter().filter(|member| {
+        legacy
+            .state
+            .as_ref()
+            .unwrap()
+            .members()
+            .contains(&member.public)
+    }) {
+        let source = [&owner, &first, &second]
+            .into_iter()
+            .find(|source| source.identity.public() == accepted.public)
+            .unwrap();
+        let proof = source.own_group_proof();
+        // Keep the grant's primary original distinct from the exporting
+        // first device, so its old physical closure cannot be relabeled.
+        let primary = if source.account_id() == account.account_id() {
+            second.own_group_proof()
+        } else {
+            proof.clone()
+        };
+        grants
+            .entry(source.account.public().ed25519_pub)
+            .or_insert(AccountGrant {
+                incarnation: if source.account_id() == owner.account_id() {
+                    [1; 16]
+                } else {
+                    [2; 16]
+                },
+                pending: false,
+                original: primary,
+                membership_event: accepted.membership_event,
+                acceptance_event: accepted.acceptance_event,
+            });
+        bindings.push(proof);
+    }
+    let control = AccountAuthorityControl {
+        version: 1,
+        previous: None,
+        issuer: owner.own_group_proof(),
+        owner_account: owner.account.public().ed25519_pub,
+        grants: grants.into_values().collect(),
+        revoked: vec![],
+        legacy_bindings: bindings,
+        account_signature: vec![],
+    };
+    owner
+        .append_event(
+            group,
+            EventKind::ChannelAccountAuthority,
+            control.signed_encode(group, &owner.account),
+        )
+        .unwrap();
+    owner.process_channel(group);
+    let upgrade = owner
+        .account_group_projection(group)
+        .authority
+        .current_event()
+        .unwrap();
+    if !observed_first {
+        first.leave_channel(group).await.unwrap();
+    }
+    second.leave_channel(group).await.unwrap();
+    let leaves: Vec<_> = [&first, &second]
+        .into_iter()
+        .map(|source| {
+            source
+                .log
+                .lock()
+                .unwrap()
+                .events(&group)
+                .into_iter()
+                .find(|event| event.kind == EventKind::ChannelLeave)
+                .unwrap()
+                .clone()
+        })
+        .collect();
+    copy_public_group(&owner, &first, group);
+    assert_eq!(
+        first.account_group_access(group).unwrap().role,
+        AccountGroupRole::Member,
+        "one departed original cannot close its still-active sibling"
+    );
+    first.log.lock().unwrap().append(leaves[1].clone()).unwrap();
+    first.process_channel(group);
+    assert_eq!(
+        first.account_group_access_with_closed(group).unwrap().role,
+        AccountGroupRole::Left
+    );
+    let document = group_control_source_document(&first, group);
+    let head = GroupControlHead::decode(document.payload(), &account.public().ed25519_pub).unwrap();
+    assert!(head.valid(&account.public().ed25519_pub));
+    assert_eq!(head.access.observation.role, AccountGroupRole::Left);
+    assert_eq!(
+        head.access.source.lifetime.member,
+        first.identity.public(),
+        "legacy closure must retain the exporting original's exact physical lifetime"
+    );
+    let ids: Vec<_> = head.access.controls.iter().map(|event| event.id).collect();
+    assert!(ids.contains(&upgrade));
+    for leave in &leaves {
+        assert!(
+            ids.contains(&leave.id),
+            "the negative proof needs every original departure"
+        );
+    }
+    for target in [&first, &reference] {
+        for source in [&first, &reference] {
+            target
+                .account_devices
+                .lock()
+                .unwrap()
+                .insert(AccountDevice {
+                    public: source.identity.public(),
+                    certificate: account.certify(&source.identity.public().ed25519_pub),
+                })
+                .unwrap();
+        }
+        target
+            .set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = Arc::clone(&first);
+    let task = tokio::spawn(async move { Box::pin(serving.run_accept_loop(listener)).await });
+    let peer = PeerRecord {
+        public: first.identity.public(),
+        addr: address,
+        name: "closed original".into(),
+        account_id: Some(account.account_id()),
+        last_seen: Instant::now(),
+        post_office: false,
+        routes: vec![],
+    };
+    let mut cursor = sync::DocumentSyncCursor::control();
+    let exchange = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        for _ in 0..4 {
+            reference
+                .pull_account_documents_page(&peer, &mut cursor)
+                .await
+                .unwrap();
+            if reference.account_document_meta(&document.meta.key) == Some(document.meta.clone()) {
+                break;
+            }
+        }
+    })
+    .await;
+    task.abort();
+    let _ = task.await;
+    exchange.unwrap();
+    assert_eq!(
+        reference.account_document_meta(&document.meta.key),
+        Some(document.meta.clone())
+    );
+    let closed = reference.account_group_access_with_closed(group).unwrap();
+    assert_eq!(closed.role, AccountGroupRole::Left);
+    assert!(!closed.sources.is_empty());
+    assert!(
+        reference.log.lock().unwrap().events(&group).is_empty(),
+        "mandatory authority proof must work without optional history"
+    );
+}
+
+#[tokio::test]
 async fn group_control_terminal_source_invalidates_other_cached_lifetimes_before_reinvite() {
     group_control_terminal_source_case(true).await;
 }

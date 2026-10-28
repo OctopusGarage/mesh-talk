@@ -376,21 +376,50 @@ impl Node {
         // Dropping this loop aborts children; their runtime work permits remain
         // held until Tokio actually destroys each connection future.
         let mut connections = tokio::task::JoinSet::new();
+        #[cfg(test)]
+        let mut observer_sequence = 0u64;
         loop {
+            #[cfg(test)]
+            {
+                observer_sequence = observer_sequence.wrapping_add(1);
+            }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!(
+                    "responder_connection_wait sequence={observer_sequence} capacity={:?}",
+                    self.sessions.test_capacity_snapshot()
+                )
+            });
             while connections.try_join_next().is_some() {}
             // Reserve a connection slot BEFORE accepting, so we never serve more than the cap;
             // excess inbound connections wait in the OS accept queue until a slot frees.
-            let permit = match Arc::clone(&conns).acquire_owned().await {
+            let permit = match self.sessions.accept_connection_slot(&conns).await {
                 Ok(p) => p,
                 Err(_) => return, // semaphore closed — shouldn't happen, stop cleanly
             };
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!(
+                    "responder_admission_wait sequence={observer_sequence} capacity={:?}",
+                    self.sessions.test_capacity_snapshot()
+                )
+            });
             let tcp_permits = match self.sessions.inbound().await {
                 Ok(permits) => permits,
                 Err(_) => {
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        format!(
+                            "responder_admission_failed sequence={observer_sequence} capacity={:?}",
+                            self.sessions.test_capacity_snapshot()
+                        )
+                    });
                     drop(permit);
                     continue;
                 }
             };
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || format!("responder_admission_acquired_accept_begin sequence={observer_sequence} capacity={:?}", self.sessions.test_capacity_snapshot()));
             // Only the (fast) TCP accept runs on the loop; the Noise handshake runs in the
             // spawned task (bounded by HANDSHAKE_TIMEOUT), so a peer that connects then stalls
             // mid-handshake can't park the loop and block all other inbound connections.
@@ -404,6 +433,16 @@ impl Node {
                     continue;
                 }
             };
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!(
+                    "responder_accept_end sequence={observer_sequence} socket_ports={:?}",
+                    (
+                        stream.local_addr().ok().map(|addr| addr.port()),
+                        stream.peer_addr().ok().map(|addr| addr.port())
+                    )
+                )
+            });
             let node = Arc::clone(&self);
             let Some(work) = self.runtime_work.admit() else {
                 return;
@@ -417,6 +456,10 @@ impl Node {
                 if let Ok(channel) = node.privacy_accept_with_permits(stream, tcp_permits).await {
                     node.serve_connection(channel).await;
                 }
+                #[cfg(test)]
+                node.trace_account_client(&node.identity.public(), || {
+                    format!("responder_connection_finished sequence={observer_sequence}")
+                });
             }));
         }
     }
@@ -1864,5 +1907,280 @@ mod file_recovery_tests {
         let sources = b.file_recovery_sources(file, 0);
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].public, ap.public());
+    }
+}
+
+#[cfg(test)]
+mod inbound_idle_capacity_tests {
+    use super::*;
+    use crate::{
+        discovery::Announce,
+        identity::{account::Account, device::DeviceIdentity},
+        node::{AccountDocumentKey, account_devices::AccountDevice},
+    };
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        source: Arc<Node>,
+        clients: Vec<Arc<Node>>,
+        listener: TcpListener,
+        control_key: AccountDocumentKey,
+        expected: super::super::AccountDocumentMeta,
+    }
+    async fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let source_identity = DeviceIdentity::generate();
+        let identities: Vec<_> = (0..8).map(|_| DeviceIdentity::generate()).collect();
+        let first_proof = Announce::new_with_account(&identities[0], &account, "First", 9);
+        let source_path = dir.path().join("source");
+        std::fs::create_dir_all(&source_path).unwrap();
+        let source = super::super::test_support::node_with_files(
+            &source_path,
+            source_identity,
+            Account::from_secret_bytes(account.secret_bytes()),
+            &first_proof,
+        )
+        .0;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let source_proof =
+            Announce::new_with_account(&source.identity, &account, "Source", address.port());
+        let clients: Vec<_> = identities
+            .into_iter()
+            .enumerate()
+            .map(|(index, identity)| {
+                let path = dir.path().join(format!("client-{index}"));
+                std::fs::create_dir_all(&path).unwrap();
+                let client = super::super::test_support::node_with_files(
+                    &path,
+                    identity,
+                    Account::from_secret_bytes(account.secret_bytes()),
+                    &source_proof,
+                )
+                .0;
+                for (node, peer) in [(&source, &client), (&client, &source)] {
+                    node.account_devices
+                        .lock()
+                        .unwrap()
+                        .insert(AccountDevice {
+                            public: peer.identity.public(),
+                            certificate: account.certify(&peer.identity.public().ed25519_pub),
+                        })
+                        .unwrap();
+                }
+                client
+            })
+            .collect();
+        let group = source
+            .create_channel("Inbound capacity", vec![])
+            .await
+            .unwrap();
+        source.publish_account_group_access(&mut None);
+        let control_key = AccountDocumentKey::GroupControl {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let expected = source.account_document_meta(&control_key).unwrap();
+        Fixture {
+            _dir: dir,
+            source,
+            clients,
+            listener,
+            control_key,
+            expected,
+        }
+    }
+
+    #[tokio::test]
+    async fn seven_idle_authenticated_inbound_sessions_do_not_block_a_fresh_control_peer() {
+        let Fixture {
+            _dir,
+            source,
+            clients,
+            listener,
+            control_key,
+            expected,
+        } = fixture().await;
+        let serving = source.clone();
+        // Exercise the production accept owner without unrelated periodic workers.
+        let server = tokio::spawn(async move { serving.accept_connections(listener).await });
+        for client in clients.iter().take(7) {
+            let peer = client.routing_peer(&source.user_id()).unwrap();
+            let mut exchange = client
+                .begin_account_exchange(
+                    &peer,
+                    super::super::account_sync_wire::AccountSyncVersion::V2,
+                    super::super::account_sync_wire::AccountHistoryFrame::Wake {
+                        account_id: source.account_id(),
+                        epoch: [1; 16],
+                        revision: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            let ack = exchange.recv().await.unwrap();
+            assert!(
+                matches!(super::super::account_sync_wire::AccountHistoryFrame::decode_versioned(&ack),
+                Some((super::super::account_sync_wire::AccountSyncVersion::V2,
+                    super::super::account_sync_wire::AccountHistoryFrame::WakeAck { epoch, revision: 1 })) if epoch == [1; 16])
+            );
+            assert!(exchange.reusable());
+            exchange.recycle(client);
+            assert_eq!(
+                client.sessions.test_capacity_snapshot().3,
+                Some(1),
+                "the completed authenticated exchange must be retained idle by its client"
+            );
+        }
+        let before = source.sessions.test_capacity_snapshot();
+        assert_eq!(
+            before.0, 1,
+            "completed channels and the accept reservation retain shared accounting"
+        );
+        assert_eq!(
+            before.1, 0,
+            "inbound channels and accept reservation retain the seven-slot bound"
+        );
+        assert_eq!(
+            before.3,
+            Some(0),
+            "source has no outbound cached channel to evict"
+        );
+        let fresh = &clients[7];
+        let peer = fresh.routing_peer(&source.user_id()).unwrap();
+        let mut cursor = super::super::account_documents::sync::DocumentSyncCursor::control();
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            fresh.pull_account_documents_page(&peer, &mut cursor),
+        )
+        .await;
+        // Release every owned connection before reporting a progress failure.
+        source.runtime_work.close();
+        server.abort();
+        let _ = server.await;
+        for client in &clients {
+            client.sessions.clear();
+        }
+        tokio::time::timeout(Duration::from_secs(5), source.runtime_work.drain())
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Ok(Ok(()))),
+            "a fresh authenticated Control exchange must not wait for remote idle expiry; initial_capacity={before:?} completed={}",
+            result.is_ok()
+        );
+        assert_eq!(fresh.account_document_meta(&control_key), Some(expected));
+        assert!(
+            fresh
+                .group_operation_versions
+                .lock()
+                .unwrap()
+                .get(&source.user_id())
+                .is_some_and(|support| support.public == source.identity.public())
+        );
+    }
+    #[tokio::test]
+    async fn inbound_capacity_never_retires_an_active_response_and_resumes_after_completion() {
+        let Fixture {
+            _dir,
+            source,
+            clients,
+            listener,
+            control_key,
+            expected,
+        } = fixture().await;
+        let active: std::collections::HashSet<_> =
+            clients.iter().take(7).map(|node| node.user_id()).collect();
+        let arrived = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let seen = arrived.clone();
+        let gate = release.clone();
+        *source.account_session_test_hook.lock().unwrap() = Some(Arc::new(move |peer, frame| {
+            let held = active.contains(&peer.user_id())
+                && matches!(
+                    frame,
+                    super::super::account_sync_wire::AccountHistoryFrame::DocumentsComplete { .. }
+                );
+            let seen = seen.clone();
+            let gate = gate.clone();
+            Box::pin(async move {
+                if held {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    gate.acquire().await.unwrap().forget();
+                }
+            })
+        }));
+        let serving = source.clone();
+        let server = tokio::spawn(async move { serving.accept_connections(listener).await });
+        let mut requests = Vec::new();
+        for client in clients.iter().take(7) {
+            let client = Arc::clone(client);
+            let peer = client.routing_peer(&source.user_id()).unwrap();
+            requests.push(tokio::spawn(async move {
+                let mut cursor =
+                    super::super::account_documents::sync::DocumentSyncCursor::control();
+                client.pull_account_documents_page(&peer, &mut cursor).await
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while arrived.load(std::sync::atomic::Ordering::SeqCst) != 7 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("seven real responses must reach their terminal write gate");
+        let before = source.sessions.test_capacity_snapshot();
+        assert_eq!(before.1, 0);
+        let fresh = clients[7].clone();
+        let peer = fresh.routing_peer(&source.user_id()).unwrap();
+        let final_request = tokio::spawn(async move {
+            let mut cursor = super::super::account_documents::sync::DocumentSyncCursor::control();
+            tokio::time::timeout(
+                Duration::from_secs(8),
+                fresh.pull_account_documents_page(&peer, &mut cursor),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let active_preserved =
+            requests.iter().all(|request| !request.is_finished()) && !final_request.is_finished();
+        release.add_permits(1);
+        let fresh_result = final_request.await.unwrap();
+        let remaining = requests
+            .iter()
+            .filter(|request| !request.is_finished())
+            .count();
+        release.add_permits(7);
+        let mut completed = Vec::new();
+        for request in requests {
+            completed.push(request.await.unwrap());
+        }
+        source.runtime_work.close();
+        server.abort();
+        let _ = server.await;
+        for client in &clients {
+            client.sessions.clear();
+        }
+        tokio::time::timeout(Duration::from_secs(5), source.runtime_work.drain())
+            .await
+            .unwrap();
+        assert!(
+            active_preserved,
+            "capacity pressure must never cancel a response before its terminal write"
+        );
+        assert!(
+            matches!(fresh_result, Ok(Ok(()))),
+            "only a completed idle response may make room for the new Control"
+        );
+        assert_eq!(
+            remaining, 6,
+            "all other active responses must remain admitted and untouched"
+        );
+        assert!(completed.into_iter().all(|result| result.is_ok()));
+        assert_eq!(
+            clients[7].account_document_meta(&control_key),
+            Some(expected)
+        );
     }
 }

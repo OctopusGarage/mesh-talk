@@ -573,6 +573,55 @@ mod tests {
     }
 
     #[test]
+    fn owner_control_envelope_rejects_invalid_current_proof_for_sorted_unique_member() {
+        let f = Fixture::new();
+        let input = OwnerControlInput::Rename("Current proof boundary".into());
+        let (reference, prepared) = f.prepare(&input);
+        f.validate(&reference, &input, &prepared).unwrap();
+        validate_direct(&input, &prepared.witness, &prepared.event).unwrap();
+        validate_bound(&reference, &input, &prepared.witness, &prepared.event).unwrap();
+        let member = f.devices[0].public();
+        let index = prepared
+            .witness
+            .members
+            .iter()
+            .position(|row| row.lifetime.member == member)
+            .unwrap();
+        let original = prepared.witness.members[index].current.as_ref().unwrap();
+        assert_eq!(original.public(), member);
+        assert!(original.valid_presence() && !original.post_office);
+        let mut bad_signature = original.clone();
+        bad_signature.sig[0] ^= 1;
+        let different_identity =
+            Announce::new_with_account(&f.devices[1], &f.target, "Other member", 1);
+        let relay = Announce::new_post_office_with_account(&f.devices[0], &f.target, "Relay", 1);
+        assert!(different_identity.valid_presence());
+        assert_ne!(different_identity.public(), member);
+        assert!(!bad_signature.valid_presence());
+        assert_eq!(bad_signature.public(), member);
+        assert!(relay.valid_presence() && relay.post_office);
+        assert_eq!(relay.public(), member);
+        for invalid_proof in [different_identity, bad_signature, relay] {
+            let mut witness = prepared.witness.clone();
+            witness.members[index].current = Some(invalid_proof);
+            let keys: Vec<_> = witness
+                .members
+                .iter()
+                .map(|row| {
+                    let public = &row.lifetime.member;
+                    (public.user_id(), public.ed25519_pub, public.x25519_pub)
+                })
+                .collect();
+            assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+            // Keep the original signed event, intent and every physical lifetime.
+            // Check the envelope directly so parent reconstruction cannot mask
+            // a skipped current-proof check for this otherwise unique member.
+            assert!(validate_direct(&input, &witness, &prepared.event).is_err());
+            assert!(validate_bound(&reference, &input, &witness, &prepared.event).is_err());
+        }
+    }
+
+    #[test]
     fn owner_witness_rejects_omitted_physical_lifetime_and_changed_source() {
         let f = Fixture::new();
         let input = OwnerControlInput::RemoveAccount(f.target.account_id());

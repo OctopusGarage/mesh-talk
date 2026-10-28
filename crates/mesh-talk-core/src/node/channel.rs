@@ -369,11 +369,31 @@ impl ChannelBook {
         before: Option<EventId>,
         by_id: &HashMap<EventId, &Event>,
     ) -> ChannelMembershipProjection {
+        Self::membership_projection_inner(channel_id, events, before, by_id, true)
+    }
+
+    fn membership_projection_inner(
+        channel_id: ConversationId,
+        events: &[&Event],
+        before: Option<EventId>,
+        by_id: &HashMap<EventId, &Event>,
+        legacy_checks: bool,
+    ) -> ChannelMembershipProjection {
         use super::channel_account_authority::{
             AccountAuthority, LegacyAccountMember, LegacyAuthorityContext,
         };
         use super::channel_account_bootstrap::DeviceControl;
+        let legacy_departures = if legacy_checks
+            && events
+                .iter()
+                .any(|event| event.kind == EventKind::ChannelAccountAuthority)
+        {
+            Self::legacy_parent_cut_departures(channel_id, events, by_id)
+        } else {
+            HashMap::new()
+        };
         let mut authority = AccountAuthority::default();
+        authority.set_legacy_candidates(legacy_departures.values().cloned().collect());
         let mut authorized = HashSet::new();
         let mut bindings: HashMap<String, crate::discovery::Announce> = HashMap::new();
         let mut roots: HashMap<String, (PublicIdentity, EventId, Option<EventId>, bool)> =
@@ -424,11 +444,13 @@ impl ChannelBook {
                         continue;
                     };
                     let original_member_count = meta.members.len();
-                    meta.members.retain(|member| {
-                        !departures.iter().any(|(uid, leave_id)| {
-                            uid == &member.user_id() && !descends_from(event, *leave_id, by_id)
-                        })
-                    });
+                    if authority.current_event().is_none() {
+                        meta.members.retain(|member| {
+                            !departures.iter().any(|(uid, leave_id)| {
+                                uid == &member.user_id() && !descends_from(event, *leave_id, by_id)
+                            })
+                        });
+                    }
                     if let Some(state) = prior.as_mut() {
                         if !state.can_admin(&author) {
                             continue;
@@ -505,6 +527,7 @@ impl ChannelBook {
                                 .original_device_proofs()
                                 .into_iter()
                                 .chain(authority.invited_device_proofs())
+                                .chain(authority.legacy_closed_device_proofs())
                                 .find(|proof| proof.user_id == author)
                         });
                         if let Some(proof) = proof
@@ -537,12 +560,20 @@ impl ChannelBook {
                     }
                 }
                 EventKind::ChannelLeave => {
-                    if authority.current_event().is_some() {
+                    if authority.current_event().is_some()
+                        && legacy_departures.contains_key(&event.id)
+                    {
+                        // The old empty action is scoped by its validated legacy
+                        // parent cut, never by a newer grant incarnation.
+                        valid = true;
+                        departures.push((author.clone(), event.id));
+                    } else if authority.current_event().is_some() {
                         let proof = bindings.get(&author).cloned().or_else(|| {
                             authority
                                 .original_device_proofs()
                                 .into_iter()
                                 .chain(authority.invited_device_proofs())
+                                .chain(authority.legacy_closed_device_proofs())
                                 .find(|proof| proof.user_id == author)
                         });
                         if let Some(proof) = proof {
@@ -551,7 +582,7 @@ impl ChannelBook {
                             } else if authority.is_member(&proof.public(), &proof) {
                                 authority.leave_account(event, &proof, by_id)
                             } else {
-                                Err(super::channel_account_authority::AuthorityError::Invalid)
+                                authority.replay_leave_after_legacy_closure(event, &proof, by_id)
                             };
                             valid = result.is_ok();
                             if matches!(result, Ok(true)) {
@@ -610,6 +641,7 @@ impl ChannelBook {
                                     })
                                     .collect(),
                                 epoch: state.epoch(),
+                                live: state.members().to_vec(),
                             };
                             valid = authority.apply(event, &context, by_id).is_ok();
                         }
@@ -639,15 +671,28 @@ impl ChannelBook {
                     .all(|parent| authorized.contains(parent))
             {
                 authorized.insert(event.id);
+                if let Some(departure) = legacy_departures.get(&event.id) {
+                    authority.note_legacy_departure(departure);
+                }
                 if let Some((device, departure, account)) = account_departure {
                     departures.push((device.clone(), departure));
                     departure_accounts.insert(device, account);
+                }
+                for (device, departure) in &departures {
+                    if let Some(account) = authority.legacy_departure_account(*departure) {
+                        departure_accounts.insert(device.clone(), account);
+                    }
                 }
                 // Do not carry an earlier self-departure route into a new
                 // incarnation, even if a later owner removal leaves us absent.
                 let rejoined: HashSet<_> = departure_accounts
                     .iter()
-                    .filter(|(_, account)| authority.account_grant(account).is_some())
+                    .filter(|(device, account)| {
+                        authority.account_grant(account).is_some()
+                            && !departures.iter().any(|(author, event)| {
+                                author == *device && authority.legacy_departure_current(*event)
+                            })
+                    })
                     .map(|(device, _)| device.clone())
                     .collect();
                 departure_accounts.retain(|device, _| !rejoined.contains(device));
@@ -753,6 +798,81 @@ impl ChannelBook {
             authorized,
             invited,
         }
+    }
+
+    fn legacy_parent_cut_departures(
+        channel: ConversationId,
+        events: &[&Event],
+        by_id: &HashMap<EventId, &Event>,
+    ) -> HashMap<EventId, super::channel_account_authority::LegacyDeparture> {
+        use super::channel_account_authority::{LegacyAccountMember, LegacyDeparture};
+        let mut departures = HashMap::new();
+        let ordered = super::timeline::ordered_ids(events, &[], true);
+        for event in events
+            .iter()
+            .filter(|event| event.kind == EventKind::ChannelLeave && event.ciphertext.is_empty())
+        {
+            if !event.is_canonical() || !event.verify_integrity() || !event.verify_signature() {
+                continue;
+            }
+            let mut ancestors = HashSet::new();
+            let mut pending = event.parents.clone();
+            let mut complete = true;
+            while let Some(id) = pending.pop() {
+                if !ancestors.insert(id) {
+                    continue;
+                }
+                let Some(parent) = by_id
+                    .get(&id)
+                    .filter(|parent| parent.conversation_id == channel)
+                else {
+                    complete = false;
+                    break;
+                };
+                pending.extend(parent.parents.iter().copied());
+            }
+            if !complete {
+                continue;
+            }
+            let cut: Vec<_> = ordered
+                .iter()
+                .filter(|id| ancestors.contains(id))
+                .filter_map(|id| by_id.get(id).copied())
+                .collect();
+            let projection = Self::membership_projection_inner(channel, &cut, None, by_id, false);
+            if projection.authority.current_event().is_some()
+                || !event
+                    .parents
+                    .iter()
+                    .all(|id| projection.authorized.contains(id))
+            {
+                continue;
+            }
+            let Some(state) = projection.state.as_ref() else {
+                continue;
+            };
+            let author = event.author.user_id();
+            if state.owner() == author || !state.is_accepted_member(&author) {
+                continue;
+            }
+            let Some(member) = projection.accepted.iter().find(|member| {
+                member.public.user_id() == author && state.members().contains(&member.public)
+            }) else {
+                continue;
+            };
+            departures.insert(
+                event.id,
+                LegacyDeparture {
+                    event: event.id,
+                    member: LegacyAccountMember {
+                        public: member.public.clone(),
+                        membership_event: member.membership_event,
+                        acceptance_event: member.acceptance_event,
+                    },
+                },
+            );
+        }
+        departures
     }
 
     pub(super) fn project_membership(

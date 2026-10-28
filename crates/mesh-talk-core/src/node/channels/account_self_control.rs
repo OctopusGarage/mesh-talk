@@ -1175,7 +1175,15 @@ pub(in crate::node) mod tests {
                         }
                         samples.insert(key, state);
                     }
-                    if event.starts_with("operation_local_published")
+                    let selected_responder = selected_trace_peer
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|online| {
+                            &own_public == online || own_public == reference_public
+                        });
+                    if (selected_responder && event.starts_with("responder_"))
+                        || event.starts_with("operation_local_published")
                         || event.starts_with("wake_")
                         || (selected_pair
                             && (event.starts_with("dial_") || event.starts_with("session_")))

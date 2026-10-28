@@ -309,6 +309,8 @@
         "crates/mesh-talk-core/src/node/privacy_routing.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime_tests.rs",
         "crates/mesh-talk-core/src/node/session_pool.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/transport/channel.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs"
@@ -323,6 +325,8 @@
             "private_probe_refreshes_public_presence_before_its_lease_expires",
             "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
             "node::session_pool::",
+            "seven_idle_authenticated_inbound_sessions_do_not_block_a_fresh_control_peer",
+            "inbound_capacity_never_retires_an_active_response_and_resumes_after_completion",
             "private_control_noise_handshake_overtakes_queued_background_without_more_capacity",
             "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel",
             "authentication_backpressure_preserves_document_progress_and_recovers",
@@ -332,9 +336,13 @@
         }
       ],
       "capability": {
-        "summary": "Keep historical route probing within its background connection budget and rotate only launched devices across canceled rounds.",
+        "summary": "Bound historical route probes and completed account-session reuse under the shared connection budget, preserving canceled probe turns.",
         "guide": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance",
         "invariants": [
+          {
+            "name": "Only completed reusable account sessions may retire under listener/shared pressure: one oldest-idle retirement remains pending until the owner drops real socket permits; ready frames, handshakes and active responses remain protected under unchanged eight shared/seven directional slots and the existing enclosing idle deadline.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
           {
             "name": "GroupControl fresh authentication overtakes queued Ordinary work only: one active handshake per exact full identity, endpoint and privacy generation remains; FIFO within each class and an Ordinary turn after each Control prevent starvation, while cancellation and the unchanged two-second wait release all tickets.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
@@ -495,7 +503,10 @@
         "crates/mesh-talk-core/src/node/channel_account_authority.rs",
         "crates/mesh-talk-core/src/node/channel_account_bootstrap.rs",
         "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
-        "crates/mesh-talk-core/src/node/channel_account_controls.rs"
+        "crates/mesh-talk-core/src/node/channel_account_controls.rs",
+        "crates/mesh-talk-core/src/node/account_group/access.rs",
+        "crates/mesh-talk-core/src/node/account_group/wire.rs",
+        "crates/mesh-talk-core/src/node/account_documents/group_control.rs"
       ],
       "rust": [
         {
@@ -505,6 +516,10 @@
             "node::channel_account_authority::tests::",
             "node::channel_account_bootstrap::tests::",
             "node::channel_account_maintenance::tests::",
+            "captured_initial_account_upgrade_never_resurrects_a_completed_legacy_departure",
+            "initial_upgrade_after_observed_departure_preserves_legacy_cleanup_provenance",
+            "initial_upgrade_whole_cohort_closure_reaches_a_history_free_certified_reference",
+            "initial_upgrade_partly_observed_cohort_closure_reaches_a_history_free_reference",
             "channel::model::tests::account_invites_receive_no_content_keys_until_the_account_accepts",
             "account_authority_arriving_after_probe_restarts_without_legacy_followup_leak",
             "account_authority_negotiates_v4_and_transfers_in_both_directions",
@@ -520,6 +535,12 @@
             "rejected_account_authority_never_exposes_a_v4_requirement_to_legacy_members",
             "channel::model::tests::routine_receive_snapshot_preserves_small_out_of_order_messages"
           ]
+        },
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "contact_policy::native_mesh_tests::registered_hide_keeps_real_multi_device_delivery_and_restart_history"
+          ]
         }
       ],
       "consumers": [
@@ -532,6 +553,10 @@
         "summary": "Authorize account membership and owner roles once, inherit them on certified independent devices, and revoke every sibling through one signed account grant lifetime.",
         "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
         "invariants": [
+          {
+            "name": "Automatic initial migration preserves exact legacy departure lifetimes, remaining original siblings, fresh invitation incarnations and monotonic key epochs; effective permissions exclude closed initial grants while structural descendant controls and complete bounded negative proofs remain valid.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
           {
             "name": "Owner-root signed controls and account-root full-device inheritance bind immutable grants, exact key tuples and causal authority; discovery and late adoption cannot manufacture membership",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"

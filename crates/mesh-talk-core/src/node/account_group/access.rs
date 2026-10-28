@@ -65,13 +65,23 @@ fn authorization_view(
     log: &PersistentEventLog,
     group: ConversationId,
 ) -> (Vec<EventId>, ([u8; 32], usize)) {
+    authorization_view_at(log, group, None)
+}
+fn authorization_view_at(
+    log: &PersistentEventLog,
+    group: ConversationId,
+    scope: Option<&HashSet<EventId>>,
+) -> (Vec<EventId>, ([u8; 32], usize)) {
     let relevant: HashSet<_> = log
         .events(&group)
         .into_iter()
         // The validated log can contain rejected competing controls which are
         // parents of a later applied decision. The reducer's authorized index
         // is not a complete record of its state transitions.
-        .filter(|event| super::wire::authorization_control(event.kind))
+        .filter(|event| {
+            scope.is_none_or(|scope| scope.contains(&event.id))
+                && super::wire::authorization_control(event.kind)
+        })
         .map(|event| event.id)
         .collect();
     let mut ids: Vec<_> = relevant.iter().copied().collect();
@@ -136,7 +146,11 @@ fn departed_legacy_source(
     proofs: &GroupProofSnapshot,
 ) -> Option<(AccountGroupSource, EventId)> {
     let state = projection.state.as_ref()?;
-    if projection.authority.current_event().is_some()
+    if (projection.authority.current_event().is_some()
+        && projection
+            .authority
+            .omitted_legacy_departure(own, proof)
+            .is_none())
         || state.members().contains(own)
         || !proofs.binding_current(proof)
         || proof.public() != *own
@@ -280,7 +294,7 @@ fn revoked_account_source(
         .collect();
     let revocation = projection
         .authority
-        .revocation_events(&proofs.account_public)
+        .explicit_revocation_events(&proofs.account_public)
         .into_iter()
         .filter_map(|id| log.get(&id))
         .filter(|event| event.conversation_id == group && projection.authorized.contains(&event.id))
@@ -835,11 +849,103 @@ impl Node {
         heads: &[GroupControlHead],
         proofs: &GroupProofSnapshot,
     ) -> Option<SourceAccess> {
+        let own = self.own_group_proof();
+        let basis = projection
+            .authority
+            .legacy_closing_basis(&own.public(), &own);
+        let initial_owner = basis
+            .iter()
+            .filter_map(|id| log.get(id))
+            .find_map(|event| {
+                (event.kind == EventKind::ChannelAccountAuthority)
+                    .then(|| {
+                        super::super::channel_account_authority::AccountAuthorityControl::decode(
+                            &event.ciphertext,
+                        )
+                    })
+                    .flatten()
+            })
+            .map(|control| control.owner_account);
+        if !basis.is_empty() && initial_owner != Some(proofs.account_public) {
+            let mut ancestors = HashSet::new();
+            let mut pending = basis;
+            let mut complete = true;
+            while let Some(id) = pending.pop() {
+                if !ancestors.insert(id) {
+                    continue;
+                }
+                let Some(event) = log.get(&id).filter(|event| event.conversation_id == group)
+                else {
+                    complete = false;
+                    break;
+                };
+                pending.extend(event.parents.iter().copied());
+            }
+            if complete {
+                let events: Vec<_> = log
+                    .events(&group)
+                    .into_iter()
+                    .filter(|event| ancestors.contains(&event.id))
+                    .collect();
+                let closed = crate::node::channel::ChannelBook::project_membership(group, &events);
+                return self.account_group_snapshot_inner(
+                    group,
+                    log,
+                    &closed,
+                    None,
+                    heads,
+                    proofs,
+                    Some(&ancestors),
+                );
+            }
+        }
+        self.account_group_snapshot_inner(group, log, projection, prior, heads, proofs, None)
+    }
+
+    fn account_group_snapshot_inner(
+        &self,
+        group: ConversationId,
+        log: &PersistentEventLog,
+        projection: &crate::node::channel::ChannelMembershipProjection,
+        prior: Option<&SourceAccess>,
+        heads: &[GroupControlHead],
+        proofs: &GroupProofSnapshot,
+        scope: Option<&HashSet<EventId>>,
+    ) -> Option<SourceAccess> {
         let state = projection.state.as_ref()?;
         let own = self.identity.public();
         let own_proof = self.own_group_proof();
         let revoked = revoked_account_source(group, log, projection, &own, &own_proof, proofs)
-            .or_else(|| departed_legacy_source(group, log, projection, &own, &own_proof, proofs));
+            .or_else(|| departed_legacy_source(group, log, projection, &own, &own_proof, proofs))
+            .or_else(|| {
+                if !proofs.binding_current(&own_proof) {
+                    return None;
+                }
+                let (_, original, departure) = projection
+                    .authority
+                    .legacy_retired_source(&own, &own_proof)?;
+                Some((
+                    AccountGroupSource {
+                        device: own.clone(),
+                        role: if state.is_dissolved() {
+                            AccountGroupRole::Dissolved
+                        } else {
+                            AccountGroupRole::Left
+                        },
+                        lifetime: MembershipLifetime {
+                            member: original.public,
+                            membership: original.membership_event,
+                            acceptance: original.acceptance_event,
+                        },
+                        authority: AuthorityExpectation {
+                            authority: projection.authority.current_event(),
+                            epoch: projection.authority.key_epoch()?,
+                        },
+                        execution: AccountGroupExecution::Local,
+                    },
+                    departure,
+                ))
+            });
         let source = Self::public_account_group_source(group, projection, &own, &own_proof)
             .or_else(|| revoked.as_ref().map(|(source, _)| source.clone()))
             .or_else(|| {
@@ -880,7 +986,8 @@ impl Node {
                 })
         });
         let mut candidate_proofs = proofs.historical.clone();
-        candidate_proofs.push(own_proof);
+        candidate_proofs.push(own_proof.clone());
+        candidate_proofs.extend(projection.authority.original_device_proofs());
         candidate_proofs.extend(heads.iter().flat_map(|head| {
             std::iter::once(head.proof.clone()).chain(
                 head.access
@@ -971,6 +1078,7 @@ impl Node {
         ids.extend(projection.ownership);
         if !state.is_dissolved() {
             ids.extend(revoked.as_ref().map(|(_, event)| *event));
+            ids.extend(projection.authority.legacy_closing_basis(&own, &own_proof));
         }
         if state.is_dissolved() {
             ids.extend(
@@ -986,7 +1094,7 @@ impl Node {
         ids.sort();
         ids.dedup();
         let controls = ids.iter().filter_map(|id| log.get(id).cloned()).collect();
-        let (local_frontier, (fingerprint, count)) = authorization_view(log, group);
+        let (local_frontier, (fingerprint, count)) = authorization_view_at(log, group, scope);
         let mut frontier = local_frontier.clone();
         let complete_frontier = frontier.len() <= MAX_ACCESS_FRONTIER;
         frontier.truncate(MAX_ACCESS_FRONTIER);
@@ -1017,6 +1125,8 @@ impl Node {
             .collect();
         for head in heads {
             if head.proof.public() != own
+                && scope
+                    .is_none_or(|scope| head.access.frontier.iter().all(|id| scope.contains(id)))
                 && !result.compatible(&head.access)
                 && view_contains(log, group, (fingerprint, count), &head.access)
                 && evaluated(log, group, &head.access)

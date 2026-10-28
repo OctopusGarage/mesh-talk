@@ -33,6 +33,8 @@ pub(in crate::node) struct HeadReference {
     pub revision: u64,
     pub content_hash: [u8; 32],
 }
+pub(in crate::node) const MAX_PROVENANCE_CONTROLS: usize = 4;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(in crate::node) struct SourceAccess {
     pub source: AccountGroupSource,
@@ -215,7 +217,7 @@ impl GroupControlHead {
     }
     fn available_valid(&self, account: &[u8; 32]) -> bool {
         let access = &self.access;
-        if access.controls.len() > 4
+        if access.controls.len() > MAX_PROVENANCE_CONTROLS
             || !access.controls.iter().all(|event| {
                 event.conversation_id == self.group
                     && provenance_anchor(event.kind)

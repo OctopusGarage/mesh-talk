@@ -1333,6 +1333,16 @@ impl Node {
                             let stream = TcpStream::connect(candidate).await?;
                             #[cfg(test)]
                             self.trace_account_client(expected, || "dial_tcp_connect_end".into());
+                            #[cfg(test)]
+                            self.trace_account_client(expected, || {
+                                format!(
+                                    "dial_socket_ports={:?}",
+                                    (
+                                        stream.local_addr().ok().map(|addr| addr.port()),
+                                        stream.peer_addr().ok().map(|addr| addr.port())
+                                    )
+                                )
+                            });
                             stream.set_nodelay(true)?;
                             crate::transport::net::set_tcp_keepalive(&stream);
                             let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
@@ -1453,6 +1463,15 @@ impl Node {
         let mut timing = super::delivery_runtime::TestTiming::new("accept-tcp-ready");
         #[cfg(test)]
         timing.socket(&stream);
+        #[cfg(test)]
+        let observer_socket_ports = (
+            stream.local_addr().ok().map(|addr| addr.port()),
+            stream.peer_addr().ok().map(|addr| addr.port()),
+        );
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_tcp_ready socket_ports={observer_socket_ports:?}")
+        });
         let endpoint = stream.peer_addr()?;
         let ip = endpoint.ip();
         stream.set_nodelay(true)?;
@@ -1461,12 +1480,24 @@ impl Node {
         timing.phase("accept-own-presence");
         #[cfg(test)]
         timing.phase("accept-privacy-gate");
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_privacy_gate_wait socket_ports={observer_socket_ports:?}")
+        });
         let _operation = self.privacy.gate.read().await;
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_privacy_gate_acquired socket_ports={observer_socket_ports:?}")
+        });
         let own = self.own_presence();
         let transitions = self.own_account_transitions();
         let publicly_visible = self.publicly_visible_at(endpoint);
         #[cfg(test)]
         timing.phase("accept-noise-presence");
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_noise_begin socket_ports={observer_socket_ports:?}")
+        });
         let mut channel = tokio::time::timeout(
             super::route_timing::MAX_AUTHENTICATION_DEADLINE,
             SecureChannel::accept_with_transitions(
@@ -1485,6 +1516,10 @@ impl Node {
         .map_err(|_| TransportError::Noise("accept timed out".into()))??;
         #[cfg(test)]
         timing.phase("accept-remember-peer");
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_noise_end socket_ports={observer_socket_ports:?}")
+        });
         channel.retain_connection_permits(permits);
         if self.pairing_retry_allowed(channel.peer_identity(), channel.peer_announcement()) {
             channel.restrict_to_pairing();

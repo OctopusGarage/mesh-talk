@@ -393,9 +393,23 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     until("original group message reaches Alice", || {
         !alice_handle.channel_history(group, 20).is_empty()
     });
+    // Public access diagnostics contain only role, execution and signed scope
+    // identifiers. Terminal public DTOs intentionally omit cleanup-only sources.
+    let trace_access = |phase: &str| {
+        eprintln!(
+            "native personal group {phase} access={:?}",
+            alice_handle.account_group_access(group)
+        );
+    };
+    trace_access("before_leave");
     tauri::async_runtime::block_on(alice_handle.leave_channel(group)).unwrap();
+    trace_access("after_leave");
+    let deleted = invoke_raw("owner_delete_left_channel", delete_body);
+    if deleted.is_err() {
+        trace_access("delete_error");
+    }
     assert!(
-        invoke_raw("owner_delete_left_channel", delete_body)
+        deleted
             .unwrap()
             .deserialize::<serde_json::Value>()
             .unwrap()

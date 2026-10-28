@@ -174,6 +174,49 @@ impl CapacityDiagnostics {
     }
 }
 
+#[derive(Default)]
+struct InboundIdleState {
+    next: u64,
+    retiring: Option<u64>,
+    entries: std::collections::VecDeque<(u64, tokio::sync::oneshot::Sender<()>)>,
+}
+#[derive(Default)]
+struct InboundIdleRegistry {
+    state: Mutex<InboundIdleState>,
+    changed: tokio::sync::Notify,
+}
+pub(in crate::node) struct InboundIdleRegistration {
+    registry: Arc<InboundIdleRegistry>,
+    token: u64,
+}
+impl Drop for InboundIdleRegistration {
+    fn drop(&mut self) {
+        let mut state = self.registry.state.lock().unwrap();
+        state.entries.retain(|(token, _)| *token != self.token);
+        if state.retiring == Some(self.token) {
+            state.retiring = None;
+        }
+        drop(state);
+        self.registry.changed.notify_waiters();
+    }
+}
+
+pub(in crate::node) enum InboundReuse {
+    Frame(Vec<u8>),
+    Retired(InboundIdleRegistration),
+}
+async fn wait_registered_inbound(
+    channel: &SecureChannel<TcpStream>,
+    registration: InboundIdleRegistration,
+    mut retire: tokio::sync::oneshot::Receiver<()>,
+) -> Result<Option<InboundIdleRegistration>, TransportError> {
+    tokio::select! {
+        biased;
+        ready = channel.inbound_frame_ready() => ready.map(|_| None).map_err(TransportError::Io),
+        _ = &mut retire => Ok(Some(registration)),
+    }
+}
+
 pub(in crate::node) struct SessionPool {
     authentication_gates: Mutex<Vec<(PeerEndpointKey, Weak<AuthenticationGate>)>>,
     capacity_diagnostics: Mutex<CapacityDiagnostics>,
@@ -181,6 +224,7 @@ pub(in crate::node) struct SessionPool {
     outbound: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     idle: Arc<Mutex<Vec<Idle>>>,
+    inbound_idle: Arc<InboundIdleRegistry>,
     timings: Mutex<super::route_timing::RouteTimings>,
     account_unsupported: Mutex<std::collections::VecDeque<(PeerEndpointKey, Instant)>>,
     file_identity_unsupported: Mutex<std::collections::VecDeque<(PeerEndpointKey, Instant)>>,
@@ -197,6 +241,7 @@ impl Default for SessionPool {
             outbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             inbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             idle: Arc::new(Mutex::new(Vec::new())),
+            inbound_idle: Arc::new(InboundIdleRegistry::default()),
             timings: Mutex::new(super::route_timing::RouteTimings::default()),
             account_unsupported: Mutex::new(Default::default()),
             file_identity_unsupported: Mutex::new(Default::default()),
@@ -357,12 +402,88 @@ impl SessionPool {
             .control_timed_out(&peer.user_id(), address);
     }
 
+    fn register_inbound_idle(
+        &self,
+    ) -> Option<(InboundIdleRegistration, tokio::sync::oneshot::Receiver<()>)> {
+        let mut state = self.inbound_idle.state.lock().unwrap();
+        if state.entries.len() + usize::from(state.retiring.is_some()) >= MAX_DIRECTION_CONNECTIONS
+        {
+            return None;
+        }
+        let token = state.next.checked_add(1)?;
+        state.next = token;
+        let (send, receive) = tokio::sync::oneshot::channel();
+        state.entries.push_back((token, send));
+        drop(state);
+        self.inbound_idle.changed.notify_waiters();
+        Some((
+            InboundIdleRegistration {
+                registry: self.inbound_idle.clone(),
+                token,
+            },
+            receive,
+        ))
+    }
+    fn retire_oldest_inbound_idle(&self) {
+        loop {
+            let entry = {
+                let mut state = self.inbound_idle.state.lock().unwrap();
+                if state.retiring.is_some() {
+                    return;
+                }
+                let entry = state.entries.pop_front();
+                state.retiring = entry.as_ref().map(|(token, _)| *token);
+                entry
+            };
+            let Some((token, retire)) = entry else {
+                return;
+            };
+            if retire.send(()).is_ok() {
+                return;
+            }
+            let mut state = self.inbound_idle.state.lock().unwrap();
+            if state.retiring == Some(token) {
+                state.retiring = None;
+            }
+        }
+    }
+    /// Retirement only signals a completed idle connection. Its owning future
+    /// must drop the channel and release the real permits before admission wins.
+    pub(in crate::node) async fn accept_connection_slot(
+        &self,
+        slots: &Arc<Semaphore>,
+    ) -> Result<OwnedSemaphorePermit, TransportError> {
+        loop {
+            let changed = self.inbound_idle.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Ok(permit) = slots.clone().try_acquire_owned() {
+                return Ok(permit);
+            }
+            // The channel can release its TCP permits just before the outer
+            // accept task drops its connection permit. Wait for that owner;
+            // do not retire another idle channel during this handoff.
+            if self.inbound.available_permits() == 0 {
+                self.retire_oldest_inbound_idle();
+            }
+            tokio::select! {
+                result = slots.clone().acquire_owned() => return result.map_err(|_| TransportError::AdmissionDenied),
+                _ = changed => {}
+            }
+        }
+    }
+
     fn prepare_capacity(&self, direction: &Arc<Semaphore>) {
         self.prune();
         if direction.available_permits() == 0 || self.total.available_permits() == 0 {
             // Idle connections must never prevent a new identity/route or an
             // incoming peer from making progress. Active sessions are untouched.
             self.idle.lock().unwrap().clear();
+            if self.total.available_permits() == 0
+                || Arc::ptr_eq(direction, &self.inbound) && direction.available_permits() == 0
+            {
+                self.retire_oldest_inbound_idle();
+            }
         }
     }
 
@@ -425,6 +546,16 @@ impl SessionPool {
         let directional = self.outbound.clone().try_acquire_owned().ok()?;
         let shared = self.total.clone().try_acquire_owned().ok()?;
         Some(vec![directional, shared])
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn test_capacity_snapshot(&self) -> (usize, usize, usize, Option<usize>) {
+        (
+            self.total.available_permits(),
+            self.inbound.available_permits(),
+            self.outbound.available_permits(),
+            self.idle.try_lock().ok().map(|idle| idle.len()),
+        )
     }
 
     pub(in crate::node) async fn inbound(
@@ -699,6 +830,20 @@ impl Node {
 
     /// The caller must have consumed a successful complete sync exchange. On
     /// cancellation, malformed replies or I/O errors, simply drop the channel.
+    /// Only call after a successful terminal response, before reading a new
+    /// frame. Ready bytes win a retirement race; registration ends before recv.
+    pub(in crate::node) async fn recv_inbound_reuse(
+        &self,
+        channel: &mut SecureChannel<TcpStream>,
+    ) -> Result<InboundReuse, TransportError> {
+        if let Some((registration, retire)) = self.sessions.register_inbound_idle()
+            && let Some(retired) = wait_registered_inbound(channel, registration, retire).await?
+        {
+            return Ok(InboundReuse::Retired(retired));
+        }
+        channel.recv().await.map(InboundReuse::Frame)
+    }
+
     pub(in crate::node) fn recycle_sync_channel(&self, channel: SecureChannel<TcpStream>) {
         self.recycle_channel(SessionProtocol::Sync, channel);
     }
@@ -771,6 +916,96 @@ mod tests {
         ] {
             assert!(!local_capacity_busy(&error));
         }
+    }
+
+    #[tokio::test]
+    async fn ready_encrypted_frame_wins_idle_retirement_and_cancellation_removes_its_token() {
+        use crate::identity::device::DeviceIdentity;
+        use tokio::net::TcpListener;
+        let first = DeviceIdentity::generate();
+        let second = DeviceIdentity::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sending, receiving) = tokio::join!(
+            async {
+                let stream = TcpStream::connect(address).await.unwrap();
+                SecureChannel::connect(stream, &first, Some(&second.public()))
+                    .await
+                    .unwrap()
+            },
+            async {
+                let (stream, _) = listener.accept().await.unwrap();
+                SecureChannel::accept(stream, &second).await.unwrap()
+            }
+        );
+        let (mut sending, mut receiving) = (sending, receiving);
+        let pool = SessionPool::default();
+        let (registration, retire) = pool.register_inbound_idle().unwrap();
+        let mut waiting = Box::pin(wait_registered_inbound(&receiving, registration, retire));
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(waiting.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(waiting);
+        assert!(
+            pool.inbound_idle.state.lock().unwrap().entries.is_empty(),
+            "cancelled idle reception cannot retain a stale eviction token"
+        );
+        sending
+            .send(b"already arrived framed request")
+            .await
+            .unwrap();
+        receiving.inbound_frame_ready().await.unwrap();
+        let (registration, retire) = pool.register_inbound_idle().unwrap();
+        pool.retire_oldest_inbound_idle();
+        assert!(
+            wait_registered_inbound(&receiving, registration, retire)
+                .await
+                .unwrap()
+                .is_none(),
+            "already-ready bytes must win simultaneous retirement"
+        );
+        assert!(pool.inbound_idle.state.lock().unwrap().entries.is_empty());
+        assert_eq!(
+            receiving.recv().await.unwrap(),
+            b"already arrived framed request",
+            "readiness and retirement must never consume or corrupt a framed request"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_idle_retirement_is_bounded_and_old_guards_cannot_remove_new_entries() {
+        let pool = SessionPool::default();
+        let (first, mut retired_first) = pool.register_inbound_idle().unwrap();
+        let (second, mut retired_second) = pool.register_inbound_idle().unwrap();
+        for _ in 0..MAX_DIRECTION_CONNECTIONS {
+            pool.retire_oldest_inbound_idle();
+        }
+        assert!(retired_first.try_recv().is_ok());
+        assert!(
+            matches!(
+                retired_second.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "repeated pressure must wait for the first owner to release its retirement guard"
+        );
+        drop(first);
+        assert_eq!(pool.inbound_idle.state.lock().unwrap().entries.len(), 1);
+        pool.retire_oldest_inbound_idle();
+        assert!(retired_second.try_recv().is_ok());
+        drop(second);
+        let registrations: Vec<_> = (0..MAX_DIRECTION_CONNECTIONS)
+            .map(|_| pool.register_inbound_idle().unwrap())
+            .collect();
+        assert!(pool.register_inbound_idle().is_none());
+        drop(registrations);
+        assert!(pool.inbound_idle.state.lock().unwrap().entries.is_empty());
+        assert_eq!(
+            pool.total.available_permits(),
+            MAX_TCP_CONNECTIONS,
+            "idle registration and cancellation never manufacture or release real TCP permits"
+        );
     }
 
     #[test]
