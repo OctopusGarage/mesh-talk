@@ -105,7 +105,9 @@ test("city avatar thumbnails load after scrolling the gallery", async ({
   await seedMarketPacks(page, ["cities"]);
   await enterChat(page);
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page
+    .getByRole("button", { name: "My group photo", exact: true })
+    .click();
   await page.getByText(/Choose from gallery/).click();
   const gallery = page.getByTestId("avatar-gallery");
   // Cold Windows module transforms need the startup budget before image checks.

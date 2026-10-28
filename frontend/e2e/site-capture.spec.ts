@@ -183,7 +183,9 @@ test("capture current desktop surfaces for the site and README", async ({
   await page.keyboard.press("Escape");
 
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page
+    .getByRole("button", { name: "My group photo", exact: true })
+    .click();
   await page.getByText(/Choose from gallery/).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();
   await page.screenshot({ path: resolve(output, "avatars-clubs.png") });
