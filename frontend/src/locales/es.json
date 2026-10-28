@@ -351,6 +351,7 @@
       "help": "Una copia confirmada significa que un miembro externo informó de almacenamiento duradero a uno de tus dispositivos vinculados. Las copias pueden perderse después; no confirma entrega ni lectura."
     },
     "sending": "enviando…",
+    "image": "Foto",
     "reply": "Responder",
     "react": "Reaccionar",
     "retry": "Reintentar",

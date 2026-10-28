@@ -1746,6 +1746,81 @@
       "escalation": [
         "Verify switching, reload persistence, short-window creation and sidebar/settings layout in Portuguese and Korean. Browser mocks cover interface behavior, not native operating-system menus or translated article content."
       ]
+    },
+    {
+      "id": "frontend-image-live-text",
+      "paths": [
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MediaPreview.test.ts",
+        "frontend/src/lib/sensitiveClipboard.ts",
+        "frontend/src/lib/sensitiveClipboard.test.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "docs/help/topics/send-files.md"
+      ],
+      "frontend": [
+        "src/features/chat/MediaPreview.test.ts",
+        "src/lib/sensitiveClipboard.test.ts",
+        "src/features/chat/mediaFileRead.test.ts",
+        "src/features/chat/protectedImage.test.ts"
+      ],
+      "capability": {
+        "summary": "Select and copy text directly in ordinary enlarged macOS chat images through WebKit Live Text and the existing clipboard policy.",
+        "guide": "docs/help/topics/send-files.md#copy-text-from-an-image",
+        "invariants": [
+          {
+            "name": "Only the ordinary enlarged Mac image opts into native selection and context menus; recognized text copy uses current-session admission and the existing confirmation/clear policy. Protected images remain excluded.",
+            "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
+          },
+          {
+            "name": "An image selection drag ending on the backdrop does not close the preview; explicit backdrop clicks, Close and Escape remain available.",
+            "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/media-recovery.spec.ts and e2e/protected-messages.spec.ts. Verify real macOS WKWebView blob-image recognition, drag selection and Command-C/context-menu copy with copy confirmation and clipboard clearing. Browser mocks prove wiring, not native recognition or system menu behavior. Test supported OS/languages and image sizes without globally enabling selection on protected content."
+      ]
+    },
+    {
+      "id": "frontend-reply-preview",
+      "paths": [
+        "frontend/src/features/chat/ReplyPreview.tsx",
+        "frontend/src/features/chat/ReplyPreview.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/e2e/reply-preview.spec.ts",
+        "frontend/src/features/chat/replyNavigation.ts",
+        "frontend/src/features/chat/replyNavigation.test.ts"
+      ],
+      "frontend": [
+        "src/features/chat/ReplyPreview.test.ts",
+        "src/features/chat/useConversationViewport.test.ts",
+        "src/lib/messagePresentation.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/features/chat/replyNavigation.test.ts"
+      ],
+      "capability": {
+        "summary": "Photo quotes show original authors and thumbnails below replies, share safe previews with the composer and open exact source context beyond loaded history.",
+        "guide": "docs/help/topics/history.md#follow-a-reply",
+        "invariants": [
+          {
+            "name": "Protected, recalled, expired, pending and oversized photo quotes never fetch plaintext preview bytes; ordinary photos reuse owner-scoped availability and object URLs.",
+            "reference": "docs/help/topics/history.md#follow-a-reply"
+          },
+          {
+            "name": "Clicking or keyboard-activating a quote centers and highlights its exact source through the existing virtualized viewport.",
+            "reference": "docs/help/topics/history.md#follow-a-reply"
+          },
+          {
+            "name": "Older-source navigation validates the exact conversation and message identity, owner/runtime lifetime and latest request; unavailable sources do not open substitute content.",
+            "reference": "docs/help/topics/history.md#follow-a-reply"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/reply-preview.spec.ts and the reply-to scenario in e2e/chat.spec.ts to verify thumbnails, keyboard navigation and exact-source scrolling."
+      ]
     }
   ],
   "prScenarios": [
@@ -2378,6 +2453,41 @@
         "e2e/language-settings.spec.ts",
         "e2e/login-recovery.spec.ts",
         "e2e/ui-audit-shell.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-image-live-text-acceptance",
+      "paths": [
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MediaPreview.test.ts",
+        "frontend/src/lib/sensitiveClipboard.ts",
+        "frontend/src/lib/sensitiveClipboard.test.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "docs/help/topics/send-files.md"
+      ],
+      "browser": [
+        "e2e/media-recovery.spec.ts",
+        "e2e/protected-messages.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "frontend-reply-preview-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ReplyPreview.tsx",
+        "frontend/src/features/chat/ReplyPreview.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/e2e/reply-preview.spec.ts",
+        "frontend/src/features/chat/replyNavigation.ts",
+        "frontend/src/features/chat/replyNavigation.test.ts"
+      ],
+      "browser": [
+        "e2e/reply-preview.spec.ts",
+        "e2e/chat.spec.ts"
       ]
     }
   ]

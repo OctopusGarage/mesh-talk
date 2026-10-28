@@ -351,6 +351,7 @@
       "help": "A confirmed copy means an external member reported durable storage to one of your linked devices. Copies can later be lost; this is not a delivery or read receipt."
     },
     "sending": "sending…",
+    "image": "Photo",
     "reply": "Reply",
     "react": "React",
     "retry": "Retry",
