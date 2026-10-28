@@ -221,6 +221,10 @@ impl Node {
                 .expect("account wake mutex");
             received.retain(&certified);
             if received.record(channel.peer_identity().clone(), epoch, revision) {
+                #[cfg(test)]
+                self.trace_account_client(channel.peer_identity(), || {
+                    format!("wake_received revision={revision}")
+                });
                 self.account_sync_notify.notify_one();
             }
         }
@@ -250,6 +254,10 @@ impl Node {
             ));
         }
         let epoch = self.account_wake.epoch;
+        #[cfg(test)]
+        self.trace_account_client(&peer.public, || {
+            format!("wake_send_begin revision={revision}")
+        });
         let mut channel = self
             .begin_account_exchange(
                 peer,
@@ -270,6 +278,10 @@ impl Node {
                     revision: echoed_revision,
                 },
             )) if echoed == epoch && echoed_revision == revision => {
+                #[cfg(test)]
+                self.trace_account_client(&peer.public, || {
+                    format!("wake_send_ack revision={revision}")
+                });
                 channel.recycle(self);
                 Ok(())
             }

@@ -49,6 +49,8 @@
         "frontend/src/features/chat/ConversationStates.tsx",
         "frontend/src/features/chat/ConversationView.test.ts",
         "frontend/e2e/member-account-projection.spec.ts",
+        "frontend/e2e/member-list-large.spec.ts",
+        "frontend/e2e/peer-picker-large.spec.ts",
         "frontend/src/lib/api/chat.ts",
         "frontend/src/lib/api.test.ts",
         "frontend/src/store/accountGroupOperations.ts",
@@ -122,7 +124,7 @@
       },
       "escalation": [
         "Run targeted group-sync reference-to-real browser scenarios, readonly/member completeness and applicable unchanged visual regression; mock IPC alone does not prove physical convergence.",
-        "Run member-account-projection browser scenarios at desktop and smaller native window sizes for keyboard access, long names, history scope and unavailable invitation controls."
+        "Run member-account-projection, member-list-large and peer-picker-large browser scenarios at desktop and smaller native window sizes for bounded rows, keyboard access, long names, history scope and unavailable invitation controls."
       ]
     },
     {

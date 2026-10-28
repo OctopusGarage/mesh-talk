@@ -64,6 +64,7 @@ export function MessageStatus({
         )}
         <span className="sr-only">{label}</span>
       </button>
+      {/* Reserve the scroll track before WebKit measures the wrapped flex row. */}
       {open && (
         <div
           id={id}
@@ -73,7 +74,7 @@ export function MessageStatus({
           aria-describedby={`${id}-description`}
           tabIndex={0}
           onKeyDown={escape}
-          className="max-h-[min(16rem,40vh)] min-w-0 basis-full overflow-y-auto pt-1 text-left text-xs leading-relaxed outline-offset-2 focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring [overflow-wrap:anywhere]"
+          className="max-h-[min(16rem,40vh)] min-w-0 basis-full overflow-y-scroll pt-1 text-left text-xs leading-relaxed outline-offset-2 focus-visible:outline focus-visible:outline-1 focus-visible:outline-ring [overflow-wrap:anywhere]"
         >
           <div className="ml-auto max-w-sm space-y-2">
             <h3 id={`${id}-heading`} className="font-medium text-foreground">

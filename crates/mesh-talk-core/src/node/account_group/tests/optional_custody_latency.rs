@@ -136,7 +136,7 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
         }
     }));
     source.note_account_local_change();
-    tokio::time::timeout(Duration::from_secs(8), held)
+    super::cold_account_setup(held)
         .await
         .expect("the next real authenticated History request must reach the gate")
         .unwrap();

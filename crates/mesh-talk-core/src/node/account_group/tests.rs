@@ -19,6 +19,15 @@ mod message_actions;
 #[path = "tests/message_action_reference.rs"]
 mod message_action_reference;
 
+// Cold authenticated fixture arrival is established before operation admission.
+// Keep its existing 30-second owner budget separate from the held 8-second
+// operation/progress assertions; this helper does not drive additional traffic.
+async fn cold_account_setup<T>(
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, tokio::time::error::Elapsed> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), future).await
+}
+
 fn node(path: &Path, account: &Account) -> Arc<Node> {
     let (dm, _) = mpsc::unbounded_channel();
     let (channel, _) = mpsc::unbounded_channel();
@@ -1438,7 +1447,7 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
     );
     assert!(reference.channel_members(group).is_empty());
     assert!(!reference.channel_can_manage(group));
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    cold_account_setup(async {
         loop {
             let requester_ready = reference.group_operation_versions.lock().unwrap()
                 .get(&owner.user_id()).is_some_and(|support| support.public == owner.identity.public());

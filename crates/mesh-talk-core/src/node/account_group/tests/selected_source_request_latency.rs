@@ -141,7 +141,7 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
             .await
             .unwrap();
     }
-    tokio::time::timeout(Duration::from_secs(8), async {
+    super::cold_account_setup(async {
         loop {
             let ready = [&owner, &reference].into_iter().all(|node| {
                 let peer = if node.user_id() == owner.user_id() {
@@ -298,7 +298,7 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     // unchanged publication correctly emits no wake; schedule the reference's
     // next ordinary refresh only after the response hook is installed.
     owner.account_sync_notify.notify_one();
-    tokio::time::timeout(Duration::from_secs(8), held)
+    super::cold_account_setup(held)
         .await
         .expect("the selected executor must reach the unrelated authenticated Control response")
         .unwrap();

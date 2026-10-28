@@ -94,6 +94,53 @@ async fn channel_custody_is_shared_with_certified_sibling_while_holder_is_offlin
     channel_custody_sibling_scenario(true).await;
 }
 
+async fn pull_custody_page_observed(
+    node: &std::sync::Arc<Node>,
+    peer: &crate::discovery::roster::PeerRecord,
+    cursor: &mut sync::DocumentSyncCursor,
+    mut local_busy: impl FnMut(usize),
+) {
+    let started = std::time::Instant::now();
+    let mut attempts = 0;
+    let mut busy = 0;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(retry_at) = cursor.retry_at {
+                tokio::time::sleep_until(retry_at.into()).await;
+            }
+            attempts += 1;
+            match node.pull_account_documents_page(peer, cursor).await {
+                Ok(()) if !cursor.admission_deferred() => return,
+                Ok(()) => {}
+                Err(error) => {
+                    assert!(
+                        super::super::account_sync::local_sync_capacity_busy(&error),
+                        "custody page protocol exchange failed: {error}"
+                    );
+                    busy += 1;
+                    local_busy(busy);
+                }
+            }
+            assert!(cursor.admission_deferred());
+            assert!(cursor.retry_at.is_some());
+        }
+    })
+    .await;
+    eprintln!(
+        "functional custody page attempts={attempts} local_busy={busy} elapsed_ms={} completed={}",
+        started.elapsed().as_millis(),
+        result.is_ok()
+    );
+    result.expect("functional custody page must complete within thirty seconds");
+}
+async fn pull_custody_page(
+    node: &std::sync::Arc<Node>,
+    peer: &crate::discovery::roster::PeerRecord,
+    cursor: &mut sync::DocumentSyncCursor,
+) {
+    pull_custody_page_observed(node, peer, cursor, |_| {}).await;
+}
+
 #[tokio::test]
 async fn channel_custody_never_counts_sender_sibling_as_other_member() {
     channel_custody_sibling_scenario(false).await;
@@ -110,36 +157,6 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         cursor.domain = AccountDocumentDomain::ChannelCustody as usize;
         cursor
     };
-    // A local admission rejection exchanges no bytes and retains this page.
-    // Follow the existing cursor retry contract rather than treating transient
-    // backpressure as a protocol failure or discarding its continuation.
-    async fn pull_custody_page(
-        node: &std::sync::Arc<Node>,
-        peer: &crate::discovery::roster::PeerRecord,
-        cursor: &mut sync::DocumentSyncCursor,
-    ) {
-        tokio::time::timeout(Duration::from_secs(8), async {
-            loop {
-                if let Some(retry_at) = cursor.retry_at {
-                    tokio::time::sleep_until(retry_at.into()).await;
-                }
-                match node.pull_account_documents_page(peer, cursor).await {
-                    Ok(()) if !cursor.admission_deferred() => return,
-                    Ok(()) => {}
-                    Err(error) => {
-                        assert!(
-                            super::super::account_sync::local_sync_capacity_busy(&error),
-                            "custody page protocol exchange failed: {error}"
-                        );
-                    }
-                }
-                assert!(cursor.admission_deferred());
-                assert!(cursor.retry_at.is_some());
-            }
-        })
-        .await
-        .expect("custody page must recover from local admission within eight seconds");
-    }
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let other = Account::generate();
@@ -675,18 +692,32 @@ async fn authentication_backpressure_preserves_document_progress_and_recovers() 
             .contains_key(&source.user_id()),
         "local contention cannot retire authenticated peer operation support"
     );
-    drop(held);
+    let mut held = Some(held);
     let serving = Arc::clone(&source);
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let channel = serving.privacy_accept(stream).await.unwrap();
         serving.serve_connection(channel).await;
     });
-    cursor.retry_at = None;
-    target
-        .pull_account_documents_page(&peer, &mut cursor)
-        .await
-        .unwrap();
+    let mut observed_busy = 0;
+    pull_custody_page_observed(&target, &peer, &mut cursor, |busy| {
+        observed_busy = busy;
+        if busy == 2 {
+            drop(held.take());
+        }
+    })
+    .await;
+    assert_eq!(
+        observed_busy, 2,
+        "two real local admission failures must precede the signed page"
+    );
+    assert!(held.is_none());
+    let imported = target.account_document_meta(&key).unwrap();
+    assert!(imported.valid(&account.public().ed25519_pub));
+    assert_eq!(
+        imported.version(),
+        source.account_document_meta(&key).unwrap().version()
+    );
     assert_eq!(
         target.account_document(&key).unwrap().unwrap().payload(),
         b"queued settings"
@@ -3464,6 +3495,128 @@ async fn group_control_source_leave_is_individual_and_all_known_left_sources_pro
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Left
+    );
+}
+
+#[tokio::test]
+async fn sequential_legacy_departures_retain_only_a_whole_account_closed_source() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        eventlog::{Event, EventKind},
+        node::{AccountGroupRole, account_group::wire::GroupControlHead},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &Account::generate());
+    let first = node(&dir.path().join("first"), &account);
+    let second = node(&dir.path().join("second"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    let group = new_channel_id();
+    let genesis = Event::new(
+        &owner.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Sequential whole-account closure".into(),
+            members: vec![
+                owner.identity.public(),
+                first.identity.public(),
+                second.identity.public(),
+            ],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    for source in [&first, &second] {
+        source.log.lock().unwrap().append(genesis.clone()).unwrap();
+        source.process_channel(group);
+    }
+    // Each physical source must actually know its sibling's certified binding,
+    // otherwise its individual departure cannot observe that remaining member.
+    let first_member = group_control_source_document(&first, group);
+    let second_member = group_control_source_document(&second, group);
+    for (target, document) in [
+        (&first, &second_member),
+        (&second, &first_member),
+        (&reference, &first_member),
+        (&reference, &second_member),
+    ] {
+        target
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(document.meta.clone(), document.payload())
+            .unwrap();
+    }
+    first.leave_channel(group).await.unwrap();
+    let first_left = group_control_source_document(&first, group);
+    let first_head =
+        GroupControlHead::decode(first_left.payload(), &account.public().ed25519_pub).unwrap();
+    assert_eq!(first_head.access.source.role, AccountGroupRole::Left);
+    assert_eq!(first_head.access.observation.role, AccountGroupRole::Member);
+    assert_eq!(first_head.access.observation.sources.len(), 1);
+    assert_eq!(
+        first_head.access.observation.sources[0].source.device,
+        second.identity.public()
+    );
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(first_left.meta.clone(), first_left.payload())
+        .unwrap();
+    let before = reference.account_group_access_with_closed(group).unwrap();
+    assert_eq!(before.role, AccountGroupRole::Member);
+    assert_eq!(before.sources.len(), 1);
+    assert_eq!(before.sources[0].device, second.identity.public());
+    // B's final signed cut contains A's real departure before B leaves.
+    let first_leave = first
+        .log
+        .lock()
+        .unwrap()
+        .events(&group)
+        .into_iter()
+        .find(|event| event.kind == EventKind::ChannelLeave)
+        .unwrap()
+        .clone();
+    second.log.lock().unwrap().append(first_leave).unwrap();
+    second.process_channel(group);
+    second
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(first_left.meta.clone(), first_left.payload())
+        .unwrap();
+    second.leave_channel(group).await.unwrap();
+    let second_left = group_control_source_document(&second, group);
+    let second_head =
+        GroupControlHead::decode(second_left.payload(), &account.public().ed25519_pub).unwrap();
+    assert_eq!(second_head.access.source.role, AccountGroupRole::Left);
+    assert_eq!(second_head.access.observation.role, AccountGroupRole::Left);
+    assert!(second_head.access.observation.sources.is_empty());
+    assert!(first_head.access.compatible(&second_head.access));
+    reference
+        .account_documents
+        .lock()
+        .unwrap()
+        .merge(second_left.meta.clone(), second_left.payload())
+        .unwrap();
+    let closed = reference.account_group_access_with_closed(group).unwrap();
+    assert_eq!(closed.role, AccountGroupRole::Left);
+    assert_eq!(
+        closed.sources.len(),
+        1,
+        "an earlier individual departure that still observed an active sibling is not a whole-account closure source"
+    );
+    assert_eq!(closed.sources[0].device, second.identity.public());
+    assert_eq!(
+        closed.sources[0].lifetime,
+        second_head.access.source.lifetime
     );
 }
 

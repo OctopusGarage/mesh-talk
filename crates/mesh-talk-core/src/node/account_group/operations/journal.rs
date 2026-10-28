@@ -2112,6 +2112,7 @@ mod tests {
     fn source_terminal_fanout_coalesces_history_per_group_and_rebuilds_on_reopen() {
         let (dir, node, account, accepted, effect) = fixture();
         let group = effect.conversation_id;
+        assert_eq!(node.account_group_fanout_sequence(group), None);
         node.log
             .lock()
             .unwrap()
@@ -2126,6 +2127,8 @@ mod tests {
         }
         let first = node.account_group_fanout_page(0, 128);
         assert_eq!(first.len(), 1);
+        assert!(first[0].0 > 0);
+        assert_eq!(node.account_group_fanout_sequence(group), Some(first[0].0));
         let operation = AccountGroupOperation::Rename {
             name: "another exact effect".into(),
         };
@@ -2168,6 +2171,7 @@ mod tests {
         );
         assert!(later[0].0 > first[0].0);
         assert_eq!(later[0].1, group);
+        assert_eq!(node.account_group_fanout_sequence(group), Some(later[0].0));
         let public = node.identity.public();
         drop(node);
         let journal =

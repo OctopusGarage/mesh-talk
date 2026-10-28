@@ -104,6 +104,8 @@ impl Node {
                 channel: hex::encode(group.as_bytes()),
                 source_device: self.user_id(),
             };
+            #[cfg(test)]
+            let published_revision;
             let changed = {
                 let mut store = self.account_documents.lock().expect("documents mutex");
                 let previous = store.meta(&key);
@@ -133,8 +135,18 @@ impl Node {
                     &payload,
                     false,
                 );
+                #[cfg(test)]
+                {
+                    published_revision = revision;
+                }
                 store.merge(meta, &payload)
             };
+            #[cfg(test)]
+            if matches!(&changed, Ok(true)) {
+                self.trace_account_client(&self.identity.public(), || {
+                    format!("operation_local_published revision={published_revision}")
+                });
+            }
             match changed {
                 Ok(true) => self.documents_changed(),
                 Ok(false) => {}

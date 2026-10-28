@@ -168,7 +168,7 @@ async fn reference_owner_rename_overtakes_blocked_optional_document_page_over_no
         servers.spawn(target.run_accept_loop(listener));
     }
     owner.publish_account_group_access(&mut None);
-    tokio::time::timeout(Duration::from_secs(30), acknowledged_page)
+    super::cold_account_setup(acknowledged_page)
         .await
         .unwrap_or_else(|_| {
             let imported = drafts.iter().filter(|(key, _, _)| reference.account_document_meta(key).is_some()).count();

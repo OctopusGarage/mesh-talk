@@ -397,6 +397,7 @@ mod tests {
         pending: Arc<Semaphore>,
         connections: Arc<Semaphore>,
         shutdown: tokio::sync::oneshot::Sender<()>,
+        shutdown_observed: tokio::sync::oneshot::Receiver<()>,
         task: tokio::task::JoinHandle<Result<(), IntegrationError>>,
     }
 
@@ -442,8 +443,10 @@ mod tests {
         assert!(endpoint.starts_with("http://127.0.0.1:"));
         let host = endpoint.strip_prefix("http://").unwrap().to_owned();
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let (observed, shutdown_observed) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(server.run_until(service, async {
             let _ = stopped.await;
+            let _ = observed.send(());
         }));
         Fixture {
             _directory: directory,
@@ -456,6 +459,7 @@ mod tests {
             pending,
             connections,
             shutdown,
+            shutdown_observed,
             task,
         }
     }
@@ -723,6 +727,11 @@ mod tests {
             request(&f, "POST", "/v1/context", &f.host, &f.token, "", "{}").await;
         assert_eq!(status, 503);
         assert_eq!(response["error"]["code"], "CAPACITY_EXCEEDED");
+        // Real TCP admission and overload rejection precede virtual time. Exercise
+        // the unchanged production header deadline without sleeping for 30 seconds.
+        tokio::time::pause();
+        tokio::time::advance(REQUEST_TIMEOUT).await;
+        tokio::time::resume();
         let mut bytes = Vec::new();
         tokio::time::timeout(
             REQUEST_TIMEOUT + Duration::from_secs(3),
@@ -766,6 +775,19 @@ mod tests {
         .await
         .unwrap();
         f.shutdown.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), f.shutdown_observed)
+            .await
+            .unwrap()
+            .unwrap();
+        // The shutdown future has been observed by run_until; its synchronous
+        // listener close and drain setup run before that task yields back to us.
+        // The admitted body must still own its slot while shutdown is draining.
+        assert_eq!(f.pending.available_permits(), MAX_REQUESTS - 1);
+        assert!(!f.task.is_finished());
+        assert!(tokio::net::TcpStream::connect(&f.host).await.is_err());
+        tokio::time::pause();
+        tokio::time::advance(REQUEST_TIMEOUT).await;
+        tokio::time::resume();
         let mut bytes = Vec::new();
         tokio::time::timeout(
             REQUEST_TIMEOUT + Duration::from_secs(3),

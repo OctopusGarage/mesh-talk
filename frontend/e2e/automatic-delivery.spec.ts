@@ -126,11 +126,30 @@ for (const viewport of [
       ),
     ).toBe(true);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
-    expect(
-      await details.evaluate(
-        (element) => element.scrollWidth <= element.clientWidth,
-      ),
-    ).toBe(true);
+    const layout = await details.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      width: element.getBoundingClientRect().width,
+      overflowingChildren: Array.from(element.querySelectorAll("*"))
+        .filter((child) => child.scrollWidth > child.clientWidth)
+        .map((child) => ({
+          tag: child.tagName,
+          left:
+            child.getBoundingClientRect().left -
+            element.getBoundingClientRect().left,
+          right:
+            child.getBoundingClientRect().right -
+            element.getBoundingClientRect().left,
+          classes: child.getAttribute("class"),
+          scrollWidth: child.scrollWidth,
+          clientWidth: child.clientWidth,
+          width: child.getBoundingClientRect().width,
+        })),
+    }));
+    expect(layout.scrollWidth, JSON.stringify(layout)).toBeLessThanOrEqual(
+      layout.clientWidth,
+    );
+    expect(layout.overflowingChildren, JSON.stringify(layout)).toEqual([]);
     await page.screenshot({
       path: testInfo.outputPath("delivery-details-open.png"),
     });

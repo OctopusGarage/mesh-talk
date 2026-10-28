@@ -2597,6 +2597,16 @@ impl Node {
                     )
                     .is_none_or(|at| at <= std::time::Instant::now())
             };
+            #[cfg(test)]
+            for (key, _) in control_queue.iter().filter(|(key, _)| {
+                selected.contains(&key.identity())
+                    || hints.iter().any(|hint| hint.public == key.public())
+            }) {
+                self.trace_account_client(&key.public(), || format!("control_queue selected={} hint={} ready={} retry_ms={} active_same={} active_other={}",
+                    selected.contains(&key.identity()), hints.iter().any(|hint| hint.public == key.public()), ready(key),
+                    document_cursors.get(key).and_then(|state| state.retry_at).map_or(0, |at| at.saturating_duration_since(std::time::Instant::now()).as_millis()),
+                    document_active.contains(key), document_active.iter().any(|active| active.lane == DocumentLane::Control && active != key)));
+            }
             let selected_waiting = control_queue
                 .iter()
                 .any(|(key, _)| selected.contains(&key.identity()) && ready(key));
@@ -3200,6 +3210,22 @@ impl Node {
                     for lane in DocumentLane::ALL {
                         let key = DocumentPeer::new(&device.public, lane);
                         let queue = &mut document_queues[lane.index()];
+                        #[cfg(test)]
+                        if lane == DocumentLane::Control {
+                            self.trace_account_client(&key.public(), || {
+                                format!(
+                                    "control_refresh active={} queued={} retry_ms={}",
+                                    document_active.contains(&key),
+                                    queue.iter().any(|(queued, _)| queued == &key),
+                                    document_cursors
+                                        .get(&key)
+                                        .and_then(|state| state.retry_at)
+                                        .map_or(0, |at| at
+                                            .saturating_duration_since(std::time::Instant::now())
+                                            .as_millis())
+                                )
+                            });
+                        }
                         if document_active.contains(&key) {
                             document_refresh.insert(key);
                         } else if !queue.iter().any(|(queued, _)| queued == &key)

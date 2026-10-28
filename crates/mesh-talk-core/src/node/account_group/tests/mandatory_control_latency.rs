@@ -102,7 +102,7 @@ async fn reference_owner_rename_overtakes_held_mandatory_inventory_over_noise() 
         group,
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(8), async {
+    super::cold_account_setup(async {
         loop {
             let ready = [&owner, &reference].into_iter().all(|node| {
                 let peer = if node.user_id() == owner.user_id() {
@@ -170,7 +170,7 @@ async fn reference_owner_rename_overtakes_held_mandatory_inventory_over_noise() 
     // unchanged publication correctly emits no wake; schedule the reference's
     // next ordinary refresh only after the response hook is installed.
     reference.account_sync_notify.notify_one();
-    tokio::time::timeout(Duration::from_secs(8), held)
+    super::cold_account_setup(held)
         .await
         .expect("the reference must reach an authenticated Inventory response")
         .unwrap();

@@ -115,7 +115,7 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
         group,
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(8), async {
+    super::cold_account_setup(async {
         loop {
             let ready = [&owner, &reference].into_iter().all(|node| {
                 let peer = if node.user_id() == owner.user_id() {
@@ -192,7 +192,7 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
     // unchanged publication correctly emits no wake; schedule the reference's
     // next ordinary refresh only after the response hook is installed.
     reference.account_sync_notify.notify_one();
-    tokio::time::timeout(Duration::from_secs(8), held)
+    super::cold_account_setup(held)
         .await
         .expect("the reference must reach the unrelated authenticated Control response")
         .unwrap();

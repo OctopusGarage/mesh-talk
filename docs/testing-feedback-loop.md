@@ -147,15 +147,15 @@ checks before adding retries or global obligations. A policy change needs an
 explicit rationale and review; this process does not automatically rewrite rules,
 relax thresholds or infer a speedup or zero omissions from a small sample.
 
-Private account-action fixtures follow the [account/device ownership contract](module-boundaries.md#account-and-device-ownership): source commit, durable requester adoption and public member receipt are separate observations. Keep the private request/result deadline around source and requester commitment, exact effect IDs and durable private projections with optional History disabled. Verify public receipt afterward through the existing authenticated sync owner, retaining original signature, author, sealed payload and reduction assertions. Never install an event or decrypted body directly to make receipt pass. Dedicated automatic-fanout fixtures retain coverage for scheduling, backpressure, delayed work and real member delivery.
+Private account-action fixtures follow the [account/device ownership contract](module-boundaries.md#account-and-device-ownership): source commit, durable requester adoption and public member receipt are separate observations. The generic History-off/signed-provenance functional fixture uses a thirty-second watchdog around source and requester commitment, exact effect IDs and durable private projections. This is a functional completion bound, not an eight-second business latency guarantee. Dedicated request/result and held-traffic performance fixtures retain their independent eight-second assertions. Verify public receipt afterward through the existing authenticated sync owner, retaining original signature, author, sealed payload and reduction assertions. Never install an event or decrypted body directly to make receipt pass. Dedicated automatic-fanout fixtures retain coverage for scheduling, backpressure, delayed work and real member delivery.
 
 When a reference-device fixture requires a synchronous capability-cache override
 and admission on one current-thread runtime, keep that requester and its watchers
 there. Run the other simulated devices' complete accept/background owners on
 independent owned current-thread runtimes. Transfer listeners through standard
 sockets before registering them on the owning reactor; release all server start
-gates together without warmup traffic. Preserve the original deadlines, resource
-budgets and signed-provenance assertions. Post-commit public network observations
+gates together without warmup traffic. Preserve each explicitly scoped functional
+or performance deadline, resource budgets and signed-provenance assertions. Post-commit public network observations
 run on the observing device's runtime. Shutdown closes admission, cancels and joins
 producers, clears idle sessions, drains admitted writers and joins every owned
 thread, including panic cleanup. A same-source topology comparison diagnoses a
@@ -183,7 +183,9 @@ body-free cursor flags and metadata-class differences rather than message bodies
 Explicit custody-page fixtures follow the production cursor's local-admission
 contract. A typed local-capacity rejection exchanges no bytes: preserve the same
 cursor and continuation, wait for its existing retry time, and retry within the
-fixture's bounded deadline. An early successful no-op while admission is still
+functional fixture's thirty-second watchdog. Two typed local-admission failures
+can legitimately require two five-second deferrals before a signed page completes;
+retain real admission and authenticated-page checks rather than clearing cooldowns. An early successful no-op while admission is still
 deferred does not prove a completed exchange. Other errors fail immediately;
 History-off, exact signed negative versions and repaired-positive assertions stay
 unchanged. Do not clear cooldowns, create a new cursor or warm the connection to
@@ -356,6 +358,26 @@ using the boundary table above. Existing PR preflight, full-health, protected CI
 and release obligations remain unchanged. Compare median/p95 feedback latency,
 compile time, resource queue time, first-attempt failures and defects caught only
 by broader tests before claiming a speedup.
+
+### Cold fixture preparation versus measured progress
+
+Account-group Noise latency fixtures share the existing test owner's bounded
+30-second `cold_account_setup` for reciprocal capability establishment and the
+first authenticated response that creates a controlled hold. These waits happen
+before operation admission or before the external custody source starts. They
+establish the fixture's real connection state; they are not an eight-second
+operation or custody latency assertion, and they do not drive extra RPCs, warm
+session pools, retry submissions or suppress background workers.
+
+Once the original operation is admitted, or the external possession proof starts,
+the existing eight-second progress assertions remain unchanged. The same applies
+to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
+Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
+work drains. The overall nextest per-test 60-second and mutation 240-second
+limits remain authoritative; stage bounds do not add together into a larger test
+budget. Only waits with this specific pre-admission/controlled-hold purpose use
+the cold helper; do not replace unrelated eight-second waits by matching their
+numeric duration.
 
 ## Structured development feedback
 

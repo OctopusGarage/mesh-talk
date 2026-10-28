@@ -1123,6 +1123,9 @@ pub(in crate::node) mod tests {
         let trace = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let trace_started = std::time::Instant::now();
         let trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let selected_trace_peer = std::sync::Arc::new(std::sync::Mutex::new(
+            None::<crate::identity::device::PublicIdentity>,
+        ));
         let peer_labels: std::collections::HashMap<_, _> = nodes
             .iter()
             .map(|(label, node)| (node.identity.public().user_id(), *label))
@@ -1132,9 +1135,51 @@ pub(in crate::node) mod tests {
             let client_labels = peer_labels.clone();
             let client_omitted = trace_omitted.clone();
             let weak = std::sync::Arc::downgrade(node);
+            let selected_trace_peer = selected_trace_peer.clone();
+            let own_public = node.identity.public();
+            let reference_public = reference.identity.public();
+            let queue_samples = std::sync::Mutex::new(std::collections::HashMap::new());
             *node.account_client_test_hook.lock().unwrap() =
                 Some(std::sync::Arc::new(move |peer, event| {
-                    if event.starts_with("control_")
+                    let selected_pair =
+                        selected_trace_peer
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .is_some_and(|online| {
+                                (own_public == reference_public && &peer == online)
+                                    || (&own_public == online && peer == reference_public)
+                            });
+                    if event.starts_with("control_queue") || event.starts_with("control_refresh") {
+                        if !selected_pair {
+                            return;
+                        }
+                        let state = event
+                            .split_ascii_whitespace()
+                            .map(|part| {
+                                if part.starts_with("retry_ms=") && part != "retry_ms=0" {
+                                    "retry_ms=pending"
+                                } else {
+                                    part
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let key = (
+                            peer.user_id(),
+                            event.split_ascii_whitespace().next().unwrap().to_owned(),
+                        );
+                        let mut samples = queue_samples.lock().unwrap();
+                        if samples.get(&key) == Some(&state) {
+                            return;
+                        }
+                        samples.insert(key, state);
+                    }
+                    if event.starts_with("operation_local_published")
+                        || event.starts_with("wake_")
+                        || (selected_pair
+                            && (event.starts_with("dial_") || event.starts_with("session_")))
+                        || event.starts_with("control_")
                         || event.starts_with("negotiation_begin domain=Some(GroupControl)")
                         || event.starts_with("negotiation_end domain=Some(GroupControl)")
                         || event.starts_with("page_end")
@@ -1335,6 +1380,7 @@ pub(in crate::node) mod tests {
             Some(_) => (source.clone(), Some(3)),
             None => (source.clone(), None),
         };
+        *selected_trace_peer.lock().unwrap() = Some(online.identity.public());
         let offline = offline_index.map(|index| nodes[index].1.clone());
         let offline_public = offline.as_ref().map(|node| node.identity.public());
         let kind = input.operation().kind();
@@ -1607,6 +1653,11 @@ pub(in crate::node) mod tests {
                     event.starts_with("executor_phase=") || event.starts_with("converged ")
                 })
                 .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "self control final observer chosen_online={online_label} omitted={} bounded_trace={:?}",
+            trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            trace.lock().unwrap().iter().cloned().collect::<Vec<_>>()
         );
         let status = reference
             .account_group_operation_status(&shared.account_id(), id)
