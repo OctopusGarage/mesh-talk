@@ -113,6 +113,78 @@ impl ShutdownSignals {
     }
 }
 
+// An accept failure can describe one abandoned connection rather than a failed
+// listener. Keep this paced retry future alive across unrelated select wakes.
+fn retryable_accept_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::Interrupted
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::WouldBlock
+    ) {
+        return true;
+    }
+    // Mio's Darwin sockaddr conversion returns this bare kind for an accepted
+    // connection without a usable peer address. Configuration/OS errors retain
+    // their source and must not enter this narrowly scoped compatibility path.
+    #[cfg(target_os = "macos")]
+    if error.kind() == ErrorKind::InvalidInput
+        && error.raw_os_error().is_none()
+        && error.get_ref().is_none()
+    {
+        return true;
+    }
+    false
+}
+#[derive(Debug)]
+struct AcceptFailure {
+    source: std::io::Error,
+    retries: u32,
+}
+impl std::fmt::Display for AcceptFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "relay TCP accept failed after {} retries: {}",
+            self.retries, self.source
+        )
+    }
+}
+impl std::error::Error for AcceptFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+async fn accept_with_retry<T, F, A>(mut accept: F) -> std::io::Result<T>
+where
+    F: FnMut() -> A,
+    A: Future<Output = std::io::Result<T>>,
+{
+    let mut retries = 0u32;
+    loop {
+        match accept().await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => {
+                if !retryable_accept_error(&error) {
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        AcceptFailure {
+                            source: error,
+                            retries,
+                        },
+                    ));
+                }
+                let delay =
+                    Duration::from_millis(20u64 << retries.min(6)).min(Duration::from_secs(1));
+                retries = retries.saturating_add(1);
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
 async fn drain_sessions(
     office: &IndexedPostOffice,
     sessions: &mut JoinSet<Result<(), IndexedRelayError>>,
@@ -154,6 +226,9 @@ pub(super) async fn run(
         tokio::pin!(worker);
         {
             tokio::pin!(outgoing);
+            let accept = || listener.accept();
+            let accepting = accept_with_retry(accept);
+            tokio::pin!(accepting);
             result = loop {
                 tokio::select! {
                     biased;
@@ -171,9 +246,10 @@ pub(super) async fn run(
                             _ => {}
                         }
                     }
-                    incoming=listener.accept(), if sessions.len()<256=>{
+                    incoming=&mut accepting, if sessions.len()<256=>{
                         match incoming {
                             Ok((stream,_))=>{
+                                accepting.set(accept_with_retry(accept));
                                 let endpoint=endpoint.clone(); let identity=identity.clone();
                                 sessions.spawn(async move {
                                     stream.set_nodelay(true)?;
@@ -212,6 +288,126 @@ pub(super) async fn run(
 mod tests {
     use super::*;
     use mesh_talk_core::storage::profile::ProfileStorageLease;
+    #[tokio::test(start_paused = true)]
+    async fn accept_retries_transient_errors_then_returns_connection() {
+        for kind in [
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::WouldBlock,
+        ] {
+            let mut results =
+                std::collections::VecDeque::from([Err(std::io::Error::from(kind)), Ok(7)]);
+            let started = tokio::time::Instant::now();
+            let result = accept_with_retry(|| std::future::ready(results.pop_front().unwrap()))
+                .await
+                .unwrap();
+            assert_eq!(result, 7);
+            assert!(results.is_empty());
+            assert_eq!(started.elapsed(), Duration::from_millis(20));
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn accept_many_transient_errors_recover_with_capped_backoff() {
+        let started = tokio::time::Instant::now();
+        let mut attempts = Vec::new();
+        let connection = accept_with_retry(|| {
+            attempts.push(started.elapsed());
+            std::future::ready(if attempts.len() <= 12 {
+                Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted))
+            } else {
+                Ok(7)
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(connection, 7);
+        assert_eq!(
+            attempts,
+            [
+                0, 20, 60, 140, 300, 620, 1260, 2260, 3260, 4260, 5260, 6260, 7260
+            ]
+            .map(Duration::from_millis)
+        );
+        assert_eq!(started.elapsed(), Duration::from_millis(7260));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn accept_permanent_error_returns_immediately() {
+        let started = tokio::time::Instant::now();
+        let mut attempts = 0;
+        let error = accept_with_retry(|| {
+            attempts += 1;
+            std::future::ready(Err::<(), _>(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            )))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .contains("relay TCP accept failed after 0 retries")
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn pinned_accept_backoff_survives_unrelated_select_wake() {
+        let started = tokio::time::Instant::now();
+        let mut attempts = Vec::new();
+        {
+            let accept = accept_with_retry(|| {
+                attempts.push(started.elapsed());
+                std::future::ready(if attempts.len() < 3 {
+                    Err(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+                } else {
+                    Ok(7)
+                })
+            });
+            tokio::pin!(accept);
+            tokio::select! {
+                result=&mut accept=>panic!("accept finished before unrelated wake: {result:?}"),
+                _=tokio::time::sleep(Duration::from_millis(5))=>{}
+            }
+            assert_eq!((&mut accept).await.unwrap(), 7);
+        }
+        assert_eq!(started.elapsed(), Duration::from_millis(60));
+        assert_eq!(attempts, [0, 20, 60].map(Duration::from_millis));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_cancels_pinned_accept_without_waiting_for_backoff() {
+        let started = tokio::time::Instant::now();
+        let attempts = std::cell::Cell::new(0);
+        {
+            let accept = accept_with_retry(|| {
+                attempts.set(attempts.get() + 1);
+                std::future::ready(Err::<(), _>(std::io::Error::from(
+                    std::io::ErrorKind::ConnectionReset,
+                )))
+            });
+            tokio::pin!(accept);
+            tokio::select! {
+                result=&mut accept=>panic!("accept finished before shutdown: {result:?}"),
+                _=tokio::time::sleep(Duration::from_millis(5))=>{}
+            }
+        }
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(started.elapsed(), Duration::from_millis(5));
+    }
+    #[test]
+    fn accept_invalid_input_retry_is_only_the_bare_macos_mio_error() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            retryable_accept_error(&Error::from(ErrorKind::InvalidInput)),
+            cfg!(target_os = "macos")
+        );
+        assert!(!retryable_accept_error(&Error::new(
+            ErrorKind::InvalidInput,
+            "invalid listener configuration"
+        )));
+        assert!(!retryable_accept_error(&Error::from_raw_os_error(22)));
+    }
     struct Dropped(Option<tokio::sync::oneshot::Sender<()>>);
     impl Drop for Dropped {
         fn drop(&mut self) {
