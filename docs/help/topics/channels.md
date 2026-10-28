@@ -93,8 +93,12 @@ does not enable message-history transfer or change any other synchronization cho
 
 ## Understand message copy status
 
-A group message's check marks report confirmed stored copies held by other
-member accounts. They do not mean everyone received or read the message. Copies
+A group message's copy icon reports confirmed stored copies held by other
+member accounts. The number beside it is 1 or 2+; a question mark means the
+status is unavailable, and the icon alone means no member copy is confirmed.
+An inbox icon identifies a post-office copy. Select a status icon to expand its
+explanation below the message; select it again or press Escape to collapse it.
+These signals do not mean everyone received or read the message. Copies
 on your own linked devices do not count as another member's confirmation.
 
 Your linked devices synchronize these historical confirmations with message

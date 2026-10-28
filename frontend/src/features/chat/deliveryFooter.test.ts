@@ -36,7 +36,7 @@ const render = (m: ChatMessage, isChannel = false, isPersonal = false) =>
   );
 
 describe("automatic delivery footer", () => {
-  it("visibly identifies a received file offer instead of claiming file delivery", async () => {
+  it("names a received file offer without claiming file delivery", async () => {
     await i18n.changeLanguage("en");
     const html = render({
       ...base,
@@ -50,7 +50,7 @@ describe("automatic delivery footer", () => {
       },
     });
     expect(html).toContain('aria-label="File offer received"');
-    expect(html).toContain('aria-hidden="true">File offer received</span>');
+    expect(html).not.toContain('role="tooltip"');
     expect(html).not.toContain('aria-label="Delivered"');
   });
   it("distinguishes personal file metadata from bytes and external upload progress", async () => {
@@ -85,7 +85,7 @@ describe("automatic delivery footer", () => {
       "Saved on this device",
     );
   });
-  it("renders an awaiting disclosure button and static delivered receipt for text, sticker and file cards", async () => {
+  it("renders compact inline disclosure buttons for text, sticker and file cards", async () => {
     await i18n.changeLanguage("en");
     for (const m of [
       base,
@@ -107,8 +107,10 @@ describe("automatic delivery footer", () => {
         'data-delivery="delivered"',
       );
       expect(render(m)).toContain('data-testid="delivery-details-trigger"');
-      expect(render(m)).toContain('aria-haspopup="dialog"');
-      expect(render({ ...m, delivery: "delivered" })).toContain('tabindex="0"');
+      expect(render(m)).toContain('aria-expanded="false"');
+      expect(render({ ...m, delivery: "delivered" })).toContain(
+        'aria-expanded="false"',
+      );
     }
   });
   it("never shows a receipt claim for groups, incoming or untracked messages", () => {
@@ -124,16 +126,17 @@ describe("automatic delivery footer", () => {
       const markup = render({ ...base, replicas: copies }, true);
       expect(markup).toContain(`data-custody="${copies}"`);
       expect(markup).not.toContain("data-delivery=");
-      expect(markup).toContain("not a delivery or read receipt");
+      expect(markup).not.toContain('role="tooltip"');
+      expect(markup).toContain('aria-expanded="false"');
       if (copies > 0) expect(markup).toContain("Last confirmed");
       else expect(markup).toContain("No member copy confirmed");
     }
   });
-  it("explains what a confirmed copy means without claiming one for known zero", async () => {
+  it("keeps known-zero copy meaning accessible without mounting its explanation", async () => {
     await i18n.changeLanguage("en");
     const html = render({ ...base, replicas: 0, postOfficeCopies: 0 }, true);
     expect(html).toContain("No member copy confirmed");
-    expect(html).toContain("A confirmed copy means");
+    expect(html).not.toContain("A confirmed copy means");
     expect(html).not.toContain("An external member reported durable storage;");
   });
   it("does not turn missing linked-device copy status into a zero-copy claim", async () => {
@@ -143,7 +146,9 @@ describe("automatic delivery footer", () => {
     expect(html).not.toContain('data-custody="0"');
     expect(html).toContain('data-custody="unknown"');
     expect(html).toContain("Copy status unavailable");
-    expect(html).toContain("Another linked device may have newer information.");
+    expect(html).not.toContain(
+      "Another linked device may have newer information.",
+    );
     expect(html).not.toContain("✓");
     expect(html).not.toContain("data-delivery=");
   });

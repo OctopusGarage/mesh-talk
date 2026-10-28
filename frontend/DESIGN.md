@@ -54,3 +54,14 @@ scroll within the footer. Successful refresh removes the notice. Evidence
 continues to expire independently of this presentation.
 
 Controls need accessible names, keyboard focus indicators and at least the existing touch target sizes. Native buttons handle Enter and Space; Escape closes Radix dialogs and menus. Brief 150–190ms motion is reserved for press feedback and floating surfaces. Ordinary message reading does not animate on entry. Reduced-motion settings remove spatial movement while preserving 80ms color and opacity feedback; progress that would otherwise be shown by a spinner has readable text. Theme previews use the actual canvas, signal and rail tokens. At narrow widths, the existing responsive conversation behavior remains intact; at short heights, dialogs scroll and tools remain reachable. Title-bar drag regions and native control insets remain clear on macOS, Windows and Linux.
+
+Message receipt and copy signals sit beside the timestamp below each bubble.
+Use small Lucide icons: a clock for awaiting receipt, a check for recipient
+confirmation, a copy icon with 1 or 2+ for member copies, and an inbox for
+post-office custody. An unknown copy observation uses a question mark beside
+the copy icon; zero confirmed member copies uses the icon alone. Keep neutral
+color and accessible names. Group copy evidence never uses delivery check marks.
+Selecting a signal expands its explanation in the message flow; hover and focus
+do not open overlays. Enter/Space toggles the disclosure, Escape collapses it
+and restores focus. Reset disclosure on message, conversation or session changes.
+Failure text, retry actions and file byte progress retain their separate meaning.
