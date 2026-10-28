@@ -24,6 +24,7 @@ import { useDrafts } from "@/store/drafts";
 import { useAuth } from "@/store/auth";
 import { usePacks } from "@/store/packs";
 import { messageSummary } from "@/lib/messagePresentation";
+import { useNewGroupAnnouncement } from "../useGroupAnnouncement";
 
 export function ConversationRow({
   conv,
@@ -53,6 +54,7 @@ export function ConversationRow({
   listSize: number;
 }) {
   const { t } = useTranslation();
+  const newAnnouncement = useNewGroupAnnouncement(channel ? conv.id : "");
   const packs = usePacks((s) => s.packs);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -183,6 +185,11 @@ export function ConversationRow({
             {mentioned && (
               <span className="shrink-0 font-medium text-destructive">
                 {t("sidebar.mentionedYou")}
+              </span>
+            )}
+            {newAnnouncement && (
+              <span className="shrink-0 font-medium text-signal">
+                {t("groupMetadata.newAnnouncement")}
               </span>
             )}
             <span className="truncate">

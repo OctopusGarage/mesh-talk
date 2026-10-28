@@ -21,6 +21,8 @@ export type SearchTarget =
     };
 
 export interface ChatMessage {
+  /** Group publication presentation; never an ordinary message or delivery receipt. */
+  announcement?: import("@/lib/types").ChannelMetadataValue;
   fileMessageAliases?: string[];
   protection?: import("@/lib/types").MessageProtection | null;
   /** Authenticated absolute send-time deadline; null/absent means keep. */

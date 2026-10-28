@@ -1,3 +1,8 @@
+import {
+  ChannelAnnouncementStrip,
+  AnnouncementPublication,
+} from "./ChannelAnnouncement";
+import { withAnnouncementPublications } from "@/lib/groupAnnouncements";
 import { ConversationBio } from "./ConversationHeaders";
 import { useMessageCollection } from "./favorites/useMessageCollection";
 import {
@@ -217,12 +222,28 @@ export function ConversationView() {
               (!message.id || !deletedContextIds.includes(message.id)) &&
               (message.expiresAtMs == null || message.expiresAtMs > expiryNow),
           )
-        : historyMessages,
-    [exactContext, historyMessages, deletedContextIds, expiryNow],
+        : active?.kind === "channel"
+          ? withAnnouncementPublications(
+              historyMessages,
+              channels.find((c) => c.channel_id === active.id)?.metadata
+                ?.announcement_history ?? [],
+              myAccountId,
+            )
+          : historyMessages,
+    [
+      exactContext,
+      historyMessages,
+      deletedContextIds,
+      expiryNow,
+      active?.kind,
+      active?.id,
+      channels,
+      myAccountId,
+    ],
   );
   const savedMessageIds = useFavoriteMembership(
     active,
-    messages,
+    messages.filter((message) => !message.announcement),
     `${owner}:${authGeneration}:${receptionScope}:${key}`,
   );
   const closeSearchContext = () => {
@@ -509,6 +530,12 @@ export function ConversationView() {
           )
         )}
       </header>
+      {isChannel && !sharedReference && (
+        <ChannelAnnouncementStrip
+          key={`${owner}:${authGeneration}:${receptionScope}:${active.id}`}
+          channelId={active.id}
+        />
+      )}
       {notificationReminder.visible && (
         <NotificationPermissionNotice
           onDismiss={notificationReminder.dismiss}
@@ -662,10 +689,18 @@ export function ConversationView() {
             atBottomThreshold={48}
             increaseViewportBy={400}
             itemContent={(i, m) => {
+              if (m.announcement)
+                return (
+                  <AnnouncementPublication
+                    channelId={active.id}
+                    value={m.announcement}
+                  />
+                );
               const prev = messages[i - 1];
               const next = messages[i + 1];
               const joins = (neighbor?: ChatMessage) =>
                 !!neighbor &&
+                !neighbor.announcement &&
                 neighbor.who === m.who &&
                 neighbor.fromMe === m.fromMe &&
                 formatDay(neighbor.wallClock) === formatDay(m.wallClock) &&

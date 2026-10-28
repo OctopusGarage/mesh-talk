@@ -175,6 +175,16 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   The `dm.rs` recipient sealed-box (no FS) is now used only
   to distribute channel keys, seal file manifests and encrypt delivery-control
   metadata (the latter has no forward secrecy and contains no message text).
+- **Shared group metadata** — owner-published group photos and announcements use the appended kind-19
+  metadata control, gated by V5 sync envelopes. Each publication encrypts its
+  bounded content under an independent random key sealed to accepted members;
+  eligible current holders can release only a current field's key to an accepted
+  newcomer. This does not export prior sender chains or enable pre-join text
+  history. Causal owner authority, exact device/account bindings and current
+  membership govern publication, replay and release. Independent field revisions
+  and durable clear tombstones preserve offline convergence without coupling
+  updates to membership epochs or ordinary message retention. Private avatar
+  overrides retain their account-document owner. See [group announcements](help/topics/channels.md#group-announcements).
 - **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
   single-use message keys; membership add/remove rotates the **epoch** and re-distributes
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are

@@ -613,6 +613,32 @@ Desktop `src-tauri/src/message_favorites.rs` owns admitted IPC adaptation;
 contact pin/alias preferences or Message Yourself as a collection store.
 [Favorites](favorites.md) owns the limits, retention and synchronization contract.
 
+## Shared group photos and announcements
+
+`core/node/group_metadata.rs` owns independently versioned owner-published group
+photos and announcements, encrypted publication keys, current-state releases and
+durable clear tombstones. It reuses channel authority and causal ownership
+validation; private account documents never grant authority over shared group
+content. Group sync capability gating and event-log retention preserve this
+contract across replay, offline recovery and accepted-member bootstrap.
+
+`src-tauri/src/chat_commands/channel_metadata.rs` owns exact owner/account/runtime
+admission for reads and edits. Channel summaries project validated current content
+and a bounded recent announcement-card window. `ui/components/GroupAvatar.tsx`
+resolves the existing private override before shared group content and the member
+montage; `AvatarEditMenu` only changes personal overrides. The group editor in
+`ui/features/chat/ChannelMetadataSettings.tsx` publishes shared changes with
+expected revisions and retires requests on group/session/authority replacement.
+`ChannelAnnouncement.tsx` owns current details, publication cards and reminders;
+`ui/lib/groupAnnouncements.ts` owns bounded device-private per-account version
+markers and presentation-only timeline merging. Publication cards never enter
+message delivery, read-receipt or ordinary-message unread ledgers.
+
+The [channel guide](help/topics/channels.md#group-announcements) owns the visible
+workflow and limits. Cover and announcement updates do not rotate membership or
+overwrite each other's revisions. Current-state release cannot become pre-join
+message history access.
+
 ## Network cost protection
 
 `core/node/network_cost.rs` owns temporary group attachment export eligibility,

@@ -1,4 +1,5 @@
 import { canManageChannel } from "./channelPermissions";
+import { ChannelMetadataSettings } from "./ChannelMetadataSettings";
 import {
   channelMemberAccounts,
   channelInviteAccounts,
@@ -527,6 +528,17 @@ export function MembersDialog({ dissolved = false }: { dissolved?: boolean }) {
           )}
         </DialogHeader>
 
+        {!sharedReference && open && channelId && (
+          <ChannelMetadataSettings
+            channelId={channelId}
+            canManage={
+              isOwner &&
+              !channel?.archived &&
+              !channel?.left &&
+              !channel?.pending_invite
+            }
+          />
+        )}
         {!sharedReference && open && channelId && (
           <ChannelHistorySettings
             channelId={channelId}

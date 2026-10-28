@@ -301,6 +301,7 @@ pub struct Node {
     pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
+    pub(in crate::node) group_metadata_cache: Mutex<super::group_metadata::MetadataCache>,
     #[cfg(test)]
     pub(in crate::node) channel_projection_replays: std::sync::atomic::AtomicUsize,
     /// Fixed read-only summaries recovered from previous devices at open time.
@@ -873,6 +874,7 @@ impl Node {
             channel_senders: Mutex::new(channel_senders),
             channel_custody: Mutex::new(channel_custody),
             channel_projection_cache: Mutex::new(Default::default()),
+            group_metadata_cache: Mutex::new(Default::default()),
             #[cfg(test)]
             channel_projection_replays: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]

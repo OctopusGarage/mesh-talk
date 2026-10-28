@@ -2,6 +2,50 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-group-metadata",
+      "paths": [
+        "frontend/src/features/chat/ChannelMetadataSettings.tsx",
+        "frontend/src/features/chat/ChannelMetadataSettings.test.ts",
+        "frontend/src/features/chat/ChannelAnnouncement.tsx",
+        "frontend/src/lib/groupAnnouncements.ts",
+        "frontend/src/lib/groupAnnouncements.test.ts",
+        "frontend/src/components/GroupAvatar.tsx",
+        "frontend/src/components/GroupAvatar.test.ts",
+        "frontend/src/components/identity/AvatarEditMenu.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/MembersDialog.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/e2e/group-metadata.spec.ts",
+        "frontend/src/features/chat/useGroupAnnouncement.ts"
+      ],
+      "capability": {
+        "summary": "Publish owner-authorized encrypted group photos and announcements while preserving private overrides and independently versioned current state.",
+        "guide": "docs/help/topics/channels.md#group-announcements",
+        "invariants": [
+          {
+            "name": "Personal group photos take priority; clearing restores shared content. Only current owner authority can publish, and stale sessions or revisions cannot overwrite newer state.",
+            "reference": "docs/module-boundaries.md#shared-group-photos-and-announcements"
+          },
+          {
+            "name": "Publication cards and private dismissal never fabricate message unread counts, recipient delivery or public read receipts.",
+            "reference": "CONTEXT.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run group-metadata, channel-history and group avatar browser scenarios plus applicable visual regression. Native IPC and encrypted loopback/restart/capability evidence are required; browser mocks do not certify physical peer synchronization."
+      ],
+      "frontend": [
+        "src/features/chat/ChannelMetadataSettings.test.ts",
+        "src/lib/groupAnnouncements.test.ts",
+        "src/components/GroupAvatar.test.ts",
+        "src/components/identity/AvatarEditMenu.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/store/channelRefresh.test.ts",
+        "src/features/chat/favorites/selection.test.ts"
+      ]
+    },
+    {
       "id": "frontend-inline-media",
       "paths": [
         "frontend/src/features/chat/MediaPreview.tsx",

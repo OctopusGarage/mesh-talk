@@ -68,7 +68,9 @@ pub(crate) mod filebook;
 pub(crate) mod files;
 #[cfg(test)]
 mod group_chain_tests;
+mod group_metadata;
 mod join_history;
+pub use group_metadata::{ChannelMetadata, ChannelMetadataValue};
 pub(crate) mod lifecycle;
 pub(crate) mod linking;
 pub(crate) mod media_store;

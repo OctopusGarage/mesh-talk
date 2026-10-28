@@ -2,6 +2,58 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-group-metadata",
+      "paths": [
+        "crates/mesh-talk-core/src/node/group_metadata.rs",
+        "crates/mesh-talk-core/src/node/group_metadata_tests.rs",
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/node/channel_projection_cache.rs",
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/join_history.rs",
+        "crates/mesh-talk-core/src/node/session.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/eventlog/event.rs",
+        "crates/mesh-talk-core/src/eventlog/store.rs",
+        "crates/mesh-talk-core/src/eventlog/persist.rs",
+        "crates/mesh-talk-core/src/eventlog/sync.rs",
+        "crates/mesh-talk-core/src/node/group_chain_tests.rs",
+        "crates/mesh-talk-core/src/node/node.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::group_metadata::tests::",
+            "current_group_metadata_crosses_real_tcp_after_owner_goes_offline",
+            "node::session::tests::",
+            "eventlog::event::tests::",
+            "eventlog::persist::tests::",
+            "node::join_history::tests::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Publish owner-authorized encrypted shared group photos and current announcements while preserving private photo overrides and independent field revisions.",
+        "guide": "docs/help/topics/channels.md",
+        "invariants": [
+          {
+            "name": "Only the current accepted owner account publishes; former-owner forks cannot replace transferred metadata. Current field keys reach accepted new members through retained holders independently of pre-join message history, without sharing sender chains.",
+            "reference": "docs/help/topics/channels.md"
+          },
+          {
+            "name": "Announcement deletion tombstones and bounded group artwork survive replay; metadata event kind 19 requires appended V5 sync envelopes before transfer to older decoders.",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      },
+      "consumers": [
+        "desktop-group-metadata"
+      ],
+      "escalation": [
+        "Exercise real linked owner-account devices, removal/re-invitation, source-offline restart and mixed-version native clients. Loopback TCP tests establish encrypted event convergence but not physical LAN reachability."
+      ]
+    },
+    {
       "id": "core-group-file-network-cost",
       "paths": [
         "crates/mesh-talk-core/src/node/network_cost.rs",
