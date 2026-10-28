@@ -733,8 +733,12 @@ impl ChannelBook {
             {
                 #[cfg(test)]
                 tests::MEMBERSHIP_REBUILDS.with(|count| {
-                    if let Some(current) = count.get() {
-                        count.set(Some(current + 1));
+                    if let Some((root, causal)) = count.get() {
+                        count.set(Some(if legacy_checks {
+                            (root + 1, causal)
+                        } else {
+                            (root, causal + 1)
+                        }));
                     }
                 });
                 let mut proofs = authority.original_device_proofs();
@@ -1504,20 +1508,22 @@ mod tests {
     use crate::eventlog::sync::reconcile;
 
     thread_local! {
-        pub(super) static MEMBERSHIP_REBUILDS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+        // Root projection control work and nested legacy parent-cut work are
+        // observed separately; both remain visible to content invariance checks.
+        pub(super) static MEMBERSHIP_REBUILDS: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
     }
 
     #[test]
     fn content_events_preserve_membership_without_rebuilding_account_proofs() {
         let mut f = crate::node::channels::account_self_control::tests::fixture(true);
         let project_count = |events: &[Event]| {
-            MEMBERSHIP_REBUILDS.with(|count| count.set(Some(0)));
+            MEMBERSHIP_REBUILDS.with(|count| count.set(Some((0, 0))));
             let projection =
                 ChannelBook::project_membership(f.group, &events.iter().collect::<Vec<_>>());
             let count = MEMBERSHIP_REBUILDS.with(|count| count.replace(None).unwrap());
-            (projection, count)
+            (projection, count.0, count.1)
         };
-        let (before, baseline) = project_count(&f.events);
+        let (before, baseline, baseline_causal) = project_count(&f.events);
         for index in 0..60 {
             let kind = [
                 EventKind::Message,
@@ -1535,7 +1541,7 @@ mod tests {
                 vec![],
             ));
         }
-        let (with_content, rebuilds) = project_count(&f.events);
+        let (with_content, rebuilds, causal_rebuilds) = project_count(&f.events);
         assert_eq!(
             with_content.state.as_ref().unwrap().members(),
             before.state.as_ref().unwrap().members()
@@ -1548,6 +1554,7 @@ mod tests {
             rebuilds, baseline,
             "content must not repeat immutable account proof reconstruction"
         );
+        assert_eq!(causal_rebuilds, baseline_causal);
         let accept = Event::new(
             &f.member,
             f.group,
@@ -1559,7 +1566,7 @@ mod tests {
             vec![],
         );
         f.events.push(accept.clone());
-        let (accepted, after_accept) = project_count(&f.events);
+        let (accepted, after_accept, _) = project_count(&f.events);
         assert!(
             accepted.authorized.contains(&accept.id),
             "content-parent ancestry must remain authorized"
@@ -1583,7 +1590,7 @@ mod tests {
             vec![],
         );
         f.events.push(leave.clone());
-        let (departed, after_leave) = project_count(&f.events);
+        let (departed, after_leave, after_leave_causal) = project_count(&f.events);
         assert!(departed.authorized.contains(&leave.id));
         assert!(
             !departed
@@ -1593,6 +1600,42 @@ mod tests {
                 .is_member(&f.member.user_id())
         );
         assert_eq!(after_leave, baseline + 2);
+        // Once a real departure requires legacy parent-cut validation, adding
+        // content must not repeat either root or nested causal rebuild work.
+        for index in 0..60 {
+            let kind = [
+                EventKind::Message,
+                EventKind::FileManifest,
+                EventKind::KeyRotation,
+            ][index % 3];
+            f.events.push(Event::new(
+                &f.owner,
+                f.group,
+                200 + index as u64,
+                vec![f.events.last().unwrap().id],
+                200 + index as u64,
+                200 + index as u64,
+                kind,
+                vec![],
+            ));
+        }
+        let (departed_with_content, root_after_content, causal_after_content) =
+            project_count(&f.events);
+        assert!(departed_with_content.authorized.contains(&leave.id));
+        assert!(
+            !departed_with_content
+                .state
+                .as_ref()
+                .unwrap()
+                .is_member(&f.member.user_id())
+        );
+        assert_eq!(root_after_content, after_leave);
+        assert_eq!(causal_after_content, after_leave_causal);
+        assert_eq!(
+            root_after_content + causal_after_content,
+            after_leave + after_leave_causal,
+            "post-departure content must not increase total proof reconstruction work"
+        );
         let forged = Event::new(
             &f.member,
             f.group,
@@ -1604,7 +1647,7 @@ mod tests {
             vec![],
         );
         f.events.push(forged.clone());
-        let (still_departed, _) = project_count(&f.events);
+        let (still_departed, _, _) = project_count(&f.events);
         assert!(!still_departed.authorized.contains(&forged.id));
         assert!(!still_departed.state.unwrap().is_member(&f.member.user_id()));
 
@@ -1678,7 +1721,7 @@ mod tests {
         );
         f.events
             .extend([invitation, authority, content_parent, reaccept.clone()]);
-        let (rejoined, after_rejoin) = project_count(&f.events);
+        let (rejoined, after_rejoin, _) = project_count(&f.events);
         assert!(rejoined.authorized.contains(&reaccept.id));
         assert!(
             rejoined

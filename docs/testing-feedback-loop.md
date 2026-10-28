@@ -379,6 +379,12 @@ budget. Only waits with this specific pre-admission/controlled-hold purpose use
 the cold helper; do not replace unrelated eight-second waits by matching their
 numeric duration.
 
+Projection-work regressions distinguish root membership-control reconstruction
+from nested legacy parent-cut proof validation. Keep the original root-control
+counts and observe nested work separately. Content-only additions, including
+content after a real departure, must leave both counts unchanged; do not pin a
+particular nested count or hide nested work from total-work assertions.
+
 ## Structured development feedback
 
 Every affected execution writes a unique JSON report under
