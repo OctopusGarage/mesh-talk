@@ -4318,8 +4318,8 @@ async fn channel_sending_survives_restart() {
     )
     .unwrap();
 
-    tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
-    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let alice_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(alice_listener));
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
 
     let channel = alice_node
         .create_channel("general", vec![bob_pub])
@@ -4335,9 +4335,17 @@ async fn channel_sending_survives_restart() {
         .expect("channel stream open");
     assert_eq!(got.text, b"before restart");
 
-    // RESTART Alice: drop her node, reopen from the SAME paths/password. Her
+    // RESTART Alice: retire every owner, reopen from the SAME paths/password. Her
     // `my_sender` is rebuilt from `channel.senders`, not the (sender-key-less) log.
-    drop(alice_node);
+    alice_node.runtime_work.close();
+    alice_node.clear_delivery_observations();
+    alice_task.abort();
+    assert!(alice_task.await.unwrap_err().is_cancelled());
+    alice_node.sessions.clear();
+    tokio::time::timeout(Duration::from_secs(5), alice_node.runtime_work.drain())
+        .await
+        .unwrap();
+    alice_node.close_profile().unwrap();
     let (a_dm2, _a_dm_r2) = mpsc::unbounded_channel();
     let (a_ch2, _a_ch_r2) = mpsc::unbounded_channel();
     let (a_file2, _a_file_r2) = mpsc::unbounded_channel();
@@ -4366,6 +4374,16 @@ async fn channel_sending_survives_restart() {
         .expect("channel stream open");
     assert_eq!(after.text, b"after restart");
     assert_eq!(after.from, alice_node2.user_id());
+    bob_node.runtime_work.close();
+    bob_node.clear_delivery_observations();
+    bob_task.abort();
+    assert!(bob_task.await.unwrap_err().is_cancelled());
+    bob_node.sessions.clear();
+    tokio::time::timeout(Duration::from_secs(5), bob_node.runtime_work.drain())
+        .await
+        .unwrap();
+    bob_node.close_profile().unwrap();
+    alice_node2.close_profile().unwrap();
 }
 
 /// Live add-member rig over loopback TCP: Alice creates a {Alice, Bob} channel and
@@ -5256,7 +5274,7 @@ async fn media_lands_in_durable_store_survives_prune_and_restart() {
     )
     .unwrap();
     let bob_node = Node::open(bob, bob_roster, b_dm, b_ch, b_f, &b_log, &b_sent, "pw").unwrap();
-    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
+    let bob_task = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(listener));
 
     // A multi-chunk IMAGE payload sent via the MEDIA button (kind drives media-store).
     let mut payload = vec![0x89u8; crate::file::CHUNK_SIZE + 4242];
@@ -5332,7 +5350,16 @@ async fn media_lands_in_durable_store_survives_prune_and_restart() {
 
     // RESTART: reopen Bob on the same dir — the media store is on disk, so the image still
     // reads back even though its chunks are gone and history was reloaded from the logs.
-    drop(bob_node);
+    bob_node.runtime_work.close();
+    bob_node.clear_delivery_observations();
+    bob_task.abort();
+    assert!(bob_task.await.unwrap_err().is_cancelled());
+    alice_node.sessions.clear();
+    bob_node.sessions.clear();
+    tokio::time::timeout(Duration::from_secs(5), bob_node.runtime_work.drain())
+        .await
+        .unwrap();
+    bob_node.close_profile().unwrap();
     let (b2_dm, _b2_dm_r) = mpsc::unbounded_channel();
     let (b2_ch, _b2_ch_r) = mpsc::unbounded_channel();
     let (b2_f, _b2_f_r) = mpsc::unbounded_channel();
@@ -5356,6 +5383,14 @@ async fn media_lands_in_durable_store_survives_prune_and_restart() {
         Some(&payload[..]),
         "stored media still reads back after restart, with no chunks"
     );
+    alice_node.runtime_work.close();
+    alice_node.clear_delivery_observations();
+    alice_node.sessions.clear();
+    tokio::time::timeout(Duration::from_secs(5), alice_node.runtime_work.drain())
+        .await
+        .unwrap();
+    alice_node.close_profile().unwrap();
+    bob_node2.close_profile().unwrap();
 }
 
 #[tokio::test]

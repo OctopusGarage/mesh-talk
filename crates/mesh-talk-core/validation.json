@@ -688,7 +688,8 @@
     {
       "id": "core-channel",
       "paths": [
-        "crates/mesh-talk-core/src/channel/"
+        "crates/mesh-talk-core/src/channel/",
+        "crates/mesh-talk-core/tests/forward_secrecy_boundaries.rs"
       ],
       "rust": [
         {
@@ -698,8 +699,23 @@
           ]
         }
       ],
+      "capability": {
+        "summary": "Preserve exact channel receiver state through authenticated candidate preparation and reject exhausted sender-key counters before mutation.",
+        "guide": "docs/ARCHITECTURE.md",
+        "invariants": [
+          {
+            "name": "Text and file manifests share the authenticated-author and epoch-bound receiver chain; bad AEAD and abandoned preparation leave live state unchanged.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "The strict bounded device-local codec preserves skipped-key identity and eviction order; exhausted u32 advancement cannot wrap, while terminal skipped keys remain consumable.",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      },
       "escalation": [
-        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
+        "Receiver candidate or checkpoint changes require the separate integration selection: cargo test -p mesh-talk-core --test forward_secrecy_boundaries signed_channel_text_and_manifest_retry_over_noise_loopback. The local codec alone does not certify durable receiver/transcript atomicity or demand-loaded startup."
       ],
       "consumers": [
         "core-node"

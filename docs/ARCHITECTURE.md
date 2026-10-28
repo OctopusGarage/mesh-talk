@@ -184,6 +184,16 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   attack. Receiver state currently rebuilds by reopening distributions from the
   event log; replacing this with consuming pairwise ratchets requires a durable,
   transactional receiver projection that preserves restart and replay behavior.
+  Opening text or a file manifest first binds the authenticated author and epoch,
+  then prepares an exact private receiver candidate. Only successful AEAD installs
+  it; failed authentication and abandoned preparation preserve the live chain.
+  The bounded device-local codec preserves the next position, skipped keys and
+  exact eviction order, rejects malformed or oversized input, and wipes temporary
+  secret buffers. It is neither a wire distribution nor a portable backup format.
+  Sender and receiver advances reject exhausted `u32` positions before mutation;
+  already-buffered skipped keys remain usable at the terminal position. These
+  primitives do not yet persist receiver checkpoints or atomically commit crypto
+  with transcript installation, and do not remove startup history replay.
   An owner-authored `ChannelDissolve`
   event closes a channel for all members without erasing local history; closed channels
   remain visible as read-only history and reject new local events. Desktop-created

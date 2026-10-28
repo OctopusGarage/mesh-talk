@@ -440,6 +440,7 @@ mod tests {
     #[tokio::test]
     async fn inherited_owner_invitation_commits_pending_account_authority_with_invitation() {
         let f = Fixture::new();
+        let target_directory = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -454,8 +455,8 @@ mod tests {
             dm,
             channels,
             files,
-            &f._directory.path().join("invite-target.log"),
-            &f._directory.path().join("invite-target-sent.log"),
+            &target_directory.path().join("invite-target.log"),
+            &target_directory.path().join("invite-target-sent.log"),
             "pw",
         )
         .unwrap();
@@ -504,16 +505,19 @@ mod tests {
                 .is_member(&f.devices[3].public(), &proof)
         );
         assert_eq!(projection.authority.key_epoch(), Some(0));
-        let log = f.node.log.lock().unwrap();
-        let event = log
-            .get(&projection.authority.current_event().unwrap())
-            .unwrap()
-            .unwrap();
-        assert!(event.parents.contains(&grant.membership_event));
-        assert_eq!(
-            log.get(&grant.membership_event).unwrap().unwrap().kind,
-            EventKind::MembershipChange
-        );
+        {
+            let log = f.node.log.lock().unwrap();
+            let event = log
+                .get(&projection.authority.current_event().unwrap())
+                .unwrap()
+                .unwrap();
+            assert!(event.parents.contains(&grant.membership_event));
+            assert_eq!(
+                log.get(&grant.membership_event).unwrap().unwrap().kind,
+                EventKind::MembershipChange
+            );
+        }
         server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 }
