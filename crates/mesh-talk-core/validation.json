@@ -1600,7 +1600,7 @@
             "node::file_consent::",
             "node::file_consent_store::",
             "node::file_completion::",
-            "node::opaque_relay::permission_tests::",
+            "node::opaque_relay::",
             "retained_relay_file_exchange_rechecks_signed_consent_and_relay_role",
             "relay_file_worker_preserves_progress_across_slow_mailbox_exchanges",
             "relay_custody_releases_slots_for_more_than_eight_pending_files",

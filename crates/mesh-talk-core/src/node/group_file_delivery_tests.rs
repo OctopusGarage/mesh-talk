@@ -60,15 +60,15 @@ impl GroupRelayFixture {
         let alice = DeviceIdentity::generate();
         let aa = Account::generate();
         let bob = DeviceIdentity::generate();
-        let ba = Account::generate();
+        let bob_account = Account::generate();
         let akeys = alice.secret_bytes();
         let bkeys = bob.secret_bytes();
         let aaccount = aa.secret_bytes();
-        let baccount = ba.secret_bytes();
+        let baccount = bob_account.secret_bytes();
         let ap = Announce::new_with_account(&alice, &aa, "Alice", port);
-        let bp = Announce::new_with_account(&bob, &ba, "Bob", port);
+        let bp = Announce::new_with_account(&bob, &bob_account, "Bob", port);
         let (a, _, _) = node_with_files(&directory.path().join("a"), alice, aa, &bp);
-        let (b, _, offers) = node_with_files(&directory.path().join("b"), bob, ba, &ap);
+        let (b, _, offers) = node_with_files(&directory.path().join("b"), bob, bob_account, &ap);
         // Seed only genuine signed group setup controls. The offer and every
         // file byte below must travel through actual encrypted TCP mailboxes.
         let group = a
