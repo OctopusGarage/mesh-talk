@@ -35,14 +35,17 @@ scenarios in `requiredBrowserPaths` and additional spec files in the owning
 validation contract. Discovery checks do not replace executed browser evidence.
 
 Portable browser acceptance runs through `scripts/evals/portable-runner.mjs`.
-Windows uses two sequential Playwright shards with separate browser/dev-server
+Windows uses four sequential Playwright shards with separate browser/dev-server
 lifetimes; other platforms use one. Each shard writes a unique nested evidence
 root and must exit successfully. The runner merges every outcome and validates
 the unchanged full scenario inventory before the existing screenshot/trace
 validator runs. Missing, duplicate, skipped, flaky or failed cases remain failures.
-This bounds process lifetime after Windows traces showed progressive local
-page-load latency and a 20-minute job cancellation after 55 of 57 passed cases;
-it does not increase the job deadline or establish a product latency guarantee.
+The current 76-case core and 77-case extended inventories keep each Windows
+process to at most 20 scenarios; discovery regressions verify this bound and the
+exact once-only union. Two 38-case processes exceeded the 20-minute hosted job
+deadline after 75 of 76 scenarios passed, with later page loads slowing down.
+Four processes reduce that accumulation without increasing the job deadline,
+retrying failed scenarios or establishing a product latency guarantee.
 
 ## Validation stages and agent responsibilities
 
