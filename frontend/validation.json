@@ -2,6 +2,47 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-inline-media",
+      "paths": [
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/mediaFile.tsx",
+        "frontend/src/features/chat/mediaObjectUrlCache.ts",
+        "frontend/src/features/chat/mediaObjectUrlCache.test.ts",
+        "frontend/src/features/chat/mediaFileRead.test.ts",
+        "frontend/src/features/chat/useConversationViewport.ts",
+        "frontend/src/features/chat/useConversationViewport.test.ts",
+        "frontend/e2e/media-scroll.spec.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "frontend/e2e/media-lifecycle.spec.ts",
+        "frontend/e2e/media-hook-harness.tsx"
+      ],
+      "frontend": [
+        "src/features/chat/mediaObjectUrlCache.test.ts",
+        "src/features/chat/mediaFileRead.test.ts",
+        "src/features/chat/mediaFile.test.ts",
+        "src/features/chat/useConversationViewport.test.ts",
+        "src/features/chat/protectedImage.test.ts"
+      ],
+      "capability": {
+        "summary": "Keep inline media geometry stable during receive, decode and virtualized remounts while reusing ordinary media within bounded session ownership.",
+        "guide": "docs/module-boundaries.md#inline-media-presentation",
+        "invariants": [
+          {
+            "name": "Receiving, loading, decoded and unsupported inline previews keep a responsive frame; user scroll intent prevents stale anchor restoration.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
+          {
+            "name": "Ordinary media reuse shares admitted reads and URLs, bounds idle Blob bytes and entries, expires idle URLs, and revokes on owner/runtime retirement; protected reveals remain ephemeral.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          }
+        ]
+      },
+      "escalation": [
+        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior."
+      ]
+    },
+    {
       "id": "frontend-call-media",
       "paths": [
         "frontend/src/store/calls.ts",
@@ -1749,6 +1790,31 @@
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-inline-media-acceptance",
+      "paths": [
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/mediaFile.tsx",
+        "frontend/src/features/chat/mediaObjectUrlCache.ts",
+        "frontend/src/features/chat/useConversationViewport.ts",
+        "frontend/e2e/media-scroll.spec.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "frontend/e2e/media-lifecycle.spec.ts",
+        "frontend/e2e/media-hook-harness.tsx"
+      ],
+      "browser": [
+        "e2e/media-scroll.spec.ts",
+        "e2e/media-recovery.spec.ts",
+        "e2e/media-lifecycle.spec.ts",
+        "e2e/chat.spec.ts",
+        "e2e/protected-messages.spec.ts",
+        "e2e/ui-visual-regression.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
     {
       "id": "frontend-call-media-acceptance",
       "paths": [

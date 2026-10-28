@@ -100,6 +100,34 @@ example, discovery TTL and conversation presence need not share a constant just
 because both measure time; session admission and mailbox admission must retain
 their distinct authorization contracts.
 
+### Inline media presentation
+
+`ui/features/chat/MediaPreview.tsx` owns ordinary inline image/video presentation.
+Receiving, loading, decoded and unsupported states share a responsive frame
+(up to 320 pixels wide, 4:3 for images and 16:9 for video); artwork is contained
+without cropping, and the lightbox retains full-size access. Transfer readiness
+must not swap an ordinary preview from a compact file card to an image row.
+Attachment consent remains owned by `FileBubble` and the existing file policy.
+
+`mediaFile.tsx` owns durable-first reads and explicitly opts ordinary previews
+into `mediaObjectUrlCache.ts`. Concurrent consumers share one admitted read and
+Blob URL. Active views hold references; idle reuse is limited to 64 entries,
+32 MiB of Blob bytes, and 30 seconds since the last view released its reference.
+Oversized media is released on last use instead of evicting smaller idle media.
+Auth generation, owner, chat runtime, identity or readiness retirement revokes
+stale URLs and clears video posters; retired reads cannot initiate fallback or
+publish a URL. Protected reveals keep the default per-mount URL lifecycle and
+never opt into ordinary-media reuse.
+
+`useConversationViewport.ts` owns reader anchors and live-edge intent alongside
+Virtuoso's variable-height measurements. Pending user scroll input prevents old
+anchors from writing `scrollTop` during insertions or resize callbacks. Explicit
+navigation to the latest message clears earlier momentum intent so delayed row
+measurements keep following the live edge. Existing message keys remain the
+virtual row identities. Browser scenarios cover stable
+receive/decode geometry, remount reuse and owner cleanup; native trackpad momentum
+and WKWebView decoding still require platform evidence.
+
 ### Coordinated state owners
 
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,

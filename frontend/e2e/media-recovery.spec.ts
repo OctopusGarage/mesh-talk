@@ -96,6 +96,12 @@ test("received media recovers when bytes become available with stable fileConv",
   await expect(
     page.getByRole("progressbar", { name: "Receiving file…" }),
   ).toHaveAttribute("aria-valuenow", "50");
+  const messageRow = page.locator(
+    '[data-message-id="early-media-stable-message"]',
+  );
+  const receivingHeight = await messageRow.evaluate(
+    (row) => row.getBoundingClientRect().height,
+  );
   const initialCalls = await page.evaluate(
     () => (window as unknown as MediaWindow).__mediaDiagnostic.calls,
   );
@@ -130,6 +136,11 @@ test("received media recovers when bytes become available with stable fileConv",
         },
       )
       .toBe(true);
+    await expect
+      .poll(() =>
+        messageRow.evaluate((row) => row.getBoundingClientRect().height),
+      )
+      .toBe(receivingHeight);
     await page.getByRole("button", { name: "View full size" }).click();
     const lightbox = page.getByTestId("file-image-lightbox");
     await expect(lightbox).toBeVisible();

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 67], ["extended", 68]]) {
+  for (const [tier, count] of [["core", 74], ["extended", 75]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[0] === "portable-core.spec.ts" && path[1] === "presence waits for node readiness without showing a startup failure"));
@@ -21,7 +21,8 @@ test("portable matrix requires existing receipt and media cases in both tiers", 
     assert.ok(paths.some(path => path[1] === "delivery details close on navigation and app lock, including a late status response"));
     assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "delivery recovery survives its receipt and returns focus safely, then retires on logout"));
     assert.equal(paths.filter(path => path[0] === "media-recovery.spec.ts").length, 1);
-    assert.equal(paths.filter(path => path[0] === "media-lifecycle.spec.ts").length, 3);
+    assert.equal(paths.filter(path => path[0] === "media-lifecycle.spec.ts").length, 4);
+    assert.equal(paths.filter(path => path[0] === "media-scroll.spec.ts").length, 6);
     assert.equal(paths.filter(path => path[0] === "screenshot-portable.spec.ts").length, 9);
     assert.ok(paths.some(path => path[0] === "screenshot-portable.spec.ts" && path[1] === "Enter sends a staged screenshot after capture loses input focus"));
     assert.ok(paths.some(path => path[0] === "screenshot-portable.spec.ts" && path[1] === "clipboard denial retains the edited screenshot for retry without staging"));

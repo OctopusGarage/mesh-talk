@@ -160,7 +160,7 @@ function FileBubble({
   // below, so it stays visible and savable instead of rendering an empty bubble.
   if (
     !metadataPending &&
-    available &&
+    !approvalNeeded &&
     file.fileConv &&
     file.media &&
     withinInlineCap(file.name, file.size)
@@ -172,6 +172,7 @@ function FileBubble({
           name={file.name}
           size={file.size}
           mime={file.mime}
+          readOnly={readOnly}
         />
         {uploadKey && (
           <TransferBar

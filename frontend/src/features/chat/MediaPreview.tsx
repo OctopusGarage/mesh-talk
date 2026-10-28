@@ -57,11 +57,14 @@ export function MediaPreview({
   const status = useFileStatus(savedPath ? undefined : fileConv);
   const available = !!savedPath || !!status?.ready;
   const video = isVideo(name);
+  // Keep the same responsive box through IPC reads, decode, failures and remounts.
+  const frameClass = `relative mb-1.5 w-80 max-w-full overflow-hidden rounded-lg bg-muted/40 ${video ? "aspect-video" : "aspect-[4/3]"}`;
   const withinCap = withinInlineCap(name, size);
   const url = useFileObjectUrl(
     fileConv,
     available && withinCap,
     blobMime(name, mime),
+    { reuse: true },
   );
   const [lightbox, setLightbox] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -168,7 +171,7 @@ export function MediaPreview({
   // never a dead end (no empty bubble, no broken-image icon).
   const unpreviewable = (msgKey: string, testid?: string) => (
     <div
-      className="mb-1.5 flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2"
+      className={`${frameClass} flex items-center gap-2 border px-3 py-2`}
       data-testid={testid}
     >
       <p className="min-w-0 flex-1 text-xs text-muted-foreground">
@@ -213,7 +216,10 @@ export function MediaPreview({
   }
   if (!available)
     return (
-      <div className="min-w-40 p-2 text-xs" title={displayName}>
+      <div
+        className={`${frameClass} flex flex-col justify-center p-2 text-xs`}
+        title={displayName}
+      >
         <span className="block truncate">{displayName}</span>
         <ReceiveProgress status={status} />
       </div>
@@ -221,7 +227,7 @@ export function MediaPreview({
   if (!url)
     return (
       <div
-        className="flex min-h-24 min-w-40 items-center justify-center rounded-lg bg-muted/40 px-3 text-center text-xs text-muted-foreground"
+        className={`${frameClass} flex items-center justify-center px-3 text-center text-xs text-muted-foreground`}
         role="status"
       >
         {t("common.loading")} {displayName}
@@ -235,13 +241,10 @@ export function MediaPreview({
         src={poster}
         alt={displayName}
         data-testid="file-video"
-        className="max-h-80 w-full rounded-lg object-cover"
+        className="h-full w-full object-contain"
       />
     ) : (
-      <div
-        data-testid="file-video"
-        className="flex aspect-video w-full items-center justify-center rounded-lg bg-muted"
-      />
+      <div data-testid="file-video" className="h-full w-full bg-muted" />
     );
     // A play badge marks it as a video (purely visual in read-only mode).
     const playBadge = (
@@ -257,7 +260,7 @@ export function MediaPreview({
     // Read-only (history viewer): show the poster + badge, no click-to-play, no lightbox.
     if (readOnly) {
       return (
-        <div className="relative">
+        <div className={frameClass}>
           {thumb}
           {playBadge}
         </div>
@@ -272,12 +275,12 @@ export function MediaPreview({
           onClick={() => setLightbox(true)}
           title={t("files.playVideo")}
           aria-label={t("files.playVideo")}
-          className="relative mb-1.5 block w-full"
+          className={`${frameClass} block`}
         >
           <motion.div
             layoutId={layoutId}
             transition={layoutTransition}
-            className="relative"
+            className="relative h-full w-full"
           >
             {thumb}
             {playBadge}
@@ -332,13 +335,15 @@ export function MediaPreview({
   // Read-only (history viewer): the image as-is, no click-to-enlarge, no lightbox.
   if (readOnly) {
     return (
-      <img
-        src={url}
-        alt={displayName}
-        data-testid="file-image"
-        onError={() => setImgFailed(true)}
-        className="max-h-80 w-full rounded-lg object-cover"
-      />
+      <div className={frameClass}>
+        <img
+          src={url}
+          alt={displayName}
+          data-testid="file-image"
+          onError={() => setImgFailed(true)}
+          className="h-full w-full object-contain"
+        />
+      </div>
     );
   }
 
@@ -349,7 +354,7 @@ export function MediaPreview({
         onClick={() => setLightbox(true)}
         title={t("files.viewFullSize")}
         aria-label={t("files.viewFullSize")}
-        className="mb-1.5 block w-full"
+        className={`${frameClass} block`}
       >
         <motion.img
           src={url}
@@ -358,7 +363,7 @@ export function MediaPreview({
           transition={layoutTransition}
           data-testid="file-image"
           onError={() => setImgFailed(true)}
-          className="max-h-80 w-full rounded-lg object-cover"
+          className="h-full w-full object-contain"
         />
       </button>
       <AnimatePresence>

@@ -699,3 +699,110 @@ it("does not follow the live edge while exact search context is being measured",
   await nextAnimationFrame();
   expect(scrollTo).not.toHaveBeenCalled();
 });
+
+it("does not restore a stale anchor on an insertion while a user scroll event is pending", async () => {
+  await render("account:alice");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1500, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  scroller.getBoundingClientRect = () => ({ top: 0, bottom: 300 }) as DOMRect;
+  let rowTop = 150;
+  const row = document.createElement("div");
+  row.dataset.messageId = "target";
+  row.getBoundingClientRect = () =>
+    ({
+      top: rowTop - scroller.scrollTop,
+      bottom: rowTop + 300 - scroller.scrollTop,
+    }) as DOMRect;
+  scroller.append(row);
+  viewport.stopRestoring();
+  scroller.scrollTop = 100;
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  // Input has arrived, but the browser has not delivered its new scroll event.
+  viewport.stopRestoring();
+  rowTop += 80;
+  await act(async () =>
+    root.render(
+      createElement(Harness, {
+        conversation: "account:alice",
+        rows: [...messages, { ...messages[2], id: "appended" }],
+      }),
+    ),
+  );
+  expect(scroller.scrollTop).toBe(100);
+});
+
+it("keeps explicit jump-to-latest intent through delayed row measurements after recent input", async () => {
+  await render("account:images");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1000, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  scroller.scrollTop = 300;
+  viewport.stopRestoring();
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  const scrollTo = vi.fn();
+  Object.assign(viewport.virtuosoRef, { current: { scrollTo } });
+  viewport.jumpToLatest();
+  await nextAnimationFrame();
+  // The requested bottom position is still being measured, so an intermediate
+  // atBottom=false arrives before the virtualizer's correction finishes.
+  await act(async () => viewport.atBottomStateChange(false));
+  scrollTo.mockClear();
+  window.dispatchEvent(new Event("focus"));
+  await nextAnimationFrame();
+  expect(scrollTo).toHaveBeenCalled();
+});
+
+it("does not apply a resize correction before pending user scroll input is consumed", async () => {
+  let resized!: ResizeObserverCallback;
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        resized = callback;
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  await render("account:images");
+  const scroller = container.firstElementChild as HTMLElement;
+  Object.defineProperties(scroller, {
+    scrollHeight: { value: 1500, configurable: true },
+    clientHeight: { value: 300, configurable: true },
+  });
+  let top = 0;
+  scroller.getBoundingClientRect = () => ({ top, bottom: 300 }) as DOMRect;
+  const row = document.createElement("div");
+  row.dataset.messageId = "target";
+  row.getBoundingClientRect = () =>
+    ({
+      top: 150 - scroller.scrollTop,
+      bottom: 450 - scroller.scrollTop,
+    }) as DOMRect;
+  scroller.append(row);
+  viewport.stopRestoring();
+  scroller.scrollTop = 100;
+  await act(async () =>
+    viewport.onScroll({
+      currentTarget: scroller,
+    } as React.UIEvent<HTMLElement>),
+  );
+  viewport.stopRestoring();
+  top = 29;
+  await act(async () => resized([], {} as ResizeObserver));
+  await nextAnimationFrame();
+  expect(scroller.scrollTop).toBe(100);
+});
