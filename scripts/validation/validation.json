@@ -54,6 +54,7 @@
         "site/index.html",
         "docs/updates.md",
         "scripts/diagnostics/release-updater.test.mjs",
+        "scripts/diagnostics/release-signing.test.mjs",
         "scripts/release/delta.mjs",
         "scripts/release/delta_assets.py",
         "scripts/diagnostics/release-delta.test.mjs",
@@ -72,6 +73,7 @@
         "scripts/diagnostics/version-contract.test.mjs",
         "scripts/diagnostics/version-automation.test.mjs",
         "scripts/diagnostics/release-updater.test.mjs",
+        "scripts/diagnostics/release-signing.test.mjs",
         "scripts/diagnostics/release-delta.test.mjs"
       ],
       "escalation": [
@@ -350,7 +352,7 @@
         "scripts/diagnostics/browser-eval-report.test.mjs"
       ],
       "escalation": [
-        "Portable browser reporting requires exact scenario identities, unique trace and screenshot evidence, and zero skipped or flaky cases from the configured browser matrix. Diagnostic tests do not establish browser acceptance; see docs/testing-feedback-loop.md."
+        "Portable browser reporting requires exact scenario identities, unique trace and screenshot evidence, and zero skipped or flaky cases from the configured browser matrix. Windows process batches must remain at most 20 scenarios for both configured inventories, whose shard union must match every scenario exactly once; run the actual hosted Windows browser job to validate timing. Diagnostic tests do not establish browser acceptance; see docs/testing-feedback-loop.md."
       ]
     },
     {

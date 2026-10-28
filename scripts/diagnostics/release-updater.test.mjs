@@ -50,3 +50,17 @@ test("the installed CLI produces a real signature bound to the logical Nightly i
     assert.match(signature, /trusted comment:.*\tversion:0\.4\.4-nightly\.42\.2/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test("updater failures retain the cause and child diagnostics while redacting signing secrets", async () => {
+  const { updaterFailure } = await import("../release/updater.mjs");
+  const env = { TAURI_SIGNING_PRIVATE_KEY: "fixture-private-secret", TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "fixture-password" };
+  const error = Object.assign(new Error("EXDEV: cross-device link, rename"), {
+    stderr: Buffer.from("native equivalence rejected fixture-private-secret fixture-password"),
+  });
+  const output = updaterFailure(error, env);
+  assert.match(output, /EXDEV: cross-device link/);
+  assert.match(output, /native equivalence rejected/);
+  assert.ok(!output.includes(env.TAURI_SIGNING_PRIVATE_KEY));
+  assert.ok(!output.includes(env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD));
+});

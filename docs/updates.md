@@ -110,6 +110,10 @@ Clients never recreate archives, recompress installers or modify the running exe
 Release tooling verifies representation equivalence and round-trips every emitted patch
 through the production decoder. Patch plus required catalog/signatures must save at least
 25% and 1 MiB against the ordinary **compressed** full download; otherwise no patch is offered.
+Windows bundle snapshots stay beside the build output so restoration uses the same filesystem,
+even when the runner workspace and system temporary directory are on different drives.
+Updater preparation failures report the underlying exception and captured child diagnostics,
+with configured signing secrets redacted; authentication and equivalence failures remain fatal.
 
 Local limits are 64 KiB for the catalog, 128 MiB for the executable base and zstd window,
 256 MiB for the patch and reconstructed target, and 60 seconds for reconstruction. One normal
@@ -131,6 +135,15 @@ in each operating system's existing test pass; Linux's full-only branch cannot r
 macOS/Windows delta preparation paths.
 
 ### Free updater signing setup
+
+Desktop and post-office release ZIPs use `scripts/release/sign-blob.mjs` for keyless Cosign
+signing. Transient Rekor conflicts, HTTP rate limits/server errors and recognized transport
+timeouts retry in fresh signing processes at most three times, waiting 15 then 45 seconds.
+Each attempt has a three-minute process timeout and a separate temporary bundle; only a
+successful process with a nonempty bundle promotes it to the final path. Permanent errors
+and exhausted retries fail the build. A transparency-log conflict alone never counts as success.
+The aggregate verifier still checks each final bundle's certificate identity, issuer and
+transparency evidence before publication; retries do not bypass that gate.
 
 Generate a dedicated updater key pair once, outside the repository, using the installed Tauri CLI:
 

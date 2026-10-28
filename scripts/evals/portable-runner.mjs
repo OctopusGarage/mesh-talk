@@ -6,7 +6,9 @@ import { pathToFileURL } from "node:url";
 import { requiredBrowserPaths, validateBrowserReport } from "./browser-report.mjs";
 
 export function portableShards(platform) {
-  return platform === "win32" ? 2 : 1;
+  // The 76-case core inventory exceeded the hosted job deadline in two
+  // 38-case processes. Restart before Windows page-load latency accumulates.
+  return platform === "win32" ? 4 : 1;
 }
 
 /** Preserve every outcome and identity; the full inventory remains authoritative. */
@@ -31,7 +33,7 @@ export function mergePortableReports(reports) {
 }
 
 export async function runPortable({ shards = portableShards(process.platform) } = {}) {
-  assert.ok([1, 2].includes(shards), "Portable execution requires one or two bounded shards");
+  assert.ok([1, 2, 4].includes(shards), "Portable execution requires one, two or four bounded shards");
   const browser = process.env.EVAL_BROWSER ?? "chromium", tier = process.env.EVAL_TIER ?? "core";
   assert.ok(["chromium", "webkit", "firefox"].includes(browser), "Unsupported portable browser");
   assert.ok(["core", "extended"].includes(tier), "Unsupported portable tier");
