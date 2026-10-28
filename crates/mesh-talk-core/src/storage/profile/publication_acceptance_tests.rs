@@ -59,7 +59,7 @@ fn growth(rows: u64, payload_bytes: usize) {
             <= payload_bytes * 2 + 1024
     );
     assert_eq!(MAX_LIVE.with(|v| v.get()), 1);
-    assert_eq!(MAX_BATCH.with(|v| v.get()), 1);
+    assert!((1..=64).contains(&MAX_BATCH.with(|v| v.get())));
     assert!(MAX_EDGES.with(|v| v.get()) <= 128);
     assert!(!profile.cleanup_pending().unwrap());
     drop(profile);

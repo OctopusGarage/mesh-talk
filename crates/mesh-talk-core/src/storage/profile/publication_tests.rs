@@ -252,6 +252,7 @@ fn every_publication_cut_reopens_from_authenticated_state() {
         "events-staged",
         "events-ranked",
         "kahn-page",
+        "kahn-batch",
         "verified",
         "admission-row",
         "publication-transaction",
@@ -460,7 +461,7 @@ fn interrupted_import_restarts_with_bounded_live_records_and_batches() {
         "restart must visit the complete archived source"
     );
     assert_eq!(MAX_LIVE.with(|v| v.get()), 1);
-    assert_eq!(MAX_BATCH.with(|v| v.get()), 1);
+    assert_eq!(MAX_BATCH.with(|v| v.get()), 20);
     assert!(MAX_EDGES.with(|v| v.get()) <= 128);
 }
 

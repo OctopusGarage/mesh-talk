@@ -1083,7 +1083,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Streaming import visits only authenticated records without retaining prior decoded bodies, and callback errors preserve source bytes before any tail repair.",
+            "name": "Streaming import retains one decoded event and batches at most 64 encoded rows within 1 MiB including fixed metadata and parent capacity, with one legal oversized record alone. Ranking retains at most 64 ordered childless ready IDs, preserving parent priority and bounded child pages; initial migration may read historical body pages under the existing schema; committed batches retain owner durability. Callback errors preserve source bytes before tail repair.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

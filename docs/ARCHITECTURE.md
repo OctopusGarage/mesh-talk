@@ -1392,8 +1392,16 @@ bootstrap is checkpointed and closed before publication. Prepared, frozen,
 importing, verified and published states make interrupted operations explicit;
 event and arrival domains become available together only after verification.
 Streaming encrypted staging repairs historical child-before-parent ordering
-without retaining the graph or bodies in memory. Interrupted imports restart
-their authenticated stream; the legacy parser does not provide seek recovery.
+without retaining the graph or bodies in memory. Staging retains one decoded
+event and batches encoded rows within 64 records and 1 MiB, including fixed
+metadata and parent capacity; one legal oversized record is processed alone.
+Each batch uses the existing durable owner transaction. Canonical ranking batches
+only an ordered prefix of at most 64 childless ready vertex IDs, stopping
+before any parent that could introduce an earlier-priority child. Ranking retains
+fixed IDs, but SQLite may read body pages while locating rows in the existing
+WITHOUT ROWID staging table; initial migration remains proportional to history. Parent processing retains bounded 128-child pages. Interrupted imports
+restart their authenticated stream; the legacy parser does not provide seek
+recovery. These batches do not change the schema or publication barriers.
 Arrival import preserves last-record precedence and seeds only missing retained
 mailboxes with the upgrade time. The same indexed metadata pass assigns distinct
 touch ticks and verifies summed event counts and costs against the event domain;
