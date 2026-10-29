@@ -113,6 +113,60 @@ impl CallInbox {
 mod tests {
     use super::*;
     #[test]
+    fn adopted_bounded_constructor_exposes_only_its_committed_account_receipt_stream() {
+        use crate::{
+            discovery::Roster,
+            identity::{account::Account, device::DeviceIdentity},
+            node::{BoundedNodeOpenRequest, Node},
+            storage::profile::ProfileStorageLease,
+        };
+        use std::sync::Arc;
+        let directory = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let keys = identity.secret_bytes();
+        let open = |identity, account| {
+            Node::open_bounded_with_profile_lease(
+                ProfileStorageLease::acquire(directory.path()).unwrap(),
+                BoundedNodeOpenRequest {
+                    identity,
+                    account,
+                    roster: Arc::new(Mutex::new(Roster::default())),
+                    log_path: &directory.path().join("messages.log"),
+                    sent_path: &directory.path().join("sent.log"),
+                    password: "pw",
+                },
+            )
+            .unwrap()
+        };
+        let node = open(identity, Account::generate());
+        let previous = node.reception_effects.head().unwrap();
+        let next = Account::generate();
+        node.delivery
+            .lock()
+            .unwrap()
+            .prepare_profile_adoption(&next.account_id())
+            .unwrap();
+        crate::storage::profile::participant::prepare_adoption(
+            node.storage.database(),
+            &node.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        node.close_profile().unwrap();
+        let node = open(DeviceIdentity::from_secret_bytes(keys.0, keys.1), next);
+        let current = node.reception_effects.head().unwrap();
+        assert_eq!(current.sequence, 0);
+        assert_ne!(current.epoch, previous.epoch);
+        assert!(matches!(
+            node.reception_effects.register(
+                super::super::reception_effects::ReceptionConsumer::Desktop,
+                previous
+            ),
+            Err(crate::eventlog::LogError::StaleCursor)
+        ));
+        node.close_profile().unwrap();
+    }
+    #[test]
     fn explicit_legacy_target_retains_the_callers_collecting_contract() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let (generation, observer) = watch::channel(0);
