@@ -878,13 +878,7 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
         }
     })
     .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "the kept device receives the joining device's later nickname edit: {error}; expected={shared:?}; owner={:?}; sibling={:?}",
-            runtime.handle().account_profile(runtime.account_id()),
-            joining.handle().account_profile(joining.account_id()),
-        )
-    });
+    .expect("the kept device receives the joining device's later nickname edit");
     assert_eq!(shared.bio, "Personal signature");
     assert_eq!(shared.avatar, Some(b"avatar".to_vec()));
     joining.stop().await;
