@@ -39,6 +39,7 @@ jobs:
         run: node --test scripts/diagnostics/mutants-workflow.test.mjs scripts/diagnostics/mutation-evidence.test.mjs scripts/release/run-mutants.test.mjs
 
   mutants:
+    name: Workspace mutation sample (${{ matrix.worker }})
     needs: runner-contract
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

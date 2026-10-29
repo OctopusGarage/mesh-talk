@@ -11,6 +11,15 @@ test("main pushes cannot cancel scheduled deep assurance", () => {
   assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \|\| github.event_name == 'push' \}\}/);
 });
 
+test("skipped deep jobs cannot impersonate the protected mutation gate", () => {
+  const deep = workflow.split("  mutants:\n")[1].split("  mutation-gate:\n")[0];
+  const name = deep.match(/^    name: (.+)$/m)?.[1];
+  assert.ok(name, "deep jobs need an explicit name even when skipped before matrix expansion");
+  const skippedName = name.replace(/\$\{\{ matrix\.worker \}\}/g, "").trim();
+  assert.notEqual(skippedName, "mutants", "only the final aggregate owns the protected name");
+  assert.equal([...workflow.matchAll(/^    name: mutants$/gm)].length, 1);
+});
+
 test("mutation selection precedes expensive setup and zero selections skip only execution work", () => {
   const selection = workflow.indexOf("name: Select mutation sample");
   assert.ok(selection > 0);
