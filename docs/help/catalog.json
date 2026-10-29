@@ -412,7 +412,7 @@
       "document": "topics/language.md",
       "target": {
         "kind": "settings",
-        "category": "general",
+        "category": "appearance",
         "controlId": "setting-language"
       }
     },
@@ -534,7 +534,7 @@
       "document": "topics/local-agent-access.md",
       "target": {
         "kind": "settings",
-        "category": "general",
+        "category": "integrations",
         "controlId": "setting-local-agent-access"
       }
     },

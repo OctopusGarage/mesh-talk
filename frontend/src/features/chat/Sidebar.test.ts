@@ -107,7 +107,6 @@ vi.mock("./SearchDialog", () => ({ SearchDialog: () => null }));
 vi.mock("./FilesTray", () => ({ FilesTray: () => null }));
 vi.mock("./LinkDeviceDialog", () => ({ LinkDeviceDialog: () => null }));
 vi.mock("./DiagnosticsDialog", () => ({ DiagnosticsDialog: () => null }));
-vi.mock("./WebRtcTestDialog", () => ({ WebRtcTestDialog: () => null }));
 vi.mock("./OfflineConnectDialog", () => ({ OfflineConnectDialog: () => null }));
 vi.mock("./SettingsDialog", () => ({ SettingsDialog: () => null }));
 vi.mock("./ProfileDialog", () => ({ ProfileDialog: () => null }));

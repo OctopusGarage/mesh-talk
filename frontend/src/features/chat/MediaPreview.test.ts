@@ -73,6 +73,13 @@ let root: Root;
 const ancestorMenu = vi.fn();
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
   ancestorMenu.mockClear();
   document.body.addEventListener("contextmenu", ancestorMenu);
   state.mac = true;
@@ -135,7 +142,7 @@ async function copySelection(image: HTMLImageElement, text = "图片里的文字
   return event;
 }
 
-it("enables native selection only on the enlarged Mac image and isolates its context menu", async () => {
+it("keeps native text selection while replacing the browser image menu", async () => {
   const image = await openImage();
   expect(image.classList.contains("select-text")).toBe(true);
   expect(
@@ -148,7 +155,7 @@ it("enables native selection only on the enlarged Mac image and isolates its con
     cancelable: true,
   });
   image.dispatchEvent(context);
-  expect(context.defaultPrevented).toBe(false);
+  expect(context.defaultPrevented).toBe(true);
   expect(ancestorMenu).not.toHaveBeenCalled();
 });
 
@@ -182,12 +189,12 @@ it("blocks stale session copies and reports current clipboard failures", async (
   expect(state.setError).toHaveBeenCalledWith("common.copyFailed");
 });
 
-it("keeps other platforms' existing preview and message context menu", async () => {
+it("isolates image actions from message menus on other platforms", async () => {
   state.mac = false;
   const image = await openImage();
   expect(image.classList.contains("select-text")).toBe(false);
   image.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
-  expect(ancestorMenu).toHaveBeenCalledTimes(1);
+  expect(ancestorMenu).not.toHaveBeenCalled();
 });
 
 it("does not dismiss when image selection ends on the backdrop; a backdrop click still closes", async () => {
@@ -205,4 +212,96 @@ it("does not dismiss when image selection ends on the backdrop; a backdrop click
     dialog.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
   expect(host.querySelector('[data-testid="file-image-lightbox"]')).toBeNull();
+});
+
+it("zooms, resets and restores focus when the preview closes", async () => {
+  const image = await openImage();
+  const trigger = host.querySelector<HTMLButtonElement>(
+    'button[aria-label="files.viewFullSize"]',
+  )!;
+  const zoomIn = host.querySelector<HTMLButtonElement>(
+    'button[aria-label="files.zoomIn"]',
+  );
+  expect(zoomIn).not.toBeNull();
+  await act(async () => zoomIn!.click());
+  expect(
+    image.closest('[data-testid="image-transform"]')?.getAttribute("style"),
+  ).toContain("scale(1.25)");
+  await act(async () =>
+    host
+      .querySelector<HTMLButtonElement>(
+        'button[aria-label="files.fitToWindow"]',
+      )!
+      .click(),
+  );
+  expect(
+    image.closest('[data-testid="image-transform"]')?.getAttribute("style"),
+  ).toContain("scale(1)");
+  await act(async () =>
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  expect(host.querySelector('[data-testid="file-image-lightbox"]')).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
+
+it("anchors wheel zoom, clamps dragging and resets on double click", async () => {
+  const image = await openImage();
+  const transform = image.closest<HTMLElement>(
+    '[data-testid="image-transform"]',
+  )!;
+  const stage = transform.parentElement!;
+  Object.defineProperties(stage, {
+    clientWidth: { value: 400 },
+    clientHeight: { value: 300 },
+  });
+  Object.defineProperties(image, {
+    offsetWidth: { value: 400 },
+    offsetHeight: { value: 300 },
+  });
+  vi.spyOn(stage, "getBoundingClientRect").mockReturnValue({
+    left: 0,
+    top: 0,
+    width: 400,
+    height: 300,
+  } as DOMRect);
+  const wheel = new WheelEvent("wheel", {
+    deltaY: -100,
+    clientX: 300,
+    clientY: 150,
+    cancelable: true,
+    bubbles: true,
+  });
+  await act(async () => stage.dispatchEvent(wheel));
+  expect(wheel.defaultPrevented).toBe(true);
+  expect(transform.style.transform).toMatch(/translate\(-22\.140/);
+  stage.setPointerCapture = vi.fn();
+  stage.hasPointerCapture = vi.fn(() => true);
+  stage.releasePointerCapture = vi.fn();
+  const pointer = (type: string, x: number) => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.assign(event, {
+      pointerId: 1,
+      clientX: x,
+      clientY: 150,
+      button: 0,
+      isPrimary: true,
+    });
+    return event;
+  };
+  await act(async () => stage.dispatchEvent(pointer("pointerdown", 300)));
+  await act(async () => stage.dispatchEvent(pointer("pointermove", 10000)));
+  expect(transform.style.transform).toMatch(/translate\(44\.280/);
+  await act(async () => stage.dispatchEvent(pointer("pointercancel", 10000)));
+  const stopped = transform.style.transform;
+  await act(async () => stage.dispatchEvent(pointer("pointermove", 0)));
+  expect(transform.style.transform).toBe(stopped);
+  expect(
+    host.querySelector('[data-testid="file-image-lightbox"]'),
+  ).not.toBeNull();
+  await act(async () =>
+    image.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })),
+  );
+  expect(transform.style.transform).toBe("translate(0px, 0px) scale(1)");
 });

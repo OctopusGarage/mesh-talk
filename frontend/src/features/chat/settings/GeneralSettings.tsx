@@ -1,46 +1,17 @@
-import { ScreenshotShortcutSettings } from "./ScreenshotShortcutSettings";
-import { Languages, MinusSquare, Rocket } from "lucide-react";
+import { MinusSquare, Rocket } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Switch } from "@/components/ui/switch";
-import {
-  LANGUAGE_LABELS,
-  resolveLanguage,
-  setLanguage,
-  SUPPORTED_LANGUAGES,
-  type Language,
-} from "@/lib/i18n";
-import { SettingsRow, SELECT_CLASS } from "./primitives";
+import { SettingsRow } from "./primitives";
 import type { SettingsController } from "./useSettingsController";
 export function GeneralSettings({
   controller: c,
 }: {
   controller: SettingsController;
 }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const s = c.settings;
   return (
     <>
-      <SettingsRow
-        id="setting-language"
-        icon={<Languages className="h-4 w-4" />}
-        title={t("settings.language")}
-        desc={t("settings.languageDesc")}
-        control={
-          <select
-            id="setting-language"
-            data-testid="settings-language-select"
-            value={resolveLanguage(i18n.language) ?? "en"}
-            onChange={(e) => setLanguage(e.target.value as Language)}
-            className={SELECT_CLASS}
-          >
-            {SUPPORTED_LANGUAGES.map((language) => (
-              <option key={language} value={language} lang={language}>
-                {LANGUAGE_LABELS[language]}
-              </option>
-            ))}
-          </select>
-        }
-      />
       {s && (
         <>
           <SettingsRow
@@ -72,10 +43,6 @@ export function GeneralSettings({
                 }
               />
             }
-          />
-          <ScreenshotShortcutSettings
-            key={c.identity ?? "loading"}
-            controller={c}
           />
         </>
       )}

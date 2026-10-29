@@ -1,3 +1,6 @@
+import { canForward } from "./forwarding/selection";
+import { ForwardedRecordPreview } from "./forwarding/ForwardedRecordPreview";
+import { isForwardedRecord } from "@/lib/forwardedRecord";
 import { canCollect } from "./favorites/selection";
 import { ProtectedMessage } from "./ProtectedMessage";
 import {
@@ -188,6 +191,18 @@ function FileBubble({
   // Attachment (or over-cap media): the file card IS the content — name + size + download.
   return (
     <div className="min-w-[12rem] max-w-xs">
+      {!readOnly &&
+        !metadataPending &&
+        !approvalNeeded &&
+        available &&
+        isForwardedRecord(file.name, file.mime) && (
+          <ForwardedRecordPreview
+            fileConv={file.fileConv}
+            name={file.name}
+            size={file.size}
+            mime={file.mime}
+          />
+        )}
       <div className="flex items-center gap-2">
         {fileGlyph(file.name, file.mime)}
         <div className="min-w-0 flex-1">
@@ -336,10 +351,12 @@ export function MessageBubble({
   onRecall,
   onReEdit,
   onCollect,
+  onForward,
   onSelectMessages,
   collected = false,
 }: {
   onCollect?: (m: ChatMessage) => void;
+  onForward?: (m: ChatMessage) => void;
   onSelectMessages?: (m: ChatMessage) => void;
   collected?: boolean;
   m: ChatMessage;
@@ -678,6 +695,15 @@ export function MessageBubble({
               </div>
             </ContextMenuTrigger>
             <ContextMenuContent data-testid="message-context-menu">
+              {onForward && canForward(m) && (
+                <ContextMenuItem
+                  data-testid="msg-forward"
+                  onSelect={() => onForward(m)}
+                >
+                  <CornerUpLeft className="h-3.5 w-3.5 opacity-70" />
+                  {t("messageForwarding.forward")}
+                </ContextMenuItem>
+              )}
               {onCollect && canCollect(m) && (
                 <ContextMenuItem
                   data-testid="msg-collect"
@@ -697,7 +723,7 @@ export function MessageBubble({
                   onSelect={() => onSelectMessages(m)}
                 >
                   <ListChecks className="h-3.5 w-3.5 opacity-70" />
-                  {t("messageFavorites.selectMessages")}
+                  {t("messageForwarding.selectMessages")}
                 </ContextMenuItem>
               )}
               <ContextMenuItem

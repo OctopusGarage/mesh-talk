@@ -423,7 +423,7 @@ for (const viewport of [
       await selectSettingsCategory(page, "appearance");
       await page.getByTestId("theme-light").click();
       await expect(page.locator("html")).not.toHaveClass(/dark/);
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page
         .getByTestId("settings-language-select")
         .selectOption("zh-Hans");
@@ -443,7 +443,7 @@ for (const viewport of [
       await selectSettingsCategory(page, "appearance");
       await page.getByTestId("theme-dark").click();
       await expect(page.locator("html")).toHaveClass(/dark/);
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page.getByTestId("settings-language-select").selectOption("en");
       await expect(
         page.getByText("Direct messages", { exact: true }),
@@ -518,7 +518,7 @@ if (process.env.EVAL_TIER === "extended")
           page.evaluate(() => localStorage.getItem("mesh-talk-theme")),
         )
         .toBe(theme);
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page
         .getByTestId("settings-language-select")
         .selectOption("zh-Hans");

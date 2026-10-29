@@ -62,6 +62,7 @@
         "frontend/e2e/media-hook-harness.tsx"
       ],
       "frontend": [
+        "src/features/chat/MediaPreview.test.ts",
         "src/features/chat/mediaObjectUrlCache.test.ts",
         "src/features/chat/mediaFileRead.test.ts",
         "src/features/chat/mediaFile.test.ts",
@@ -72,6 +73,10 @@
         "summary": "Keep inline media geometry stable during receive, decode and virtualized remounts while reusing ordinary media within bounded session ownership.",
         "guide": "docs/module-boundaries.md#inline-media-presentation",
         "invariants": [
+          {
+            "name": "Ordinary image previews support anchored bounded zoom and pan without dismissing on drag; reset/reopen restores window fit, and native text-copy policy remains enforced.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
           {
             "name": "Receiving, loading, decoded and unsupported inline previews keep a responsive frame; user scroll intent prevents stale anchor restoration.",
             "reference": "docs/module-boundaries.md#inline-media-presentation"
@@ -89,6 +94,13 @@
     {
       "id": "frontend-call-media",
       "paths": [
+        "frontend/src/features/chat/WebRtcTestDialog.tsx",
+        "frontend/src/features/chat/WebRtcTestDialog.test.ts",
+        "frontend/src/lib/mediaDeviceCheck.ts",
+        "frontend/src/lib/mediaDeviceCheck.test.ts",
+        "frontend/src/features/chat/settings/MediaDeviceCheck.tsx",
+        "frontend/src/features/chat/settings/MediaDeviceCheck.test.ts",
+        "frontend/e2e/media-device-check.spec.ts",
         "frontend/src/store/calls.ts",
         "frontend/src/store/calls.test.ts",
         "frontend/src/features/chat/CallDialog.tsx",
@@ -105,13 +117,18 @@
         "src/store/calls.test.ts",
         "src/features/chat/CallDialog.test.ts",
         "src/lib/localeParity.test.ts",
-        "src/features/chat/WebRtcTestDialog.test.ts",
+        "src/lib/mediaDeviceCheck.test.ts",
+        "src/features/chat/settings/MediaDeviceCheck.test.ts",
         "src/store/settings.test.ts"
       ],
       "capability": {
         "summary": "Play remote voice and video through the shipped call dialog, preserve audio-only fallback, and release playback and capture on termination.",
         "guide": "docs/help/topics/calls.md#media-playback-and-cleanup",
         "invariants": [
+          {
+            "name": "Local device checks live inside enabled call settings, acquire microphone/camera independently only on explicit action, release resources across view/session/call retirement, and use advancing media statistics for advanced local-only diagnostics.",
+            "reference": "docs/help/topics/calls.md#check-microphone-and-camera"
+          },
           {
             "name": "A connected remote audio stream has an unmuted playback element even without video; replacement and unmount pause and detach the old stream.",
             "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"
@@ -701,6 +718,10 @@
     {
       "id": "frontend-settings-shell",
       "paths": [
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/settings-dialog-dark-820x620.png",
+        "frontend/e2e/touch-targets.spec.ts",
+        "frontend/e2e/unrestricted-messages.spec.ts",
+        "frontend/e2e/window-controls.spec.ts",
         "frontend/src/features/chat/SettingsDialog.tsx",
         "frontend/src/features/chat/settings/GeneralSettings.tsx",
         "frontend/src/features/chat/settings/model.ts",
@@ -720,7 +741,11 @@
         "guide": "docs/settings.md",
         "invariants": [
           {
-            "name": "General contains routine app preferences; Integrations owns agent access, permissions and setup. Only the active category is mounted and all locales provide its navigation label.",
+            "name": "One settings model owns grouped navigation, category order and control routes. Language lives in Appearance & language, screenshot edits/save feedback live in Shortcuts, and Agent privacy links reach Agent access.",
+            "reference": "docs/settings.md#categories"
+          },
+          {
+            "name": "App behavior contains startup/window preferences; Agent access owns local permissions and setup. Only the active category is mounted and all locales provide its navigation label.",
             "reference": "docs/settings.md"
           }
         ]
@@ -762,7 +787,7 @@
             "reference": "docs/settings.md#local-agent-access"
           },
           {
-            "name": "Integrations owns local agent setup and save feedback; conversation selection stays collapsed by default with a selected count, searchable bounded results and selected-only review; filtering preserves grants and the 16-conversation limit.",
+            "name": "Agent access owns local agent setup and save feedback; conversation selection stays collapsed by default with a selected count, searchable bounded results and selected-only review; filtering preserves grants and the 16-conversation limit.",
             "reference": "docs/settings.md#local-agent-access"
           }
         ]
@@ -1842,6 +1867,8 @@
     {
       "id": "frontend-image-live-text",
       "paths": [
+        "frontend/src/lib/imageClipboard.ts",
+        "frontend/src/lib/imageClipboard.test.ts",
         "frontend/src/features/chat/MediaPreview.tsx",
         "frontend/src/features/chat/MediaPreview.test.ts",
         "frontend/src/lib/sensitiveClipboard.ts",
@@ -1850,6 +1877,7 @@
         "docs/help/topics/send-files.md"
       ],
       "frontend": [
+        "src/lib/imageClipboard.test.ts",
         "src/features/chat/MediaPreview.test.ts",
         "src/lib/sensitiveClipboard.test.ts",
         "src/features/chat/mediaFileRead.test.ts",
@@ -1860,7 +1888,7 @@
         "guide": "docs/help/topics/send-files.md#copy-text-from-an-image",
         "invariants": [
           {
-            "name": "Only the ordinary enlarged Mac image opts into native selection and context menus; recognized text copy uses current-session admission and the existing confirmation/clear policy. Protected images remain excluded.",
+            "name": "Ordinary image previews use controlled copy/save/reveal actions and capability-gated file sharing, suppress browser defaults, and preserve Mac text selection. Image/text copy requires current-session admission and honors confirmation/clear policy; protected images remain excluded.",
             "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
           },
           {
@@ -1870,6 +1898,7 @@
         ]
       },
       "escalation": [
+        "Run e2e/media-recovery.spec.ts in Chromium and WebKit. Preserve the real gesture-triggered clipboard write and verify its completed PNG dimensions in both engines; request automated clipboard-read/write permissions and read back system clipboard pixels only in Chromium.",
         "Run e2e/media-recovery.spec.ts and e2e/protected-messages.spec.ts. Verify real macOS WKWebView blob-image recognition, drag selection and Command-C/context-menu copy with copy confirmation and clipboard clearing. Browser mocks prove wiring, not native recognition or system menu behavior. Test supported OS/languages and image sizes without globally enabling selection on protected content."
       ]
     },
@@ -1917,6 +1946,10 @@
     {
       "id": "frontend-unread-recovery",
       "paths": [
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-1280x800.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-760x620.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-oled-760x620-win32.png",
+        "frontend/e2e/sidebar-row-layout.spec.ts",
         "frontend/src/store/reception.ts",
         "frontend/src/store/reception.test.ts",
         "frontend/src/store/chat.ts",
@@ -1984,7 +2017,7 @@
         ]
       },
       "escalation": [
-        "Run frontend/e2e/unread-badge.spec.ts and relevant e2e/ui-visual-regression.spec.ts cases for unread review, keyboard focus, narrow/short windows and light/dark layouts. Browser mocks verify IPC requests, not physical Dock/tray appearance; real packaged macOS/Linux badge repaint and logout evidence remain separate native acceptance. Windows count badges retain their documented unsupported behavior."
+        "Run frontend/e2e/ui-audit-shell.spec.ts and frontend/e2e/sidebar-row-layout.spec.ts for compact tool labels, full accessible names and side-by-side geometry. Run frontend/e2e/unread-badge.spec.ts and relevant e2e/ui-visual-regression.spec.ts cases for unread review, keyboard focus, narrow/short windows and light/dark layouts. Browser mocks verify IPC requests, not physical Dock/tray appearance; real packaged macOS/Linux badge repaint and logout evidence remain separate native acceptance. Windows count badges retain their documented unsupported behavior."
       ]
     },
     {
@@ -2006,6 +2039,41 @@
           }
         ]
       }
+    },
+    {
+      "id": "frontend-camera-capture",
+      "paths": [
+        "frontend/src/features/chat/CameraCaptureDialog.tsx",
+        "frontend/src/features/chat/CameraCaptureDialog.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/e2e/camera-capture.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/CameraCaptureDialog.test.ts",
+        "src/features/chat/ComposerScreenshot.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Capture a local photo, review or retake it, and stage it for explicit conversation-owned submission.",
+        "guide": "docs/help/topics/send-files.md#take-a-photo",
+        "invariants": [
+          {
+            "name": "Camera tracks and preview URLs are released; late permission and encoding results cannot export after cancellation.",
+            "reference": "docs/help/topics/send-files.md#take-a-photo"
+          },
+          {
+            "name": "Confirmed photos join the existing attachment queue and cannot cross conversation or auth lifetimes.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/camera-capture.spec.ts and inspect wide and compact dialog captures. Verify real camera permission, device switching, track release and lock/logout in packaged desktop apps; browser mocks cannot certify OS permission behavior."
+      ]
     }
   ],
   "prScenarios": [
@@ -2663,7 +2731,8 @@
       "browser": [
         "e2e/language-settings.spec.ts",
         "e2e/login-recovery.spec.ts",
-        "e2e/ui-audit-shell.spec.ts"
+        "e2e/ui-audit-shell.spec.ts",
+        "e2e/person-presence.spec.ts"
       ]
     },
     {
@@ -2699,6 +2768,24 @@
       "browser": [
         "e2e/reply-preview.spec.ts",
         "e2e/chat.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-camera-capture-acceptance",
+      "paths": [
+        "frontend/src/features/chat/CameraCaptureDialog.tsx",
+        "frontend/src/features/chat/CameraCaptureDialog.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/e2e/camera-capture.spec.ts"
+      ],
+      "browser": [
+        "e2e/camera-capture.spec.ts"
+      ],
+      "native": [
+        "host"
       ]
     }
   ]

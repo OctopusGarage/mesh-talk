@@ -3,7 +3,7 @@
 Use your signed-in Mesh-Talk account for updates requested through an agent on
 this computer. You do not need a bot account, MCP setup or a CLI download.
 
-1. Open **More → Settings → General**.
+1. Open **More → Settings → Shortcuts**.
 2. Under **Local agent access**, select the contacts or joined groups the agent
    may send to. You can select up to 16 conversations.
 3. Choose **One hour** for temporary access, or explicitly choose **Until I turn it off**

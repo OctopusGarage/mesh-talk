@@ -75,6 +75,10 @@ history is not animated as a new live message.
 
 ## Unread review and badge recovery
 
+The sidebar keeps **Unread** and **Files** side by side in one compact row.
+Their full names remain available to assistive technology and in tooltips; each
+opens its own existing dialog and retains its count.
+
 The sidebar's **Unread messages** review accounts for the same positive counters
 as the application badge: ordinary and hidden conversations, conversations no
 longer in the directory, aggregate overflow and sender devices whose account

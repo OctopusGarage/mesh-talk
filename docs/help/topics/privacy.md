@@ -36,7 +36,7 @@ viewing; it does not delete the message or prevent screenshots.
 
 ## Control network visibility
 
-**Invisible mode** is under **Settings → Connection & delivery**, together with **Reply permissions**. Invisible mode suppresses public announcements; authorized contacts and existing groups have separate admission rules. It does not provide IP anonymity.
+**Invisible mode** is under **Settings → Network & delivery**, together with **Reply permissions**. Invisible mode suppresses public announcements; authorized contacts and existing groups have separate admission rules. It does not provide IP anonymity.
 
 ## Hide or delete a contact
 

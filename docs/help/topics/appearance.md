@@ -4,7 +4,7 @@ Personalize the interface while keeping conversation content readable.
 
 ## Open appearance settings
 
-1. Open **More → Settings → Appearance**.
+1. Open **More → Settings → Appearance & language**.
 2. Choose from the installed theme library and available wallpaper options.
 3. Turn wallpaper visibility off if you prefer a quieter conversation surface.
 
