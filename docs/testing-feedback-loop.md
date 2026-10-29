@@ -49,10 +49,12 @@ and Health, so late desktop scheduling cannot delay that merge. Portable collect
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
 Desktop browser shards start after Health completes, limiting the initial runner
-burst. Browser, portable Health and independent backend jobs use the standard
-`macos-26-intel` pool; the full Rust workspace and real native desktop acceptance
-retain `macos-latest` Apple Silicon coverage. This separates demand after hosted
-ARM capacity exhaustion prevented jobs from acquiring runners. Intel is a
+burst. Portable Health, independent backend and standalone browser jobs use the
+standard `macos-26-intel` pool. Full Chromium, the Rust workspace and real native
+desktop acceptance retain `macos-latest` Apple Silicon execution. Measure both
+queue and execution before moving a workload: full Chromium qualification on
+Intel acquired runners but substantially increased matching-case execution time.
+Staging desktop admission keeps full Chromium out of the initial ARM burst. Intel is a
 [standard hosted runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
 not a larger-runner purchase; both pools still require measured queue and execution
 evidence. Keep artifact consumers and app-bound required check names aligned when
@@ -63,6 +65,15 @@ Linux/macOS 30 seconds and Windows 120 seconds. These are harness watchdogs, not
 product latency assertions. Chromium's device and timezone are aligned; the
 Windows image is the full suite's `windows-latest`, not the former standalone
 `windows-2022` image.
+
+For transient message highlights, start `helpers/message-highlight.ts` observation
+before navigation. Its browser-side predicate captures the visible exact target
+and rejects competing highlights within the existing assertion budget. Keep
+subsequent navigation/context assertions and the production highlight lifetime;
+controller round trips must not determine whether short-lived feedback occurred.
+Recovery-batch fixtures send ordered events in one browser call and yield a render
+turn between deliveries. Preserve every payload and completion marker, and verify
+intermediate unread counts; a synchronous burst changes the scenario being tested.
 
 The browser harness still relies on Vite source-module imports, explicit lazy
 module failure routes and an unbundled media harness. A built-preview replacement

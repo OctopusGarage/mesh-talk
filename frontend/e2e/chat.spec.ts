@@ -1,3 +1,4 @@
+import { expectMessageHighlight } from "./helpers/message-highlight";
 import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { seedMarketPacks } from "./helpers/packs";
@@ -542,8 +543,13 @@ test.describe("Mesh-Talk UI flow", () => {
     const quote = page.getByTestId("message-parent-snippet").first();
     await expect(quote).toHaveRole("button");
     await quote.focus();
-    await page.keyboard.press("Enter");
-    await expect(firstBubble.locator("xpath=..")).toHaveClass(/bg-signal\/10/);
+    const parentId = await firstBubble
+      .locator("xpath=..")
+      .getAttribute("data-message-id");
+    expect(parentId).not.toBeNull();
+    await expectMessageHighlight(page, parentId!, () =>
+      page.keyboard.press("Enter"),
+    );
   });
 
   test("search opens, queries, shows results, and navigates", async ({
@@ -555,15 +561,13 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("search-input").fill("welcome");
     const result = page.getByTestId("search-result").first();
     await expect(result).toBeVisible();
-    await result.click();
+    // The first seeded Bob message in tauri-mock.ts owns this exact hit.
+    await expectMessageHighlight(page, "m101", () => result.click());
     // Navigated into the conversation containing the hit.
     await expect(page.getByTestId("conversation-header")).toBeVisible();
     await expect(
       page.getByTestId("message-bubble").getByText("hey, welcome to the mesh"),
     ).toBeVisible();
-    await expect(page.getByRole("log").locator(".bg-signal\\/10")).toHaveCount(
-      1,
-    );
   });
 
   test("search opens the selected identical message in bounded older context", async ({
@@ -592,10 +596,14 @@ test.describe("Mesh-Talk UI flow", () => {
     await page.getByTestId("sidebar-action-search").click();
     await page.getByTestId("search-input").fill("identical search phrase");
     await expect(page.getByTestId("search-result")).toHaveCount(2);
-    await page.getByTestId("search-result").nth(1).click();
+    await expectMessageHighlight(
+      page,
+      "exact-two",
+      () => page.getByTestId("search-result").nth(1).click(),
+      "exact-one",
+    );
     const selected = page.locator('[data-message-id="exact-two"]');
     await expect(selected).toBeVisible();
-    await expect(selected).toHaveClass(/bg-signal/);
     await expect(page.locator('[data-message-id="exact-one"]')).not.toHaveClass(
       /bg-signal/,
     );
@@ -608,11 +616,13 @@ test.describe("Mesh-Talk UI flow", () => {
     // Search again while the same conversation already owns a mounted viewport.
     await page.getByTestId("sidebar-action-search").click();
     await expect(page.getByTestId("search-result")).toHaveCount(2);
-    await page.getByTestId("search-result").first().click();
-    await expect(page.locator('[data-message-id="exact-one"]')).toBeVisible();
-    await expect(page.locator('[data-message-id="exact-one"]')).toHaveClass(
-      /bg-signal/,
+    await expectMessageHighlight(
+      page,
+      "exact-one",
+      () => page.getByTestId("search-result").nth(0).click(),
+      "exact-two",
     );
+    await expect(page.locator('[data-message-id="exact-one"]')).toBeVisible();
   });
 
   test("unavailable exact search context stays in the dialog with useful feedback", async ({

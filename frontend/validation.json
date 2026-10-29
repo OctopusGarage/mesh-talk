@@ -1912,7 +1912,8 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/reply-preview.spec.ts",
         "frontend/src/features/chat/replyNavigation.ts",
-        "frontend/src/features/chat/replyNavigation.test.ts"
+        "frontend/src/features/chat/replyNavigation.test.ts",
+        "frontend/e2e/helpers/message-highlight.ts"
       ],
       "frontend": [
         "src/features/chat/ReplyPreview.test.ts",
@@ -2763,7 +2764,8 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/reply-preview.spec.ts",
         "frontend/src/features/chat/replyNavigation.ts",
-        "frontend/src/features/chat/replyNavigation.test.ts"
+        "frontend/src/features/chat/replyNavigation.test.ts",
+        "frontend/e2e/helpers/message-highlight.ts"
       ],
       "browser": [
         "e2e/reply-preview.spec.ts",

@@ -40,7 +40,7 @@ jobs:
     needs: health
     uses: ./.github/workflows/ui-shards.yml
     with:
-      operating_systems: '["macos-26-intel","windows-latest"]'
+      operating_systems: '["macos-latest","windows-latest"]'
 
   coverage:
     # This existing name is required by branch protection. It now certifies
@@ -124,7 +124,7 @@ jobs:
       - name: Validate every OS and all 76 portable scenarios
         shell: bash
         run: |
-          for entry in ubuntu-24.04:linux macos-26-intel:darwin windows-latest:win32; do
+          for entry in ubuntu-24.04:linux macos-latest:darwin windows-latest:win32; do
             os="${entry%:*}"
             platform="${entry#*:}"
             mkdir -p "target/chromium-collected/$platform"
@@ -169,7 +169,7 @@ jobs:
         shell: bash
         run: |
           status=0
-          for os in ubuntu-24.04 macos-26-intel windows-latest; do
+          for os in ubuntu-24.04 macos-latest windows-latest; do
             mkdir -p "../target/ui-report-blobs/$os"
             available=true
             for artifact in ../target/ui-reports/playwright-ui-"$os"-*-${{ github.run_attempt }}; do

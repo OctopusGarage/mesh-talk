@@ -39,7 +39,7 @@ test("one reusable shard implementation retains twelve runners and all evidence 
   assert.match(reusable, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
   assert.match(reusable, /shard: \[1, 2, 3, 4\]/);
   assert.match(job("linux"), /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
+  assert.match(job("desktop"), /operating_systems: '\["macos-latest","windows-latest"\]'/);
   assert.equal((root().match(/uses: \.\/\.github\/workflows\/ui-shards.yml/g) ?? []).length, 2);
   assert.ok(!root().includes("name: Run UI E2E"));
   assert.match(reusable, /npx playwright test --workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/4 --reporter=list,blob,json/);
@@ -50,16 +50,15 @@ test("one reusable shard implementation retains twelve runners and all evidence 
   assert.match(reusable, /if-no-files-found: error/);
 });
 
-test("portable browser and Health allocation uses Intel while Rust and real native retain ARM", () => {
+test("full Chromium, Rust and native use ARM while portable work shares Intel capacity", () => {
   const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
   const rust = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
   const native = readFileSync(new URL("../../.github/workflows/hidden-contacts-native.yml", import.meta.url), "utf8");
-  assert.doesNotMatch(root(), /macos-latest/);
-  assert.match(job("desktop"), /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
+  assert.match(job("desktop"), /operating_systems: '\["macos-latest","windows-latest"\]'/);
   assert.match(job("portable"), /os: macos-26-intel, browser: webkit/);
   assert.match(job("chromium-extended"), /os: \[ubuntu-24.04, macos-26-intel, windows-latest\]/);
-  assert.match(job("portable-evidence"), /macos-26-intel:darwin/);
-  assert.match(job("reports"), /for os in ubuntu-24.04 macos-26-intel windows-latest/);
+  assert.match(job("portable-evidence"), /macos-latest:darwin/);
+  assert.match(job("reports"), /for os in ubuntu-24.04 macos-latest windows-latest/);
   assert.match(health, /os: \[ubuntu-latest, macos-26-intel, windows-latest\]/);
   assert.match(rust, /os: \[ubuntu-latest, macos-latest\]/);
   assert.match(native, /os: \[ubuntu-24.04, windows-2022, macos-latest\]/);

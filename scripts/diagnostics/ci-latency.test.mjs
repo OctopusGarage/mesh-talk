@@ -56,7 +56,7 @@ test("full browser coverage remains on every desktop OS with bounded shards", ()
   const shardWorkflow = read("ui-shards.yml");
   const baseline = shardWorkflow.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
   assert.match(ui, /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(ui, /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
+  assert.match(ui, /operating_systems: '\["macos-latest","windows-latest"\]'/);
   assert.match(baseline, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
   assert.match(baseline, /shard: \[1, 2, 3, 4\]/);
   assert.match(baseline, /fail-fast: false/);
@@ -141,7 +141,7 @@ test("full Chromium execution owns portable evidence while unique engines remain
   assert.match(step(read("ui-shards.yml"), "Run UI E2E"), /--reporter=list,blob,json/);
   const reports = ui.split("  reports:\n")[1].split("  packs:\n")[0];
   assert.doesNotMatch(reports, /matrix:/);
-  assert.match(reports, /for os in ubuntu-24.04 macos-26-intel windows-latest/);
+  assert.match(reports, /for os in ubuntu-24.04 macos-latest windows-latest/);
   assert.match(ui, /chromium-extended:/);
   assert.match(ui, /firefox-extended:/);
 });
