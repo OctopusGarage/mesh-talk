@@ -180,6 +180,44 @@ impl ReceivedStore {
             .map(decode)
             .transpose()
     }
+    pub(crate) fn file_headers(
+        &self,
+        file: &ConversationId,
+        after: Option<i64>,
+        limit: TranscriptPageLimit,
+    ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
+        self.repository.file_headers(file, after, limit)
+    }
+    pub(crate) fn row_by_ordinal(&self, ordinal: i64) -> Result<Option<ReceivedEntry>, LogError> {
+        self.repository
+            .row_by_ordinal(ordinal)?
+            .map(decode)
+            .transpose()
+    }
+    pub(crate) fn header_page(
+        &self,
+        conversation: Option<&ConversationId>,
+        after: Option<TranscriptCursor>,
+        limit: TranscriptPageLimit,
+        descending: bool,
+    ) -> Result<TranscriptPage<TranscriptHeader>, LogError> {
+        self.repository
+            .header_page(conversation, after, limit, descending)
+    }
+    pub(crate) fn header_scan_page(
+        &self,
+        conversation: Option<&ConversationId>,
+        after: Option<i64>,
+        limit: TranscriptPageLimit,
+    ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
+        self.repository.header_scan_page(conversation, after, limit)
+    }
+    pub(crate) fn conversation_revision(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<u64, LogError> {
+        self.repository.conversation_revision(conversation)
+    }
     pub(crate) fn page(
         &self,
         conversation: Option<&ConversationId>,

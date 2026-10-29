@@ -4,7 +4,41 @@ use super::*;
 use crate::storage::profile::publication_files::{
     copy, inspect_regular, matches_stub, stream_identity, sync_parent,
 };
-use std::io::Write;
+use std::{io::Write, path::PathBuf};
+
+/// One published history source. Auxiliary owners keep their own SQL tables and
+/// share this exact authenticated source registry and legacy-writer barrier.
+pub(crate) struct PublishedHistorySource {
+    profile: Arc<ProfileStorage>,
+    path: PathBuf,
+    stub: Vec<u8>,
+}
+impl PublishedHistorySource {
+    pub(crate) fn open(
+        profile: Arc<ProfileStorage>,
+        path: &Path,
+        password: &str,
+        kind: i64,
+        import: impl FnOnce(&Connection, &Path, &str) -> Result<(), LogError>,
+    ) -> Result<Self, LogError> {
+        initialize(&profile)?;
+        let (path, stub) = publish(&profile, path, password, kind, import)?;
+        Ok(Self {
+            profile,
+            path,
+            stub,
+        })
+    }
+    pub(crate) fn profile(&self) -> &Arc<ProfileStorage> {
+        &self.profile
+    }
+    pub(crate) fn check_write(&self) -> Result<(), LogError> {
+        if !matches_stub(&self.path, &self.stub)? {
+            return Err(invalid("history source barrier changed"));
+        }
+        sync_parent(&self.path)
+    }
+}
 
 struct Source {
     stub: Vec<u8>,
@@ -52,6 +86,9 @@ fn domain(kind: i64) -> Result<[u8; 16], LogError> {
         RECEIVED => Ok(*b"MeshRecvHistory1"),
         FILES => Ok(*b"MeshFileHistory1"),
         SUPPRESSION => Ok(*b"MeshSuppression1"),
+        RECOVERED_IDS => Ok(*b"MeshRecoveredId1"),
+        FILE_PROOFS => Ok(*b"MeshFileProofs01"),
+        FILE_IDENTITIES => Ok(*b"MeshFileIdent001"),
         _ => Err(invalid("invalid transcript source kind")),
     }
 }

@@ -48,6 +48,271 @@ fn received(n: u8) -> ReceivedEntry {
 }
 
 #[test]
+fn runtime_leaf_gap_revisions_survive_warm_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let path = dir.path().join("sent.log");
+    let owner = profile(dir.path(), &identity, &account);
+    let mut store = SentStore::from_profile(owner.clone(), &path, "pw").unwrap();
+    store.record_durable(&sent(1)).unwrap();
+    let conversation_revision = store.conversation_revision(&conv(1)).unwrap();
+    let revision = store.revision();
+    assert_ne!(revision, 0);
+    store.remove_where(|_| true).unwrap();
+    let empty_revision = store.conversation_revision(&conv(1)).unwrap();
+    assert!(empty_revision > conversation_revision);
+    assert!(store.conversation_page(None, 128).unwrap().is_empty());
+    let removed_revision = store.revision();
+    let rewritten = store.rewrite_revision();
+    drop(store);
+    drop(owner);
+    crate::storage::record_log::frame_observations::reset();
+    let owner = profile(dir.path(), &identity, &account);
+    let mut store = SentStore::from_profile(owner, &path, "pw").unwrap();
+    assert_eq!(store.revision(), removed_revision);
+    assert_eq!(store.rewrite_revision(), rewritten);
+    assert_eq!(
+        store.conversation_revision(&conv(1)).unwrap(),
+        empty_revision
+    );
+    assert_eq!(store.body_reads(), 0);
+    assert_eq!(
+        crate::storage::record_log::frame_observations::maximum_capacity(),
+        0
+    );
+    store.record_durable(&sent(2)).unwrap();
+    assert!(store.revision() > removed_revision);
+    assert!(store.conversation_revision(&conv(1)).unwrap() > empty_revision);
+}
+
+#[test]
+fn runtime_leaf_gap_recovered_ids_do_not_replay_on_warm_open() {
+    use crate::node::recovered_sent_ids::{IndexedRecoveredSentIds, RecoveredSentIds};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recovery-sent-ids.log");
+    let mut store = RecoveredSentIds::open(&path, "pw").unwrap();
+    for seq in 0..256 {
+        store.record(&sent(seq), EventId::new([7; 32])).unwrap();
+    }
+    drop(store);
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let mut store = IndexedRecoveredSentIds::from_profile(owner.clone(), &path, "pw").unwrap();
+    store.record(&sent(255), EventId::new([7; 32])).unwrap();
+    assert!(store.record(&sent(255), EventId::new([8; 32])).is_err());
+    drop(store);
+    drop(owner);
+    crate::storage::record_log::frame_observations::reset();
+    let owner = profile(dir.path(), &identity, &account);
+    let store = IndexedRecoveredSentIds::from_profile(owner.clone(), &path, "pw").unwrap();
+    assert_eq!(
+        store.id_for(&sent(255)).unwrap(),
+        Some(EventId::new([7; 32]))
+    );
+    assert_eq!(
+        crate::storage::record_log::frame_observations::maximum_capacity(),
+        0
+    );
+    let mut transcript =
+        SentStore::from_profile(owner, &dir.path().join("sent.log"), "pw").unwrap();
+    transcript.record_durable(&sent(255)).unwrap();
+    let header = transcript
+        .header_scan_page(None, None, TranscriptPageLimit::default())
+        .unwrap()
+        .rows
+        .remove(0);
+    assert_eq!(
+        store.id_for_header(&header).unwrap(),
+        Some(EventId::new([7; 32]))
+    );
+    assert_eq!(transcript.body_reads(), 0);
+}
+
+#[test]
+fn metadata_pages_select_keys_before_exact_ordinal_body_fetch() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let mut store =
+        SentStore::from_profile(owner.clone(), &dir.path().join("sent.log"), "pw").unwrap();
+    let received =
+        ReceivedStore::from_profile(owner, &dir.path().join("received.log"), "pw").unwrap();
+    for seq in 1..=6 {
+        store.record_durable(&sent(seq)).unwrap();
+    }
+    let page = store
+        .header_page(
+            Some(&conv(1)),
+            None,
+            TranscriptPageLimit::new(128, 512).unwrap(),
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        page.rows.iter().map(|h| h.sequence).collect::<Vec<_>>(),
+        vec![6, 5]
+    );
+    assert_eq!(store.body_reads(), 0);
+    let older = store
+        .header_page(
+            Some(&conv(1)),
+            page.next,
+            TranscriptPageLimit::new(128, 512).unwrap(),
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        older.rows.iter().map(|h| h.sequence).collect::<Vec<_>>(),
+        vec![4, 3]
+    );
+    let header = &page.rows[0];
+    assert_eq!(
+        header.plaintext_sha256,
+        <[u8; 32]>::from(Sha256::digest(&sent(6).plaintext))
+    );
+    assert_eq!(store.row_by_ordinal(header.ordinal).unwrap(), Some(sent(6)));
+    assert!(received.row_by_ordinal(header.ordinal).unwrap().is_none());
+    assert_eq!(store.body_reads(), 1);
+    assert_eq!(received.body_reads(), 0);
+    for limit in [
+        TranscriptPageLimit {
+            rows: usize::MAX,
+            bytes: 1,
+        },
+        TranscriptPageLimit { rows: 1, bytes: 0 },
+    ] {
+        assert!(store.header_page(None, None, limit, false).is_err());
+        assert!(store.header_scan_page(None, None, limit).is_err());
+    }
+    assert!(
+        store
+            .header_scan_page(None, None, TranscriptPageLimit::new(1, 255).unwrap())
+            .is_err()
+    );
+    assert_eq!(store.body_reads(), 1);
+}
+
+#[test]
+fn file_selector_is_scoped_metadata_and_deleted_ordinals_cascade() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let mut files = ReceivedStore::file_cards_from_profile(
+        owner.clone(),
+        &dir.path().join("received_files.log"),
+        "pw",
+    )
+    .unwrap();
+    let mut messages =
+        ReceivedStore::from_profile(owner.clone(), &dir.path().join("received.log"), "pw").unwrap();
+    let manifest = crate::file::FileManifest {
+        name: "sample.bin".into(),
+        size: 1,
+        mime: "application/octet-stream".into(),
+        checksum: [1; 32],
+        file_key: [2; 32],
+        file_conv: conv(9),
+        chunk_count: 1,
+    }
+    .encode();
+    let mut row = received(1);
+    row.plaintext = manifest;
+    files.record_durable(&row).unwrap();
+    row.conversation = conv(2);
+    files.record_file_alias_durable(&row).unwrap();
+    messages.record_durable(&row).unwrap();
+    files.record_durable(&received(2)).unwrap();
+    let page = files
+        .file_headers(&conv(9), None, TranscriptPageLimit::new(1, 256).unwrap())
+        .unwrap();
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].conversation, conv(1));
+    assert_eq!(page.rows[0].file_conversation, Some(conv(9)));
+    let ordinal = page.rows[0].ordinal;
+    let tail = files
+        .file_headers(&conv(9), page.next, TranscriptPageLimit::default())
+        .unwrap();
+    assert_eq!(tail.rows.len(), 1);
+    assert_eq!(tail.rows[0].conversation, conv(2));
+    assert_eq!(files.body_reads(), 0);
+    assert_eq!(
+        messages
+            .header_scan_page(None, None, TranscriptPageLimit::default())
+            .unwrap()
+            .rows[0]
+            .file_conversation,
+        None
+    );
+    assert!(
+        messages
+            .file_headers(&conv(9), None, TranscriptPageLimit::default())
+            .is_err()
+    );
+    owner.database().transaction(|c| {
+        c.execute_batch("CREATE TABLE test_file_projection(ordinal INTEGER PRIMARY KEY REFERENCES transcript_rows(ordinal) ON DELETE CASCADE)")?;
+        c.execute("INSERT INTO test_file_projection VALUES(?1)",[ordinal])?;
+        Ok(())
+    }).unwrap();
+    files
+        .remove_where(|row| row.conversation == conv(1))
+        .unwrap();
+    assert!(files.row_by_ordinal(ordinal).unwrap().is_none());
+    assert_eq!(
+        owner
+            .database()
+            .read(|c| Ok(
+                c.query_row("SELECT count(*) FROM test_file_projection", [], |r| r
+                    .get::<_, i64>(0))?
+            ))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        files
+            .file_headers(&conv(9), None, TranscriptPageLimit::default())
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn recovered_source_restarts_each_publication_boundary_without_replay() {
+    use crate::node::recovered_sent_ids::{IndexedRecoveredSentIds, RecoveredSentIds};
+    for point in [
+        "transcript-imported",
+        "transcript-barrier",
+        "transcript-published",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let path = dir.path().join("recovery-sent-ids.log");
+        let mut legacy = RecoveredSentIds::open(&path, "pw").unwrap();
+        legacy.record(&sent(1), EventId::new([8; 32])).unwrap();
+        drop(legacy);
+        let owner = profile(dir.path(), &identity, &account);
+        publication::fail_at(Some(point));
+        assert!(IndexedRecoveredSentIds::from_profile(owner.clone(), &path, "pw").is_err());
+        publication::fail_at(None);
+        drop(owner);
+        crate::storage::record_log::frame_observations::reset();
+        let owner = profile(dir.path(), &identity, &account);
+        let store = IndexedRecoveredSentIds::from_profile(owner, &path, "pw").unwrap();
+        assert_eq!(store.id_for(&sent(1)).unwrap(), Some(EventId::new([8; 32])));
+        assert_eq!(
+            crate::storage::record_log::frame_observations::maximum_capacity(),
+            0
+        );
+    }
+}
+
+#[test]
 fn ordinary_reopen_does_not_decode_historical_bodies() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sent.log");
