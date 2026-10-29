@@ -1527,5 +1527,26 @@
     "selected": "{{count}} selected",
     "cancel": "Cancel",
     "favorite": "Add to Favorites"
+  },
+  "cameraCapture": {
+    "title": "Take photo",
+    "review": "Review your photo. It will wait in the composer until you send it.",
+    "hint": "Take a photo, review it, then add it to your message.",
+    "photoAlt": "Captured photo",
+    "preview": "Camera preview",
+    "starting": "Starting camera… Allow camera access if prompted.",
+    "denied": "Camera permission was denied. Allow access in system settings, then retry, or choose a photo.",
+    "missing": "No camera found. Connect a camera or choose a photo.",
+    "unsupported": "Camera access is unavailable here. Choose a photo instead.",
+    "unavailable": "The camera could not start. Close other apps using it and retry, or choose a photo.",
+    "captureFailed": "The photo could not be captured. Retry or choose a photo.",
+    "device": "Camera",
+    "defaultDevice": "Default camera",
+    "deviceNumber": "Camera {{number}}",
+    "retake": "Retake",
+    "usePhoto": "Use photo",
+    "choosePhoto": "Choose photo",
+    "retry": "Retry",
+    "capturing": "Capturing…"
   }
 }

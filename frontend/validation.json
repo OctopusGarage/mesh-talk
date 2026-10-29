@@ -2038,6 +2038,41 @@
           }
         ]
       }
+    },
+    {
+      "id": "frontend-camera-capture",
+      "paths": [
+        "frontend/src/features/chat/CameraCaptureDialog.tsx",
+        "frontend/src/features/chat/CameraCaptureDialog.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/e2e/camera-capture.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/CameraCaptureDialog.test.ts",
+        "src/features/chat/ComposerScreenshot.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Capture a local photo, review or retake it, and stage it for explicit conversation-owned submission.",
+        "guide": "docs/help/topics/send-files.md#take-a-photo",
+        "invariants": [
+          {
+            "name": "Camera tracks and preview URLs are released; late permission and encoding results cannot export after cancellation.",
+            "reference": "docs/help/topics/send-files.md#take-a-photo"
+          },
+          {
+            "name": "Confirmed photos join the existing attachment queue and cannot cross conversation or auth lifetimes.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/camera-capture.spec.ts and inspect wide and compact dialog captures. Verify real camera permission, device switching, track release and lock/logout in packaged desktop apps; browser mocks cannot certify OS permission behavior."
+      ]
     }
   ],
   "prScenarios": [
@@ -2732,6 +2767,24 @@
       "browser": [
         "e2e/reply-preview.spec.ts",
         "e2e/chat.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-camera-capture-acceptance",
+      "paths": [
+        "frontend/src/features/chat/CameraCaptureDialog.tsx",
+        "frontend/src/features/chat/CameraCaptureDialog.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/e2e/camera-capture.spec.ts"
+      ],
+      "browser": [
+        "e2e/camera-capture.spec.ts"
+      ],
+      "native": [
+        "host"
       ]
     }
   ]

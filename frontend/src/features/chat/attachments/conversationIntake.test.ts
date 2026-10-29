@@ -1523,3 +1523,43 @@ it.each([
     expect(intake.dragOver).toBe(false);
   },
 );
+
+it("stages a confirmed camera photo without sending it", async () => {
+  let intake!: ReturnType<typeof useAttachmentIntake>;
+  function Probe() {
+    intake = useAttachmentIntake(i18n.t);
+    return null;
+  }
+  await act(async () => root.render(createElement(Probe)));
+  await act(async () => intake.openCamera());
+  expect(intake.cameraOpen).toBe(true);
+  const photo = file("camera.jpg", "image/jpeg");
+  await act(async () => intake.confirmCamera(photo));
+  expect(intake.cameraOpen).toBe(false);
+  expect(intake.stagedScreenshot).toBe(photo);
+  expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+});
+it.each(["conversation", "auth"])(
+  "invalidates camera confirmation after %s changes",
+  async (kind) => {
+    let intake!: ReturnType<typeof useAttachmentIntake>;
+    function Probe() {
+      intake = useAttachmentIntake(i18n.t);
+      return null;
+    }
+    await act(async () => root.render(createElement(Probe)));
+    await act(async () => intake.openCamera());
+    const staleConfirm = intake.confirmCamera;
+    await act(async () => {
+      if (kind === "conversation")
+        useChat.setState({
+          active: { kind: "account", id: "bob", name: "Bob" },
+        });
+      else useAuth.setState({ generation: useAuth.getState().generation + 1 });
+    });
+    await act(async () => staleConfirm(file("camera.jpg", "image/jpeg")));
+    expect(intake.cameraOpen).toBe(false);
+    expect(intake.stagedScreenshot).toBeNull();
+    expect(useChat.getState().sendFile).not.toHaveBeenCalled();
+  },
+);

@@ -32,6 +32,7 @@ import { messageSummary } from "@/lib/messagePresentation";
 import { usePacks } from "@/store/packs";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { ReceptionStatus } from "./ReceptionStatus";
+import { CameraCaptureDialog } from "./CameraCaptureDialog";
 import { Composer } from "./Composer";
 import { useDrafts } from "@/store/drafts";
 import {
@@ -1068,6 +1069,7 @@ export function ConversationView() {
           onAttach={attachments.attachFile}
           onAttachDirectory={attachments.attachDirectory}
           onImage={attachments.pickMedia}
+          onCamera={attachments.openCamera}
           onSend={(text, protection) => {
             const current = () => {
               const auth = useAuth.getState();
@@ -1119,6 +1121,16 @@ export function ConversationView() {
           }}
           onPasteFiles={attachments.pasteFiles}
           onScreenshot={attachments.captureScreenshot}
+        />
+      )}
+      {attachments.cameraOpen && (
+        <CameraCaptureDialog
+          onCancel={attachments.cancelCamera}
+          onConfirm={attachments.confirmCamera}
+          onPickImage={() => {
+            attachments.cancelCamera();
+            void attachments.pickMedia();
+          }}
         />
       )}
       {attachments.screenshotBytes && (

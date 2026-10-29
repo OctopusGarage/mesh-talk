@@ -1527,5 +1527,26 @@
     "selected": "{{count}}개 선택됨",
     "cancel": "취소",
     "favorite": "즐겨찾기에 추가"
+  },
+  "cameraCapture": {
+    "title": "사진 촬영",
+    "review": "사진을 확인하세요. 전송할 때까지 입력란에 보관됩니다.",
+    "hint": "사진을 찍고 확인한 후 메시지에 추가하세요.",
+    "photoAlt": "촬영한 사진",
+    "preview": "카메라 미리보기",
+    "starting": "카메라 시작 중… 요청 시 접근을 허용하세요.",
+    "denied": "카메라 권한이 거부되었습니다. 시스템 설정에서 허용한 후 다시 시도하거나 사진을 선택하세요.",
+    "missing": "카메라를 찾을 수 없습니다. 카메라를 연결하거나 사진을 선택하세요.",
+    "unsupported": "카메라를 사용할 수 없습니다. 사진을 선택하세요.",
+    "unavailable": "카메라를 시작할 수 없습니다. 사용 중인 다른 앱을 닫고 다시 시도하거나 사진을 선택하세요.",
+    "captureFailed": "사진을 촬영할 수 없습니다. 다시 시도하거나 사진을 선택하세요.",
+    "device": "카메라",
+    "defaultDevice": "기본 카메라",
+    "deviceNumber": "카메라 {{number}}",
+    "retake": "다시 촬영",
+    "usePhoto": "사진 사용",
+    "choosePhoto": "사진 선택",
+    "retry": "다시 시도",
+    "capturing": "촬영 중…"
   }
 }

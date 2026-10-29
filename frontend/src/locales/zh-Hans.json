@@ -1527,5 +1527,26 @@
     "selected": "已选 {{count}} 条",
     "cancel": "取消",
     "favorite": "添加到收藏夹"
+  },
+  "cameraCapture": {
+    "title": "拍照",
+    "review": "检查照片，确认后加入输入框，点击发送才会发送。",
+    "hint": "拍摄照片，预览确认后添加到消息。",
+    "photoAlt": "拍摄的照片",
+    "preview": "摄像头预览",
+    "starting": "正在启动摄像头… 如有提示，请允许访问。",
+    "denied": "未获得摄像头权限。请在系统设置中允许访问后重试，或选择照片。",
+    "missing": "未找到摄像头。请连接摄像头，或选择照片。",
+    "unsupported": "当前环境无法访问摄像头，请选择照片。",
+    "unavailable": "无法启动摄像头。请关闭可能占用它的应用后重试，或选择照片。",
+    "captureFailed": "拍照失败，请重试或选择照片。",
+    "device": "摄像头",
+    "defaultDevice": "默认摄像头",
+    "deviceNumber": "摄像头 {{number}}",
+    "retake": "重拍",
+    "usePhoto": "使用照片",
+    "choosePhoto": "选择照片",
+    "retry": "重试",
+    "capturing": "正在拍摄…"
   }
 }

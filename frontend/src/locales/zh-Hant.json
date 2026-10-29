@@ -1527,5 +1527,26 @@
     "selected": "已選 {{count}} 則",
     "cancel": "取消",
     "favorite": "加入收藏夾"
+  },
+  "cameraCapture": {
+    "title": "拍照",
+    "review": "檢查照片，確認後加入輸入框，點擊傳送才會傳送。",
+    "hint": "拍攝照片，預覽確認後加入訊息。",
+    "photoAlt": "拍攝的照片",
+    "preview": "攝影機預覽",
+    "starting": "正在啟動攝影機… 如有提示，請允許存取。",
+    "denied": "未取得攝影機權限。請在系統設定允許存取後重試，或選擇照片。",
+    "missing": "找不到攝影機。請連接攝影機，或選擇照片。",
+    "unsupported": "目前環境無法存取攝影機，請選擇照片。",
+    "unavailable": "無法啟動攝影機。請關閉可能佔用它的應用程式後重試，或選擇照片。",
+    "captureFailed": "拍照失敗，請重試或選擇照片。",
+    "device": "攝影機",
+    "defaultDevice": "預設攝影機",
+    "deviceNumber": "攝影機 {{number}}",
+    "retake": "重拍",
+    "usePhoto": "使用照片",
+    "choosePhoto": "選擇照片",
+    "retry": "重試",
+    "capturing": "正在拍攝…"
   }
 }

@@ -518,6 +518,11 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   recording and registration belong to Shortcuts. See [settings](settings.md).
   Future settings must extend the relevant category and shared rules rather than
   adding another independent save coordinator.
+- `CameraCaptureDialog.tsx` owns camera stream acquisition, still capture and preview
+  cleanup. `useAttachmentIntake.ts` owns its conversation/runtime lease and stages
+  confirmed photos through the existing composer queue; only Send submits them.
+  Late camera permission and encoding results cannot outlive their dialog. See
+  [taking a photo](help/topics/send-files.md#take-a-photo).
 - `ConversationView.tsx` delegates picker, drop, paste and screenshot intake to
   `attachments/useAttachmentIntake.ts`. Acquisition owns conversation/runtime
   leases, staging cleanup and source-specific media intent; store intents retain

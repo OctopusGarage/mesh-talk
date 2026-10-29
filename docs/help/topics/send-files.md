@@ -68,3 +68,20 @@ Press **Escape** or use the close button to return to the conversation.
 ## Further reference
 
 [File receiving settings](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/settings.md#receiving-and-saving-files)
+
+## Take a photo
+
+Open the message tools beside the input and choose **Take photo**. Allow camera
+access when prompted. With multiple cameras, choose the camera below the preview.
+Take a photo, then choose **Retake** or **Use photo**. The confirmed photo joins
+pending attachments; add text if needed, then press **Send**.
+
+Taking a photo does not use the microphone. The camera stops after capture or
+when you close the dialog, leave the conversation, or lock/sign out of the app.
+The live self-camera preview may be mirrored; the saved photo preserves the
+camera's original orientation so text remains readable. Photos are captured as
+JPEG with a maximum long edge of 1920 pixels.
+
+If access is denied, allow camera access in your operating system's privacy
+settings and retry. If the camera is unavailable or busy, close other apps using
+it and retry, or choose an existing photo instead.

@@ -110,6 +110,7 @@ export function Composer({
   onProtectionChange,
   onDraftChange,
   onAttach,
+  onCamera,
   onAttachDirectory,
   onPasteFiles,
   onScreenshot,
@@ -142,6 +143,7 @@ export function Composer({
     protection: import("@/lib/types").MessageProtection | undefined,
   ) => void;
   onDraftChange?: (text: string) => void;
+  onCamera?: () => void;
   onAttach?: () => void;
   onAttachDirectory?: () => void;
   /** Send copied files after the user presses Enter or Send. */
@@ -952,6 +954,19 @@ export function Composer({
               onClick={onImage}
             >
               <ImageIcon className="h-4 w-4" />
+            </Button>
+          )}
+          {onCamera && (
+            <Button
+              variant="ghost"
+              size="icon"
+              data-testid="composer-camera"
+              className="h-9 w-9 shrink-0 rounded-md text-muted-foreground"
+              title={t("cameraCapture.title")}
+              aria-label={t("cameraCapture.title")}
+              onClick={onCamera}
+            >
+              <Camera className="h-4 w-4" />
             </Button>
           )}
           <Button

@@ -1527,5 +1527,26 @@
     "selected": "{{count}} selecionadas",
     "cancel": "Cancelar",
     "favorite": "Adicionar aos Favoritos"
+  },
+  "cameraCapture": {
+    "title": "Tirar foto",
+    "review": "Confira a foto. Ela aguardará no campo de mensagem até você enviar.",
+    "hint": "Tire uma foto, confira e adicione à mensagem.",
+    "photoAlt": "Foto capturada",
+    "preview": "Prévia da câmera",
+    "starting": "Iniciando câmera… Permita o acesso se solicitado.",
+    "denied": "Permissão da câmera negada. Permita o acesso nas configurações do sistema e tente novamente, ou escolha uma foto.",
+    "missing": "Nenhuma câmera encontrada. Conecte uma ou escolha uma foto.",
+    "unsupported": "A câmera não está disponível. Escolha uma foto.",
+    "unavailable": "Não foi possível iniciar a câmera. Feche outros aplicativos que a utilizam e tente novamente, ou escolha uma foto.",
+    "captureFailed": "Não foi possível tirar a foto. Tente novamente ou escolha uma foto.",
+    "device": "Câmera",
+    "defaultDevice": "Câmera padrão",
+    "deviceNumber": "Câmera {{number}}",
+    "retake": "Tirar outra",
+    "usePhoto": "Usar foto",
+    "choosePhoto": "Escolher foto",
+    "retry": "Tentar novamente",
+    "capturing": "Capturando…"
   }
 }
