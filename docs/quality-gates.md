@@ -165,7 +165,7 @@ The dispatch downloads that build's `verified-release-evidence` and container
 artifacts, then downloads the current draft. It re-verifies signatures, provenance,
 installer metadata and the recorded snapshot, including repository/source/tag,
 release and asset IDs, sizes, digests and actual file bytes. It then requires
-current-source CI, both full health jobs, UI/backend E2E, Gitleaks, Scorecard, all
+current-source CI, every direct Health check, UI/backend E2E, Gitleaks, Scorecard, all
 three CodeQL languages and no unresolved main code-scanning alerts, plus container
 smoke tests before publishing relay images. Missing, running, skipped or failed
 checks stop publication. The latest check run is used; an older success cannot mask

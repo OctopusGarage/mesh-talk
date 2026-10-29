@@ -562,8 +562,9 @@ one browser LCOV upload. It prefixes filenames so reports from different runners
 cannot overwrite each other and clears old output only after validating every
 input. Unit coverage artifacts are attempt-bound: use **Re-run all jobs** for this
 workflow when retrying a failed attempt, so producer and shards belong to the
-same attempt. The extra producer job adds setup/queue/transfer cost; benchmark
-its net latency and runner-minute effect before claiming a speedup.
+same attempt. Health's existing Linux job produces this artifact; no additional
+unit-test runner is allocated. Include artifact transfer and consumer validation
+costs when measuring the benefit of reuse.
 The final UI gate requires successful browser, coverage, optional-pack and
 portable jobs, plus Firefox when selected. HTML report rendering runs independently
 and is not a merge acceptance dependency; each test shard still requires its raw
