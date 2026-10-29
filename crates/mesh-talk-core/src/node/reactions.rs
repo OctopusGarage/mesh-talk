@@ -166,7 +166,7 @@ impl Node {
                 .collect()
         };
         let mut decoded: Vec<(String, u64, ReactionPayload)> =
-            self.private_account_reactions(peer_account_id);
+            self.private_account_reactions(peer_account_id)?;
         for (conv, author, peer_account) in convs {
             let react_events: Vec<Event> = {
                 let log = self.log.lock().expect("log mutex not poisoned");
@@ -219,7 +219,7 @@ impl Node {
             }
         }
         for (_, _, payload) in &mut decoded {
-            payload.target = self.file_message_logical_id(acct_conv, payload.target);
+            payload.target = self.file_message_logical_id(acct_conv, payload.target)?;
         }
         Ok(aggregate(&decoded))
     }

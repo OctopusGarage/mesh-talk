@@ -156,7 +156,10 @@ fn conversations(
 ) -> Result<Vec<AgentConversation>, CommandError> {
     let mut accounts = BTreeMap::new();
     let names = runtime.known_account_names();
-    for id in runtime.known_account_ids() {
+    for id in runtime
+        .known_account_ids()
+        .map_err(|e| CommandError::Internal(e.to_string()))?
+    {
         accounts.insert(
             id.clone(),
             names

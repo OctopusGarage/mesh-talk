@@ -83,6 +83,22 @@ pub(crate) struct IndexedRecoveredSentIds {
 }
 const INDEX_SCHEMA: &str = "CREATE TABLE recovered_sent_ids(conversation BLOB NOT NULL CHECK(length(conversation)=32), sequence BLOB NOT NULL CHECK(length(sequence)=8), clock BLOB NOT NULL CHECK(length(clock)=8), plaintext_sha256 BLOB NOT NULL CHECK(length(plaintext_sha256)=32), id BLOB NOT NULL CHECK(length(id)=32), PRIMARY KEY(conversation,sequence,clock,plaintext_sha256)) WITHOUT ROWID;";
 impl IndexedRecoveredSentIds {
+    pub(crate) fn authenticate_legacy(
+        profile: &crate::storage::profile::context::ProfileStorage,
+        path: &Path,
+        password: &str,
+    ) -> Result<(), LogError> {
+        super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<
+            RecoveredSentId,
+        >(
+            profile,
+            path,
+            password,
+            super::transcript_repository::RECOVERED_IDS,
+            MAGIC,
+        )
+    }
+
     pub(crate) fn from_profile(
         profile: std::sync::Arc<crate::storage::profile::context::ProfileStorage>,
         path: &Path,
@@ -187,6 +203,17 @@ impl IndexedRecoveredSentIds {
             .profile()
             .database()
             .read(|c| Self::lookup_on(c, &fingerprint))
+    }
+    pub(crate) fn revision(&self) -> Result<u64, LogError> {
+        self.source.profile().database().read(|c| {
+            Ok(c.query_row(
+                "SELECT revision FROM transcript_sources WHERE kind=?1",
+                [super::transcript_repository::RECOVERED_IDS],
+                |r| r.get::<_, i64>(0),
+            )?
+            .try_into()
+            .map_err(|_| LogError::CorruptFile("invalid history counter".into()))?)
+        })
     }
     pub(crate) fn id_for_header(
         &self,

@@ -102,6 +102,9 @@ impl SentStore {
             plaintext: plaintext.to_vec(),
         })
     }
+    pub(crate) fn maximum_sequence(&self, conversation: &ConversationId) -> Result<u64, LogError> {
+        self.repository.maximum_sequence(conversation)
+    }
     pub(crate) fn entry(
         &self,
         conversation: &ConversationId,
@@ -122,6 +125,12 @@ impl SentStore {
             .map(decode)
             .transpose()
     }
+    pub(crate) fn header_by_ordinal(
+        &self,
+        ordinal: i64,
+    ) -> Result<Option<TranscriptHeader>, LogError> {
+        self.repository.header_by_ordinal(ordinal)
+    }
     pub(crate) fn row_by_ordinal(&self, ordinal: i64) -> Result<Option<SentEntry>, LogError> {
         self.repository
             .row_by_ordinal(ordinal)?
@@ -138,6 +147,15 @@ impl SentStore {
         self.repository
             .header_page(conversation, after, limit, descending)
     }
+    pub(crate) fn header_reverse_scan_page(
+        &self,
+        conversation: &ConversationId,
+        before: Option<i64>,
+        limit: TranscriptPageLimit,
+    ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
+        self.repository
+            .header_reverse_scan_page(conversation, before, limit)
+    }
     pub(crate) fn header_scan_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -145,6 +163,13 @@ impl SentStore {
         limit: TranscriptPageLimit,
     ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
         self.repository.header_scan_page(conversation, after, limit)
+    }
+    pub(crate) fn account_routes_page(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<Vec<(ConversationId, Option<super::DmRoute>)>, LogError> {
+        self.repository.account_routes_page(after, limit)
     }
     pub(crate) fn conversation_revision(
         &self,
@@ -246,6 +271,9 @@ impl SentStore {
         })?;
         Ok(found)
     }
+    pub(crate) fn remove_ordinals(&mut self, ordinals: &[i64]) -> Result<usize, LogError> {
+        self.repository.remove_ordinals(ordinals)
+    }
     pub(crate) fn remove_where(
         &mut self,
         mut predicate: impl FnMut(&SentEntry) -> bool,
@@ -287,5 +315,43 @@ impl SentStore {
     #[cfg(test)]
     pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
         self.repository.fail_appends_for_test(enabled)
+    }
+}
+
+// Explicit fixture materialization only. Production callers use owned lookups
+// and bounded pages; these compatibility names do not exist in release builds.
+#[cfg(test)]
+impl SentStore {
+    pub(crate) fn entries_ref(&self, conversation: &ConversationId) -> Vec<SentEntry> {
+        let mut rows = Vec::new();
+        self.visit(Some(conversation), |row| {
+            rows.push(row.clone());
+            Ok(true)
+        })
+        .expect("fixture transcript read");
+        rows
+    }
+    pub(crate) fn entries(&self, conversation: &ConversationId) -> Vec<SentEntry> {
+        let mut rows = self.entries_ref(conversation);
+        rows.sort_by_key(|entry| (entry.wall_clock, entry.seq));
+        rows
+    }
+}
+
+#[cfg(test)]
+impl SentStore {
+    pub(crate) fn conversations(&self) -> Vec<ConversationId> {
+        let mut cursor = None;
+        let mut result = Vec::new();
+        loop {
+            let page = self
+                .conversation_page(cursor, 128)
+                .expect("fixture conversations");
+            if page.is_empty() {
+                return result;
+            }
+            cursor = page.last().copied();
+            result.extend(page);
+        }
     }
 }

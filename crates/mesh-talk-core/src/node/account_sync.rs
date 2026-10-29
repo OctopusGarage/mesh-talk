@@ -667,13 +667,14 @@ impl Node {
                 };
             if author
                 .as_deref()
-                .is_some_and(|author| self.private_dm_message_recalled(peer, event_id, author))
+                .map(|author| self.private_dm_message_recalled(peer, event_id, author))
+                .transpose()?
+                .unwrap_or(false)
                 || self
                     .recalls
                     .lock()
                     .expect("recalls mutex")
-                    .targets(&host)
-                    .contains(&event_id)
+                    .contains(host, event_id)?
             {
                 return Ok(());
             }
@@ -689,13 +690,13 @@ impl Node {
                 "file proof conflicts with signed event".into(),
             ));
         }
-        let logical = self.file_message_row_logical_id(&row);
+        let logical = self.file_message_row_logical_id(&row)?;
         let suppressed = {
             let suppression = self
                 .account_suppression
                 .lock()
                 .expect("account suppression mutex not poisoned");
-            suppression.contains(host, event_id) || suppression.contains(host, logical)
+            suppression.contains(host, event_id)? || suppression.contains(host, logical)?
         };
         let erased = {
             let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
@@ -713,10 +714,7 @@ impl Node {
             .received_files
             .lock()
             .expect("files mutex not poisoned");
-        let fresh = !files
-            .entries_ref(&host)
-            .iter()
-            .any(|entry| entry.event_id == event_id);
+        let fresh = !files.contains_in(&host, event_id)?;
         files
             .record_file_alias_durable(&row)
             .map_err(NodeError::Log)?;
@@ -729,119 +727,195 @@ impl Node {
         Ok(())
     }
 
-    fn has_live_local_file_card(&self, file_conv: ConversationId) -> bool {
-        let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-        self.has_live_local_file_card_with(file_conv, &delivery)
+    fn has_live_local_file_card(&self, file: ConversationId) -> Result<bool, NodeError> {
+        let delivery = self.delivery.lock().expect("delivery mutex");
+        self.has_live_local_file_card_with(file, &delivery)
     }
-
     fn has_live_local_file_card_with(
         &self,
-        file_conv: ConversationId,
+        file: ConversationId,
         delivery: &super::delivery_store::DeliveryStore,
-    ) -> bool {
-        let rows = self
-            .received_files
-            .lock()
-            .expect("files mutex not poisoned");
-        let suppression = self
-            .account_suppression
-            .lock()
-            .expect("suppression mutex not poisoned");
-        for host in rows.conversations() {
-            for row in rows.entries_ref(&host) {
-                if delivery.file_erased(host, row.event_id)
-                    || delivery.manifest_event_erased(row.event_id)
-                    || suppression.contains(host, row.event_id)
-                {
+    ) -> Result<bool, NodeError> {
+        let mut cursor = None;
+        loop {
+            let page = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .file_headers(
+                    &file,
+                    cursor,
+                    super::transcript_repository::TranscriptPageLimit::default(),
+                )?;
+            if page.rows.is_empty() {
+                return Ok(false);
+            }
+            for header in page.rows {
+                cursor = Some(header.ordinal);
+                let Some(row) = self
+                    .received_files
+                    .lock()
+                    .expect("files mutex")
+                    .row_by_ordinal(header.ordinal)?
+                else {
                     continue;
-                }
-                if super::files::validated_manifest(&row.plaintext)
-                    .is_some_and(|manifest| manifest.file_conv() == file_conv)
+                };
+                if !delivery.file_erased(row.conversation, row.event_id)
+                    && !delivery.manifest_event_erased(row.event_id)
+                    && !self.file_message_row_suppressed(&row)?
+                    && super::files::validated_manifest(&row.plaintext)
+                        .is_some_and(|m| m.file_conv() == file)
                 {
-                    return true;
+                    return Ok(true);
                 }
             }
         }
-        false
     }
-
     fn attachment_for_sibling(
         &self,
-        file_conv: ConversationId,
+        file: ConversationId,
         requester: &PublicIdentity,
     ) -> Result<Option<crate::file::AnyManifest>, NodeError> {
-        let (recalled, _) = self.account_archive_recalls()?;
         let own = self.account_id();
         let me = self.user_id();
-        let requester_id = requester.user_id();
-        let mut hosts = HashSet::new();
-        hosts.insert(account_conversation_id(&own, &own));
-        for other in self.known_account_ids() {
-            hosts.insert(account_conversation_id(&own, &other));
-        }
+        let requester = requester.user_id();
+        let mut hosts: HashMap<_, Option<String>> = self
+            .known_account_ids()?
+            .into_iter()
+            .map(|peer| (account_conversation_id(&own, &peer), Some(peer)))
+            .collect();
+        hosts.insert(account_conversation_id(&own, &own), Some(own));
         {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            for channel in book.channel_ids() {
-                if book.state(&channel).is_some_and(|state| {
-                    !state.is_dissolved()
-                        && state.is_accepted_member(&me)
-                        && state.is_accepted_member(&requester_id)
+            let book = self.channels.lock().expect("channels mutex");
+            for id in book.channel_ids() {
+                if book.state(&id).is_some_and(|s| {
+                    !s.is_dissolved()
+                        && s.is_accepted_member(&me)
+                        && s.is_accepted_member(&requester)
                 }) {
-                    hosts.insert(channel);
+                    hosts.insert(id, None);
                 }
             }
         }
-        let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-        let rows = self
-            .received_files
-            .lock()
-            .expect("files mutex not poisoned");
-        let log = self.log.lock().expect("log mutex not poisoned");
-        let proofs = self
-            .account_file_proofs
-            .lock()
-            .expect("file proofs mutex not poisoned");
-        let suppression = self
-            .account_suppression
-            .lock()
-            .expect("suppression mutex not poisoned");
-        for host in hosts {
-            for row in rows.entries_ref(&host) {
-                if delivery.file_erased(host, row.event_id)
-                    || delivery.manifest_event_erased(row.event_id)
-                    || suppression.contains(host, row.event_id)
-                    || recalled
-                        .get(&host)
-                        .is_some_and(|ids| ids.contains(&row.event_id))
+        let mut cursor = None;
+        loop {
+            let page = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .file_headers(
+                    &file,
+                    cursor,
+                    super::transcript_repository::TranscriptPageLimit::default(),
+                )?;
+            if page.rows.is_empty() {
+                return Ok(None);
+            }
+            for header in page.rows {
+                cursor = Some(header.ordinal);
+                let Some(peer) = hosts.get(&header.conversation) else {
+                    continue;
+                };
+                let Some(row) = self
+                    .received_files
+                    .lock()
+                    .expect("files mutex")
+                    .row_by_ordinal(header.ordinal)?
+                else {
+                    continue;
+                };
                 {
+                    let delivery = self.delivery.lock().expect("delivery mutex");
+                    if delivery.file_erased(row.conversation, row.event_id)
+                        || delivery.manifest_event_erased(row.event_id)
+                    {
+                        continue;
+                    }
+                }
+                if self.file_message_row_suppressed(&row)? {
                     continue;
                 }
-                let selected = log.get(&row.event_id)?;
-                let proof = selected.as_ref().or_else(|| proofs.get(&row.event_id));
-                if let Some(manifest) = super::files::eligible_manifest_row(row, proof, None)
-                    && manifest.file_conv() == file_conv
+                let selected = self.log.lock().expect("log mutex").get(&row.event_id)?;
+                let proof = match selected {
+                    Some(event) => Some(event),
+                    None => self
+                        .account_file_proofs
+                        .lock()
+                        .expect("proofs mutex")
+                        .get(&row.event_id)?,
+                };
+                let author = self
+                    .file_message_identities
+                    .lock()
+                    .expect("identities mutex")
+                    .row_author_account(&row)?;
+                if self.message_recalled_selected(
+                    row.conversation,
+                    row.event_id,
+                    peer.as_deref(),
+                    author.as_deref(),
+                )? {
+                    continue;
+                }
+                if let Some(manifest) =
+                    super::files::eligible_manifest_row(&row, proof.as_ref(), None)
+                    && manifest.file_conv() == file
                 {
                     return Ok(Some(manifest));
                 }
             }
         }
-        Ok(None)
     }
-
-    fn account_recalled_files(&self) -> Result<HashSet<ConversationId>, NodeError> {
-        let (recalled, _) = self.account_archive_recalls()?;
-        let rows = self.received_files.lock().expect("files mutex");
-        let mut files = HashSet::new();
-        for (host, targets) in recalled {
-            for row in rows.entries_ref(&host) {
-                if targets.contains(&row.event_id)
-                    && let Some(manifest) = super::files::validated_manifest(&row.plaintext)
-                {
-                    files.insert(manifest.file_conv());
+    fn account_file_recalled(&self, file: ConversationId) -> Result<bool, NodeError> {
+        let own = self.account_id();
+        let mut peers: HashMap<_, _> = self
+            .known_account_ids()?
+            .into_iter()
+            .map(|peer| (account_conversation_id(&own, &peer), peer))
+            .collect();
+        peers.insert(account_conversation_id(&own, &own), own);
+        let mut cursor = None;
+        loop {
+            let page = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .file_headers(
+                    &file,
+                    cursor,
+                    super::transcript_repository::TranscriptPageLimit::default(),
+                )?;
+            if page.rows.is_empty() {
+                return Ok(false);
+            }
+            for header in page.rows {
+                cursor = Some(header.ordinal);
+                let Some(peer) = peers.get(&header.conversation) else {
+                    continue;
+                };
+                let Some(row) = self
+                    .received_files
+                    .lock()
+                    .expect("files mutex")
+                    .row_by_ordinal(header.ordinal)?
+                else {
+                    continue;
+                };
+                let author = self
+                    .file_message_identities
+                    .lock()
+                    .expect("identities mutex")
+                    .row_author_account(&row)?;
+                if self.message_recalled_selected(
+                    row.conversation,
+                    row.event_id,
+                    Some(peer),
+                    author.as_deref(),
+                )? {
+                    return Ok(true);
                 }
             }
         }
-        Ok(files)
     }
 
     pub(in crate::node) async fn serve_account_attachment_checked(
@@ -1232,7 +1306,7 @@ impl Node {
             .lock()
             .expect("account sync commit mutex not poisoned");
         if self.private_dm_control_revision() != controls
-            || self.account_recalled_files()?.contains(&file_conv)
+            || self.account_file_recalled(file_conv)?
         {
             return Err(NodeError::Authorization(
                 "attachment recall state changed".into(),
@@ -1251,7 +1325,7 @@ impl Node {
                 .expect("files mutex not poisoned")
                 .manifest(&file_conv)
                 .is_none()
-            || !self.has_live_local_file_card_with(file_conv, &delivery)
+            || !self.has_live_local_file_card_with(file_conv, &delivery)?
         {
             return Err(NodeError::File("attachment was removed during sync".into()));
         }
@@ -1271,7 +1345,7 @@ impl Node {
         if self.media.contains(file_conv) {
             return Ok(true);
         }
-        if !self.has_live_local_file_card(file_conv)
+        if !self.has_live_local_file_card(file_conv)?
             || self
                 .file_progress(file_conv)?
                 .is_none_or(|progress| progress.done != progress.total)
@@ -1375,12 +1449,12 @@ impl Node {
                         .account_suppression
                         .lock()
                         .expect("account suppression mutex not poisoned")
-                        .contains(conversation, event_id)
+                        .contains(conversation, event_id)?
                     {
                         continue;
                     }
                     let mut received = self.received.lock().expect("received mutex not poisoned");
-                    if let Some(existing) = received.entry(event_id) {
+                    if let Some(existing) = received.entry(event_id)? {
                         // The live receive and sender sidecar can timestamp the
                         // same signed event differently. Preserve the local row
                         // when its identity and plaintext already match.
@@ -1478,29 +1552,46 @@ impl Node {
         if !self.file_identity_capability_due(peer.addr, &peer.public) {
             return;
         }
-        let mut requests: Vec<_> = requests
-            .iter()
-            .copied()
-            .filter(|(_, manifest)| {
-                let host = self
+        let selected = (|| -> Result<Vec<_>, NodeError> {
+            let mut selected = Vec::new();
+            for request in requests {
+                let Some(row) = self
                     .received_files
                     .lock()
-                    .expect("received files lock")
-                    .entry(*manifest)
-                    .map(|row| row.conversation);
-                host.is_some_and(|host| {
-                    host != account_conversation_id(&self.account_id(), &self.account_id())
-                        && self
-                            .channels
-                            .lock()
-                            .expect("channels lock")
-                            .state(&host)
-                            .is_none()
-                        && !self.has_file_message_identity(host, *manifest)
-                })
-            })
-            .collect();
-        requests.extend(self.pending_file_message_identities(&peer.public));
+                    .expect("files mutex")
+                    .entry(request.1)?
+                else {
+                    continue;
+                };
+                let host = row.conversation;
+                if host != account_conversation_id(&self.account_id(), &self.account_id())
+                    && self
+                        .channels
+                        .lock()
+                        .expect("channels mutex")
+                        .state(&host)
+                        .is_none()
+                    && !self.has_file_message_identity(host, request.1)?
+                {
+                    selected.push(*request);
+                }
+            }
+            Ok(selected)
+        })();
+        let mut requests = match selected {
+            Ok(requests) => requests,
+            Err(error) => {
+                log::warn!("file identity discovery deferred after storage failure: {error}");
+                return;
+            }
+        };
+        match self.pending_file_message_identities(&peer.public) {
+            Ok(pending) => requests.extend(pending),
+            Err(error) => {
+                log::warn!("file identity discovery deferred after storage failure: {error}");
+                return;
+            }
+        }
         requests.sort_unstable_by_key(|(file, manifest)| (*file.as_bytes(), *manifest.as_bytes()));
         requests.dedup();
         if !requests.is_empty() {
@@ -1931,10 +2022,9 @@ impl Node {
                                 attachment_unsupported.retain(|_, until| *until > tokio::time::Instant::now());
                                 let favorites_supported=state.favorites_supported;
                                 let missing = self.account_blocking(move |node| {
-                                    let recalled = node.account_recalled_files()?;
                                     let mut missing = node.files.lock().expect("files mutex not poisoned").file_convs();
                                     missing.sort_by_key(|id| *id.as_bytes());
-                                    missing.retain(|file| !node.media.contains(*file) && !recalled.contains(file));
+                                    let mut visible=Vec::new();for file in missing{if !node.media.contains(file)&&!node.account_file_recalled(file)?{visible.push(file);}}let missing=visible;
                                     let mut queue:Vec<_>=missing.into_iter().map(|file|(file,false)).collect();
                                     if favorites_supported && node.device_sync_policy().history {queue.extend(node.missing_favorite_files().into_iter().map(|file|(file,true)));}
                                     Ok(queue)

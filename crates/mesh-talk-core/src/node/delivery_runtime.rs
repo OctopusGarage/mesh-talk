@@ -2,6 +2,7 @@
 //! immutable snapshots; no delivery or ratchet guard crosses a transport await.
 use super::delivery_store::{DeliveryDestination, ReceiptDelivery};
 use super::delivery_store::{DeliveryStore, DeliveryTransaction, OutgoingDelivery};
+#[cfg(test)]
 use super::sentlog::SentEntry;
 use super::session::SessionError;
 use super::*;
@@ -529,12 +530,12 @@ impl Node {
         }
         let manifest = super::files::validated_manifest(&received.plaintext)
             .ok_or_else(|| LogError::CorruptFile("invalid file manifest".into()))?;
-        let logical = self.file_message_row_logical_id(&received);
+        let logical = self.file_message_row_logical_id(&received)?;
         if self
             .account_suppression
             .lock()
             .expect("account suppression lock")
-            .contains(received.conversation, logical)
+            .contains(received.conversation, logical)?
         {
             self.files
                 .lock()
@@ -826,6 +827,14 @@ impl Node {
             || event.parents.len() > 1024
         {
             return Ok(None);
+        }
+        if self
+            .received
+            .lock()
+            .expect("received mutex")
+            .processed(event.id)?
+        {
+            return Ok(Some(()));
         }
         if sibling && !self.device_sync_policy().history {
             return Ok(None);
@@ -1137,9 +1146,9 @@ impl Node {
                 store.recover_next_with_channels(
                     &mut ratchet,
                     &mut log,
-                    &mut sent,
-                    &mut received,
-                    Some(&mut files),
+                    &mut *sent,
+                    &mut *received,
+                    Some(&mut *files),
                     Some(&mut self.channel_senders.lock().expect("sender store lock")),
                 )
             };
@@ -1218,7 +1227,7 @@ impl Node {
                                     mime: manifest.mime().to_owned(),
                                     file_conv: manifest.file_conv(),
                                     media: super::media_store::manifest_is_media(&manifest),
-                                    event_id: self.file_message_row_logical_id(&entry),
+                                    event_id: self.file_message_row_logical_id(&entry)?,
                                     authored_at: entry.wall_clock,
                                     received_at: super::node::now_millis(),
                                     arrival_kind: "live",
@@ -1230,12 +1239,8 @@ impl Node {
                             }
                         }
                     }
-                } else if self
-                    .emitted
-                    .lock()
-                    .expect("emitted lock not poisoned")
-                    .insert(entry.event_id)
-                {
+                } else {
+                    self.note_reception_change();
                     let envelope = DmEnvelope::decode(&entry.plaintext);
                     let inner = envelope
                         .as_ref()
@@ -1356,53 +1361,32 @@ impl Node {
         self.delivery_status_notify.notified().await;
     }
 
-    pub(in crate::node) fn raw_sent_history(
+    pub(in crate::node) fn sent_header_identity(
         &self,
-        conversation: ConversationId,
-    ) -> Result<Vec<(EventId, SentEntry)>, LogError> {
-        let store = self.delivery.lock().expect("delivery lock not poisoned");
-        let log = self.log.lock().expect("log lock not poisoned");
-        let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
-        let mut ids: std::collections::HashMap<_, _> = log
-            .events(&conversation)?
-            .into_iter()
-            .filter(|e| e.kind == crate::eventlog::EventKind::Message && e.author == author)
-            .map(|e| (e.seq, e.id))
-            .collect();
-        let mut entries = self
-            .sentlog
-            .lock()
-            .expect("sent lock not poisoned")
-            .entries(&conversation);
-        for tx in store.pending_transactions() {
-            if let DeliveryTransaction::Outgoing { message, sent, .. } = tx.body()
-                && sent.conversation == conversation
-            {
-                ids.insert(sent.seq, message.logical_id);
-                if !entries.iter().any(|e| e == sent) {
-                    entries.push(sent.clone());
-                }
-            }
-        }
-        let recovered_ids = self
+        header: &super::transcript_repository::TranscriptHeader,
+    ) -> Result<EventId, LogError> {
+        if let Some(id) = self
             .recovered_sent_ids
             .lock()
-            .expect("recovered sent ids mutex not poisoned");
-        Ok(entries
-            .into_iter()
-            .map(|e| {
-                (
-                    recovered_ids
-                        .as_ref()
-                        .and_then(|saved| saved.id_for(&e))
-                        .or_else(|| ids.get(&e.seq).copied())
-                        .unwrap_or(EventId::new([0; 32])),
-                    e,
-                )
-            })
-            .collect())
+            .expect("recovered identity mutex")
+            .as_ref()
+            .map(|r| r.id_for_header(header))
+            .transpose()?
+            .flatten()
+        {
+            return Ok(id);
+        }
+        let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
+        Ok(self
+            .log
+            .lock()
+            .expect("log mutex")
+            .repository()?
+            .authored_header(&header.conversation, author, header.sequence)?
+            .filter(|h| h.kind == crate::eventlog::EventKind::Message)
+            .map(|h| h.id)
+            .unwrap_or(EventId::new([0; 32])))
     }
-
     #[cfg(test)]
     pub(in crate::node) fn sent_entries_for_history(
         &self,
@@ -2524,14 +2508,14 @@ impl Node {
         let log = self.log.lock().expect("log lock not poisoned");
         let mut scopes = Vec::new();
         for file in store.file_cards() {
-            let Some(entry) = rows.entry(file.id) else {
+            let Some(entry) = rows.entry(file.id)? else {
                 continue;
             };
             if entry.conversation != file.conversation || entry.from != self.user_id() {
                 continue;
             }
             let original = log.get(&entry.event_id)?;
-            if !self.file_card_manifest_matches(file, entry, original.as_ref()) {
+            if !self.file_card_manifest_matches(file, &entry, original.as_ref()) {
                 continue;
             }
             for destination in &file.destinations {

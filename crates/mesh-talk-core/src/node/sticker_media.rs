@@ -242,7 +242,7 @@ impl Node {
     ) -> Result<Option<Vec<Event>>, crate::eventlog::LogError> {
         if headers.is_empty()
             || headers.len() > 64
-            || self.expired_received_file(file)
+            || self.expired_received_file(file)?
             || self
                 .delivery_suspended
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -308,8 +308,7 @@ impl Node {
             .received_files
             .lock()
             .expect("received files lock")
-            .entry(offer)
-            .cloned()
+            .entry(offer)?
         else {
             return Ok(None);
         };

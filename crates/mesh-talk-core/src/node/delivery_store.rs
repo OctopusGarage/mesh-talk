@@ -14,6 +14,67 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// The delivery journal installs only these durable projections. Standalone
+/// encrypted-log fixtures and profile-backed runtime stores share this write
+/// boundary; neither exposes a historical collection through it.
+pub(crate) trait DeliverySentProjection {
+    fn record_durable(&mut self, entry: &SentEntry) -> Result<(), LogError>;
+}
+pub(crate) trait DeliveryReceivedProjection {
+    fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError>;
+    fn record_incoming(
+        &mut self,
+        original: &Event,
+        entry: &ReceivedEntry,
+        owner: Option<(&PublicIdentity, &str)>,
+    ) -> Result<(), LogError>;
+}
+impl DeliverySentProjection for SentLog {
+    fn record_durable(&mut self, entry: &SentEntry) -> Result<(), LogError> {
+        SentLog::record_durable(self, entry)
+    }
+}
+impl DeliverySentProjection for super::sent_store::SentStore {
+    fn record_durable(&mut self, entry: &SentEntry) -> Result<(), LogError> {
+        Self::record_durable(self, entry)
+    }
+}
+impl DeliveryReceivedProjection for ReceivedLog {
+    fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
+        ReceivedLog::record_durable(self, entry)
+    }
+    fn record_incoming(
+        &mut self,
+        _: &Event,
+        entry: &ReceivedEntry,
+        _: Option<(&PublicIdentity, &str)>,
+    ) -> Result<(), LogError> {
+        self.record_durable(entry)
+    }
+}
+impl DeliveryReceivedProjection for super::received_store::ReceivedStore {
+    fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
+        Self::record_durable(self, entry)
+    }
+    fn record_incoming(
+        &mut self,
+        original: &Event,
+        entry: &ReceivedEntry,
+        owner: Option<(&PublicIdentity, &str)>,
+    ) -> Result<(), LogError> {
+        let (device, account) =
+            owner.ok_or_else(|| invalid("incoming transcript requires bound delivery owner"))?;
+        let metadata = super::reception_effects::ReceptionMetadata::for_incoming(
+            original,
+            entry,
+            device,
+            account,
+            super::node::now_millis(),
+        );
+        self.record_durable_with_reception(entry, &metadata)
+    }
+}
+
 const JOURNAL_MAGIC: &[u8; 6] = b"MTDTX1";
 const OUTBOX_MAGIC: &[u8; 6] = b"MTDOB1";
 const HEADER_BYTES: u64 = 22;
@@ -917,8 +978,8 @@ impl DeliveryStore {
         &mut self,
         ratchet: &mut DmRatchet,
         log: &mut PersistentEventLog,
-        sent: &mut SentLog,
-        received: &mut ReceivedLog,
+        sent: &mut impl DeliverySentProjection,
+        received: &mut impl DeliveryReceivedProjection,
     ) -> Result<Option<EventId>, LogError> {
         self.recover_next_with_files(ratchet, log, sent, received, None)
     }
@@ -928,9 +989,9 @@ impl DeliveryStore {
         &mut self,
         ratchet: &mut DmRatchet,
         log: &mut PersistentEventLog,
-        sent: &mut SentLog,
-        received: &mut ReceivedLog,
-        files: Option<&mut ReceivedLog>,
+        sent: &mut impl DeliverySentProjection,
+        received: &mut impl DeliveryReceivedProjection,
+        files: Option<&mut dyn DeliveryReceivedProjection>,
     ) -> Result<Option<EventId>, LogError> {
         self.recover_next_with_channels(ratchet, log, sent, received, files, None)
     }
@@ -940,9 +1001,9 @@ impl DeliveryStore {
         &mut self,
         ratchet: &mut DmRatchet,
         log: &mut PersistentEventLog,
-        sent: &mut SentLog,
-        received: &mut ReceivedLog,
-        files: Option<&mut ReceivedLog>,
+        sent: &mut impl DeliverySentProjection,
+        received: &mut impl DeliveryReceivedProjection,
+        files: Option<&mut dyn DeliveryReceivedProjection>,
         channel_senders: Option<&mut super::channel_senders::ChannelSenderStore>,
     ) -> Result<Option<EventId>, LogError> {
         self.sync_replacement()?;
@@ -1004,7 +1065,13 @@ impl DeliveryStore {
             } => {
                 ratchet.commit_prepared(prepared)?;
                 log.append_durable((**original).clone())?;
-                received.record_durable(entry)?;
+                received.record_incoming(
+                    original,
+                    entry,
+                    self.profile
+                        .as_ref()
+                        .map(|(_, p)| (&p.device, p.account.as_str())),
+                )?;
                 // Persist/schedule the receipt only after plaintext durability.
                 if let Some(receipt) = receipt {
                     log.append_durable(receipt.destination.event.clone())?;
@@ -1282,6 +1349,30 @@ impl DeliveryStore {
 
     /// Validate the entire requested batch before any visibility tombstone commits.
     /// Existing cards already reserve their slot; legacy aliases need new slots.
+    pub(crate) fn file_erasure_needs_slot(
+        &self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> bool {
+        !self.file_erased(conversation, id)
+            && !self
+                .files
+                .get(&id)
+                .is_some_and(|file| file.conversation == conversation)
+    }
+    pub(crate) fn check_file_erasure_count(&self, additional: usize) -> Result<(), LogError> {
+        if additional > 0
+            && self
+                .files
+                .len()
+                .saturating_add(self.erased_files.len())
+                .saturating_add(additional)
+                > self.limits.completed_receipts
+        {
+            return Err(invalid("file erasure capacity exhausted"));
+        }
+        Ok(())
+    }
     pub(crate) fn check_file_erasure_capacity(
         &self,
         targets: impl IntoIterator<Item = (ConversationId, EventId)>,

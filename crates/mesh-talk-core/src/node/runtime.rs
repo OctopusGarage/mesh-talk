@@ -965,7 +965,7 @@ impl NodeRuntime {
 
     /// Account conversations retained locally, including contacts with no
     /// currently discoverable device.
-    pub fn known_account_ids(&self) -> Vec<String> {
+    pub fn known_account_ids(&self) -> Result<Vec<String>, NodeError> {
         self.node.known_account_ids()
     }
 

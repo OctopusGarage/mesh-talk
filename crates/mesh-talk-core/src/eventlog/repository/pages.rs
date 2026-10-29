@@ -17,7 +17,6 @@ impl Default for PageBudget {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PageOrder {
-    #[cfg(test)]
     Headers,
     Bodies,
     Ids,
@@ -169,7 +168,6 @@ impl EventRepository {
             },
         })
     }
-    #[cfg(test)]
     pub(crate) fn headers_page(
         &self,
         conv: &ConversationId,

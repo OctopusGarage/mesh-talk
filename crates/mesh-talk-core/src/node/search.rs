@@ -2,8 +2,7 @@
 //! uses verified peer proofs and durable account history; routing remains separate.
 
 use super::conversation::{account_conversation_id, dm_conversation_id};
-use super::queries::decode_account_entry;
-use super::{MessageBody, Node, SearchHit};
+use super::{Node, SearchHit};
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
 use crate::node::NodeError;
@@ -418,7 +417,7 @@ impl Node {
             }
         }
         let mut accounts: std::collections::BTreeSet<String> =
-            self.known_account_ids().into_iter().collect();
+            self.known_account_ids()?.into_iter().collect();
         accounts.extend(
             account_labels
                 .iter()
@@ -466,127 +465,32 @@ impl Node {
         limit: usize,
         scope: SearchScope<'_>,
     ) -> Result<Vec<ScanMatch>, super::NodeError> {
-        let my_account = self.account.account_id();
-        let own_devices: std::collections::HashSet<_> = self
-            .linked_devices()
-            .into_iter()
-            .map(|device| device.public.user_id())
-            .collect();
-        // Decode text from the borrowed stores, then apply the same recent-message
-        // window as history before checking the query. Recalled rows occupy a
-        // window slot even though search must omit their text.
-        let mut lines = Vec::new();
-        {
-            let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
-            for e in sentlog.entries_ref(&conv) {
-                if super::expiry_policy::plaintext_deadline(&e.plaintext)
-                    .is_some_and(|deadline| deadline <= self.expiry_now())
-                {
-                    continue;
-                }
-                let (id, body, sent_seq) = if matches!(scope, SearchScope::Account(_)) {
-                    let (id, body) = decode_account_entry(&e.plaintext);
-                    (Some(id), body.text, None)
-                } else {
-                    (None, MessageBody::decode(&e.plaintext).text, Some(e.seq))
-                };
-                lines.push(ScanMatch {
-                    from_me: true,
-                    who: "you".to_string(),
-                    text: body,
-                    wall_clock: e.wall_clock,
-                    id,
-                    sent_seq,
-                });
-            }
-        }
-        {
-            let received = self.received.lock().expect("received mutex not poisoned");
-            for e in received.entries_ref(&conv) {
-                let envelope = super::DmEnvelope::decode(&e.plaintext);
-                let inner = envelope
-                    .as_ref()
-                    .map_or(e.plaintext.as_slice(), |env| env.body.as_slice());
-                if self.recipient_expired(inner, e.event_id, e.wall_clock) {
-                    continue;
-                }
-                let (from_me, who, body, id) = if matches!(scope, SearchScope::Account(_)) {
-                    let (id, body) = decode_account_entry(&e.plaintext);
-                    let from_me = e.from == my_account;
-                    let who = if from_me {
-                        "you".to_string()
-                    } else {
-                        e.from.clone()
-                    };
-                    (from_me, who, body.text, id)
-                } else {
-                    let from_me = own_devices.contains(&e.from);
-                    let who = if from_me {
-                        "you".to_string()
-                    } else {
-                        e.from.clone()
-                    };
-                    (
-                        from_me,
-                        who,
-                        MessageBody::decode(&e.plaintext).text,
-                        e.event_id,
-                    )
-                };
-                lines.push(ScanMatch {
-                    from_me,
-                    who,
-                    text: body,
-                    wall_clock: e.wall_clock,
-                    id: Some(id),
-                    sent_seq: None,
-                });
-            }
-        }
-        lines.sort_by_key(|line| line.wall_clock);
-        if lines.len() > limit {
-            lines.drain(0..lines.len() - limit);
-        }
-        let mut matches: Vec<_> = lines
-            .into_iter()
-            .filter(|line| {
-                String::from_utf8_lossy(&line.text)
-                    .to_lowercase()
-                    .contains(q)
-            })
-            .collect();
-        if matches.is_empty() {
-            return Ok(matches);
-        }
-        let recalled = match scope {
-            SearchScope::LegacyDm => return Ok(matches),
-            SearchScope::Account(peer) => self.recalled_targets_account(peer)?,
-            SearchScope::Channel => self.recalled_targets_channel(conv)?,
+        let account = match scope {
+            SearchScope::Account(peer) => Some(peer),
+            _ => None,
         };
-        if recalled.is_empty() {
-            return Ok(matches);
-        }
-        // Channel sent entries store sequence numbers, while recall markers
-        // name event IDs. Reuse the history resolver only for channel matches
-        // that might contain recalled text.
-        let recalled_sent_sequences: std::collections::HashSet<u64> =
-            if matches!(scope, SearchScope::Channel)
-                && matches.iter().any(|line| line.sent_seq.is_some())
-            {
-                self.raw_sent_history(conv)?
-                    .into_iter()
-                    .filter_map(|(id, entry)| recalled.contains(&id).then_some(entry.seq))
-                    .collect()
-            } else {
-                Default::default()
-            };
-        matches.retain(|line| {
-            !line.id.is_some_and(|id| recalled.contains(&id))
-                && !line
-                    .sent_seq
-                    .is_some_and(|seq| recalled_sent_sequences.contains(&seq))
-        });
-        Ok(matches)
+        Ok(self
+            .project_history(
+                conv,
+                account,
+                super::queries::HistorySelection::Recent(limit),
+            )?
+            .into_iter()
+            .flat_map(|context| context.messages)
+            .filter(|row| {
+                !row.recalled
+                    && row.file.is_none()
+                    && String::from_utf8_lossy(&row.text)
+                        .to_lowercase()
+                        .contains(q)
+            })
+            .map(|row| ScanMatch {
+                from_me: row.from_me,
+                who: row.who,
+                text: row.text,
+                wall_clock: row.wall_clock,
+            })
+            .collect())
     }
 }
 
@@ -603,8 +507,6 @@ struct ScanMatch {
     who: String,
     text: Vec<u8>,
     wall_clock: u64,
-    id: Option<crate::eventlog::event::EventId>,
-    sent_seq: Option<u64>,
 }
 
 #[cfg(test)]

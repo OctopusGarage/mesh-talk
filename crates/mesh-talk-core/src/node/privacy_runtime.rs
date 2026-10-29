@@ -208,8 +208,12 @@ impl Node {
                     }
                 }
             }
-            for conversation in records.conversations() {
-                for record in records.entries(&conversation) {
+            let mut after = None;
+            loop {
+                let page = records
+                    .scan_page(None, after, Default::default())
+                    .map_err(io::Error::other)?;
+                for record in page.rows {
                     if let (Some(manifest), Some(event)) = (
                         crate::file::decode_manifest(&record.plaintext),
                         events.get(&record.event_id),
@@ -223,6 +227,10 @@ impl Node {
                                 event: event.id,
                             });
                     }
+                }
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => break,
                 }
             }
         }

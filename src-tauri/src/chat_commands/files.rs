@@ -612,7 +612,7 @@ pub async fn read_media<R: tauri::Runtime>(
         .blocking(move |runtime, _| {
             runtime
                 .handle()
-                .read_media(id)
+                .read_media_checked(id)?
                 .ok_or_else(|| CommandError::from("no stored media for this file".to_string()))
         })
         .await?;

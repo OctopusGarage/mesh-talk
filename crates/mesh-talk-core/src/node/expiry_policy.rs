@@ -38,6 +38,14 @@ impl Node {
         let Some(deadline) = crate::expiry::deadline(wire) else {
             return false;
         };
+        self.recipient_metadata_expired(deadline, id, sent_at_ms)
+    }
+    pub(in crate::node) fn recipient_metadata_expired(
+        &self,
+        deadline: u64,
+        id: EventId,
+        sent_at_ms: u64,
+    ) -> bool {
         if deadline <= self.expiry_now() {
             return true;
         }
@@ -56,18 +64,31 @@ impl Node {
     pub(in crate::node) fn expired_received_file(
         &self,
         file_conv: crate::eventlog::event::ConversationId,
-    ) -> bool {
-        let files = self
-            .received_files
-            .lock()
-            .expect("files mutex not poisoned");
-        files.conversations().into_iter().any(|conv| {
-            files.entries_ref(&conv).iter().any(|row| {
-                self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
-                    && super::files::validated_manifest(&row.plaintext)
-                        .is_some_and(|manifest| manifest.file_conv() == file_conv)
-            })
-        })
+    ) -> Result<bool, crate::eventlog::LogError> {
+        let files = self.received_files.lock().expect("files mutex");
+        let mut after = None;
+        loop {
+            let page = files.file_headers(
+                &file_conv,
+                after,
+                super::transcript_repository::TranscriptPageLimit::default(),
+            )?;
+            if page.rows.is_empty() {
+                return Ok(false);
+            }
+            for h in page.rows {
+                after = Some(h.ordinal);
+                let Some(deadline) = h.deadline else {
+                    continue;
+                };
+                let id = EventId::new(h.key.as_slice().try_into().map_err(|_| {
+                    crate::eventlog::LogError::CorruptFile("invalid file event key".into())
+                })?);
+                if self.recipient_metadata_expired(deadline, id, h.wall_clock) {
+                    return Ok(true);
+                }
+            }
+        }
     }
     /// The process anchor prevents setting the wall clock backward from extending a deadline.
     pub(in crate::node) fn expiry_now(&self) -> u64 {
@@ -94,70 +115,83 @@ impl Node {
             .into_iter()
             .map(|device| device.public.user_id())
             .collect();
+        let mut removed = 0;
+        for file in [false, true] {
+            let mut after = None;
+            loop {
+                let page = if file {
+                    self.received_files
+                        .lock()
+                        .expect("files mutex")
+                        .deadline_page(None, after, 128)?
+                } else {
+                    self.received
+                        .lock()
+                        .expect("received mutex")
+                        .deadline_page(None, after, 128)?
+                };
+                if page.is_empty() {
+                    break;
+                }
+                for row in page {
+                    after = Some(row.cursor);
+                    let event_id = row.event_id.ok_or_else(|| {
+                        crate::eventlog::LogError::CorruptFile(
+                            "missing received deadline identity".into(),
+                        )
+                    })?;
+                    let recipient = row.sender != own_account && !own_devices.contains(&row.sender);
+                    if (restart && recipient)
+                        || self.recipient_metadata_expired(
+                            row.cursor.deadline,
+                            event_id,
+                            row.wall_clock,
+                        )
+                    {
+                        removed += self.delete_message(
+                            row.conversation,
+                            row.logical_id.unwrap_or(event_id),
+                            file || row.logical_id.is_some(),
+                        )?;
+                        self.expiry_first_seen
+                            .lock()
+                            .expect("expiry mutex")
+                            .remove(&event_id);
+                    }
+                }
+            }
+        }
+        let mut after = None;
+        loop {
+            let page = self.sentlog.lock().expect("sent mutex").deadline_page(
+                Some(self.expiry_now()),
+                after,
+                128,
+            )?;
+            if page.is_empty() {
+                break;
+            }
+            for row in page {
+                after = Some(row.cursor);
+                let id = if let Some(id) = row.logical_id {
+                    id
+                } else {
+                    let header = self
+                        .sentlog
+                        .lock()
+                        .expect("sent mutex")
+                        .header_by_ordinal(row.cursor.ordinal)?
+                        .ok_or_else(|| {
+                            crate::eventlog::LogError::CorruptFile(
+                                "selected expiry row disappeared".into(),
+                            )
+                        })?;
+                    self.sent_header_identity(&header)?
+                };
+                removed += self.delete_message(row.conversation, id, row.logical_id.is_some())?;
+            }
+        }
         let mut targets = Vec::new();
-        {
-            let received = self.received.lock().expect("received mutex not poisoned");
-            for conv in received.conversations() {
-                for row in received.entries_ref(&conv) {
-                    let envelope = DmEnvelope::decode(&row.plaintext);
-                    let inner = envelope
-                        .as_ref()
-                        .map_or(row.plaintext.as_slice(), |env| env.body.as_slice());
-                    let recipient = row.from != own_account && !own_devices.contains(&row.from);
-                    if crate::expiry::deadline(inner).is_some()
-                        && ((restart && recipient)
-                            || self.recipient_expired(inner, row.event_id, row.wall_clock))
-                    {
-                        let account = envelope.is_some();
-                        let target = envelope.map_or(row.event_id, |env| EventId::new(env.msg_id));
-                        targets.push((conv, target, account, row.event_id));
-                    }
-                }
-            }
-        }
-        {
-            let files = self
-                .received_files
-                .lock()
-                .expect("files mutex not poisoned");
-            for conv in files.conversations() {
-                for row in files.entries_ref(&conv) {
-                    let recipient = row.from != own_account && !own_devices.contains(&row.from);
-                    if crate::expiry::deadline(&row.plaintext).is_some()
-                        && ((restart && recipient)
-                            || self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock))
-                    {
-                        targets.push((conv, row.event_id, true, row.event_id));
-                    }
-                }
-            }
-        }
-        // Snapshot only conversations with due sender rows. Resolve legacy sequence
-        // identities after releasing the sidecar lock (delivery uses the reverse order).
-        let due_conversations = {
-            let sent = self.sentlog.lock().expect("sent mutex not poisoned");
-            sent.conversations()
-                .into_iter()
-                .filter(|conv| {
-                    sent.entries_ref(conv).iter().any(|row| {
-                        plaintext_deadline(&row.plaintext)
-                            .is_some_and(|deadline| deadline <= self.expiry_now())
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        for conv in due_conversations {
-            for (event_id, row) in self.raw_sent_history(conv)? {
-                if plaintext_deadline(&row.plaintext)
-                    .is_some_and(|deadline| deadline <= self.expiry_now())
-                {
-                    let envelope = DmEnvelope::decode(&row.plaintext);
-                    let account = envelope.is_some();
-                    let target = envelope.map_or(event_id, |env| EventId::new(env.msg_id));
-                    targets.push((conv, target, account, event_id));
-                }
-            }
-        }
         {
             let delivery = self.delivery.lock().expect("delivery lock not poisoned");
             for transaction in delivery.pending_transactions() {
@@ -194,7 +228,6 @@ impl Node {
         }
         let mut seen = std::collections::HashSet::new();
         targets.retain(|target| seen.insert(*target));
-        let mut removed = 0;
         for (conv, id, account, event_id) in targets {
             removed += self.delete_message(conv, id, account)?;
             self.expiry_first_seen

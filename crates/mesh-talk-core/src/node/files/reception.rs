@@ -18,7 +18,7 @@ impl Node {
                 return Ok(None);
             }
         }
-        if self.file_message_row_suppressed(entry)
+        if self.file_message_row_suppressed(entry)?
             || self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
         {
             return Ok(None);
@@ -28,13 +28,14 @@ impl Node {
             .lock()
             .expect("log lock not poisoned")
             .get(&entry.event_id)?;
-        let original = original.or_else(|| {
-            self.account_file_proofs
+        let original = match original {
+            Some(event) => Some(event),
+            None => self
+                .account_file_proofs
                 .lock()
                 .expect("file proofs lock not poisoned")
-                .get(&entry.event_id)
-                .cloned()
-        });
+                .get(&entry.event_id)?,
+        };
         let Some(original) = original else {
             return Ok(None);
         };
@@ -62,8 +63,8 @@ impl Node {
                 .lock()
                 .expect("file identity lock not poisoned");
             (
-                identities.row_logical(entry),
-                identities.row_author_account(entry),
+                identities.row_logical(entry)?,
+                identities.row_author_account(entry)?,
             )
         };
         // Existing DM reception suppresses copies from certified sibling

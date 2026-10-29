@@ -176,7 +176,7 @@ impl Node {
                         && !self.certified_sibling(&peer.public)
                         && self.file_identity_capability_due(peer.addr, &peer.public)
                     {
-                        let requests = self.pending_file_message_identities(&peer.public);
+                        let requests = self.pending_file_message_identities(&peer.public)?;
                         let offers = self.file_message_identity_controls_for(&peer.public, true)?;
                         if (!requests.is_empty() || !offers.is_empty())
                             && self
@@ -744,7 +744,7 @@ impl Node {
                     .account_suppression
                     .lock()
                     .expect("account suppression lock not poisoned")
-                    .contains(conv, event.id)
+                    .contains(conv, event.id)?
                 {
                     continue;
                 }
@@ -1033,7 +1033,7 @@ impl Node {
                                     return Ok(());
                                 }
                             };
-                            let pending = self.pending_sticker_aliases(fc);
+                            let pending = self.pending_sticker_aliases(fc)?;
                             if !pending {
                                 self.pending_files
                                     .lock()
@@ -1103,7 +1103,7 @@ impl Node {
                                                 if let Err(error) = store.lock().expect("sync store lock").sticker_file_consent(&fc, &manifest, headers) {
                                                     log::warn!("sticker consent deferred: {error}"); return;
                                                 }
-                                                if self.media.contains(fc) && self.has_verified_file_completion(fc) && !self.pending_sticker_aliases(fc) {
+                                                if self.media.contains(fc) && self.has_verified_file_completion(fc) && match self.pending_sticker_aliases(fc) { Ok(pending) => !pending, Err(error) => { log::warn!("sticker completion deferred: {error}"); return; } } {
                                                     self.recycle_sync_channel(channel);
                                                     return;
                                                 }
@@ -1280,14 +1280,6 @@ impl Node {
             {
                 return Ok(());
             }
-            let mut saved: std::collections::HashSet<_> = self
-                .received
-                .lock()
-                .expect("received mutex not poisoned")
-                .entries_ref(&conv)
-                .iter()
-                .map(|entry| entry.event_id)
-                .collect();
             let events: Vec<Event> = self
                 .log
                 .lock()
@@ -1341,12 +1333,16 @@ impl Node {
                 let mut received = Vec::new();
                 let mut messages = messages.into_iter();
                 while let Some(mut msg) = messages.next() {
-                    if saved.contains(&msg.event_id)
+                    if self
+                        .received
+                        .lock()
+                        .expect("received mutex not poisoned")
+                        .processed(msg.event_id)?
                         || self
                             .account_suppression
                             .lock()
                             .expect("account suppression lock not poisoned")
-                            .contains(conv, msg.event_id)
+                            .contains(conv, msg.event_id)?
                     {
                         continue;
                     }
@@ -1376,7 +1372,6 @@ impl Node {
                         pending.messages.extend(messages);
                         break;
                     }
-                    saved.insert(msg.event_id);
                     if !msg.own_device && msg.from != self.user_id() {
                         self.note_account_local_change();
                     }
@@ -1733,20 +1728,15 @@ impl Node {
                 log::warn!("DM processing awaits local delivery recovery: {error}");
                 return Ok(());
             }
-            let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-            let candidates: Vec<Event> = {
+            let candidates = {
                 let log = self.log.lock().expect("log mutex not poisoned");
-                let emitted = self.emitted.lock().expect("emitted mutex not poisoned");
-                log.events(&conv)?
-                    .into_iter()
-                    .filter(|e| {
-                        e.kind == EventKind::Message
-                            && e.author != self_author
-                            && !emitted.contains(&e.id)
-                    })
-                    .collect()
+                log.repository()?
+                    .pending_receive_ids(conv, 128, 8 * 1024 * 1024)?
             };
-            for event in candidates {
+            for id in candidates {
+                let Some(event) = self.log.lock().expect("log mutex not poisoned").get(&id)? else {
+                    continue;
+                };
                 if let Some(proof) = self.historical_author(event.author.ed25519_pub()) {
                     let _ = self.accept_dm_event(&event, &proof, &mut delivery)?;
                 } else if let Some(device) = self
@@ -1766,40 +1756,6 @@ impl Node {
             if let Err(error) = self.project_private_dm_controls(conv) {
                 log::warn!("private DM controls await durable projection: {error}");
             }
-            // A recall may arrive before its target is viewed. Persist verified
-            // tombstones while the old device and peer proofs are still available,
-            // so an offline backup cannot resurrect the recalled plaintext.
-            if self
-                .log
-                .lock()
-                .expect("log mutex not poisoned")
-                .events(&conv)?
-                .iter()
-                .any(|event| event.kind == EventKind::Delete)
-            {
-                let my_account = self.account_id();
-                let peers = self.historical_dm_peers();
-                let matched: Vec<_> = peers
-                    .iter()
-                    .filter(|peer| {
-                        super::conversation::dm_conversation_id(
-                            &self.identity.public(),
-                            &peer.public(),
-                        ) == conv
-                    })
-                    .filter_map(|peer| peer.account_id())
-                    .collect();
-                for account in matched {
-                    if account == my_account {
-                        for other in self.known_account_ids() {
-                            self.recalled_targets_account(&other)?;
-                        }
-                    } else {
-                        self.recalled_targets_account(&account)?;
-                    }
-                }
-            }
-
             Ok(())
         })();
         if let Err(error) = result {

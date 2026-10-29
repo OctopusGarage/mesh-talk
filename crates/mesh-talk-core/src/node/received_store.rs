@@ -88,19 +88,50 @@ impl ReceivedStore {
         })
     }
     pub(crate) fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
-        self.repository.put(
-            entry.conversation,
-            entry.event_id.as_bytes(),
-            entry.wall_clock,
-            0,
-            &entry.from,
-            &entry.plaintext,
-            false,
-            false,
-        )
+        if self.repository.kind == RECEIVED {
+            self.check_write()?;
+            let inserted = self.repository.profile.database().transaction(|c| {
+                Self::install_received_on(
+                    c,
+                    entry,
+                    None,
+                    super::reception_effects::ReceptionKind::DirectMessage,
+                )
+            })?;
+            self.note_channel_commit(usize::from(inserted));
+            Ok(())
+        } else {
+            self.repository.put(
+                entry.conversation,
+                entry.event_id.as_bytes(),
+                entry.wall_clock,
+                0,
+                &entry.from,
+                &entry.plaintext,
+                false,
+                false,
+            )
+        }
     }
     pub(crate) fn check_write(&self) -> Result<(), LogError> {
         self.repository.check_write()
+    }
+    /// Body-free processing evidence for a consumed channel message. The caller
+    /// checks this store's publication barrier and commits its receiver state in
+    /// the same transaction. This does not change the transcript revision.
+    pub(crate) fn install_evidence_on(
+        c: &rusqlite::Connection,
+        conversation: ConversationId,
+        event_id: EventId,
+    ) -> Result<(), LogError> {
+        c.execute(
+            "INSERT OR IGNORE INTO transcript_received_evidence VALUES(?1,?2)",
+            rusqlite::params![
+                event_id.as_bytes().as_slice(),
+                conversation.as_bytes().as_slice()
+            ],
+        )?;
+        Ok(())
     }
     /// The channel owner holds this store and the profile transaction. Check the
     /// source barrier before entering it; update the cache only after COMMIT.
@@ -122,10 +153,17 @@ impl ReceivedStore {
         reception: Option<&super::reception_effects::ReceptionMetadata>,
         reception_kind: super::reception_effects::ReceptionKind,
     ) -> Result<bool, LogError> {
-        let logical =
-            super::dm_envelope::DmEnvelope::decode_ref(&entry.plaintext).map(|env| env.msg_id);
+        let logical = super::dm_envelope::DmEnvelope::decode_ref(&entry.plaintext)
+            .filter(|env| {
+                super::conversation::account_conversation_id(
+                    env.route.sender_account,
+                    env.route.recipient_account,
+                ) == entry.conversation
+            })
+            .map(|env| env.msg_id);
         let suppressed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM transcript_suppression WHERE conversation=?1 AND (id=?2 OR id=?3))",rusqlite::params![entry.conversation.as_bytes().as_slice(),entry.event_id.as_bytes().as_slice(),logical.as_ref().map(|id|id.as_slice())],|r|r.get(0))?;
         if suppressed {
+            Self::install_evidence_on(c, entry.conversation, entry.event_id)?;
             return Ok(false);
         }
         let inserted = TranscriptRepository::put_on(
@@ -276,6 +314,12 @@ impl ReceivedStore {
     ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
         self.repository.file_headers(file, after, limit)
     }
+    pub(crate) fn header_by_ordinal(
+        &self,
+        ordinal: i64,
+    ) -> Result<Option<TranscriptHeader>, LogError> {
+        self.repository.header_by_ordinal(ordinal)
+    }
     pub(crate) fn row_by_ordinal(&self, ordinal: i64) -> Result<Option<ReceivedEntry>, LogError> {
         self.repository
             .row_by_ordinal(ordinal)?
@@ -292,6 +336,15 @@ impl ReceivedStore {
         self.repository
             .header_page(conversation, after, limit, descending)
     }
+    pub(crate) fn header_reverse_scan_page(
+        &self,
+        conversation: &ConversationId,
+        before: Option<i64>,
+        limit: TranscriptPageLimit,
+    ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
+        self.repository
+            .header_reverse_scan_page(conversation, before, limit)
+    }
     pub(crate) fn header_scan_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -299,6 +352,13 @@ impl ReceivedStore {
         limit: TranscriptPageLimit,
     ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
         self.repository.header_scan_page(conversation, after, limit)
+    }
+    pub(crate) fn account_routes_page(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<Vec<(ConversationId, Option<super::DmRoute>)>, LogError> {
+        self.repository.account_routes_page(after, limit)
     }
     pub(crate) fn conversation_revision(
         &self,
@@ -400,6 +460,9 @@ impl ReceivedStore {
         })?;
         Ok(found)
     }
+    pub(crate) fn remove_ordinals(&mut self, ordinals: &[i64]) -> Result<usize, LogError> {
+        self.repository.remove_ordinals(ordinals)
+    }
     pub(crate) fn remove_where(
         &mut self,
         mut predicate: impl FnMut(&ReceivedEntry) -> bool,
@@ -449,5 +512,43 @@ impl ReceivedStore {
     #[cfg(test)]
     pub(crate) fn fail_once_after_for_test(&mut self, successful: usize) {
         self.fail_once_after = Some(successful);
+    }
+}
+
+// Explicit fixture materialization only. Production callers use owned lookups
+// and bounded pages; these compatibility names do not exist in release builds.
+#[cfg(test)]
+impl ReceivedStore {
+    pub(crate) fn entries_ref(&self, conversation: &ConversationId) -> Vec<ReceivedEntry> {
+        let mut rows = Vec::new();
+        self.visit(Some(conversation), |row| {
+            rows.push(row.clone());
+            Ok(true)
+        })
+        .expect("fixture transcript read");
+        rows
+    }
+    pub(crate) fn entries(&self, conversation: &ConversationId) -> Vec<ReceivedEntry> {
+        let mut rows = self.entries_ref(conversation);
+        rows.sort_by_key(|entry| entry.wall_clock);
+        rows
+    }
+}
+
+#[cfg(test)]
+impl ReceivedStore {
+    pub(crate) fn conversations(&self) -> Vec<ConversationId> {
+        let mut cursor = None;
+        let mut result = Vec::new();
+        loop {
+            let page = self
+                .conversation_page(cursor, 128)
+                .expect("fixture conversations");
+            if page.is_empty() {
+                return result;
+            }
+            cursor = page.last().copied();
+            result.extend(page);
+        }
     }
 }

@@ -249,7 +249,8 @@ pub async fn list_accounts(
                 .into_iter()
                 .filter_map(|p| p.account_id.map(|id| (id, p.name, p.post_office)))
                 .collect();
-            let mut rows = merge_account_rows(live, rt.known_account_ids());
+            let mut rows =
+                merge_account_rows(live, rt.known_account_ids().map_err(|e| e.to_string())?);
             fill_account_names(&mut rows, rt.known_account_names());
             let accounts = rows.iter().map(|row| row.account_id.clone()).collect();
             let visible = policy.visible_accounts(&owner, &online, accounts)?;

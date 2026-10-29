@@ -20,8 +20,8 @@ use crate::node::dm_ratchet::DmRatchet;
 use crate::node::filebook::{FileBook, ReceivedFile};
 use crate::node::pairing::PendingLink;
 use crate::node::ratchet_sessions::RatchetSessions;
-use crate::node::received_log::ReceivedLog;
-use crate::node::sentlog::SentLog;
+use crate::node::received_store::ReceivedStore as ReceivedLog;
+use crate::node::sent_store::SentStore as SentLog;
 use crate::node::session::SessionError;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -291,7 +291,8 @@ pub struct Node {
     pub(in crate::node) account_documents:
         Mutex<super::account_documents::store::AccountDocumentStore>,
     pub(in crate::node) account_document_updates: tokio::sync::watch::Sender<u64>,
-    pub(in crate::node) account_suppression: Mutex<super::account_suppression::AccountSuppression>,
+    pub(in crate::node) account_suppression:
+        Mutex<super::account_suppression::IndexedAccountSuppression>,
     pub(in crate::node) favorites: Mutex<super::favorites::FavoriteStore>,
     pub(in crate::node) favorite_media: super::media_store::MediaStore,
     pub(in crate::node) account_sync_policy:
@@ -302,12 +303,12 @@ pub struct Node {
     pub(in crate::node) account_preferences: Mutex<super::account_preferences::AccountPreferences>,
     pub(in crate::node) file_message_identity_cursor: std::sync::atomic::AtomicUsize,
     pub(in crate::node) file_message_identities:
-        Mutex<super::file_message_identity::FileMessageIdentities>,
-    pub(in crate::node) account_file_proofs: Mutex<super::account_file_proofs::AccountFileProofs>,
+        Mutex<super::file_message_identity::IndexedFileMessageIdentities>,
+    pub(in crate::node) account_file_proofs:
+        Mutex<super::account_file_repository::IndexedAccountFileProofs>,
     pub(in crate::node) account_sync_notify: tokio::sync::Notify,
     pub(in crate::node) account_history_revision: std::sync::atomic::AtomicU64,
     pub(in crate::node) account_archive_cache: Mutex<super::account_sync::ArchiveCache>,
-    pub(in crate::node) known_account_cache: Mutex<super::recovery::KnownAccountCache>,
     pub(in crate::node) account_sync_commit: Mutex<()>,
     pub(in crate::node) account_wake: super::account_sync::AccountWake,
     pub(in crate::node) account_sync_status:
@@ -339,7 +340,7 @@ pub struct Node {
     pub(in crate::node) recovery_origins: Vec<crate::eventlog::Author>,
     pub(in crate::node) recovery_contacts: Vec<String>,
     pub(in crate::node) recovered_sent_ids:
-        Mutex<Option<super::recovered_sent_ids::RecoveredSentIds>>,
+        Mutex<Option<super::recovered_sent_ids::IndexedRecoveredSentIds>>,
     /// Durable, encrypted store of this node's per-channel sending keys (`my_sender`).
     /// `my_sender` is in-memory only and rebuilt empty on restart; persisting it here
     /// lets us resume our sending chains so receivers (first-wins on chains they hold)
@@ -351,7 +352,6 @@ pub struct Node {
     pub(in crate::node) channel_custody: Mutex<ChannelCustodyStore>,
     #[cfg(test)]
     pub(in crate::node) channel_last_send: Mutex<Option<(usize, u64)>>,
-    pub(in crate::node) emitted: Mutex<HashSet<EventId>>,
     pub(in crate::node) file_incoming: super::runtime_delivery::HostPayload<ReceivedFile>,
     pub(in crate::node) files: Mutex<FileBook>,
     pub(super) group_file_sharing: super::network_cost::GroupFileSharingPolicy,
@@ -425,7 +425,7 @@ pub struct Node {
     /// Durable record of OUR OWN recalls (sealed to peers, so un-openable from our own log).
     /// `history`/`account_history` read this to tombstone our recalled messages; it survives
     /// restart (unlike own reactions).
-    pub(in crate::node) recalls: Mutex<crate::node::recall::RecallLog>,
+    pub(in crate::node) recalls: Mutex<crate::node::recall::IndexedRecallLog>,
     /// Owns profile journals, local publication and coordinated account transitions.
     pub(in crate::node) trust_cards: Mutex<super::trust_card::TrustCardStore>,
     pub(in crate::node) profiles: Mutex<super::account_profile_data::AccountProfileStore>,
@@ -706,9 +706,9 @@ impl Node {
                     &account.account_id(),
                 )
             });
-            let h_sent = s.spawn(|| SentLog::open(sent_path, password));
+            let h_sent = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::sentlog::SentEntry>(&storage,sent_path,password,super::transcript_repository::SENT,b"MTSENT"));
             let h_sess = s.spawn(|| RatchetSessions::open(&dir.join("ratchet.sessions"), password));
-            let h_recv = s.spawn(|| ReceivedLog::open(&dir.join("received.log"), password));
+            let h_recv = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::received_log::ReceivedEntry>(&storage,&dir.join("received.log"),password,super::transcript_repository::RECEIVED,b"MTRECV"));
             let h_csnd =
                 s.spawn(|| ChannelSenderStore::open(&dir.join("channel.senders"), password));
             let h_custody =
@@ -717,7 +717,7 @@ impl Node {
             // so the file book's emitted set survives restart WITHOUT marking unopened
             // manifests as emitted — see the seeding below.
             let h_files =
-                s.spawn(|| ReceivedLog::open_file_cards(&dir.join("received_files.log"), password));
+                s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::received_log::ReceivedEntry>(&storage,&dir.join("received_files.log"),password,super::transcript_repository::FILES,b"MTRECV"));
             // Durable store of avatars peers propagated to us (one per account, newest-wins).
             let h_profiles = s.spawn(|| {
                 crate::node::profile_store::ProfileStore::open(&dir.join("profiles.log"), password)
@@ -726,7 +726,7 @@ impl Node {
             // can't open them from our own log), so this is how `history` knows which of our
             // messages we recalled — and it must survive restart.
             let h_recalls = s
-                .spawn(|| crate::node::recall::RecallLog::open(&dir.join("recalls.log"), password));
+                .spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::recall::RecallMark>(&storage,&dir.join("recalls.log"),password,super::transcript_repository::RECALL_MARKS,b"MTRECL"));
             let h_consent = s.spawn(|| {
                 super::attachment_consent::AttachmentConsent::open(
                     &dir.join("attachment-consent.log"),
@@ -750,11 +750,9 @@ impl Node {
             });
             let h_recovered_ids = s.spawn(|| {
                 let path = dir.join("recovery-sent-ids.log");
-                if path.exists() {
-                    super::recovered_sent_ids::RecoveredSentIds::open(&path, password).map(Some)
-                } else {
-                    Ok(None)
-                }
+                super::recovered_sent_ids::IndexedRecoveredSentIds::authenticate_legacy(
+                    &storage, &path, password,
+                )
             });
             (
                 h_sent.join(),
@@ -777,12 +775,12 @@ impl Node {
         // is not silently swallowed. A normal open failure surfaces as the inner Err.
         let opaque_receive_cache =
             opaque_cache_res.unwrap_or_else(|e| std::panic::resume_unwind(e));
-        let mut sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let mut received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let mut received_files = recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let account_profiles = super::account_profile::AccountProfiles::new(&account, profiles);
         let trust_cards = Mutex::new(super::trust_card::TrustCardStore::open(
@@ -793,7 +791,7 @@ impl Node {
             &dir.join("account-profiles.log"),
             password,
         )?);
-        let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recovery_origins = origin_res
@@ -802,8 +800,7 @@ impl Node {
             .map(crate::eventlog::Author::from_ed25519)
             .collect();
         let recovery_contacts = contacts_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let recovered_sent_ids =
-            recovered_ids_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        recovered_ids_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut dm_ratchet = DmRatchet::new(sessions);
         let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
         let previous_account = storage
@@ -834,15 +831,18 @@ impl Node {
             public: identity.public(),
             certificate: account.certify(&identity.public().ed25519_pub),
         })?;
-        let account_suppression = super::account_suppression::AccountSuppression::open(
+        super::account_suppression::IndexedAccountSuppression::authenticate_legacy(
+            &storage,
             &dir.join("account-suppression.log"),
             password,
         )?;
-        let account_file_proofs = super::account_file_proofs::AccountFileProofs::open(
+        super::account_file_repository::IndexedAccountFileProofs::authenticate(
+            &storage,
             &dir.join("account-file-proofs.log"),
             password,
         )?;
-        let file_message_identities = super::file_message_identity::FileMessageIdentities::open(
+        super::file_message_identity::IndexedFileMessageIdentities::authenticate(
+            &storage,
             &dir.join("file-message-identities.log"),
             password,
         )?;
@@ -900,7 +900,49 @@ impl Node {
         let profile_receive_work =
             super::profile_receive_work::ProfileReceiveWork::open(storage.clone())?;
         let reception_effects = super::reception_effects::ReceptionEffects::open(storage.clone())?;
+        let account_file_proofs =
+            super::account_file_repository::IndexedAccountFileProofs::from_profile(
+                storage.clone(),
+                &dir.join("account-file-proofs.log"),
+                password,
+            )?;
+        let file_message_identities =
+            super::file_message_identity::IndexedFileMessageIdentities::from_profile(
+                storage.clone(),
+                &dir.join("file-message-identities.log"),
+                password,
+            )?;
+        let mut sentlog = SentLog::from_profile(storage.clone(), sent_path, password)?;
+        let mut received =
+            ReceivedLog::from_profile(storage.clone(), &dir.join("received.log"), password)?;
+        let mut received_files = ReceivedLog::file_cards_from_profile(
+            storage.clone(),
+            &dir.join("received_files.log"),
+            password,
+        )?;
+        let account_suppression =
+            super::account_suppression::IndexedAccountSuppression::from_profile(
+                storage.clone(),
+                &dir.join("account-suppression.log"),
+                password,
+            )?;
+        let recalls = super::recall::IndexedRecallLog::from_profile(
+            storage.clone(),
+            &dir.join("recalls.log"),
+            password,
+        )?;
+        let recovered_sent_ids = Some(
+            super::recovered_sent_ids::IndexedRecoveredSentIds::from_profile(
+                storage.clone(),
+                &dir.join("recovery-sent-ids.log"),
+                password,
+            )?,
+        );
         let mut log = PersistentEventLog::open_profile(storage.clone(), password)?;
+        log.repository()?
+            .initialize_receiving(crate::eventlog::Author::from_ed25519(
+                identity.public().ed25519_pub,
+            ))?;
         while delivery
             .recover_next_with_channels(
                 &mut dm_ratchet,
@@ -915,19 +957,6 @@ impl Node {
         received_files
             .remove_where(|entry| delivery.file_erased(entry.conversation, entry.event_id))?;
         let delivery_control_ids = delivery.control_ids();
-        // Seed `emitted` with the events we have ALREADY recorded to the received store — NOT
-        // every id in the log. An event that was ingested durably but never recorded (it
-        // arrived before we learned its author — the DM-convergence race — or before its
-        // ratchet key was derivable) must stay eligible for `emit_new_messages` to retry after
-        // a restart; seeding it as emitted here would drop it from history forever. Self-
-        // authored events are excluded by the author check in `emit_new_messages`, so they
-        // need not be seeded.
-        let emitted: HashSet<EventId> = received
-            .conversations()
-            .iter()
-            .flat_map(|c| received.entries(c))
-            .map(|e| e.event_id)
-            .collect();
         let own_device_ids: HashSet<_> = account_devices
             .devices()
             .into_iter()
@@ -950,8 +979,8 @@ impl Node {
                 );
                 let done = !limited;
                 for msg in messages {
-                    if received.entry(msg.event_id).is_some()
-                        || account_suppression.contains(conv, msg.event_id)
+                    if received.contains(msg.event_id)?
+                        || account_suppression.contains(conv, msg.event_id)?
                     {
                         continue;
                     }
@@ -993,40 +1022,42 @@ impl Node {
         // here, so `process_file_events` retries it after restart instead of dropping the
         // file forever. (Mirrors the message-path `emitted` seeding above.)
         let mut files = FileBook::new();
-        for c in received_files.conversations() {
-            for entry in received_files.entries(&c) {
-                if delivery.file_erased(entry.conversation, entry.event_id)
-                    || delivery.manifest_event_erased(entry.event_id)
-                    || file_message_identities.row_suppressed(&entry, &account_suppression)
-                {
+        let mut live_media = std::collections::HashSet::new();
+        let mut file_after = None;
+        loop {
+            let page = received_files.scan_page(None, file_after, Default::default())?;
+            for entry in page.rows {
+                if file_message_identities.row_suppressed(&entry, &account_suppression)? {
                     continue;
                 }
                 let decoded = super::files::validated_manifest(&entry.plaintext);
+                if let Some(manifest) = &decoded {
+                    live_media.insert(manifest.file_conv());
+                }
+                if delivery.file_erased(entry.conversation, entry.event_id)
+                    || delivery.manifest_event_erased(entry.event_id)
+                {
+                    continue;
+                }
                 let existing = decoded
                     .as_ref()
                     .and_then(|m| files.manifest(&m.file_conv()));
-                let proof = log.get(&entry.event_id)?;
-                let proof = proof
-                    .as_ref()
-                    .or_else(|| account_file_proofs.get(&entry.event_id));
-                if let Some(manifest) = super::files::eligible_manifest_row(&entry, proof, existing)
+                let proof = match log.get(&entry.event_id)? {
+                    Some(event) => Some(event),
+                    None => account_file_proofs.get(&entry.event_id)?,
+                };
+                if let Some(manifest) =
+                    super::files::eligible_manifest_row(&entry, proof.as_ref(), existing)
                 {
-                    files.record_event(entry.event_id, proof.unwrap().author, manifest);
+                    files.record_event(entry.event_id, proof.as_ref().unwrap().author, manifest);
                     files.mark_emitted(entry.event_id);
                 }
             }
+            match page.next {
+                Some(next) => file_after = Some(next),
+                None => break,
+            }
         }
-        // Durable encrypted media survives chunk prune and restart.
-        let live_media: std::collections::HashSet<_> = received_files
-            .conversations()
-            .iter()
-            .flat_map(|conversation| received_files.entries(conversation))
-            .filter(|row| !file_message_identities.row_suppressed(row, &account_suppression))
-            .filter_map(|row| {
-                super::files::validated_manifest(&row.plaintext)
-                    .map(|manifest| manifest.file_conv())
-            })
-            .collect();
         media
             .prune_unreferenced(&live_media)
             .map_err(|e| LogError::Io(std::io::Error::other(format!("media prune: {e}"))))?;
@@ -1099,7 +1130,6 @@ impl Node {
             account_sync_notify: tokio::sync::Notify::new(),
             account_history_revision: std::sync::atomic::AtomicU64::new(0),
             account_archive_cache: Mutex::new(Default::default()),
-            known_account_cache: Mutex::new(Default::default()),
             account_sync_commit: Mutex::new(()),
             account_wake: Default::default(),
             account_sync_status: Mutex::new(std::collections::HashMap::new()),
@@ -1134,7 +1164,6 @@ impl Node {
             channel_projection_replays: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             channel_last_send: Mutex::new(None),
-            emitted: Mutex::new(emitted),
             file_incoming,
             files: Mutex::new(files),
             group_file_sharing: Default::default(),
@@ -1213,6 +1242,9 @@ impl Node {
         node.profile_receive_work = Mutex::new(
             super::profile_receive_work::ProfileReceiveWork::open(node.storage.clone())?,
         );
+        node.bootstrap_private_dm_controls().map_err(|error| {
+            LogError::CorruptFile(format!("account control projection: {error}"))
+        })?;
         Ok(Arc::new(node))
     }
 

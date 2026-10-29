@@ -10,6 +10,7 @@
 //! only honoured when that account is the target message's author; channel recalls are
 //! honoured only when the `Delete` event's author equals the target event's author.
 
+mod indexed;
 use super::node::{Node, now_millis};
 use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
@@ -18,6 +19,7 @@ use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 use crate::node::dm_envelope::RecallEnvelope;
 use crate::storage::record_log::EncryptedRecordLog;
 use bincode::Options;
+pub(crate) use indexed::IndexedRecallLog;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -184,7 +186,57 @@ mod recovery_snapshot_tests {
     }
 }
 
+pub(in crate::node) enum ChannelRecallPreparation {
+    Retry,
+    Ignored,
+    Mark(RecallMark),
+}
+
 impl Node {
+    pub(in crate::node) fn prepare_channel_recall(
+        &self,
+        event: &Event,
+        author_x: Option<[u8; 32]>,
+        content_admitted: bool,
+    ) -> Result<ChannelRecallPreparation, NodeError> {
+        if !content_admitted
+            || event.kind != EventKind::Delete
+            || !event.verify_integrity()
+            || !event.verify_signature()
+        {
+            return Ok(ChannelRecallPreparation::Ignored);
+        }
+        let Some(author_x) = author_x.or_else(|| {
+            self.historical_author(event.author.ed25519_pub())
+                .map(|p| p.x25519_pub)
+        }) else {
+            return Ok(ChannelRecallPreparation::Retry);
+        };
+        let Some(payload) = super::channel::SealedPayload::decode(&event.ciphertext)
+            .and_then(|sealed| sealed.open(&self.identity, &author_x))
+            .and_then(|plain| DeletePayload::decode(&plain))
+        else {
+            return Ok(ChannelRecallPreparation::Ignored);
+        };
+        let Some(target) = self
+            .log
+            .lock()
+            .expect("log mutex")
+            .repository()?
+            .header(&payload.target)?
+        else {
+            return Ok(ChannelRecallPreparation::Retry);
+        };
+        if target.author != event.author || target.conversation != event.conversation_id {
+            return Ok(ChannelRecallPreparation::Ignored);
+        }
+        Ok(ChannelRecallPreparation::Mark(RecallMark {
+            conversation: event.conversation_id,
+            target: payload.target,
+            wall_clock: target.wall_clock,
+        }))
+    }
+
     /// Recall (unsend) one of OUR OWN account messages: `target` is the logical msg id from
     /// account history. Fails if the message isn't ours or the 2-minute window has passed.
     /// Fans a `RecallEnvelope` (a `Delete` event) out to every device of `target_account_id`
@@ -213,29 +265,25 @@ impl Node {
         // under this account conversation. Its original wall_clock gauges the window.
         let wall = {
             let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
-            sent.entries(&acct_conv)
-                .into_iter()
-                .find(|e| {
-                    super::DmEnvelope::decode(&e.plaintext).is_some_and(|env| {
-                        env.msg_id == *target.as_bytes()
-                            && env.route.sender_account == my_account
+            sent.account_entry(&acct_conv, *target.as_bytes())?
+                .filter(|e| {
+                    super::DmEnvelope::decode_ref(&e.plaintext).is_some_and(|env| {
+                        env.route.sender_account == my_account
                             && env.route.recipient_account == target_account_id
                     })
                 })
                 .map(|e| e.wall_clock)
         };
-        let wall = wall.or_else(|| {
-            let files = self.received_files.lock().expect("received files lock");
-            files
-                .entries_ref(&acct_conv)
-                .iter()
-                .find(|row| {
-                    row.event_id == target
-                        && row.from == self.user_id()
-                        && recallable_manifest(&row.plaintext)
-                })
-                .map(|row| row.wall_clock)
-        });
+        let wall = match wall {
+            Some(wall) => Some(wall),
+            None => self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .entry_in(&acct_conv, target)?
+                .filter(|row| row.from == self.user_id() && recallable_manifest(&row.plaintext))
+                .map(|row| row.wall_clock),
+        };
         let Some(wall) = wall else {
             return Err(NodeError::Channel(
                 "can only recall your own message".into(),
@@ -245,8 +293,7 @@ impl Node {
             .recalls
             .lock()
             .expect("recalls mutex")
-            .targets(&acct_conv)
-            .contains(&target);
+            .contains(acct_conv, target)?;
         if !already_accepted && now_millis().saturating_sub(wall) > RECALL_WINDOW_MS {
             return Err(NodeError::Channel(
                 "the 2-minute recall window has passed".into(),
@@ -310,9 +357,8 @@ impl Node {
             .received_files
             .lock()
             .expect("received files lock")
-            .entries_ref(&channel)
-            .iter()
-            .any(|row| row.event_id == target && recallable_manifest(&row.plaintext));
+            .entry_in(&channel, target)?
+            .is_some_and(|row| recallable_manifest(&row.plaintext));
         let wall = {
             let log = self.log.lock().expect("log mutex not poisoned");
             let event = log
@@ -407,8 +453,8 @@ impl Node {
                 .lock()
                 .expect("file identity mutex");
             (
-                identities.logical(conversation, id),
-                identities.aliases(conversation, id),
+                identities.logical(conversation, id)?,
+                identities.aliases(conversation, id)?,
             )
         };
         if !aliases.contains(&logical) {
@@ -435,242 +481,52 @@ impl Node {
         Ok(false)
     }
 
-    /// The set of recalled message ids for a CHANNEL: our own recalls (durable) plus peer
-    /// `Delete` events whose author authored the target message.
+    /// Explicit compatibility enumeration for bounded invitation export and tests.
     pub(in crate::node) fn recalled_targets_channel(
         &self,
         conv: ConversationId,
     ) -> Result<HashSet<EventId>, NodeError> {
-        let content_gate = self.channel_content_gate(conv)?;
-        let mut out: HashSet<EventId> = self
-            .recalls
-            .lock()
-            .expect("recalls mutex not poisoned")
-            .targets(&conv)
-            .into_iter()
-            .collect();
-
-        let delete_events: Vec<Event> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&conv)?
-                .into_iter()
-                .filter(|e| {
-                    e.kind == EventKind::Delete
-                        && content_gate.as_ref().is_none_or(|ids| ids.contains(&e.id))
-                })
-                .collect()
-        };
-        for event in &delete_events {
-            let author_uid = event.author.user_id();
-            // The recaller's x25519 key (to open their sealed Delete): prefer the channel's
-            // current member set, then fall back to the discovery roster. The roster fallback
-            // covers a recaller who was removed from the channel within the 2-min recall
-            // window but is still a known peer — without it their recall would be dropped and
-            // the message would un-tombstone. (The two locks are taken sequentially, never
-            // nested, to keep a consistent lock order.) The author's x25519 isn't derivable
-            // from the event Author, which carries only the ed25519 key.
-            let author_x = {
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                book.state(&conv).and_then(|s| {
-                    s.members()
-                        .iter()
-                        .find(|m| m.user_id() == author_uid)
-                        .map(|m| m.x25519_pub)
-                })
+        let mut out = HashSet::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .recalls
+                .lock()
+                .expect("recalls mutex")
+                .page(Some(conv), after, 128)?;
+            if page.is_empty() {
+                break;
             }
-            .or_else(|| {
-                self.historical_author(event.author.ed25519_pub())
-                    .map(|proof| proof.public().x25519_pub)
-            });
-            let plaintext = author_x.and_then(|ax| {
-                crate::node::channel::SealedPayload::decode(&event.ciphertext)
-                    .and_then(|sealed| sealed.open(&self.identity, &ax))
-            });
-            let Some(p) = plaintext.and_then(|b| DeletePayload::decode(&b)) else {
-                continue;
-            };
-            // Only the message's own author may recall it.
-            let target_wall_clock = {
-                let log = self.log.lock().expect("log mutex not poisoned");
-                log.get(&p.target)?
-                    .filter(|target| target.author == event.author)
-                    .map(|target| target.wall_clock)
-            };
-            if let Some(wall_clock) = target_wall_clock {
-                if let Err(error) = self
-                    .recalls
-                    .lock()
-                    .expect("recalls mutex not poisoned")
-                    .record(conv, p.target, wall_clock)
-                {
-                    log::warn!("could not persist verified channel recall: {error}");
-                }
-                out.insert(p.target);
+            for mark in page {
+                after = Some((mark.conversation, mark.target));
+                out.insert(mark.target);
             }
         }
         Ok(out)
     }
-
-    /// The set of recalled (logical) message ids for the ACCOUNT conversation with
-    /// `peer_account_id`: our own recalls plus peer `RecallEnvelope`s, each authorised
-    /// against the target message's author account.
+    #[cfg(test)]
     pub(in crate::node) fn recalled_targets_account(
         &self,
-        peer_account_id: &str,
+        peer: &str,
     ) -> Result<HashSet<EventId>, NodeError> {
-        let my_account = self.account.account_id();
-        let me = self.identity.public().user_id();
-        let acct_conv = account_conversation_id(&my_account, peer_account_id);
-
-        let mut out: HashSet<EventId> = self
-            .recalls
-            .lock()
-            .expect("recalls mutex not poisoned")
-            .targets(&acct_conv)
-            .into_iter()
-            .collect();
-
-        // The device-pair conversations whose Delete events can carry this account's recalls
-        // (mirrors `account_reactions`): ours-with-each-target-device and ours-with-each-own-
-        // other-device.
-        let convs: Vec<(ConversationId, [u8; 32], Option<String>)> = {
-            self.historical_dm_peers()
-                .into_iter()
-                .filter(|p| {
-                    let account = p.account_id();
-                    let a = account.as_deref();
-                    a == Some(peer_account_id)
-                        || (a == Some(my_account.as_str()) && p.public().user_id() != me)
-                })
-                .map(|p| {
-                    let public = p.public();
-                    (
-                        dm_conversation_id(&self.identity.public(), &public),
-                        public.x25519_pub,
-                        p.account_id(),
-                    )
-                })
-                .collect()
-        };
-        // Collect the peer recall claims (target, claimed-sender-account) from Delete events,
-        // already bound to the authenticating peer key. Decrypting these is the only required
-        // work; if there are none we skip the expensive author_of rebuild below.
-        let mut claims: Vec<(EventId, String)> = self.private_dm_recall_claims(peer_account_id);
-        for (conv, author_x, peer_account) in convs {
-            let delete_events: Vec<Event> = {
-                let log = self.log.lock().expect("log mutex not poisoned");
-                log.events(&conv)?
-                    .into_iter()
-                    .filter(|e| e.kind == EventKind::Delete)
-                    .collect()
-            };
-            for event in &delete_events {
-                let Ok(pt) = crate::dm::open(&self.identity, &author_x, &event.ciphertext) else {
-                    continue;
-                };
-                let Some(env) = RecallEnvelope::decode(&pt) else {
-                    continue;
-                };
-                // Bind the claimed sender account to the peer key that authenticated it.
-                if peer_account.as_deref() != Some(env.route.sender_account.as_str()) {
-                    continue;
-                }
-                claims.push((EventId::new(env.target), env.route.sender_account));
+        for author in self.historical_dm_peers() {
+            if matches!(author.account_id().as_deref(),Some(a) if a==peer||a==self.account_id()) {
+                self.project_private_dm_controls(dm_conversation_id(
+                    &self.identity.public(),
+                    &author.public(),
+                ))?;
             }
         }
-        out = out
-            .into_iter()
-            .map(|target| self.file_message_logical_id(acct_conv, target))
-            .collect();
-        for (target, _) in &mut claims {
-            *target = self.file_message_logical_id(acct_conv, *target);
-        }
-        if claims.is_empty() {
-            return Ok(out);
-        }
-
-        // Who authored each logical message in this account conversation (to authorise
-        // peer recalls): our sends are ours, received entries carry the sender account.
-        let targets: HashSet<_> = claims.iter().map(|(target, _)| *target).collect();
-        let mut author_of: HashMap<EventId, (String, u64)> = HashMap::new();
-        {
-            let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
-            let mut entries: Vec<_> = sentlog
-                .entries_ref(&acct_conv)
-                .iter()
-                .filter_map(|entry| {
-                    let id = super::DmEnvelope::decode_ref(&entry.plaintext)
-                        .map_or(EventId::new([0; 32]), |envelope| {
-                            EventId::new(envelope.msg_id)
-                        });
-                    targets.contains(&id).then_some((id, entry))
-                })
-                .collect();
-            // Keep the original entries() override order, using borrowed rows.
-            entries.sort_by_key(|(_, entry)| (entry.wall_clock, entry.seq));
-            for (id, entry) in entries {
-                author_of.insert(id, (my_account.clone(), entry.wall_clock));
-            }
-        }
-        {
-            let received = self.received.lock().expect("received mutex not poisoned");
-            let mut entries: Vec<_> = received
-                .entries_ref(&acct_conv)
-                .iter()
-                .filter_map(|entry| {
-                    let id = super::DmEnvelope::decode_ref(&entry.plaintext)
-                        .map_or(EventId::new([0; 32]), |envelope| {
-                            EventId::new(envelope.msg_id)
-                        });
-                    targets.contains(&id).then_some((id, entry))
-                })
-                .collect();
-            entries.sort_by_key(|(_, entry)| entry.wall_clock);
-            for (id, entry) in entries {
-                author_of.insert(id, (entry.from.clone(), entry.wall_clock));
-            }
-        }
-        {
-            let mut authors: HashMap<String, String> = self
-                .historical_dm_peers()
-                .into_iter()
-                .filter_map(|proof| proof.account_id().map(|account| (proof.user_id, account)))
-                .collect();
-            authors.insert(self.user_id(), my_account.clone());
-            for device in self.linked_devices() {
-                authors.insert(device.public.user_id(), my_account.clone());
-            }
-            let files = self.received_files.lock().expect("received files lock");
-            for row in files.entries_ref(&acct_conv) {
-                let logical = self.file_message_row_logical_id(row);
-                if targets.contains(&logical)
-                    && recallable_manifest(&row.plaintext)
-                    && let Some(account) = authors.get(&row.from).cloned().or_else(|| {
-                        self.file_message_identities
-                            .lock()
-                            .expect("file identity lock")
-                            .row_author_account(row)
-                    })
-                {
-                    author_of.insert(logical, (account, row.wall_clock));
-                }
-            }
-        }
-        // Only the message's own author account may recall it.
-        for (target, sender_account) in claims {
-            if let Some((author, wall_clock)) = author_of.get(&target)
-                && author == &sender_account
+        let conv = account_conversation_id(&self.account_id(), peer);
+        let mut out = self.recalled_targets_channel(conv)?;
+        for (target, actor) in self.private_dm_recall_claims(peer) {
+            if let Some((author, _, wall)) = self.private_dm_target_route(peer, target)?
+                && actor == author
             {
-                // Keep the verified tombstone even after the old device keys and
-                // peer roster disappear during recovery.
-                if let Err(error) = self
-                    .recalls
+                self.recalls
                     .lock()
-                    .expect("recalls mutex not poisoned")
-                    .record(acct_conv, target, *wall_clock)
-                {
-                    log::warn!("could not persist verified peer recall: {error}");
-                }
+                    .expect("recalls mutex")
+                    .record(conv, target, wall)?;
                 out.insert(target);
             }
         }

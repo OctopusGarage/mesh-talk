@@ -29,7 +29,10 @@ fn channel_file_evictions(
 
 impl Node {
     /// Whether exact incoming sticker offers still need their own completion.
-    pub(in crate::node) fn pending_sticker_aliases(&self, conversation: ConversationId) -> bool {
+    pub(in crate::node) fn pending_sticker_aliases(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<bool, crate::eventlog::LogError> {
         let sticker = self
             .files
             .lock()
@@ -40,18 +43,18 @@ impl Node {
                     && super::media_store::manifest_is_media(manifest)
                     && manifest.protection().is_none()
             });
-        if !sticker || self.expired_received_file(conversation) {
-            return false;
+        if !sticker || self.expired_received_file(conversation)? {
+            return Ok(false);
         }
         let store = self.delivery.lock().expect("delivery lock not poisoned");
-        store.cards_for_file(conversation).iter().any(|card| {
+        Ok(store.cards_for_file(conversation).iter().any(|card| {
             !store.file_completed(card.id)
                 && !store.manifest_event_erased(card.id)
                 && card
                     .completion_binding
                     .as_ref()
                     .is_some_and(|binding| binding.owner_account == self.account_id())
-        })
+        }))
     }
 
     /// Rebind retained original-author completion to an exact compatible sticker offer.
@@ -90,7 +93,7 @@ impl Node {
             return Ok(false);
         }
         let rows: std::collections::HashMap<_, _> = self
-            .retained_file_rows(conversation)
+            .retained_file_rows(conversation)?
             .into_iter()
             .map(|row| (row.event_id, row))
             .collect();
@@ -279,16 +282,23 @@ impl Node {
             // that dependency under the same lock as the new durable record.
             let alias_retained = ancestors.is_empty() || {
                 let rows = self.received_files.lock().expect("files lock not poisoned");
-                rows.entry(card.id).is_some_and(|row| {
+                let mut matched = false;
+                if let Some(row) = rows.entry(card.id)? {
                     let deadline = crate::expiry::deadline(&row.plaintext);
-                    deadline.is_none_or(|time| time > super::node::now_millis())
-                        && ancestors.iter().any(|(alias, prior, _)| {
-                            *alias == card.id
-                                && rows.entry(prior.id).is_some_and(|prior_row| {
+                    if deadline.is_none_or(|time| time > super::node::now_millis()) {
+                        for (alias, prior, _) in ancestors {
+                            if *alias == card.id
+                                && rows.entry(prior.id)?.is_some_and(|prior_row| {
                                     crate::expiry::deadline(&prior_row.plaintext) == deadline
                                 })
-                        })
-                })
+                            {
+                                matched = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                matched
             };
             if !ancestors.is_empty()
                 && (!alias_retained
@@ -322,10 +332,10 @@ impl Node {
             && self.untracked_file_reclaimable(conversation, &store)?;
         let retain_replica = if !active_fanout
             && (!eligible.is_empty() || untracked)
-            && self.is_channel_file_replica(conversation)
+            && self.is_channel_file_replica(conversation)?
         {
             let own_source = self
-                .retained_file_rows(conversation)
+                .retained_file_rows(conversation)?
                 .iter()
                 .any(|row| row.from == self.user_id());
             own_source || self.shares_replica(&conversation)?
@@ -355,19 +365,22 @@ impl Node {
         Ok(true)
     }
 
-    fn is_channel_file_replica(&self, conversation: ConversationId) -> bool {
+    fn is_channel_file_replica(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<bool, super::NodeError> {
         let media = {
             let files = self.files.lock().expect("files lock not poisoned");
             let Some(manifest) = files.manifest(&conversation) else {
-                return false;
+                return Ok(false);
             };
             match manifest.kind() {
                 Some(crate::file::FileKind::File) => false,
                 _ if super::media_store::manifest_is_media(manifest) => true,
-                _ => return false,
+                _ => return Ok(false),
             }
         };
-        self.retained_file_rows(conversation).iter().any(|row| {
+        Ok(self.retained_file_rows(conversation)?.iter().any(|row| {
             self.channels
                 .lock()
                 .expect("channels lock not poisoned")
@@ -382,7 +395,7 @@ impl Node {
                             .iter()
                             .any(|member| member.user_id() != self.user_id())
                 })
-        })
+        }))
     }
 
     /// Keep complete channel files newest-first within a fixed local storage budget.
@@ -398,10 +411,10 @@ impl Node {
                 .file_convs();
             let mut replicas = Vec::new();
             for file in file_convs {
-                if !self.is_channel_file_replica(file) {
+                if !self.is_channel_file_replica(file)? {
                     continue;
                 }
-                let rows = self.retained_file_rows(file);
+                let rows = self.retained_file_rows(file)?;
                 if rows.is_empty() {
                     continue;
                 }
@@ -447,7 +460,7 @@ impl Node {
         store: &super::delivery_store::DeliveryStore,
     ) -> Result<bool, super::NodeError> {
         let rows: Vec<_> = self
-            .retained_file_rows(conversation)
+            .retained_file_rows(conversation)?
             .into_iter()
             .filter(|row| {
                 !store.manifest_event_erased(row.event_id)
@@ -504,23 +517,25 @@ impl Node {
     fn retained_file_rows(
         &self,
         conversation: ConversationId,
-    ) -> Vec<super::received_log::ReceivedEntry> {
+    ) -> Result<Vec<super::received_log::ReceivedEntry>, super::NodeError> {
         let (manifest, ids) = {
             let files = self.files.lock().expect("files lock not poisoned");
             let Some(manifest) = files.manifest(&conversation).cloned() else {
-                return vec![];
+                return Ok(vec![]);
             };
             (manifest, files.manifest_events(conversation))
         };
         let records = self.received_files.lock().expect("files lock not poisoned");
-        ids.into_iter()
-            .filter_map(|id| records.entry(id))
-            .filter(|row| {
-                super::files::validated_manifest(&row.plaintext)
+        let mut rows = Vec::new();
+        for id in ids {
+            if let Some(row) = records.entry(id)?
+                && super::files::validated_manifest(&row.plaintext)
                     .is_some_and(|stored| super::files::same_file_transfer(&manifest, &stored))
-            })
-            .cloned()
-            .collect()
+            {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     /// A local export backing path. Group/own media eligibility never enters network proofs.
@@ -539,7 +554,7 @@ impl Node {
         if self.has_verified_file_completion(conversation) {
             return Ok(Some(path));
         }
-        for row in self.retained_file_rows(conversation) {
+        for row in self.retained_file_rows(conversation)? {
             if self
                 .delivery
                 .lock()
@@ -548,18 +563,19 @@ impl Node {
             {
                 continue;
             }
-            let event = self
+            let event = match self
                 .log
                 .lock()
                 .expect("log lock not poisoned")
                 .get(&row.event_id)?
-                .or_else(|| {
-                    self.account_file_proofs
-                        .lock()
-                        .expect("file proofs lock not poisoned")
-                        .get(&row.event_id)
-                        .cloned()
-                });
+            {
+                Some(event) => Some(event),
+                None => self
+                    .account_file_proofs
+                    .lock()
+                    .expect("file proofs lock not poisoned")
+                    .get(&row.event_id)?,
+            };
             let Some(event) = event else {
                 continue;
             };
@@ -575,7 +591,7 @@ impl Node {
                 .account_file_proofs
                 .lock()
                 .expect("file proofs lock not poisoned")
-                .get(&row.event_id)
+                .get(&row.event_id)?
                 .is_some();
             if (own || channel || sibling_proof)
                 && event.kind == EventKind::FileManifest
@@ -646,8 +662,7 @@ impl Node {
                 .received_files
                 .lock()
                 .expect("files lock not poisoned")
-                .entry(card.id)
-                .cloned();
+                .entry(card.id)?;
             let retained = match (original, row) {
                 (Some(event), Some(row)) => {
                     event.kind == EventKind::FileManifest
@@ -775,7 +790,7 @@ mod replica_tests {
             .unwrap()
             .entry(cards[1].id)
             .unwrap()
-            .clone();
+            .unwrap();
         for deadline in [
             super::super::node::now_millis() - 1,
             super::super::node::now_millis() + 60_000,

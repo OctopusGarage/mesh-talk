@@ -99,6 +99,7 @@
         "crates/mesh-talk-core/src/node/sticker_media.rs",
         "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
         "crates/mesh-talk-core/src/node/recall.rs",
+        "crates/mesh-talk-core/src/node/recall/",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
         "crates/mesh-talk-core/src/node/session.rs",
@@ -1149,6 +1150,8 @@
         "crates/mesh-talk-core/src/node/account_file_repository.rs",
         "crates/mesh-talk-core/src/node/recovered_sent_ids.rs",
         "crates/mesh-talk-core/src/node/transcript_repository/",
+        "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
         "crates/mesh-talk-core/src/node/account_suppression.rs"
       ],
       "rust": [
@@ -1157,6 +1160,7 @@
           "filters": [
             "node::transcript_repository::tests::",
             "node::account_file_repository::tests::",
+            "runtime_metadata_",
             "node::recovered_sent_ids::tests::",
             "node::account_suppression::tests::"
           ]

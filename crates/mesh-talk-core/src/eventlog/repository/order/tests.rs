@@ -1106,3 +1106,86 @@ fn commit_discovery_is_bounded_metadata_and_advances_across_retirement() {
         0
     );
 }
+
+#[test]
+fn runtime_metadata_combined_history_keeps_delayed_parent_order_and_reuses_unchanged_ranks() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = EventRepository::new(database(&dir), EventDomainId([2; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    let parent = event(&author, 1, vec![], 100, EventKind::Message);
+    let control = event(&author, 2, vec![parent.id], 1, EventKind::KeyRotation);
+    let child = event(&author, 3, vec![control.id], 2, EventKind::Message);
+    let signed = vec![parent, control, child];
+    let conv = signed[0].conversation_id;
+    for event in &signed {
+        repo.append(event).unwrap();
+    }
+    finish(&repo, &conv, CausalOrder::WallClock);
+    repo.initialize_history_order().unwrap();
+    let generation = repo
+        .history_generation(
+            &conv,
+            b"revision 1",
+            0,
+            repo.order_generation(&conv, CausalOrder::WallClock)
+                .unwrap(),
+        )
+        .unwrap();
+    let archive = [
+        (EventId::new([21; 32]), 0),
+        (EventId::new([22; 32]), 50),
+        (EventId::new([23; 32]), 101),
+    ];
+    let mut visible = vec![(signed[0].id, 100), (signed[2].id, 2)];
+    visible.extend(archive);
+    for (ordinal, (id, clock)) in visible.iter().enumerate() {
+        repo.history_add(
+            &conv,
+            generation.job,
+            combined::HistorySelector {
+                id: *id,
+                clock: *clock,
+                source_kind: 2,
+                ordinal: ordinal as i64 + 1,
+                priority: 2,
+                sequence: 0,
+                charged_bytes: 400,
+            },
+            None,
+        )
+        .unwrap();
+    }
+    let mut ready = repo.history_order_step(generation.job).unwrap();
+    while !ready.ready {
+        ready = repo.history_order_step(generation.job).unwrap();
+    }
+    let expected =
+        crate::eventlog::order::ordered_ids(&signed.iter().collect::<Vec<_>>(), &archive, false)
+            .into_iter()
+            .filter(|id| visible.iter().any(|(candidate, _)| candidate == id))
+            .collect::<Vec<_>>();
+    let selected = repo
+        .history_selectors(ready.job, 0, ready.count, 4096)
+        .unwrap();
+    assert_eq!(
+        selected.iter().map(|row| row.id).collect::<Vec<_>>(),
+        expected
+    );
+    let warm = repo
+        .history_generation(
+            &conv,
+            b"revision 1",
+            0,
+            repo.order_generation(&conv, CausalOrder::WallClock)
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(warm.ready);
+    assert_eq!(warm.job, ready.job);
+    assert_eq!(repo.body_read_counts(), (0, 0));
+    assert!(matches!(
+        repo.history_selectors(ready.job, 0, ready.count, 100),
+        Err(LogError::PageBudgetTooSmall { .. })
+    ));
+    assert_eq!(repo.body_read_counts(), (0, 0));
+}

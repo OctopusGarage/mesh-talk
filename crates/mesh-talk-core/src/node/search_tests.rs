@@ -5,7 +5,7 @@ use super::*;
 use crate::discovery::announce::Announce;
 use crate::discovery::roster::Roster;
 use crate::identity::device::DeviceIdentity;
-use crate::node::MessageProtection;
+use crate::node::{DmEnvelope, MessageBody, MessageProtection};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -112,7 +112,7 @@ fn search_finds_account_message_after_contact_goes_offline() {
         .record(conversation, 1, 1, &message.encode())
         .unwrap();
 
-    assert_eq!(node.known_account_ids(), vec![contact.clone()]);
+    assert_eq!(node.known_account_ids().unwrap(), vec![contact.clone()]);
     let hits = node.search("PROJECT").unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].target, contact);
@@ -168,7 +168,7 @@ fn search_does_not_present_a_relay_only_account_as_a_contact() {
         )
         .unwrap();
 
-    assert!(node.known_account_ids().contains(&relay_id));
+    assert!(node.known_account_ids().unwrap().contains(&relay_id));
     assert!(node.search("diagnostic").unwrap().is_empty());
     assert!(node.search_recent("diagnostic").unwrap().hits.is_empty());
 
@@ -381,7 +381,6 @@ async fn recent_search_channel_reference_matches_history_and_excludes_recall() {
 #[tokio::test]
 async fn recent_search_recovered_channel_send_preserves_original_id() {
     use crate::eventlog::event::EventId;
-    use crate::node::recovered_sent_ids::RecoveredSentIds;
 
     let dir = tempfile::tempdir().unwrap();
     let node = recent_search_node(dir.path());
@@ -394,9 +393,13 @@ async fn recent_search_recovered_channel_send_preserves_original_id() {
         .unwrap();
     let entry = node.sentlog.lock().unwrap().entries(&channel)[0].clone();
     let original = EventId::new([99; 32]);
-    let mut index = RecoveredSentIds::open(&dir.path().join("recovered.log"), "pw").unwrap();
-    index.record(&entry, original).unwrap();
-    *node.recovered_sent_ids.lock().unwrap() = Some(index);
+    node.recovered_sent_ids
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .record(&entry, original)
+        .unwrap();
     assert_eq!(node.channel_history(channel, 10).unwrap()[0].id, original);
     assert_eq!(
         node.search_recent("archive token").unwrap().hits[0].reference,
@@ -1582,4 +1585,78 @@ async fn protected_image_expiry_hides_explicit_and_ordinary_bytes() {
     );
     assert!(node.read_media(file).is_none());
     assert!(node.read_file(file).is_err());
+}
+
+#[test]
+fn indexed_runtime_recent_history_fetches_only_selected_bodies_after_reopen() {
+    use crate::identity::account::Account;
+    use crate::node::conversation::account_conversation_id;
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let secrets = identity.secret_bytes();
+    let account = Account::generate();
+    let peer = "a".repeat(32);
+    let conversation = account_conversation_id(&account.account_id(), &peer);
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open_with_account(
+            DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+            Account::from_secret_bytes(account.secret_bytes()),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("messages.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let node = open();
+    for n in 1u64..=512 {
+        let mut id = [0; 32];
+        id[24..].copy_from_slice(&n.to_be_bytes());
+        let body = MessageBody::new(vec![b'x'; 16 * 1024], None).encode();
+        let envelope = DmEnvelope::new(account.account_id(), peer.clone(), id, body).encode();
+        let mut sent = node.sentlog.lock().unwrap();
+        sent.record(conversation, n, n, &envelope).unwrap();
+        sent.record(ConversationId::new([77; 32]), n, n, &vec![b'z'; 32 * 1024])
+            .unwrap();
+    }
+    let page = node.account_history(&peer, 50).unwrap();
+    assert_eq!(page.len(), 50);
+    assert_eq!(node.sentlog.lock().unwrap().body_reads(), 50);
+    assert_eq!(page.first().unwrap().wall_clock, 463);
+    assert_eq!(page.last().unwrap().wall_clock, 512);
+    let generation = |node: &Node| {
+        node.storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT job FROM history_order_jobs WHERE conversation=?1",
+                    [conversation.as_bytes().as_slice()],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let first = generation(&node);
+    drop(node);
+    let reopened = open();
+    assert_eq!(
+        reopened.sentlog.lock().unwrap().body_reads(),
+        0,
+        "ordinary startup must not hydrate transcript history"
+    );
+    assert_eq!(reopened.received.lock().unwrap().body_reads(), 0);
+    assert_eq!(reopened.received_files.lock().unwrap().body_reads(), 0);
+    assert_eq!(reopened.account_history(&peer, 50).unwrap(), page);
+    assert_eq!(reopened.sentlog.lock().unwrap().body_reads(), 50);
+    assert_eq!(
+        generation(&reopened),
+        first,
+        "unchanged recent reads reuse persisted ranks"
+    );
 }
