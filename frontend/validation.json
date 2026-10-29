@@ -62,6 +62,7 @@
         "frontend/e2e/media-hook-harness.tsx"
       ],
       "frontend": [
+        "src/features/chat/MediaPreview.test.ts",
         "src/features/chat/mediaObjectUrlCache.test.ts",
         "src/features/chat/mediaFileRead.test.ts",
         "src/features/chat/mediaFile.test.ts",
@@ -72,6 +73,10 @@
         "summary": "Keep inline media geometry stable during receive, decode and virtualized remounts while reusing ordinary media within bounded session ownership.",
         "guide": "docs/module-boundaries.md#inline-media-presentation",
         "invariants": [
+          {
+            "name": "Ordinary image previews support anchored bounded zoom and pan without dismissing on drag; reset/reopen restores window fit, and native text-copy policy remains enforced.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
           {
             "name": "Receiving, loading, decoded and unsupported inline previews keep a responsive frame; user scroll intent prevents stale anchor restoration.",
             "reference": "docs/module-boundaries.md#inline-media-presentation"

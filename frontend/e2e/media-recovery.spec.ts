@@ -89,9 +89,9 @@ test("received media recovers when bytes become available with stable fileConv",
     };
     // Produce valid PNG bytes with the browser's encoder, independent of IPC mock.
     const canvas = document.createElement("canvas");
-    canvas.width = 2;
-    canvas.height = 2;
-    canvas.getContext("2d")!.fillRect(0, 0, 2, 2);
+    canvas.width = 1200;
+    canvas.height = 900;
+    canvas.getContext("2d")!.fillRect(0, 0, 1200, 900);
     w.__mediaDiagnostic.png = Uint8Array.from(
       atob(canvas.toDataURL("image/png").split(",")[1]),
       (c) => c.charCodeAt(0),
@@ -125,7 +125,7 @@ test("received media recovers when bytes become available with stable fileConv",
       d.available = true;
       return width;
     }),
-  ).toBe(2);
+  ).toBe(1200);
   try {
     await expect
       .poll(
@@ -165,6 +165,28 @@ test("received media recovers when bytes become available with stable fileConv",
     await page.mouse.move(2, 2);
     await page.mouse.up();
     await expect(lightbox).toBeVisible();
+    await lightbox
+      .getByRole("button", { name: "Zoom in", exact: true })
+      .click();
+    const transform = lightbox.getByTestId("image-transform");
+    await expect(transform).toHaveCSS("transform", /matrix\(1.25,/);
+    const box = (await enlargedImage.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(
+      box.x + box.width / 2 + 80,
+      box.y + box.height / 2 + 60,
+      { steps: 5 },
+    );
+    await page.mouse.up();
+    await expect(lightbox).toBeVisible();
+    expect(
+      await transform.evaluate(
+        (el) => new DOMMatrix(getComputedStyle(el).transform).m42,
+      ),
+    ).toBeGreaterThan(0);
+    await lightbox.getByRole("button", { name: "Fit to window" }).click();
+    await expect(transform).toHaveCSS("transform", "matrix(1, 0, 0, 1, 0, 0)");
     await lightbox.getByRole("button", { name: "Close" }).click();
     await expect(lightbox).toHaveCount(0);
     await expect(page.getByRole("menu")).toHaveCount(0);

@@ -107,6 +107,12 @@ Receiving, loading, decoded and unsupported states share a responsive frame
 (up to 320 pixels wide, 4:3 for images and 16:9 for video); artwork is contained
 without cropping, and the lightbox retains full-size access. Transfer readiness
 must not swap an ordinary preview from a compact file card to an image row.
+The ordinary-image lightbox owns pointer-anchored wheel zoom (1–8 times the
+window-fit size), double-click zoom, bounded pointer dragging, fit reset and
+keyboard zoom (+/−/0). Resize clamps the current position; reopening resets it.
+Controls remain outside the clipped image stage. Escape restores trigger focus.
+On macOS, unzoomed images retain native text selection; Option/Alt-drag bypasses
+panning when zoomed. Actual recognition and selection require WKWebView evidence.
 Attachment consent remains owned by `FileBubble` and the existing file policy.
 
 `mediaFile.tsx` owns durable-first reads and explicitly opts ordinary previews
