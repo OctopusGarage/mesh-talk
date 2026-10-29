@@ -1443,7 +1443,11 @@ reconstruction or qualify the complete participant runtime memory bound.
 The indexed FileBook projection references those existing file-card bodies by
 ordinal. It installs validated signed bindings and exact processing facts in the
 body transaction. Physical deletion cascades to eligibility metadata, advances
-its persisted revision and retains compact processing evidence. Metadata pages
+its persisted revision and retains compact processing evidence. Durable local
+suppression also revokes eligibility in that same transaction, before physical
+cleanup can fail. Signed logical aliases apply this rule in either arrival order;
+the indexed author and exact plaintext digest must match the retained offer.
+Metadata pages
 check row and byte budgets; selected manifest reads verify physical allocation
 charges before loading bytes. Account adoption fences old handles and never
 imports the former account into the new namespace. This leaf does not by itself

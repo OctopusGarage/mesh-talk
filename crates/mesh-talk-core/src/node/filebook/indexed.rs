@@ -29,6 +29,14 @@ const TRIGGERS: &[(&str, &str)] = &[
         "file_book_offer_removed",
         "CREATE TRIGGER file_book_offer_removed AFTER DELETE ON file_book_offers BEGIN UPDATE file_book_bindings SET offers=offers-1 WHERE account=OLD.account AND file=OLD.file; UPDATE file_book_owners SET revision=revision+1 WHERE account=OLD.account; END",
     ),
+    (
+        "file_book_suppressed",
+        "CREATE TRIGGER file_book_suppressed AFTER INSERT ON transcript_suppression BEGIN DELETE FROM file_book_offers WHERE event=NEW.id AND ordinal IN (SELECT ordinal FROM transcript_rows WHERE kind=3 AND conversation=NEW.conversation AND row_key=NEW.id); DELETE FROM file_book_offers WHERE ordinal IN (SELECT o.ordinal FROM file_identity_headers h JOIN file_identity_aliases a ON a.host=h.host AND a.logical=h.logical JOIN file_book_offers o ON o.event=a.manifest AND o.author=h.author AND o.file=h.file JOIN transcript_rows r ON r.ordinal=o.ordinal AND r.plaintext_sha256=h.manifest_digest WHERE h.host=NEW.conversation AND (h.logical=NEW.id OR a.manifest=NEW.id)); END",
+    ),
+    (
+        "file_book_suppressed_alias",
+        "CREATE TRIGGER file_book_suppressed_alias AFTER INSERT ON file_identity_aliases BEGIN DELETE FROM file_book_offers WHERE event=NEW.manifest AND ordinal IN (SELECT o.ordinal FROM file_book_offers o JOIN transcript_rows r ON r.ordinal=o.ordinal JOIN file_identity_headers h ON h.host=NEW.host AND h.logical=NEW.logical AND h.author=o.author AND h.file=o.file AND h.manifest_digest=r.plaintext_sha256 WHERE o.event=NEW.manifest AND EXISTS(SELECT 1 FROM transcript_suppression s WHERE s.conversation=NEW.host AND (s.id=NEW.logical OR s.id=NEW.manifest))); END",
+    ),
 ];
 const MAX_BODY: usize = crate::node::transcript_repository::MAX_PAGE_BYTES;
 fn invalid(message: &str) -> LogError {
@@ -293,6 +301,12 @@ pub(crate) fn install_on(
         .ok_or_else(|| {
             LogError::AdmissionRejected("invalid retained signed file binding".into())
         })?;
+    if crate::node::file_message_identity::IndexedFileMessageIdentities::row_suppressed_on(
+        c, entry,
+    )? {
+        mark_processed_on(c, entry.event_id)?;
+        return Ok(false);
+    }
     let binding = digest(&entry.plaintext)?;
     let old: Option<Vec<u8>> = c
         .query_row(
@@ -397,6 +411,12 @@ mod tests {
             let records = ReceivedStore::file_cards_from_profile(
                 profile.clone(),
                 &path.join("files.log"),
+                "pw",
+            )
+            .unwrap();
+            crate::node::file_message_identity::IndexedFileMessageIdentities::from_profile(
+                profile.clone(),
+                &path.join("file-identities.log"),
                 "pw",
             )
             .unwrap();
@@ -557,6 +577,112 @@ mod tests {
         assert!(f.book.files_page(None, 128, 1024).unwrap().is_empty());
         assert!(f.book.processed(first.event_id).unwrap());
         assert!(f.book.processed(second.event_id).unwrap());
+    }
+
+    #[test]
+    fn durable_suppression_revokes_file_key_before_physical_row_cleanup() {
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(5);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                Fixture::install(c, &entry, &original)?;
+                Ok(())
+            })
+            .unwrap();
+        let ordinal = f.book.offers_page(None, None, None, 1, 144).unwrap()[0].ordinal;
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute(
+                    "INSERT INTO transcript_suppression VALUES(?1,?2)",
+                    params![
+                        entry.conversation.as_bytes().as_slice(),
+                        entry.event_id.as_bytes().as_slice()
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(f.records.entry(entry.event_id).unwrap().is_some());
+        assert!(f.book.manifest(manifest.file_conv()).unwrap().is_none());
+        assert!(!f.book.eligible_ordinal(ordinal).unwrap());
+        assert_eq!(f.book.revision().unwrap(), 2);
+        assert!(f.book.files_page(None, 1, 32).unwrap().is_empty());
+        assert!(f.book.processed(entry.event_id).unwrap());
+        assert!(
+            !f.book
+                .profile
+                .database()
+                .transaction(|c| Fixture::install(c, &entry, &original))
+                .unwrap()
+        );
+        assert!(f.book.manifest(manifest.file_conv()).unwrap().is_none());
+    }
+
+    #[test]
+    fn canonical_suppression_revokes_raw_aliases_in_either_arrival_order() {
+        for identity_first in [false, true] {
+            let f = Fixture::new();
+            let (entry, original, manifest) = f.fixture(6);
+            let host = ConversationId::new([210; 32]);
+            let logical = EventId::new([211; 32]);
+            // These are the indexed owner's authenticated identity facts. No
+            // identity or transcript body is needed by the deletion projection.
+            let bind = |c: &Connection| -> Result<(), LogError> {
+                c.execute(
+                    "INSERT INTO file_identity_headers VALUES(?1,?2,?3,?4,?5,?6,?7,?7,1)",
+                    params![
+                        host.as_bytes().as_slice(),
+                        logical.as_bytes().as_slice(),
+                        [212u8; 32].as_slice(),
+                        original.author.ed25519_pub().as_slice(),
+                        manifest.file_conv().as_bytes().as_slice(),
+                        <[u8; 32]>::from(Sha256::digest(&entry.plaintext)).as_slice(),
+                        1u64.to_be_bytes().as_slice()
+                    ],
+                )?;
+                c.execute(
+                    "INSERT INTO file_identity_aliases VALUES(?1,?2,?3)",
+                    params![
+                        entry.event_id.as_bytes().as_slice(),
+                        host.as_bytes().as_slice(),
+                        logical.as_bytes().as_slice()
+                    ],
+                )?;
+                Ok(())
+            };
+            f.book
+                .profile
+                .database()
+                .transaction(|c| {
+                    Fixture::install(c, &entry, &original)?;
+                    if identity_first {
+                        bind(c)?;
+                    }
+                    c.execute(
+                        "INSERT INTO transcript_suppression VALUES(?1,?2)",
+                        params![host.as_bytes().as_slice(), logical.as_bytes().as_slice()],
+                    )?;
+                    if !identity_first {
+                        bind(c)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert!(f.records.entry(entry.event_id).unwrap().is_some());
+            assert!(f.book.manifest(manifest.file_conv()).unwrap().is_none());
+            assert_eq!(f.book.revision().unwrap(), 2);
+            assert!(
+                !f.book
+                    .profile
+                    .database()
+                    .transaction(|c| Fixture::install(c, &entry, &original))
+                    .unwrap()
+            );
+        }
     }
 
     #[test]
