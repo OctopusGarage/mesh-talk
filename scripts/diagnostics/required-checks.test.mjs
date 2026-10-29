@@ -13,7 +13,7 @@ test("gate migration preserves strictness, app binding and unrelated protection"
   assert.equal(next.strict, true);
   assert.deepEqual(next.checks.find(x => x.context === "codecov/patch"), current.checks[2]);
   assert.deepEqual(next.checks.find(x => x.context === "review"), current.checks[3]);
-  for (const name of ["checks (ubuntu-latest)", "checks (macos-latest)", "checks (windows-latest)", "health / Source and supply-chain checks", "health / Portable checks (windows-latest)"]) {
+  for (const name of ["checks (ubuntu-latest)", "checks (macos-latest)", "windows / Windows workspace build", "windows / Windows workspace tests (1/2)", "windows / Windows workspace tests (2/2)", "health / Source and supply-chain checks", "health / Portable checks (windows-latest)"]) {
     assert.deepEqual(next.checks.find(x => x.context === name), { context: name, app_id: 15368 });
   }
   assert.ok(!next.checks.some(x => x.context === "verify"));
@@ -28,7 +28,7 @@ test("direct release acceptance rejects every missing, skipped, failed or spoofe
   for (const conclusion of ["failure", "skipped", "neutral", "cancelled", null]) assert.throws(() => requireSuccessfulChecks([{ ...checks[0], id: 999, conclusion }, ...checks], releaseSourceChecks), /check/);
   assert.throws(() => requireSuccessfulChecks([{ ...checks[0], app: { slug: "other" } }, ...checks.slice(1)], releaseSourceChecks), /check/);
   assert.ok(!releaseSourceChecks.includes("verify"));
-  assert.ok(releaseSourceChecks.includes("checks (windows-latest)"));
+  for (const name of ["windows / Windows workspace build", "windows / Windows workspace tests (1/2)", "windows / Windows workspace tests (2/2)"]) assert.ok(releaseSourceChecks.includes(name));
   assert.ok(releaseSourceChecks.includes("native-core / Real native UI (windows-2022)"));
 });
 
@@ -47,4 +47,10 @@ test("migrating the backend aggregate alone preserves Linux execution acceptance
   const next = migrateRequiredChecks({ strict: true, checks: [{ context: "Multi-process E2E", app_id: 15368 }] });
   assert.ok(next.checks.some(check => check.context === "checks (ubuntu-latest)"));
   assert.equal(next.checks.length, 6);
+});
+
+test("the former Windows matrix check requires build and both executable archive partitions", () => {
+  const policy = migrateRequiredChecks({ strict: true, checks: [{ context: "checks (windows-latest)", app_id: 15368 }] });
+  assert.deepEqual(policy.checks.map(check => check.context), ["windows / Windows workspace build", "windows / Windows workspace tests (1/2)", "windows / Windows workspace tests (2/2)"]);
+  assert.ok(policy.checks.every(check => check.app_id === 15368));
 });

@@ -49,8 +49,9 @@ must all match. Superseded candidate runs are cancelled automatically.
 Branch protection requires direct execution checks instead of runner-backed
 copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct
 release policy and replacement mapping. Source and all platform checks are
-individually required; release acceptance uses the same direct names plus its
-main-only checks. To inspect a migration, run
+individually required; Windows requires its build producer and both archive
+consumers. Release acceptance uses the same direct names plus its main-only
+checks. To inspect a migration, run
 `node scripts/ci/migrate-required-checks.mjs OWNER/REPO main PR_NUMBER --plan`.
 Use `--apply` only after the replacement checks pass on the current PR head. The
 command validates each bound GitHub App, rejects a changed candidate/policy,

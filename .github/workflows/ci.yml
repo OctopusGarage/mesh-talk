@@ -25,17 +25,16 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  MESH_TALK_TEST_TIMING: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/feat/automatic-delivery-receipts') || inputs.diagnostic_timing) && '1' || '0' }}
+  MESH_TALK_TEST_TIMING: ${{ inputs.diagnostic_timing && '1' || '0' }}
 
 jobs:
   checks:
     strategy:
       fail-fast: false
-      # Tauri targets desktop on all three platforms: verify on Linux (fast, with the
-      # GTK/WebKit deps + coverage), macOS, and Windows (so a Windows-only regression is
-      # caught on every push, not only at release time).
+      # Windows uses the reusable single-build archive workflow below. Linux
+      # and macOS retain their complete linked workspace and coverage passes.
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -79,6 +78,14 @@ jobs:
           node scripts/validation/standards.mjs
           node scripts/check-repository-hygiene.mjs
 
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2.87.31
+        with:
+          tool: cargo-llvm-cov@0.8.7
+
+      - name: Verify coverage accumulation with the actual tool
+        run: node --test scripts/ci/backend-coverage.test.mjs
+
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend
         working-directory: frontend
@@ -98,79 +105,25 @@ jobs:
         run: cargo build --workspace --locked
 
       # Collect each OS's workspace coverage without repeating its test suite.
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.87.31
-        with:
-          tool: cargo-llvm-cov
-
       # Every platform collects coverage in its existing test pass: native-only
       # updater policy cannot be represented by Linux's AppImage-only branch.
       # --workspace covers the protocol, integrations, MCP adapter and desktop app.
-      - name: Test (macOS + Windows)
+      - name: Test + coverage (macOS)
         if: matrix.os != 'ubuntu-latest'
         working-directory: src-tauri
         shell: bash
         env:
-          # Concurrent encrypted file/log rigs exceed loopback deadlines on
-          # shared Windows runners. Keep every assertion and timeout intact.
-          RUST_TEST_THREADS: ${{ matrix.os == 'windows-latest' && '1' || '4' }}
-          # Cargo retains its loader paths, package cwd and fixture environment.
-          # The runner inventories and partitions each binary; only reviewed
-          # isolated cases use two threads, with all remaining tests serial.
-          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: node ${{ github.workspace }}/scripts/validation/windows-libtest-runner.mjs
-          MESH_WINDOWS_TEST_REPORT_DIR: ${{ runner.temp }}/windows-test-schedule
+          RUST_TEST_THREADS: 4
         run: |
           set -o pipefail
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-            # The Windows target runner forwards timing output without changing
-            # its exhaustively validated harness selection.
-            if [ "$RUNNER_OS" = Windows ]; then
-              cargo llvm-cov --workspace --lcov --output-path lcov.info 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
-            else
-              cargo llvm-cov --workspace --lcov --output-path lcov.info -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
-            fi
+            cargo llvm-cov --workspace --lcov --output-path lcov.info -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
           else
             cargo llvm-cov --workspace --lcov --output-path lcov.info
           fi
           # llvm-cov runs unit/integration tests; stable Rust doctests keep their
           # original separate check without executing those suites twice.
-          unset CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER
           cargo test --workspace --doc
-
-      # Capture loader evidence when Windows cannot even start the test harness.
-      # This diagnostic never turns a failed test step into a successful check.
-      - name: Diagnose Windows test loader
-        if: failure() && matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $test = $null
-          foreach ($candidate in Get-ChildItem target/llvm-cov-target/debug/deps/mesh_talk-*.exe -ErrorAction SilentlyContinue) {
-            Write-Host "Checking test harness: $($candidate.Name)"
-            & $candidate.FullName --list
-            Write-Host "Harness exit code: $LASTEXITCODE"
-            if ($LASTEXITCODE -ne 0) { $test = $candidate; break }
-          }
-          if (-not $test) {
-            Write-Host 'All application test harnesses start successfully; inspect the failed test above.'
-            exit 0
-          }
-          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-          & $dumpbin.FullName /imports $test.FullName | Select-String 'COMCTL32|TaskDialogIndirect' -Context 2,2
-          $mt = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/mt.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-          & $mt.FullName "-inputresource:$($test.FullName);#1" "-out:$env:RUNNER_TEMP/test-original.manifest"
-          if (Test-Path "$env:RUNNER_TEMP/test-original.manifest") { Get-Content "$env:RUNNER_TEMP/test-original.manifest" }
-          $copy = Join-Path $test.DirectoryName 'mesh-talk-loader-diagnostic.exe'
-          Copy-Item $test.FullName $copy
-          $manifest = Join-Path $env:RUNNER_TEMP 'common-controls.manifest'
-          '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" /></dependentAssembly></dependency></assembly>' | Set-Content $manifest -Encoding utf8
-          & $mt.FullName -manifest $manifest "-outputresource:$copy;#1"
-          if ($LASTEXITCODE -ne 0) { throw 'Manifest embedding failed' }
-          & $copy --list
-          if ($LASTEXITCODE -ne 0) { throw 'Test harness still cannot load with Common Controls v6' }
-          & $copy contact_policy::tests --nocapture
-          if ($LASTEXITCODE -ne 0) { throw 'Native contact policy tests failed' }
 
       - name: Test + coverage (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -184,6 +137,10 @@ jobs:
             cargo llvm-cov --workspace --lcov --output-path lcov.info
           fi
 
+      - name: Workspace doctests (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --doc --locked
+
       - name: Multi-process core evidence and coverage (Linux)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -193,13 +150,13 @@ jobs:
           EVAL_COVERAGE: '1'
         run: |
           node scripts/evals/backend-runner.mjs
-          cargo llvm-cov --no-clean --no-report -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1
+          cargo llvm-cov --no-report -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1
 
       - name: Large-folder transfer regression (Linux)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          cargo llvm-cov --no-clean --no-report -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
+          cargo llvm-cov --no-report -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
           cargo llvm-cov report --lcov --output-path src-tauri/e2e-lcov.info
 
       - name: Preserve Linux backend evaluation evidence
@@ -210,14 +167,6 @@ jobs:
           path: ${{ runner.temp }}/backend-eval-results/
           if-no-files-found: error
           retention-days: 14
-
-      - name: Upload Windows test scheduling inventory and timings
-        if: always() && matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-test-schedule-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/windows-test-schedule/*.json
-          if-no-files-found: warn
 
       - name: Upload test timing diagnostics
         if: always() && env.MESH_TALK_TEST_TIMING == '1'
@@ -241,3 +190,9 @@ jobs:
           name: workspace-${{ matrix.os }}-${{ github.run_attempt }}
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true
+
+  windows:
+    uses: ./.github/workflows/windows-workspace.yml
+    with:
+      diagnostic_timing: ${{ inputs.diagnostic_timing || false }}
+    secrets: inherit

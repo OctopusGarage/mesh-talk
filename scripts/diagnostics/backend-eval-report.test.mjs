@@ -33,8 +33,8 @@ test("instrumented backend execution preserves the exact ignored scenario select
   const ordinary = backendCargoArgs("two_node_cli", false);
   const covered = backendCargoArgs("two_node_cli", true);
   assert.deepEqual(ordinary.slice(0, 2), ["test", "--locked"]);
-  assert.deepEqual(covered.slice(0, 4), ["llvm-cov", "--no-clean", "--no-report", "--locked"]);
-  assert.deepEqual(covered.slice(4), ordinary.slice(2));
+  assert.deepEqual(covered.slice(0, 3), ["llvm-cov", "--no-report", "--locked"]);
+  assert.deepEqual(covered.slice(3), ordinary.slice(2));
   assert.deepEqual(covered.slice(-4), ["--", "--ignored", "--test-threads=1", "--nocapture"]);
   assert.throws(() => backendCargoArgs("unknown", true), /Unknown backend/);
 });

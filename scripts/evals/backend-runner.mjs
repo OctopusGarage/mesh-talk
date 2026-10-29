@@ -25,7 +25,7 @@ export function validateBackendOutput(output, expected) {
 
 export function backendCargoArgs(target, coverage = false) {
   assert.ok(Object.hasOwn(BACKEND_SUITES, target), `Unknown backend suite: ${target}`);
-  return [...(coverage ? ["llvm-cov", "--no-clean", "--no-report"] : ["test"]), "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--ignored", "--test-threads=1", "--nocapture"];
+  return [...(coverage ? ["llvm-cov", "--no-report"] : ["test"]), "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--ignored", "--test-threads=1", "--nocapture"];
 }
 
 function runCargo(target) {

@@ -336,12 +336,17 @@
         "scripts/ci/required-checks.mjs",
         "scripts/ci/migrate-required-checks.mjs",
         "scripts/diagnostics/required-checks.test.mjs",
-        "scripts/validation/windows-libtest-runner.mjs",
-        "scripts/diagnostics/windows-libtest-runner.test.mjs",
         "scripts/evals/backend-runner.mjs",
         "scripts/diagnostics/backend-eval-report.test.mjs",
         "scripts/ci/timing-report.mjs",
-        "scripts/diagnostics/ci-timing-report.test.mjs"
+        "scripts/diagnostics/ci-timing-report.test.mjs",
+        "scripts/ci/backend-coverage.test.mjs",
+        ".github/workflows/windows-workspace.yml",
+        "scripts/ci/windows-coverage.mjs",
+        "scripts/diagnostics/windows-coverage.test.mjs",
+        "scripts/ci/windows-coverage-cli.test.mjs",
+        ".github/workflows/ui-shards.yml",
+        "scripts/diagnostics/ui-shard-orchestration.test.mjs"
       ],
       "node": [
         "scripts/diagnostics/ci-latency.test.mjs",
@@ -351,13 +356,19 @@
         "scripts/diagnostics/mutants-workflow.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs",
         "scripts/diagnostics/required-checks.test.mjs",
-        "scripts/diagnostics/windows-libtest-runner.test.mjs",
         "scripts/diagnostics/backend-eval-report.test.mjs",
-        "scripts/diagnostics/ci-timing-report.test.mjs"
+        "scripts/diagnostics/ci-timing-report.test.mjs",
+        "scripts/ci/backend-coverage.test.mjs",
+        "scripts/diagnostics/windows-coverage.test.mjs",
+        "scripts/ci/windows-coverage-cli.test.mjs",
+        "scripts/diagnostics/ui-shard-orchestration.test.mjs"
       ],
       "escalation": [
         "Run actionlint and affected workflow regressions. Mutation runner changes also require scripts/release/run-mutants.test.mjs with the pinned cargo-mutants and cargo-nextest tools; verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration.",
-        "Direct check migration requires successful current-source app-bound replacement evidence before editing branch protection; preserve strictness and unrelated checks. Windows libtest partition changes require real Cargo runner and coverage fixtures, exact inventory union and hosted Windows execution; unknown tests remain serial. Linux CI owns instrumented backend scenario evidence, while macOS/Windows retain their dedicated backend jobs."
+        "Direct check migration requires successful current-source app-bound replacement evidence before editing branch protection; preserve strictness and unrelated checks. Windows archive changes require official pinned-tool archive/list/receipt/coverage proof, all default Cargo targets, exhaustive disjoint partitions, source/run/compiler/config/archive identity, hermetic offline consumers and actual hosted Windows execution. Producer lint, ordinary production builds and doctests remain directly required. Linux CI owns instrumented backend scenario evidence, while macOS/Windows retain their dedicated backend jobs.",
+        "Coverage accumulation changes require scripts/ci/backend-coverage.test.mjs with real cargo-llvm-cov and matching LLVM tools. It must preserve the earlier default workspace report plus later ignored execution; --no-report and --no-clean are mutually exclusive. The owning native CI installs the tools before this regression.",
+        "The Windows archive CLI fixture requires pinned cargo-nextest0.9.148/cargo-llvm-cov0.8.7 and LLVM tools matching rustc. It creates only an isolated local Git fixture and runs both exact partitions from the archive with empty consumers; no real product full suite is replaced by this contract test.",
+        "Reusable browser shards retain exactly four Linux and eight desktop runners with the same execution/artifact steps. Linux coverage may depend on Linux plus Health only, but portable collection and final UI acceptance must reject every missing/failed/cancelled/skipped Linux or desktop result."
       ]
     },
     {

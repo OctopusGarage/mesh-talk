@@ -7,7 +7,7 @@ const read = name => readFileSync(new URL(`../../.github/workflows/${name}`, imp
 const step = (source, name) => source.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
 
 test("verification Rust caches restore on PRs and publish reusable main caches", () => {
-  for (const file of ["ci.yml", "e2e-backend.yml", "hidden-contacts-native.yml", "sanitizers.yml", "mutants.yml"]) {
+  for (const file of ["ci.yml", "windows-workspace.yml", "e2e-backend.yml", "hidden-contacts-native.yml", "sanitizers.yml", "mutants.yml"]) {
     const cache = read(file).split(/^      - /m).find(value => value.includes("uses: Swatinem/rust-cache@v2"));
     assert.ok(cache, file);
     assert.match(cache, /save-if: \$\{\{ github.ref == 'refs\/heads\/main' \}\}/, file);
@@ -53,11 +53,14 @@ test("health owns fast checks without repeating Rust or browser suites", () => {
 
 test("full browser coverage remains on every desktop OS with bounded shards", () => {
   const ui = read("e2e-ui.yml");
-  const baseline = ui.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
-  assert.match(baseline, /os: \[ubuntu-24.04, macos-latest, windows-latest\]/);
+  const shardWorkflow = read("ui-shards.yml");
+  const baseline = shardWorkflow.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
+  assert.match(ui, /operating_systems: '\["ubuntu-24.04"\]'/);
+  assert.match(ui, /operating_systems: '\["macos-latest","windows-latest"\]'/);
+  assert.match(baseline, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
   assert.match(baseline, /shard: \[1, 2, 3, 4\]/);
   assert.match(baseline, /fail-fast: false/);
-  assert.match(step(ui, "Run UI E2E"), /--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/4/);
+  assert.match(step(shardWorkflow, "Run UI E2E"), /--workers=1 --retries=0 --shard=\$\{\{ matrix.shard \}\}\/4/);
   assert.match(baseline, /name: playwright-ui-\$\{\{ matrix.os \}\}-\$\{\{ matrix.shard \}\}-\$\{\{ github.run_attempt \}\}/);
   assert.match(baseline, /if-no-files-found: error/);
   assert.doesNotMatch(baseline, /test:coverage|codecov/);
@@ -67,11 +70,11 @@ test("the stable UI gate requires coverage merged from all Linux shards", () => 
   const ui = read("e2e-ui.yml");
   const coverage = ui.split("  coverage:\n")[1]?.split("  packs:\n")[0];
   assert.ok(coverage);
-  assert.match(coverage, /needs: \[e2e, health\]/);
+  assert.match(coverage, /needs: \[linux, health\]/);
   assert.match(coverage, /actions\/download-artifact@/);
   assert.match(coverage, /collect-ui-coverage.mjs/);
   assert.match(coverage, /merge-e2e-coverage.mjs/);
-  assert.match(ui, /needs: \[e2e, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended\]/);
+  assert.match(ui, /needs: \[linux, desktop, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended\]/);
   assert.match(ui, /COVERAGE: \$\{\{ needs.coverage.result \}\}/);
   assert.match(ui, /test "\$COVERAGE" = success/);
 });
@@ -92,10 +95,10 @@ test("direct checks replace redundant runner-backed summary gates", () => {
 });
 
 test("the final UI gate rejects failed, cancelled or missing required jobs", () => {
-  const env = { BASELINE: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "skipped", EXTENDED: "false" };
+  const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "skipped", EXTENDED: "false" };
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", env).status, 0);
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, REPORTS: "failure" }).status, 0, "HTML presentation is independent of test acceptance");
-  for (const job of ["BASELINE", "COVERAGE", "PACKS", "CHROMIUM", "PORTABLE"]) {
+  for (const job of ["LINUX", "DESKTOP", "COVERAGE", "PACKS", "CHROMIUM", "PORTABLE"]) {
     for (const result of ["failure", "cancelled", "skipped", ""]) assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, [job]: result }).status, 0, `${job}=${result}`);
   }
   assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, EXTENDED: "true" }).status, 0);
@@ -133,9 +136,9 @@ test("full Chromium execution owns portable evidence while unique engines remain
   assert.doesNotMatch(portable, /browser: chromium/);
   assert.match(portable, /os: macos-latest, browser: webkit/);
   assert.match(ui, /name: Chromium portable evidence/);
-  assert.match(ui, /chromium-evidence.mjs extract/);
+  assert.match(read("ui-shards.yml"), /chromium-evidence.mjs extract/);
   assert.match(ui, /chromium-evidence.mjs collect/);
-  assert.match(step(ui, "Run UI E2E"), /--reporter=list,blob,json/);
+  assert.match(step(read("ui-shards.yml"), "Run UI E2E"), /--reporter=list,blob,json/);
   const reports = ui.split("  reports:\n")[1].split("  packs:\n")[0];
   assert.doesNotMatch(reports, /matrix:/);
   assert.match(reports, /for os in ubuntu-24.04 macos-latest windows-latest/);
@@ -147,4 +150,18 @@ test("CI runs release workflow diagnostics only through the shared glob", () => 
   const ci = read("check-health.yml");
   assert.match(ci, /node --test scripts\/diagnostics\/\*.test.mjs/);
   assert.doesNotMatch(ci, /node --test scripts\/diagnostics\/release-workflow.test.mjs/);
+});
+
+test("Windows builds once then requires two complete serial archive partitions", () => {
+  assert.match(read("ci.yml"), /os: \[ubuntu-latest, macos-latest\]/);
+  assert.match(read("ci.yml"), /windows:\n    uses: \.\/\.github\/workflows\/windows-workspace\.yml/);
+  const windows = read("windows-workspace.yml");
+  assert.match(windows, /needs: build/);
+  assert.match(windows, /shard: \[1, 2\]/);
+  assert.match(windows, /ref: \$\{\{ github.sha \}\}/);
+  assert.match(windows, /toolchain: \$\{\{ needs.build.outputs.rust \}\}/);
+  assert.match(windows, /RUST_TEST_THREADS: '1'/);
+  assert.match(windows, /cargo-nextest@0\.9\.148,cargo-llvm-cov@0\.8\.7/);
+  assert.match(windows, /if-no-files-found: error/);
+  assert.doesNotMatch(windows.split("  tests:\n")[1], /Swatinem\/rust-cache|cargo build|npm ci/);
 });

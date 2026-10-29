@@ -43,7 +43,11 @@ flaky or skipped portable scenarios fail acceptance. Windows uses the same
 `windows-latest` runner as the full suite; Chromium context settings match the
 standalone portable configuration. The collector reopens evidence on Linux with
 an explicit expected source platform, rather than trusting a producer verdict.
-One optional job renders all three HTML reports outside acceptance.
+Linux and desktop shards call one reusable `ui-shards.yml` implementation: four
+Linux plus eight macOS/Windows runners. Linux coverage depends on its own shards
+and Health, so late desktop scheduling cannot delay that merge. Portable collection
+and final UI acceptance still require both complete groups. One optional job
+renders all three HTML reports outside acceptance.
 The full suite keeps its existing harness budgets: Linux 90 seconds when collecting
 browser coverage, Windows 90 seconds and macOS 30 seconds; standalone portable uses
 Linux/macOS 30 seconds and Windows 120 seconds. These are harness watchdogs, not
@@ -486,7 +490,7 @@ independent checks run concurrently and heavy suites are not repeated by health.
 | `check-health.yml` platform jobs      | Unit coverage, help and diagnostic/Python regressions on Linux/macOS/Windows; formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                                                                                      |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
-| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, optional-pack checks, portable Chromium evidence extracted from full shards, dedicated WebKit and scheduled extended scenarios                                                                       |
+| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit and scheduled extended scenarios                                                                       |
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                        |
 
 Health is called by the UI workflow for every PR base and merge candidate, with
@@ -614,22 +618,48 @@ sample had 27–38 minute health jobs and a 31.5 minute full Linux UI job. These
 baseline observations, not promised speedups; hosted runs must establish the new
 latency and reliability.
 
-### Windows workspace scheduling and slow fixtures
+### Windows workspace archives and slow fixtures
 
-Windows keeps Cargo's own test runner environment and the original workspace
-coverage pass. Its target runner inventories each libtest binary and verifies an
-exhaustive, disjoint partition before execution. Reviewed in-memory crypto and
-explicit isolated waiting fixtures use two threads; unreviewed, shared-resource
-and heavy network/file cases stay serial. Per-binary artifacts record source,
-compiler, runner digest, inventory and group timings. Adding a prefix requires
-reviewing the whole module; test additions default to serial. This preserves
-in-process fixture locks and avoids a process-per-test migration. Doctests remain
-separate. An inventory or test failure remains fatal, with no automatic retry.
+The Windows producer runs structural checks, frontend compilation, Clippy,
+an ordinary workspace build and separate doctests. It builds the instrumented
+workspace test binaries once with pinned cargo-nextest 0.9.148 and
+cargo-llvm-cov 0.8.7, then publishes one immutable archive. Two fresh consumers
+extract that archive and run independent hash partitions. Each consumer runs
+one test at a time without retries; network/disk fixtures do not compete with
+another test on that machine. Nextest uses a fresh process per test, so tests
+must not depend on another test's process-local state.
+
+The owning `scripts/ci/windows-coverage.mjs` helper validates every default Cargo test target, the full inventory,
+default ignored markers and the exact disjoint union of both runnable partitions.
+Producer and consumers must match source/run/attempt, compiler, Cargo, feature
+resolution, lock/config/helper hashes, platform and the original absolute checkout
+root. The archive digest is verified before extraction. Fixed paths preserve
+compiled `CARGO_BIN_EXE` and manifest references. Source is checked out at the
+workflow SHA even if main advances during execution. Unqualified build-directory
+layouts fail explicitly; see the helper's upstream compatibility reference.
+
+Consumers have no dependency cache, frontend rebuild or test compilation. Reused
+official binary/Cargo metadata and offline reporting must work from a fresh Cargo
+home. Execution receipts verify each selected test starts and passes exactly
+once; missing, duplicate, failed or skipped selected cases fail the check.
+Each consumer validates and uploads its partial LCOV plus source/inventory/digest
+receipts. Both consumer checks and the producer are directly required; a skipped
+consumer after a failed build cannot certify acceptance. Diagnostic timing keeps
+machine-readable events separate from successful-test phase output.
+
+The producer executes a tiny real archive/consumer CLI regression before expensive
+workspace compilation or accepting the full archive. Its local Git fixture, both partitions, runtime and compiled
+helper paths, default ignored case, clean source, offline LCOV and captured timing
+exercise the same helper. Run its tests with the pinned nextest/coverage tools and
+LLVM tools matching rustc; portable Health does not install those tools.
 
 Linux CI produces both strict backend scenario evidence and instrumented
 coverage in the same execution, including the separate ignored bridge and
 large-folder acceptance. macOS and Windows keep their real backend executions.
-Production builds, native desktop acceptance and sanitizer checks remain distinct.
+Accumulation uses `--no-report` between executions; combining it with `--no-clean`
+is invalid. The real CLI regression first writes a normal unit report, executes
+ignored scenarios, then verifies the final report retains both. Production builds,
+native desktop acceptance and sanitizer checks remain distinct.
 
 Measure fixture preparation, protocol phases and teardown before changing a
 network deadline. HTTP regressions use the owner's private deadline policy while
