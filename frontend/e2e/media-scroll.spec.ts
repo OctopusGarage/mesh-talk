@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, BOB } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 type MediaScrollProbe = {
   reads: Record<string, number>;
   pending: Array<() => void>;

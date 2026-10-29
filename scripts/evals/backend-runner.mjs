@@ -23,9 +23,14 @@ export function validateBackendOutput(output, expected) {
   return successful;
 }
 
+export function backendCargoArgs(target, coverage = false) {
+  assert.ok(Object.hasOwn(BACKEND_SUITES, target), `Unknown backend suite: ${target}`);
+  return [...(coverage ? ["llvm-cov", "--no-clean", "--no-report"] : ["test"]), "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--ignored", "--test-threads=1", "--nocapture"];
+}
+
 function runCargo(target) {
   return new Promise((resolveRun, reject) => {
-    const child = spawn("cargo", ["test", "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--ignored", "--test-threads=1", "--nocapture"], { env: { ...process.env, CARGO_TERM_COLOR: "never" }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+    const child = spawn("cargo", backendCargoArgs(target, process.env.EVAL_COVERAGE === "1"), { env: { ...process.env, CARGO_TERM_COLOR: "never" }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
     let output = "", bytes = 0, failure, forcedKill;
     const stopTree = reason => {
       if (failure) return;

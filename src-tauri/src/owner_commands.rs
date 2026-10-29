@@ -792,6 +792,31 @@ mod tests {
             invoke(&self.webview, command, body)
         }
 
+        // Search limits need a realistic signed/persisted corpus, not hundreds
+        // of repeated IPC admissions and best-effort network flushes. Keep the
+        // registered send/search wiring in the calling tests with one IPC send.
+        fn seed_channel_search_corpus(
+            &self,
+            channel: &serde_json::Value,
+            text: &str,
+            count: usize,
+        ) {
+            let channel =
+                crate::chat_commands::parse_channel_id(channel.as_str().unwrap()).unwrap();
+            let handle = self.node.0.blocking_read().as_ref().unwrap().handle();
+            for _ in 0..count {
+                handle
+                    .enqueue_channel_message_reply_expiring_if(
+                        channel,
+                        text.as_bytes(),
+                        None,
+                        None,
+                        |commit| commit(),
+                    )
+                    .unwrap();
+            }
+        }
+
         fn offline_peer(&self) -> String {
             use mesh_talk_core::{
                 discovery::Announce,
@@ -2015,44 +2040,53 @@ mod tests {
 
     #[test]
     fn registered_search_caps_hits_and_context_serialized_bytes() {
+        let started = std::time::Instant::now();
+        let phase = |name| {
+            if std::env::var("MESH_TALK_TEST_TIMING").as_deref() == Ok("1") {
+                eprintln!(
+                    "search-fixture-timing phase={name} elapsed_us={}",
+                    started.elapsed().as_micros()
+                );
+            }
+        };
+        phase("start");
         let fixture = Fixture::new();
+        phase("runtime-ready");
         let channel = fixture
             .invoke(
                 "create_channel",
                 serde_json::json!({"name":"Caps", "memberIds":[]}),
             )
             .unwrap();
-        for _ in 0..201 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":"cap token"}),
-                )
-                .unwrap();
-        }
+        phase("channel-created");
+        fixture
+            .invoke(
+                "send_channel_message",
+                serde_json::json!({"channelId":channel,"text":"cap token"}),
+            )
+            .unwrap();
+        phase("registered-send-complete");
+        fixture.seed_channel_search_corpus(&channel, "cap token", 200);
+        phase("small-corpus-ready");
         let results = fixture
             .invoke(
                 "owner_search_recent",
                 serde_json::json!({"owner":"alice","query":"cap token"}),
             )
             .unwrap();
+        phase("hit-cap-search-complete");
         assert_eq!(results["hits"].as_array().unwrap().len(), 200);
         assert_eq!(results["coverage"]["truncated"], true);
         let text = "oversize token ".to_owned() + &"x".repeat(60_000);
-        for _ in 0..20 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":text}),
-                )
-                .unwrap();
-        }
+        fixture.seed_channel_search_corpus(&channel, &text, 20);
+        phase("large-corpus-ready");
         let results = fixture
             .invoke(
                 "owner_search_recent",
                 serde_json::json!({"owner":"alice","query":"oversize token"}),
             )
             .unwrap();
+        phase("large-corpus-search-complete");
         let reference = results["hits"][0]["reference"].clone();
         let response = fixture
             .invoke(
@@ -2060,6 +2094,7 @@ mod tests {
                 serde_json::json!({"owner":"alice","reference":reference}),
             )
             .unwrap();
+        phase("context-complete");
         assert_eq!(
             response,
             serde_json::json!({"status":"unavailable","reference":reference,"messages":[],"newer_entries":null})
@@ -2076,14 +2111,7 @@ mod tests {
             )
             .unwrap();
         let text = "byte cap token ".to_owned() + &"x".repeat(60_000);
-        for _ in 0..20 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":text}),
-                )
-                .unwrap();
-        }
+        fixture.seed_channel_search_corpus(&channel, &text, 20);
         let results = fixture
             .invoke(
                 "owner_search_recent",

@@ -39,13 +39,26 @@ Full health requires cargo-deny, cargo-machete, typos, Gitleaks, ShellCheck and
 actionlint; missing tools fail rather than being silently skipped. CI installs them
 explicitly. `--fast` remains a clearly labeled partial local check.
 
-Full macOS/Windows health checks also run on PRs, not only after merging to main.
-Independent matrix results are retained even if another platform fails. Superseded
-CI, health and mutation runs are cancelled automatically. Windows gates explicitly
-use Bash: opening a `.sh` file through PowerShell file associations or passing a
-literal test glob is not execution evidence. Require the native health check names
-alongside `verify` in branch protection to make these PR checks merge-blocking;
-the workflow alone does not change administrator branch-protection settings.
+Health runs as a reusable workflow inside the UI orchestrator for every PR and
+merge candidate, and independently on its weekly/manual triggers. All three
+platform unit and diagnostic suites remain mandatory; source-only formatting,
+type/lint and dependency policy run once. The Linux unit coverage producer seals
+its line map for same-run UI consumers; source, workflow, run, attempt and digest
+must all match. Superseded candidate runs are cancelled automatically.
+
+Branch protection requires direct execution checks instead of runner-backed
+copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct
+release policy and replacement mapping. Source and all platform checks are
+individually required; release acceptance uses the same direct names plus its
+main-only checks. To inspect a migration, run
+`node scripts/ci/migrate-required-checks.mjs OWNER/REPO main PR_NUMBER --plan`.
+Use `--apply` only after the replacement checks pass on the current PR head. The
+command validates each bound GitHub App, rejects a changed candidate/policy,
+preserves strictness and unrelated checks, and verifies the readback. A missing
+old context before migration is pending, never permission to bypass a gate.
+Diagnostics run on the actual native test machine; a probe on another VM cannot
+certify that machine's network capability. Windows gates explicitly use Bash;
+opening a script through a file association does not establish execution.
 
 Mutation testing uses pinned cargo-mutants 27.1.0 and examines all Rust workspace
 members on daily and manual runs. PR, push and merge-queue runs validate the pinned

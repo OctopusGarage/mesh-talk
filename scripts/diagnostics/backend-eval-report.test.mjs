@@ -27,3 +27,14 @@ test("backend evaluates every independent suite after a failure and retains a fa
   assert.equal(recorded.channel_and_file_cli.passed, true);
   assert.equal(recorded.channel_and_file_cli.scenarios.length, 2);
 });
+
+test("instrumented backend execution preserves the exact ignored scenario selection", async () => {
+  const { backendCargoArgs } = await import("../evals/backend-runner.mjs");
+  const ordinary = backendCargoArgs("two_node_cli", false);
+  const covered = backendCargoArgs("two_node_cli", true);
+  assert.deepEqual(ordinary.slice(0, 2), ["test", "--locked"]);
+  assert.deepEqual(covered.slice(0, 4), ["llvm-cov", "--no-clean", "--no-report", "--locked"]);
+  assert.deepEqual(covered.slice(4), ordinary.slice(2));
+  assert.deepEqual(covered.slice(-4), ["--", "--ignored", "--test-threads=1", "--nocapture"]);
+  assert.throws(() => backendCargoArgs("unknown", true), /Unknown backend/);
+});

@@ -32,7 +32,10 @@ test("Windows health and diagnostic gates explicitly execute Bash", () => {
 
 test("health runs for every PR and retains independent platform results", () => {
   const workflow = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
-  assert.match(workflow, /^  pull_request:$/m);
+  assert.match(workflow, /^  workflow_call:$/m);
+  const caller = readFileSync(new URL("../../.github/workflows/e2e-ui.yml", import.meta.url), "utf8");
+  assert.match(caller, /^  pull_request:$/m);
+  assert.match(caller, /uses: \.\/\.github\/workflows\/check-health\.yml/);
   assert.match(workflow, /^concurrency:\n  group: health-.*\n  cancel-in-progress: true$/m);
   assert.match(workflow, /^      fail-fast: false$/m);
 });

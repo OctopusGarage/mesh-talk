@@ -7,6 +7,7 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { rustPackages } from "../pr-platform/rust-packages.mjs";
 import { readVersion } from "../release/version.mjs";
 import { releaseInputs } from "../release/preflight.mjs";
+import { releaseSourceChecks } from "../ci/required-checks.mjs";
 import { requireSourceChecks, waitForSourceChecks } from "../release/check-source-checks.mjs";
 
 const inputs = { ref: "refs/tags/v0.1.6", runId: "123", version: "0.1.6", desktopVersion: "0.1.6", existingRelease: null };
@@ -42,7 +43,7 @@ test("tag preflight finds a published release even when GitHub's tag endpoint re
   assert.equal(existsSync(output), false);
 });
 
-const names = ["verify", "Playwright UI E2E", "Multi-process E2E", "Code Quality and Health Check (macos-latest)", "Code Quality and Health Check (windows-latest)", "scan", "Scorecard analysis", "Analyze (rust)", "Analyze (actions)", "Analyze (javascript-typescript)"];
+const names = releaseSourceChecks;
 const checks = names.map((name, id) => ({ name, id, app: { slug: "github-actions" }, status: "completed", conclusion: "success" }));
 
 test("publication requires successful current-source CI and all CodeQL languages", () => {
@@ -196,7 +197,7 @@ test("Nightly waits for pending and missing exact-source checks to become succes
     await run.result;
     assert.equal(run.reads(), 2);
     assert.deepEqual(run.sleeps, [10]);
-    assert.match(run.messages.join("\n"), /verify/);
+    assert.match(run.messages.join("\n"), /checks/);
   }
   const ready = checkWait([successState]);
   await ready.result;
@@ -212,7 +213,7 @@ test("Nightly waits for the newest check instead of accepting a stale success", 
 test("Nightly immediately rejects unsuccessful completed checks, including when another check is pending", async () => {
   for (const conclusion of ["failure", "cancelled", "skipped", "neutral", "timed_out", null]) {
     const run = checkWait([{ ...pendingState, checks: [...pendingState.checks, { ...checks[1], id: 100, conclusion }] }, successState]);
-    await assert.rejects(run.result, /required source check not successful: Playwright UI E2E/);
+    await assert.rejects(run.result, /required source check not successful: checks/);
     assert.equal(run.reads(), 1);
     assert.deepEqual(run.sleeps, []);
   }
@@ -232,7 +233,7 @@ test("Nightly never retries scanning alerts or API errors and refreshes alerts w
 
 test("Nightly waiting expires with the pending names and caps the last sleep to the deadline", async () => {
   const run = checkWait([pendingState], { timeoutMs: 15, intervalMs: 10 });
-  await assert.rejects(run.result, /Timed out.*verify/);
+  await assert.rejects(run.result, /Timed out.*checks/);
   assert.deepEqual(run.sleeps, [10, 5]);
   assert.equal(run.reads(), 3);
 });

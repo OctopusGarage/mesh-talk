@@ -1,4 +1,4 @@
-import { defineConfig } from "@playwright/test";
+import { defineConfig, devices } from "@playwright/test";
 
 const browser = process.env.EVAL_BROWSER ?? "chromium";
 const tier = process.env.EVAL_TIER ?? "core";
@@ -48,11 +48,12 @@ export default defineConfig({
     ["json", { outputFile: `${evidenceRoot}/results.json` }],
   ],
   outputDir: `${evidenceRoot}/artifacts`,
-  use: { baseURL, trace: "on" },
+  use: { baseURL, trace: "on", timezoneId: "Asia/Tokyo" },
   projects: [
     {
       name: browser,
       use: {
+        ...(browser === "chromium" ? devices["Desktop Chrome"] : {}),
         browserName: browser as "chromium" | "webkit" | "firefox",
         viewport: { width: 1280, height: 720 },
       },

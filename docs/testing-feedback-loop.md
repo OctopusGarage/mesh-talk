@@ -34,7 +34,31 @@ inventories with Playwright discovery without launching browsers. Register new
 scenarios in `requiredBrowserPaths` and additional spec files in the owning
 validation contract. Discovery checks do not replace executed browser evidence.
 
-Portable browser acceptance runs through `scripts/evals/portable-runner.mjs`.
+PR Chromium portable core acceptance reuses the complete full-suite execution on
+each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritative
+76 scenario paths from each of four shards, copies and validates screenshots,
+success traces and raw scenario metadata, then validates the exact once-only
+union using the current source/run/attempt/platform identity. Missing, failed,
+flaky or skipped portable scenarios fail acceptance. Windows uses the same
+`windows-latest` runner as the full suite; Chromium context settings match the
+standalone portable configuration. The collector reopens evidence on Linux with
+an explicit expected source platform, rather than trusting a producer verdict.
+One optional job renders all three HTML reports outside acceptance.
+The full suite keeps its existing harness budgets: Linux 90 seconds when collecting
+browser coverage, Windows 90 seconds and macOS 30 seconds; standalone portable uses
+Linux/macOS 30 seconds and Windows 120 seconds. These are harness watchdogs, not
+product latency assertions. Chromium's device and timezone are aligned; the
+Windows image is the full suite's `windows-latest`, not the former standalone
+`windows-2022` image.
+
+The browser harness still relies on Vite source-module imports, explicit lazy
+module failure routes and an unbundled media harness. A built-preview replacement
+must first supply equivalent bundled test seams, preserve negative controls and
+validate source-mapped coverage. Changing only the server command drops those
+contracts and is not a qualified optimization.
+
+Dedicated WebKit, nightly/manual extended Chromium and Firefox use
+`scripts/evals/portable-runner.mjs`.
 Windows uses four sequential Playwright shards with separate browser/dev-server
 lifetimes; other platforms use one. Each shard writes a unique nested evidence
 root and must exit successfully. The runner merges every outcome and validates
@@ -459,22 +483,23 @@ independent checks run concurrently and heavy suites are not repeated by health.
 
 | Owner                                 | Checks                                                                                                                                                                                                                 |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, unit coverage and upload, help tests/audit, diagnostic/Python regressions on Linux/macOS/Windows; Linux eval smoke                                                                                                      |
+| `check-health.yml` platform jobs      | Unit coverage, help and diagnostic/Python regressions on Linux/macOS/Windows; formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                                                                                      |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
-| `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage and Linux multi-process coverage |
-| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, optional-pack checks, portable browser matrices and scheduled extended scenarios                                                                       |
+| `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
+| `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, optional-pack checks, portable Chromium evidence extracted from full shards, dedicated WebKit and scheduled extended scenarios                                                                       |
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                        |
 
-Every existing protected health name now requires both the source scanner job
-and the complete portable validation matrix. A failed, cancelled or skipped dependency
-fails the gate. Health runs for every PR base so moving source checks out of CI
-does not leave non-main PRs without them. CI retains the weekly Rust run formerly
-provided by scheduled full health; UI E2E runs the full browser matrices daily.
-A manual health workflow dispatch runs static checks; dispatch CI and UI E2E too
-when complete hosted verification is needed. The local full-health command is
-unchanged. Required CI, health, UI E2E and backend check names remain stable.
-The protected `Full Linux UI regression` name now belongs to the coverage merge
-job, which explicitly fails when its browser shard matrix is unsuccessful.
+Health is called by the UI workflow for every PR base and merge candidate, with
+its own weekly/manual entry points. Direct source and platform checks are required
+individually; no new VM is allocated merely to copy their aggregate result. The
+replacement policy and source-release consumers share
+`scripts/ci/required-checks.mjs`; migrate administrator branch protection only
+after current-source replacement checks pass, as described in
+[quality gates](quality-gates.md). CI retains its weekly Rust run; UI runs full
+browser matrices daily. Dispatch CI and UI when complete hosted verification is
+needed. A manual Health dispatch runs its portable/static responsibilities.
+The protected `Full Linux UI regression` name remains the coverage merge job,
+which rejects failed, skipped or incomplete dependencies.
 
 Portable validation reuses Health's existing Node, Python and frontend dependency
 setup. Native CI no longer waits for frontend unit tests, help audits or diagnostic
@@ -589,7 +614,43 @@ sample had 27–38 minute health jobs and a 31.5 minute full Linux UI job. These
 baseline observations, not promised speedups; hosted runs must establish the new
 latency and reliability.
 
+### Windows workspace scheduling and slow fixtures
+
+Windows keeps Cargo's own test runner environment and the original workspace
+coverage pass. Its target runner inventories each libtest binary and verifies an
+exhaustive, disjoint partition before execution. Reviewed in-memory crypto and
+explicit isolated waiting fixtures use two threads; unreviewed, shared-resource
+and heavy network/file cases stay serial. Per-binary artifacts record source,
+compiler, runner digest, inventory and group timings. Adding a prefix requires
+reviewing the whole module; test additions default to serial. This preserves
+in-process fixture locks and avoids a process-per-test migration. Doctests remain
+separate. An inventory or test failure remains fatal, with no automatic retry.
+
+Linux CI produces both strict backend scenario evidence and instrumented
+coverage in the same execution, including the separate ignored bridge and
+large-folder acceptance. macOS and Windows keep their real backend executions.
+Production builds, native desktop acceptance and sanitizer checks remain distinct.
+
+Measure fixture preparation, protocol phases and teardown before changing a
+network deadline. HTTP regressions use the owner's private deadline policy while
+asserting the unchanged 30-second production default. Search limit regressions
+prepare most events through the real signing/persistence/indexing owner and keep
+registered send/search wiring. Delivery timing spans distinguish card preparation
+from restart fairness and transfer completion. These changes must retain timeout,
+resource-release, identity and immutable-byte assertions.
+
+
 ## Measure feedback before tuning capacity
+
+For hosted CI, run `node scripts/ci/timing-report.mjs OWNER/REPO COMMIT_SHA --history 30`, or add `--json` to preserve the raw API snapshot
+in ignored output. It reads all current-attempt jobs and current-source checks
+without triggering or changing runs. Runner minutes sum known execution, not
+billing. Job creation-to-start intervals may include upstream dependencies and
+must not be labeled exact runnable queue time. The latest completing job is an
+observed tail, not a reconstructed critical path. Historical P50/P95 describe
+bounded API run spans for first attempts of the same workflow/event; configuration
+and runner changes are uncontrolled. Incomplete snapshots and missing durations
+remain explicit, and timings never establish acceptance.
 
 Use the measurement entry point with local attempt history, an offline snapshot,
 or a read-only GitHub sample:

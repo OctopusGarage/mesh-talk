@@ -1317,8 +1317,37 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         .unwrap();
         node.set_invisible(true).await.unwrap();
     }
-    a.set_allowed(&b.account_id(), true).await.unwrap();
-    b.set_allowed(&a.account_id(), true).await.unwrap();
+    case.phase("file-restart-publish-permissions");
+    // Grant publication performs a real best-effort privacy handshake. Drive
+    // both listeners now, rather than making each publication wait ten seconds
+    // for a listener that will only be serviced during card setup below.
+    let alice_account = a.account_id();
+    let bob_account = b.account_id();
+    let publish = async {
+        let (alice, bob) = tokio::join!(
+            a.set_allowed(&bob_account, true),
+            b.set_allowed(&alice_account, true),
+        );
+        alice.unwrap();
+        bob.unwrap();
+    };
+    let accept_alice = async {
+        let (stream, _) = al.accept().await.unwrap();
+        let _ = a.privacy_accept(stream).await;
+    };
+    let accept_bob = async {
+        let (stream, _) = bl.accept().await.unwrap();
+        let _ = b.privacy_accept(stream).await;
+    };
+    Box::pin(tokio::time::timeout(
+        super::transport::HANDSHAKE_TIMEOUT,
+        async {
+            tokio::join!(publish, accept_alice, accept_bob);
+        },
+    ))
+    .await
+    .expect("permission publication completes against live fixture listeners");
+    case.phase("file-restart-permissions-published");
     let bytes = vec![9; crate::file::CHUNK_SIZE * 2 + 1];
     let path = ad.path().join("断点续传.bin");
     std::fs::write(&path, &bytes).unwrap();
@@ -1410,6 +1439,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             originals.push((id, file, ids));
         }
     }
+    case.phase("file-restart-all-cards-acknowledged");
     drop(al);
     drop(bl);
     assert!(confirmed.is_ok());
@@ -1440,6 +1470,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .next_file_destination(None)
             .is_some()
     );
+    case.phase("file-restart-reopen");
     drop(a);
     let al = TcpListener::bind(("127.0.0.1", ap.tcp_port)).await.unwrap();
     let bl = TcpListener::bind(("127.0.0.1", bp.tcp_port)).await.unwrap();
@@ -1487,6 +1518,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             *ids
         );
     }
+    case.phase("file-restart-restored-start-workers");
     let mut workers = tokio::task::JoinSet::new();
     workers.spawn(a.clone().run_accept_loop(al));
     let observation = Arc::new(FilePeerObservation::default());
@@ -1515,6 +1547,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     } else {
         true
     };
+    case.phase("file-restart-first-progress-observed");
     let mut slowest_poll = std::time::Duration::ZERO;
     let completed = tokio::time::timeout(
         // This observes full file and receipt convergence, including a retry
@@ -1560,7 +1593,9 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         },
     )
     .await;
+    case.phase("file-restart-converged-stop-workers");
     workers.shutdown().await;
+    case.phase("file-restart-final-invariants");
     if !first_progress {
         let completed = originals
             .iter()
@@ -4605,6 +4640,7 @@ async fn file_post_office_waits_for_recipient_consent_after_early_card_ack() {
 
 #[tokio::test]
 async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnects() {
+    let mut timing = super::delivery_runtime::TestTiming::new("relay-file-fixture-setup");
     let ad = tempfile::tempdir().unwrap();
     let bd = tempfile::tempdir().unwrap();
     let pd = tempfile::tempdir().unwrap();
@@ -4643,11 +4679,14 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     let source = ad.path().join("offline-file.bin");
     let bytes = vec![7; crate::file::CHUNK_SIZE + 17];
     std::fs::write(&source, &bytes).unwrap();
+    timing.phase("relay-file-enqueue-card");
     let (card, file) = a
         .enqueue_file_to_account(&b.account_id(), &source, crate::file::FileKind::File)
         .await
         .unwrap();
+    timing.phase("relay-file-flush-card");
     a.flush_delivery(card).await;
+    timing.phase("relay-file-drain-offer");
     b.drain_from_post_office().await;
     let offer = tokio::time::timeout(std::time::Duration::from_secs(5), offers.recv())
         .await
@@ -4656,6 +4695,7 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     assert_eq!(offer.file_conv, file);
     b.decide_attachment(file, true).unwrap();
 
+    timing.phase("relay-file-consent-exchange");
     let recipient_task = tokio::spawn(b.clone().run_accept_loop(bl));
     let recipient = a.routing_peer(&b.user_id()).unwrap();
     let mut channel = a
@@ -4724,6 +4764,7 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
         .id;
     // The immediate flush API is one bounded best-effort turn. Exercise the
     // retained production worker until the live fallback actually owns the bytes.
+    timing.phase("relay-file-closed-endpoint-fallback-custody");
     let worker = tokio::spawn(a.clone().run_delivery_loop());
     // This asserts eventual exact custody, not a five-second latency contract.
     // Windows can spend two seconds rejecting each closed loopback endpoint.
@@ -4733,6 +4774,7 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
         }
     })
     .await;
+    timing.phase("relay-file-custody-stop-worker");
     worker.abort();
     let _ = worker.await;
     assert!(
@@ -4749,6 +4791,7 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     );
     assert!(!relay.lock().unwrap().has(&final_chunk));
 
+    timing.phase("relay-file-recipient-drain");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             b.drain_from_post_office().await;
@@ -4763,8 +4806,10 @@ async fn consented_file_chunks_fall_back_to_live_relay_before_recipient_reconnec
     })
     .await
     .unwrap();
+    timing.phase("relay-file-stop-relay");
     relay_task.abort();
     let _ = relay_task.await;
+    timing.finish();
 }
 
 /// Real LAN custody tests require the installed relay's signed device ID.

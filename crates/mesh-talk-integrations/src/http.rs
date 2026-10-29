@@ -31,6 +31,27 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_REQUESTS: usize = 16;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+// One owner for connection, handler and retirement deadlines. Production defaults
+// remain fixed; in-module fixtures can exercise the same lifecycle promptly.
+#[derive(Clone, Copy)]
+struct HttpDeadlines {
+    request: Duration,
+}
+
+impl Default for HttpDeadlines {
+    fn default() -> Self {
+        Self {
+            request: REQUEST_TIMEOUT,
+        }
+    }
+}
+
+impl HttpDeadlines {
+    fn drain(self) -> Duration {
+        self.request + Duration::from_secs(1)
+    }
+}
+
 /// A numeric-loopback listener with four fixed, scoped operations and no admin routes.
 pub struct LocalHttpServer {
     listener: TcpListener,
@@ -38,6 +59,7 @@ pub struct LocalHttpServer {
     pending: Arc<Semaphore>,
     connections: Arc<Semaphore>,
     client_config: Option<PathBuf>,
+    deadlines: HttpDeadlines,
 }
 
 #[derive(Clone)]
@@ -46,6 +68,7 @@ struct HttpState {
     host: String,
     pending: Arc<Semaphore>,
     client_config: Option<PathBuf>,
+    deadlines: HttpDeadlines,
 }
 
 impl LocalHttpServer {
@@ -63,6 +86,7 @@ impl LocalHttpServer {
             pending: Arc::new(Semaphore::new(MAX_REQUESTS)),
             connections: Arc::new(Semaphore::new(MAX_REQUESTS)),
             client_config: None,
+            deadlines: HttpDeadlines::default(),
         })
     }
 
@@ -94,7 +118,9 @@ impl LocalHttpServer {
             host: self.host,
             pending: self.pending,
             client_config: self.client_config,
+            deadlines: self.deadlines,
         };
+        let deadlines = self.deadlines;
         let app = Router::new().fallback(handle).with_state(state);
         let (stopping, signal) = watch::channel(false);
         let mut tasks = JoinSet::new();
@@ -116,7 +142,7 @@ impl LocalHttpServer {
                         let _permit = permit;
                         let mut builder = http1::Builder::new();
                         builder.timer(TokioTimer::new())
-                            .header_read_timeout(REQUEST_TIMEOUT)
+                            .header_read_timeout(deadlines.request)
                             .keep_alive(false)
                             .max_buf_size(MAX_BODY_BYTES);
                         let connection = builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(app));
@@ -136,7 +162,7 @@ impl LocalHttpServer {
         drop(self.listener);
         let _ = stopping.send(true);
         // Request deadlines have one second to finish their structured timeout response.
-        let _ = tokio::time::timeout(REQUEST_TIMEOUT + Duration::from_secs(1), async {
+        let _ = tokio::time::timeout(deadlines.drain(), async {
             while tasks.join_next().await.is_some() {}
         })
         .await;
@@ -211,7 +237,7 @@ async fn handle(State(state): State<HttpState>, request: Request) -> Response {
             "Local agent API request capacity reached",
         );
     };
-    match tokio::time::timeout(REQUEST_TIMEOUT, dispatch(&state, request)).await {
+    match tokio::time::timeout(state.deadlines.request, dispatch(&state, request)).await {
         Ok(response) => response,
         Err(_) => error(
             StatusCode::GATEWAY_TIMEOUT,
@@ -265,7 +291,7 @@ async fn dispatch(state: &HttpState, request: Request) -> Response {
     if method == "help" {
         return envelope(
             StatusCode::OK,
-            json!({"result": catalog(state.client_config.as_deref())}),
+            json!({"result": catalog(state.client_config.as_deref(), state.deadlines)}),
         );
     }
     let Some(token) = single_header(headers, header::AUTHORIZATION)
@@ -338,7 +364,7 @@ async fn dispatch(state: &HttpState, request: Request) -> Response {
 #[serde(deny_unknown_fields)]
 struct EmptyParams {}
 
-fn catalog(client_config: Option<&std::path::Path>) -> Value {
+fn catalog(client_config: Option<&std::path::Path>, deadlines: HttpDeadlines) -> Value {
     let empty_schema = schemars::schema_for!(EmptyParams);
     json!({
         "api_version": 1,
@@ -349,7 +375,7 @@ fn catalog(client_config: Option<&std::path::Path>) -> Value {
             {"name":"send_message", "method":"POST", "path":"/v1/messages", "description":"Submit user-requested text to one exact destination from authenticated context with a stable retry key. Acceptance does not prove recipient delivery.", "input_schema":schemars::schema_for!(crate::SendMessage), "example":{"destination":{"kind":"account","id":"<exact granted account ID from context>"},"text":"Requested update","idempotency_key":"unique-intent-key"}},
             {"name":"get_send_result", "method":"POST", "path":"/v1/send-result", "description":"Check a prior send by its original idempotency key before retrying an uncertain submission.", "input_schema":schemars::schema_for!(crate::model::StatusRequest), "example":{"idempotency_key":"unique-intent-key"}}
         ],
-        "limits": {"max_request_bytes":MAX_BODY_BYTES,"max_concurrent_requests":MAX_REQUESTS,"max_connections":MAX_REQUESTS,"header_timeout_ms":REQUEST_TIMEOUT.as_millis(),"keep_alive":false,"request_timeout_ms":REQUEST_TIMEOUT.as_millis(),"max_text_bytes":crate::MAX_TEXT_BYTES,"content_types":["text"],"read_access":false,"parameters":"POST bodies must be JSON objects with Content-Type: application/json."},
+        "limits": {"max_request_bytes":MAX_BODY_BYTES,"max_concurrent_requests":MAX_REQUESTS,"max_connections":MAX_REQUESTS,"header_timeout_ms":deadlines.request.as_millis(),"keep_alive":false,"request_timeout_ms":deadlines.request.as_millis(),"max_text_bytes":crate::MAX_TEXT_BYTES,"content_types":["text"],"read_access":false,"parameters":"POST bodies must be JSON objects with Content-Type: application/json."},
         "retry_semantics":"Use one stable idempotency_key per intended message. On timeout or uncertain submission, query get_send_result first; retries must keep the original key, destination and content. Authenticated context defines the retry window. Accepted submission does not prove delivery.",
         "lifecycle":"The desktop must be running and unlocked with access enabled. Scope, expiry and host session are checked again at admission; revocation takes effect immediately. This public catalog grants no authority.",
         "response_envelope":{"success":{"result":"operation result"},"failure":{"error":{"code":"stable code","message":"safe explanation","retryable":false}}},
@@ -400,7 +426,21 @@ mod tests {
         task: tokio::task::JoinHandle<Result<(), IntegrationError>>,
     }
 
+    #[test]
+    fn production_http_deadlines_remain_thirty_seconds() {
+        let policy = HttpDeadlines::default();
+        assert_eq!(policy.request, Duration::from_secs(30));
+        assert_eq!(policy.drain(), Duration::from_secs(31));
+        let help = catalog(None, policy);
+        assert_eq!(help["limits"]["header_timeout_ms"], 30_000);
+        assert_eq!(help["limits"]["request_timeout_ms"], 30_000);
+    }
+
     async fn fixture() -> Fixture {
+        fixture_with_deadline(REQUEST_TIMEOUT).await
+    }
+
+    async fn fixture_with_deadline(timeout: Duration) -> Fixture {
         let directory = tempfile::tempdir().unwrap();
         let (dm, _) = tokio::sync::mpsc::unbounded_channel();
         let (channel, _) = tokio::sync::mpsc::unbounded_channel();
@@ -432,10 +472,11 @@ mod tests {
         ));
         let grant = service.handle(&admin, "grant_create", json!({"client_id":"http-test", "destinations":[destination], "describe":true,"expires_at_ms":now_ms()+60000})).await.unwrap();
         let token = grant["token"].as_str().unwrap().to_owned();
-        let server = LocalHttpServer::bind()
+        let mut server = LocalHttpServer::bind()
             .await
             .unwrap()
             .with_client_config(directory.path().join("agent-access.json"));
+        server.deadlines = HttpDeadlines { request: timeout };
         let pending = server.pending.clone();
         let connections = server.connections.clone();
         let endpoint = server.endpoint();
@@ -701,7 +742,9 @@ mod tests {
 
     #[tokio::test]
     async fn partial_headers_are_bounded_at_admission_and_expire_without_handler_work() {
-        let f = fixture().await;
+        // Leave headroom above the existing two-second admission watchdog;
+        // exercise expiry without waiting for the production thirty seconds.
+        let f = fixture_with_deadline(Duration::from_secs(5)).await;
         let mut streams = Vec::new();
         for _ in 0..MAX_REQUESTS {
             let mut stream = tokio::net::TcpStream::connect(&f.host).await.unwrap();
@@ -724,13 +767,10 @@ mod tests {
         assert_eq!(status, 503);
         assert_eq!(response["error"]["code"], "CAPACITY_EXCEEDED");
         let mut bytes = Vec::new();
-        tokio::time::timeout(
-            REQUEST_TIMEOUT + Duration::from_secs(3),
-            streams[0].read_to_end(&mut bytes),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(8), streams[0].read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains(&f.token));
         tokio::time::timeout(Duration::from_secs(2), async {
             while f.connections.available_permits() != MAX_REQUESTS {
@@ -751,7 +791,9 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_drains_an_outstanding_request_until_its_structured_deadline() {
-        let f = fixture().await;
+        // Leave headroom above the existing two-second admission watchdog;
+        // exercise expiry without waiting for the production thirty seconds.
+        let f = fixture_with_deadline(Duration::from_secs(5)).await;
         let mut stream = tokio::net::TcpStream::connect(&f.host).await.unwrap();
         let headers = format!(
             "POST /v1/context HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{",
@@ -767,13 +809,10 @@ mod tests {
         .unwrap();
         f.shutdown.send(()).unwrap();
         let mut bytes = Vec::new();
-        tokio::time::timeout(
-            REQUEST_TIMEOUT + Duration::from_secs(3),
-            stream.read_to_end(&mut bytes),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(8), stream.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
         let response = String::from_utf8(bytes).unwrap();
         let (headers, body) = response.split_once("\r\n\r\n").unwrap();
         assert!(headers.starts_with("HTTP/1.1 504 "));

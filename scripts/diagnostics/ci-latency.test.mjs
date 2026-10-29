@@ -67,11 +67,11 @@ test("the stable UI gate requires coverage merged from all Linux shards", () => 
   const ui = read("e2e-ui.yml");
   const coverage = ui.split("  coverage:\n")[1]?.split("  packs:\n")[0];
   assert.ok(coverage);
-  assert.match(coverage, /needs: \[e2e, unit-coverage\]/);
+  assert.match(coverage, /needs: \[e2e, health\]/);
   assert.match(coverage, /actions\/download-artifact@/);
   assert.match(coverage, /collect-ui-coverage.mjs/);
   assert.match(coverage, /merge-e2e-coverage.mjs/);
-  assert.match(ui, /needs: \[e2e, coverage, packs, portable, firefox-extended\]/);
+  assert.match(ui, /needs: \[e2e, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended\]/);
   assert.match(ui, /COVERAGE: \$\{\{ needs.coverage.result \}\}/);
   assert.match(ui, /test "\$COVERAGE" = success/);
 });
@@ -83,27 +83,23 @@ function runGate(file, name, env) {
   return spawnSync("bash", ["-e", "-c", script], { encoding: "utf8", env: { ...process.env, ...env } });
 }
 
-test("every protected health platform check requires both source and platform results", () => {
-  const health = read("check-health.yml");
-  assert.match(health, /needs: \[source, platform\]/);
-  assert.match(health, /if: always\(\)/);
-  for (const source of ["success", "failure", "cancelled", "skipped"]) {
-    for (const platform of ["success", "failure", "cancelled", "skipped"]) {
-      const result = runGate("check-health.yml", "Require complete health checks", { SOURCE: source, PLATFORM: platform });
-      assert.equal(result.status === 0, source === "success" && platform === "success", `${source}, ${platform}`);
-    }
-  }
+test("direct checks replace redundant runner-backed summary gates", () => {
+  assert.doesNotMatch(read("ci.yml"), /^  verify:/m);
+  assert.doesNotMatch(read("check-health.yml"), /^  check:/m);
+  assert.doesNotMatch(read("e2e-backend.yml"), /^  backend-e2e:/m);
+  assert.doesNotMatch(read("hidden-contacts-native.yml"), /^  multicast-capability:/m);
+  assert.ok(step(read("hidden-contacts-native.yml"), "Diagnose multicast on the actual native test runner"));
 });
 
 test("the final UI gate rejects failed, cancelled or missing required jobs", () => {
-  const env = { BASELINE: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", PORTABLE: "success", FIREFOX: "skipped", EXTENDED: "false" };
+  const env = { BASELINE: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "skipped", EXTENDED: "false" };
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", env).status, 0);
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, REPORTS: "failure" }).status, 0, "HTML presentation is independent of test acceptance");
-  for (const job of ["BASELINE", "COVERAGE", "PACKS", "PORTABLE"]) {
+  for (const job of ["BASELINE", "COVERAGE", "PACKS", "CHROMIUM", "PORTABLE"]) {
     for (const result of ["failure", "cancelled", "skipped", ""]) assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, [job]: result }).status, 0, `${job}=${result}`);
   }
   assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, EXTENDED: "true" }).status, 0);
-  assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, EXTENDED: "true", FIREFOX: "success" }).status, 0);
+  assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, EXTENDED: "true", EXTENDED_CHROMIUM: "success", FIREFOX: "success" }).status, 0);
 });
 
 test("the protected Full Linux UI regression name remains a fail-closed check", () => {
@@ -116,21 +112,35 @@ test("the protected Full Linux UI regression name remains a fail-closed check", 
 });
 
 
-test("UI coverage consumers share one same-workflow Linux unit run", () => {
-  const ui = read("e2e-ui.yml");
-  assert.equal((ui.match(/run: npm run test:coverage/g) || []).length, 1);
-  const producer = ui.split("  unit-coverage:\n")[1]?.split("  coverage:\n")[0];
-  assert.ok(producer);
-  assert.match(producer, /runs-on: ubuntu-24.04/);
-  assert.match(producer, /unit-coverage-artifact.mjs seal/);
-  assert.match(producer, /name: ui-unit-coverage-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
+test("UI coverage consumers share Health's same-run Linux unit coverage", () => {
+  const ui = read("e2e-ui.yml"), health = read("check-health.yml");
+  assert.equal((ui.match(/run: npm run test:coverage/g) || []).length, 0);
+  assert.match(ui, /health:\n    uses: \.\/\.github\/workflows\/check-health\.yml/);
+  assert.match(health, /unit-coverage-artifact.mjs seal/);
+  assert.match(health, /name: ui-unit-coverage-\$\{\{ github.sha \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   for (const job of ["coverage", "packs"]) {
     const consumer = ui.split(`  ${job}:\n`)[1].split(/^  [a-z][\w-]*:\n/m)[0];
-    assert.match(consumer, /needs:.*unit-coverage/);
+    assert.match(consumer, /needs:.*health/);
     assert.match(consumer, /unit-coverage-artifact.mjs restore/);
     assert.match(consumer, /actions\/download-artifact@/);
     assert.doesNotMatch(consumer, /run-id:|github-token:/);
   }
+});
+
+test("full Chromium execution owns portable evidence while unique engines remain", () => {
+  const ui = read("e2e-ui.yml");
+  const portable = ui.split("  portable:\n")[1].split("  chromium-extended:\n")[0];
+  assert.doesNotMatch(portable, /browser: chromium/);
+  assert.match(portable, /os: macos-latest, browser: webkit/);
+  assert.match(ui, /name: Chromium portable evidence/);
+  assert.match(ui, /chromium-evidence.mjs extract/);
+  assert.match(ui, /chromium-evidence.mjs collect/);
+  assert.match(step(ui, "Run UI E2E"), /--reporter=list,blob,json/);
+  const reports = ui.split("  reports:\n")[1].split("  packs:\n")[0];
+  assert.doesNotMatch(reports, /matrix:/);
+  assert.match(reports, /for os in ubuntu-24.04 macos-latest windows-latest/);
+  assert.match(ui, /chromium-extended:/);
+  assert.match(ui, /firefox-extended:/);
 });
 
 test("CI runs release workflow diagnostics only through the shared glob", () => {

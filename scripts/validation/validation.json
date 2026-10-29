@@ -58,7 +58,8 @@
         "scripts/release/delta.mjs",
         "scripts/release/delta_assets.py",
         "scripts/diagnostics/release-delta.test.mjs",
-        "src-tauri/examples/delta-artifact.rs"
+        "src-tauri/examples/delta-artifact.rs",
+        "scripts/ci/required-checks.mjs"
       ],
       "node": [
         "scripts/diagnostics/release-assets.test.mjs",
@@ -74,7 +75,8 @@
         "scripts/diagnostics/version-automation.test.mjs",
         "scripts/diagnostics/release-updater.test.mjs",
         "scripts/diagnostics/release-signing.test.mjs",
-        "scripts/diagnostics/release-delta.test.mjs"
+        "scripts/diagnostics/release-delta.test.mjs",
+        "scripts/diagnostics/required-checks.test.mjs"
       ],
       "escalation": [
         "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Manual draft/maintenance changes require hosted evidence for explicit main-only preparation, unpublished draft-only creation, exact tagged build dispatch and reviewed next-target PR creation; local mocks do not prove those settings and actual preparation/publication requires explicit release intent. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate.",
@@ -279,7 +281,17 @@
         "scripts/ci/collect-ui-coverage.mjs",
         "scripts/ci/unit-coverage-artifact.mjs",
         "scripts/diagnostics/health-workflow.test.mjs",
-        ".gitleaks.toml"
+        ".gitleaks.toml",
+        ".github/workflows/ai-eval.yml",
+        "scripts/ci/required-checks.mjs",
+        "scripts/ci/migrate-required-checks.mjs",
+        "scripts/diagnostics/required-checks.test.mjs",
+        "scripts/validation/windows-libtest-runner.mjs",
+        "scripts/diagnostics/windows-libtest-runner.test.mjs",
+        "scripts/evals/backend-runner.mjs",
+        "scripts/diagnostics/backend-eval-report.test.mjs",
+        "scripts/ci/timing-report.mjs",
+        "scripts/diagnostics/ci-timing-report.test.mjs"
       ],
       "node": [
         "scripts/diagnostics/ci-latency.test.mjs",
@@ -287,10 +299,15 @@
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
         "scripts/diagnostics/merge-queue.test.mjs",
         "scripts/diagnostics/mutants-workflow.test.mjs",
-        "scripts/diagnostics/health-workflow.test.mjs"
+        "scripts/diagnostics/health-workflow.test.mjs",
+        "scripts/diagnostics/required-checks.test.mjs",
+        "scripts/diagnostics/windows-libtest-runner.test.mjs",
+        "scripts/diagnostics/backend-eval-report.test.mjs",
+        "scripts/diagnostics/ci-timing-report.test.mjs"
       ],
       "escalation": [
-        "Run actionlint and affected workflow regressions. Mutation runner changes also require scripts/release/run-mutants.test.mjs with the pinned cargo-mutants and cargo-nextest tools; verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
+        "Run actionlint and affected workflow regressions. Mutation runner changes also require scripts/release/run-mutants.test.mjs with the pinned cargo-mutants and cargo-nextest tools; verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration.",
+        "Direct check migration requires successful current-source app-bound replacement evidence before editing branch protection; preserve strictness and unrelated checks. Windows libtest partition changes require real Cargo runner and coverage fixtures, exact inventory union and hosted Windows execution; unknown tests remain serial. Linux CI owns instrumented backend scenario evidence, while macOS/Windows retain their dedicated backend jobs."
       ]
     },
     {
@@ -349,13 +366,20 @@
         "frontend/playwright.portable.config.ts",
         "scripts/evals/browser-report.mjs",
         "scripts/evals/portable-runner.mjs",
-        "scripts/diagnostics/browser-eval-report.test.mjs"
+        "scripts/diagnostics/browser-eval-report.test.mjs",
+        "scripts/evals/chromium-evidence.mjs",
+        "scripts/diagnostics/chromium-evidence.test.mjs",
+        "frontend/e2e/helpers/portable-evidence.ts",
+        "scripts/diagnostics/test-fixtures/trace.mjs",
+        "scripts/diagnostics/trace-evidence.test.mjs"
       ],
       "node": [
-        "scripts/diagnostics/browser-eval-report.test.mjs"
+        "scripts/diagnostics/browser-eval-report.test.mjs",
+        "scripts/diagnostics/chromium-evidence.test.mjs",
+        "scripts/diagnostics/trace-evidence.test.mjs"
       ],
       "escalation": [
-        "Portable browser reporting requires exact scenario identities, unique trace and screenshot evidence, and zero skipped or flaky cases from the configured browser matrix. Windows process batches must remain at most 20 scenarios for both configured inventories, whose shard union must match every scenario exactly once; run the actual hosted Windows browser job to validate timing. Diagnostic tests do not establish browser acceptance; see docs/testing-feedback-loop.md."
+        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete 76-case inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Dedicated WebKit and extended/Firefox acceptance remain separate. Standalone Windows portable-runner batches remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
       ]
     },
     {

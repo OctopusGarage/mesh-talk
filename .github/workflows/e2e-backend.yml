@@ -28,13 +28,14 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Linux backend evidence is produced once by the instrumented CI workspace job.
 jobs:
   backend-platform:
     name: Backend core (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022, macos-latest]
+        os: [windows-2022, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -85,18 +86,3 @@ jobs:
 
   native-core:
     uses: ./.github/workflows/hidden-contacts-native.yml
-
-  backend-e2e:
-    # Preserve the existing protected check while requiring every platform.
-    name: Multi-process E2E
-    needs: [backend-platform, native-core]
-    if: always()
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Require complete successful platform matrix
-        env:
-          RESULT: ${{ needs.backend-platform.result }}
-          NATIVE_RESULT: ${{ needs.native-core.result }}
-        run: |
-          test "$RESULT" = success
-          test "$NATIVE_RESULT" = success

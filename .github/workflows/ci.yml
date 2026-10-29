@@ -114,15 +114,27 @@ jobs:
           # Concurrent encrypted file/log rigs exceed loopback deadlines on
           # shared Windows runners. Keep every assertion and timeout intact.
           RUST_TEST_THREADS: ${{ matrix.os == 'windows-latest' && '1' || '4' }}
+          # Cargo retains its loader paths, package cwd and fixture environment.
+          # The runner inventories and partitions each binary; only reviewed
+          # isolated cases use two threads, with all remaining tests serial.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: node ${{ github.workspace }}/scripts/validation/windows-libtest-runner.mjs
+          MESH_WINDOWS_TEST_REPORT_DIR: ${{ runner.temp }}/windows-test-schedule
         run: |
           set -o pipefail
           if [ "$MESH_TALK_TEST_TIMING" = 1 ]; then
-            cargo llvm-cov --workspace --lcov --output-path lcov.info -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+            # The Windows target runner forwards timing output without changing
+            # its exhaustively validated harness selection.
+            if [ "$RUNNER_OS" = Windows ]; then
+              cargo llvm-cov --workspace --lcov --output-path lcov.info 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+            else
+              cargo llvm-cov --workspace --lcov --output-path lcov.info -- --nocapture 2>&1 | tee "$RUNNER_TEMP/mesh-talk-test-timing.log"
+            fi
           else
             cargo llvm-cov --workspace --lcov --output-path lcov.info
           fi
           # llvm-cov runs unit/integration tests; stable Rust doctests keep their
           # original separate check without executing those suites twice.
+          unset CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER
           cargo test --workspace --doc
 
       # Capture loader evidence when Windows cannot even start the test harness.
@@ -172,19 +184,40 @@ jobs:
             cargo llvm-cov --workspace --lcov --output-path lcov.info
           fi
 
-      - name: Multi-process core coverage (Linux)
+      - name: Multi-process core evidence and coverage (Linux)
         if: matrix.os == 'ubuntu-latest'
-        working-directory: src-tauri
         shell: bash
-        run: >-
-          cargo llvm-cov --no-clean -p mesh-talk-core
-          --test two_node_cli
-          --test persistent_history
-          --test post_office_offline
-          --test channel_and_file_cli
-          --test bridge_cross_lan
-          --lcov --output-path e2e-lcov.info
-          -- --ignored --test-threads=1
+        env:
+          EVAL_SOURCE_SHA: ${{ github.sha }}
+          EVAL_OUTPUT_DIR: ${{ runner.temp }}/backend-eval-results
+          EVAL_COVERAGE: '1'
+        run: |
+          node scripts/evals/backend-runner.mjs
+          cargo llvm-cov --no-clean --no-report -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1
+
+      - name: Large-folder transfer regression (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          cargo llvm-cov --no-clean --no-report -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
+          cargo llvm-cov report --lcov --output-path src-tauri/e2e-lcov.info
+
+      - name: Preserve Linux backend evaluation evidence
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-core-ubuntu-24.04-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/backend-eval-results/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Windows test scheduling inventory and timings
+        if: always() && matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-test-schedule-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-test-schedule/*.json
+          if-no-files-found: warn
 
       - name: Upload test timing diagnostics
         if: always() && env.MESH_TALK_TEST_TIMING == '1'
@@ -208,13 +241,3 @@ jobs:
           name: workspace-${{ matrix.os }}-${{ github.run_attempt }}
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true
-
-  # Stable name for the branch-protection required check: stays "verify" no
-  # matter how the matrix above evolves.
-  verify:
-    needs: checks
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: All matrix checks passed
-        run: test "${{ needs.checks.result }}" = "success"

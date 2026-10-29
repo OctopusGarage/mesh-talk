@@ -9,6 +9,9 @@ import { seedMarketPacks } from "./helpers/packs";
 import { seedThemeBeforeLoad } from "./helpers/session";
 import type { Page } from "@playwright/test";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 async function observeLocalDelivery(page: Page) {
   await page.evaluate(() => {
     const scope = window as unknown as {
