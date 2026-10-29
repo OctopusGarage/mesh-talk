@@ -137,7 +137,10 @@ profile root. Core does not derive desktop authority from account keys or paths.
 
 `core/node/transcript_repository/` owns indexed transcript headers, bodies,
 metadata counters and independent source publication on the shared profile
-connection. `sent_store.rs`, `received_store.rs` and the indexed owner in
+connection. `account_file_repository.rs` and `file_message_identity/indexed.rs`
+reuse that publication owner for signed file proofs and exact logical-file
+bindings, with fixed headers, bounded owned payload reads and persisted revisions.
+`sent_store.rs`, `received_store.rs` and the indexed owner in
 `account_suppression.rs` expose owned lookups, bounded pages and exact local
 deletion markers. Their constructors require validated participant authority;
 the existing Node consumers remain on the legacy stores until their coordinated

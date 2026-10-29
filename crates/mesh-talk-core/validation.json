@@ -1142,6 +1142,7 @@
       "paths": [
         "crates/mesh-talk-core/src/node/sent_store.rs",
         "crates/mesh-talk-core/src/node/received_store.rs",
+        "crates/mesh-talk-core/src/node/account_file_repository.rs",
         "crates/mesh-talk-core/src/node/recovered_sent_ids.rs",
         "crates/mesh-talk-core/src/node/transcript_repository/",
         "crates/mesh-talk-core/src/node/account_suppression.rs"
@@ -1151,6 +1152,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::transcript_repository::tests::",
+            "node::account_file_repository::tests::",
             "node::recovered_sent_ids::tests::",
             "node::account_suppression::tests::"
           ]
@@ -1787,6 +1789,7 @@
       "id": "core-file-message-identity",
       "paths": [
         "crates/mesh-talk-core/src/node/file_message_identity.rs",
+        "crates/mesh-talk-core/src/node/file_message_identity/",
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/delivery_store.rs",
         "crates/mesh-talk-core/src/node/node.rs",

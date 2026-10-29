@@ -1432,6 +1432,13 @@ historical memory.
 
 The separate `node/transcript_repository/` owner provides indexed sent, received,
 file-card and exact suppression storage on that same encrypted connection.
+Signed file proofs and logical-file bindings reuse its per-source publication
+barrier. Proof reads validate row and physical allocation charges before payload
+fetches; aliases remain bounded by the signed identity limit. Persisted revisions
+advance only for newly accepted proofs or bindings, so duplicate insertion and
+restart preserve ordered-view invalidation. Export visitors release the SQL guard
+between bounded pages. These indexed owners alone do not replace FileBook startup
+reconstruction or qualify the complete participant runtime memory bound.
 
 `node/reception_effects/` provides the derived reception-work owner for bounded
 host integration. An effect references its existing transcript row and stores

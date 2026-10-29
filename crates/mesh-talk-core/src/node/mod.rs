@@ -16,6 +16,7 @@ pub use account_access::{
 pub(crate) mod account_devices;
 mod account_documents;
 pub(crate) mod account_file_proofs;
+mod account_file_repository;
 pub(crate) mod account_preferences;
 mod account_profile;
 mod account_session;

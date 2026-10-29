@@ -13,6 +13,9 @@ use std::{
     path::Path,
 };
 
+mod indexed;
+pub(crate) use indexed::IndexedFileMessageIdentities;
+
 const MAGIC: &[u8; 6] = b"MTFMID";
 const PREFIX: &[u8] =
     b"mesh-talk-file-consent-control-v1\0\0\0\0\0\0\0\0\xffmesh-talk-file-message-identity-v1\0";
