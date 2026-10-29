@@ -211,7 +211,9 @@ proof/expiry overhead and frame limits.
 Mutation timing comparisons must retain the actual package/workspace command,
 test inventory and process count. A package-only baseline does not establish
 that a larger workspace mutation run fits the same deadline. Improve measured
-fixture overhead without narrowing test scope or changing worker/deadline limits.
+fixture overhead without narrowing test scope. Budget the full inventory from
+observed work and runner variance; retain process isolation and per-test hang
+detection when correcting a whole-suite budget.
 A resource-bound argument may explain an equivalent surviving guard mutation;
 it cannot turn an interrupted or timed-out run into a completed advisory survivor.
 
@@ -384,7 +386,7 @@ Once the original operation is admitted, or the external possession proof starts
 the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
 Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
-work drains. The overall nextest per-test 60-second and mutation 240-second
+work drains. The overall nextest per-test 60-second and mutation 360-second
 limits remain authoritative; stage bounds do not add together into a larger test
 budget. Only waits with this specific pre-admission/controlled-hold purpose use
 the cold helper; do not replace unrelated eight-second waits by matching their
@@ -616,13 +618,23 @@ The Rust build cache maps the workspace root to `target/`, matching
 configuration key; native release, mutation and sanitizer caches stay separate.
 Cached build output never replaces executing checks on the current revision.
 
-Mutation testing retains one rotating workspace sample across four runners. Its
-120-minute job budget covers setup, the unmutated baseline and the complete sample;
-it does not extend the 60-second per-test or 240-second per-suite deadlines. The
-October 25 sample selected 16–17 mutants per runner, with builds up to 130 seconds
-and successful suites around 180–217 seconds. A 60-minute job canceled unfinished
-shards despite passing baselines. Reassess this budget from selected counts and
-build/test timings as the workspace grows; incomplete reports still fail the gate.
+Mutation testing retains one rotating workspace sample across four runners and
+four isolated test processes per runner. The 180-minute job budget covers setup,
+the baseline and the observed sample of up to 17 mutants. Each complete workspace
+suite has a 360-second bound; individual tests retain the 60-second hang detector
+and five-second termination grace. Failed or interrupted reports still fail the gate.
+
+Run 40922461468 exposed a budget mismatch: the package baseline ran 2,228 tests
+and took 223 seconds on the slower runner, while every mutation ran 2,829 tests.
+The baseline core work plus observed host work already exceeds a 240-second
+four-process budget, even before the remaining workspace tests.
+At cancellation, the active tests were only milliseconds to ten seconds old;
+none had reached the individual hang limit. Other shards completed the same full
+inventory in 183–209 seconds, confirming runner variance rather than a universal
+hang. The six-minute suite budget includes the larger inventory and variance;
+it does not reclassify those interrupted runs as successes or change test scope.
+Reassess budgets using actual commands, inventories and build/test timings as the
+workspace grows, rather than comparing a package baseline with a workspace run.
 
 The pinned cargo-mutants 27.1.0 baseline selects only packages containing the
 selected mutations, even with `--workspace --test-workspace true`; individual
@@ -644,7 +656,8 @@ time, proves the real send owns the guard, and checks it remains pending at
 the original twelve-second outer bound and release that guard. Paused time
 auto-drives the awaited timer, including Tokio's millisecond tick rounding. No real
 UDP clock is accelerated. Test inventory, four
-processes, sixty-second per-test and 240-second suite limits remain unchanged.
+processes and the sixty-second per-test limit remain unchanged; the complete
+workspace uses the 360-second suite budget described above.
 Scheduling estimates are not completed-run evidence; validate the full unchanged
 workspace inventory on the current candidate before claiming a timing improvement.
 

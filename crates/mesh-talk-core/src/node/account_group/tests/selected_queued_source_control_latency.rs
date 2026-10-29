@@ -215,6 +215,8 @@ async fn run_queued_source(gate_terminal: bool) {
     let release_intent = Arc::new(Semaphore::new(0));
     let _release_intent = ReleaseQueuedReads(release_intent.clone());
     let intent_held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let intent_entered = Arc::new(Semaphore::new(0));
+    let _release_entered = ReleaseQueuedReads(intent_entered.clone());
     let terminal_published = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let terminal_wake = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let wake_changed = Arc::new(Semaphore::new(0));
@@ -251,26 +253,37 @@ async fn run_queued_source(gate_terminal: bool) {
         let peer = b.identity.public();
         let writer = b.user_id();
         let requester_writer = reference.user_id();
-        let admitted = admitted.clone();
+        let operation = operation.clone();
         let release_intent = release_intent.clone();
         let intent_held = intent_held.clone();
+        let intent_entered = intent_entered.clone();
         move |observed, frame| {
             let trace = trace.clone();
             let peer = peer.clone();
             let writer = writer.clone();
             let requester_writer = requester_writer.clone();
-            let admitted = admitted.clone();
+            let operation = operation.clone();
             let release_intent = release_intent.clone();
             let intent_held = intent_held.clone();
+            let intent_entered = intent_entered.clone();
             Box::pin(async move {
-                if observed == peer {
-                    if gate_terminal && admitted.load(std::sync::atomic::Ordering::Acquire)
-                        && let AccountHistoryFrame::DocumentHeader{body}=&frame
-                        && serde_json::from_slice::<crate::node::AccountDocumentMeta>(body).ok().is_some_and(|meta|matches!(&meta.key,crate::node::AccountDocumentKey::GroupOperation{channel,source_device} if channel==&hex::encode(group_b.as_bytes()) && source_device==&requester_writer))
-                        && !intent_held.swap(true,std::sync::atomic::Ordering::AcqRel) {
-                        record_b_trace(&trace,clock,"fixture","source_intent_header_held_until_foreground_complete".into());
-                        let _=release_intent.acquire().await;
+                // Arm before durable admission and hold every copy at its origin:
+                // A can relay this signed head to B, and concurrent reads must
+                // not bypass the first held header. Keep the topology unchanged.
+                let intent_armed = operation.lock().unwrap().is_some();
+                if gate_terminal && intent_armed
+                    && let AccountHistoryFrame::DocumentHeader { body } = &frame
+                    && serde_json::from_slice::<crate::node::AccountDocumentMeta>(body).ok().is_some_and(|meta| matches!(&meta.key, crate::node::AccountDocumentKey::GroupOperation { channel, source_device } if channel == &hex::encode(group_b.as_bytes()) && source_device == &requester_writer))
+                {
+                    if !release_intent.is_closed()
+                        && !intent_held.swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        intent_entered.close();
+                        record_b_trace(&trace, clock, "fixture", "source_intent_header_held_until_foreground_complete".into());
                     }
+                    let _ = release_intent.acquire().await;
+                }
+                if observed == peer {
                     record_control_frame(
                         &trace,
                         clock,
@@ -294,6 +307,7 @@ async fn run_queued_source(gate_terminal: bool) {
         let first_foreground = first_foreground.clone();
         let release_intent = release_intent.clone();
         let terminal_published = terminal_published.clone();
+        let intent_held = intent_held.clone();
         let terminal_wake = terminal_wake.clone();
         let wake_changed = wake_changed.clone();
         let pages = pages.clone();
@@ -353,7 +367,13 @@ async fn run_queued_source(gate_terminal: bool) {
                         "fixture",
                         "first_foreground_partial_validated_release_source_intent".into(),
                     );
-                    release_intent.add_permits(1);
+                    assert!(
+                        intent_held.load(std::sync::atomic::Ordering::Acquire)
+                            && !terminal_published.load(std::sync::atomic::Ordering::Acquire),
+                        "the executor terminal must be newer than the first foreground page; phases={:?}",
+                        trace.lock().unwrap()
+                    );
+                    release_intent.close();
                 }
                 if phase == "control_pair_followup_observed"
                     && terminal_published.load(std::sync::atomic::Ordering::Acquire)
@@ -502,6 +522,7 @@ async fn run_queued_source(gate_terminal: bool) {
         let foreground_after = foreground_after.clone();
         let pages = pages.clone();
         let demand_dispatch = demand_dispatch.clone();
+        let intent_entered = intent_entered.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let admitted = admitted.clone();
@@ -517,6 +538,7 @@ async fn run_queued_source(gate_terminal: bool) {
             let foreground_after = foreground_after.clone();
             let pages = pages.clone();
             let demand_dispatch = demand_dispatch.clone();
+            let intent_entered = intent_entered.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
@@ -557,6 +579,9 @@ async fn run_queued_source(gate_terminal: bool) {
                         {
                             *foreground_after.lock().unwrap() =
                                 Some(serde_json::from_value(complete["next"].clone()).unwrap());
+                            // Establish the intended interleaving with real
+                            // frames, without depending on which route wins.
+                            let _ = intent_entered.acquire().await;
                         }
                         if last.is_some_and(|after| after.is_some())
                             && complete["next"].is_null()
@@ -632,6 +657,16 @@ async fn run_queued_source(gate_terminal: bool) {
         "the new result is behind the old queued suffix"
     );
     assert!(reference.pending_account_operation_sources().is_empty());
+    let intent_key = crate::node::AccountDocumentKey::GroupOperation {
+        channel: hex::encode(group_b.as_bytes()),
+        source_device: reference.user_id(),
+    };
+    assert!(
+        [&reference, &a, &b]
+            .into_iter()
+            .all(|node| node.account_document_meta(&intent_key).is_none()),
+        "the header gate must hold the new request, not an existing empty head"
+    );
     let id = reference
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
@@ -696,6 +731,7 @@ async fn run_queued_source(gate_terminal: bool) {
         .into(),
     );
     release_intent.close();
+    intent_entered.close();
     wake_changed.close();
     release.close();
     let first_fresh = b_requests
@@ -750,7 +786,8 @@ async fn run_queued_source(gate_terminal: bool) {
     if gate_terminal {
         assert!(
             intent_held.load(std::sync::atomic::Ordering::Acquire),
-            "the real source intent header was held before admission"
+            "the real source intent header was held before executor admission; phases={:?}",
+            trace.lock().unwrap()
         );
         assert!(terminal_wake.load(std::sync::atomic::Ordering::Acquire));
         let requests = b_requests.lock().unwrap();

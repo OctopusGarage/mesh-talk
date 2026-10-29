@@ -1440,6 +1440,27 @@ pub(in crate::node) mod tests {
                 .run_accept_loop(reference_listener.take().unwrap()),
         ));
         let kind = input.operation().kind();
+        // Cold document enrollment belongs to the existing setup budget. These
+        // passive observations neither send a probe nor begin the timed action.
+        let documents_ready = |node: &Node, peer: &Node| {
+            let public = peer.identity.public();
+            let exact_protocol = node
+                .account_group_versions
+                .lock()
+                .unwrap()
+                .get(&peer.user_id())
+                .is_some_and(|support| support.public == public);
+            let exact_route = node
+                .routing_peer(&peer.user_id())
+                .is_some_and(|route| route.public == public);
+            let settled = node.device_sync_status().into_iter().any(|status| {
+                status.device_id == peer.user_id()
+                    && status.document_phase == crate::node::SyncPhase::UpToDate
+                    && status.document_error.is_none()
+                    && !status.document_requires_upgrade
+            });
+            exact_protocol && exact_route && settled
+        };
         let readiness = || {
             let role_ready = reference.account_group_access(group).unwrap().role
                 == if pending {
@@ -1470,7 +1491,14 @@ pub(in crate::node) mod tests {
                     })
                 })
             });
-            [role_ready, capability_ready, reverse_ready, old_head_ready]
+            [
+                role_ready,
+                capability_ready,
+                reverse_ready,
+                old_head_ready,
+                documents_ready(&reference, &online),
+                documents_ready(&online, &reference),
+            ]
         };
         let online_label = nodes
             .iter()
@@ -1507,7 +1535,7 @@ pub(in crate::node) mod tests {
                 node.group_control_heads(group).iter().any(|head| head.proof.public() == *public
                     && head.access.observation.role == AccountGroupRole::Member)
             }));
-            format!("real private role/capability and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_forward_reverse_old={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}",
+            format!("real private role/capability and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_forward_reverse_old_documents_forward_reverse={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}",
                 readiness_started.elapsed().as_millis(), readiness(), forward, reverse, old_heads,
                 [reference.certified_sibling(&online.identity.public()), online.certified_sibling(&reference.identity.public())],
                 [reference.routing_peer(&online.user_id()).is_some_and(|peer| peer.public == online.identity.public()),
@@ -1516,8 +1544,9 @@ pub(in crate::node) mod tests {
                 trace.lock().unwrap().iter().cloned().collect::<Vec<_>>())
         }).await;
         eprintln!(
-            "self control readiness completed chosen_online={online_label} readiness_elapsed_ms={} trace_omitted={} bounded_trace={:?}",
+            "self control readiness completed chosen_online={online_label} readiness_elapsed_ms={} ready_role_forward_reverse_old_documents_forward_reverse={:?} trace_omitted={} bounded_trace={:?}",
             readiness_started.elapsed().as_millis(),
+            readiness(),
             trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
             trace.lock().unwrap().iter().cloned().collect::<Vec<_>>()
         );
