@@ -123,7 +123,10 @@ async fn file_forward_has_fresh_crypto_and_merged_bytes_export() {
         .forward_messages_if(request.clone(), |c| c())
         .await
         .unwrap();
-    assert_eq!(sent.items[0].status, "accepted", "{:?}", sent);
+    assert!(
+        sent.items[0].status == "accepted",
+        "Individual file forwarding must be accepted"
+    );
     let new_source = FavoriteSource {
         message_ids: vec![sent.items[0].message_id.clone().unwrap()],
         ..selected.clone()
@@ -413,7 +416,7 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
             .unwrap();
         assert!(
             accepted.items.iter().all(|item| item.status == "accepted"),
-            "{accepted:?}"
+            "Every group forwarding item must be accepted"
         );
         for item in &accepted.items {
             let id = crate::eventlog::EventId::new(
@@ -443,7 +446,10 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
             .forward_messages_if(request, |commit| commit())
             .await
             .unwrap();
-        assert_eq!(merged.items[0].status, "accepted", "{merged:?}");
+        assert!(
+            merged.items[0].status == "accepted",
+            "Merged group forwarding must be accepted"
+        );
         let archive_id = merged.items[0].message_id.as_ref().unwrap();
         let archive = sender
             .channel_history(group, 10)
