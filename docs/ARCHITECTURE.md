@@ -1425,10 +1425,11 @@ backend retains no event-body cache; exact reads fetch complete owned events
 from SQLCipher, and ordinary appends leave the retired legacy source untouched.
 The explicit standalone `PersistentEventLog::open` remains the collecting legacy
 SDK owner and rejects a retired participant source. Transcripts, crypto and
-projections still have separate migration boundaries. Channel startup replay,
-history ordering and authorization retain explicit temporary collections, so
-this event cutover does not establish bounded participant startup or total
-historical memory.
+projections still have separate migration boundaries. Transcript history ordering and account routes use persisted metadata selectors;
+ordinary recent and exact-context reads hydrate selected rows only. Channel
+startup, file/media state and remaining optional caches have separate cutovers,
+so the event and transcript changes alone do not establish a complete startup
+or runtime memory bound.
 
 The separate `node/transcript_repository/` owner provides indexed sent, received,
 file-card and exact suppression storage on that same encrypted connection.
@@ -1439,6 +1440,14 @@ advance only for newly accepted proofs or bindings, so duplicate insertion and
 restart preserve ordered-view invalidation. Export visitors release the SQL guard
 between bounded pages. These indexed owners alone do not replace FileBook startup
 reconstruction or qualify the complete participant runtime memory bound.
+The indexed FileBook projection references those existing file-card bodies by
+ordinal. It installs validated signed bindings and exact processing facts in the
+body transaction. Physical deletion cascades to eligibility metadata, advances
+its persisted revision and retains compact processing evidence. Metadata pages
+check row and byte budgets; selected manifest reads verify physical allocation
+charges before loading bytes. Account adoption fences old handles and never
+imports the former account into the new namespace. This leaf does not by itself
+replace Node file producers, legacy FileBook retention or media startup work.
 
 `node/reception_effects/` provides the derived reception-work owner for bounded
 host integration. An effect references its existing transcript row and stores

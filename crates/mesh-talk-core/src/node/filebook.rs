@@ -7,6 +7,8 @@ use crate::eventlog::event::{Author, ConversationId, EventId};
 use crate::file::AnyManifest;
 use std::collections::{HashMap, HashSet};
 
+pub(crate) mod indexed;
+
 /// A received file announcement, surfaced to the application.
 #[derive(Debug, Clone)]
 pub struct ReceivedFile {
