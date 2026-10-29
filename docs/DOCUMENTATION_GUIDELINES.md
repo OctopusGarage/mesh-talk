@@ -122,6 +122,13 @@ fragment links, and opening those URLs expands the relevant answer. Feature
 summaries link directly to their maintained help topics. Mobile navigation moves
 focus to its destination instead of leaving it inside a collapsed menu.
 
+FAQ motion scenarios prime real dictionaries by awaiting the
+[public language owner](../site/i18n.js) before starting geometry interactions.
+Keep language assertions after priming, verify active expansion before the actual
+chooser change, and retain its bounded language, geometry and visibility checks.
+Dedicated public-language scenarios exercise chooser loading, failure and stale
+request behavior.
+
 Help search stores its query in the URL, restores it on browser Back, and offers
 clear, Escape, `/` focus, timeout and retry behavior. Keep static topics available
 when the search index fails. Article headings precede the mobile contents list;
