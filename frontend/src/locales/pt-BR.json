@@ -317,6 +317,8 @@
     "source_unscoped": "Descoberta assinada (escopo de rede não especificado)"
   },
   "message": {
+    "sticker": "[Figurinha]",
+    "recalledSummary": "[Mensagem cancelada]",
     "expiresIn": "Expira em {{time}} após o envio; removida dos dois lados",
     "delivery": {
       "postOfficeDisabled": "O envio por postos de correio estava desativado neste dispositivo quando nenhuma rota direta era conhecida. Revise as configurações de conexão se quiser usar um posto de correio de confiança.",
@@ -349,6 +351,7 @@
       "unknownHelp": "Este dispositivo ainda não recebeu dados de confirmação. Outro dispositivo vinculado pode ter informações mais recentes."
     },
     "sending": "enviando…",
+    "image": "Foto",
     "reply": "Responder",
     "react": "Reagir",
     "retry": "Tentar novamente",
@@ -439,7 +442,30 @@
     "textValue": "Texto da anotação",
     "undo": "Desfazer anotação",
     "cancel": "Cancelar",
-    "send": "Enviar captura de tela"
+    "send": "Enviar captura de tela",
+    "shortcuts": {
+      "recording": "Pressione um atalho…",
+      "recordingHint": "Pressione um modificador e uma letra, número ou tecla de função. Esc cancela.",
+      "bindingHint": "Clique para alterar. Salvo apenas neste dispositivo.",
+      "unassigned": "Não atribuído",
+      "clear": "Limpar atalho",
+      "clearAction": "Limpar atalho de {{action}}",
+      "invalid": "Use um modificador com uma letra, número ou F1–F12.",
+      "reserved": "Este atalho é reservado para edição ou ações do sistema. Escolha outro.",
+      "duplicate": "Escolha um atalho diferente para cada ação de captura.",
+      "empty": "Atribua pelo menos um atalho antes de ativar o uso global.",
+      "globalTitle": "Usar atalhos de captura globais",
+      "globalDescription": "Permite usar estes atalhos em outros aplicativos. O Mesh-Talk deve estar aberto e desbloqueado.",
+      "checking": "Verificando atalhos globais…",
+      "globalActive": "Atalhos globais ativos",
+      "globalInactive": "Atalhos globais indisponíveis; os do aplicativo continuam funcionando",
+      "appOnly": "Os atalhos funcionam dentro do Mesh-Talk",
+      "restore": "Restaurar padrões",
+      "registrationFailed": "Não foi possível registrar os atalhos globais. Altere a combinação ou libere-a no outro aplicativo e tente novamente.",
+      "scopeApp": "No aplicativo",
+      "scopeGlobal": "Global",
+      "chooseConversation": "Escolha uma conversa antes de fazer uma captura."
+    }
   },
   "settings": {
     "originSharing": "Compartilhar meu posto de correio de origem",
@@ -801,6 +827,14 @@
     "experimentalHint": "Experimental: as chamadas podem apresentar instabilidade",
     "voice": "Chamada de voz",
     "video": "Chamada de vídeo",
+    "unavailableTitle": "Chamadas indisponíveis nesta conexão",
+    "unavailableHint": "Não há uma conexão direta disponível para esta chamada. Verifique as duas redes ou use uma VPN que permita conectar os dispositivos.",
+    "connectionHint": "Não foi possível estabelecer a chamada. Mantenha os dois aplicativos abertos e verifique se a rede ou VPN permite conexões diretas.",
+    "captureHint": "Não foi possível usar o microfone. Verifique as permissões do sistema e a conexão do dispositivo e tente novamente.",
+    "timeoutHint": "O contato não atendeu a tempo ou não foi possível estabelecer a conexão de mídia. Verifique a conexão e tente novamente.",
+    "checkConnection": "Verificar conexão",
+    "retry": "Tentar novamente",
+    "technicalDetails": "Detalhes técnicos",
     "ringtone": {
       "classic": "Toque clássico",
       "oldPhone": "Telefone antigo",
@@ -916,7 +950,7 @@
     "trigger": "Membros",
     "title": "Membros",
     "description": "Todos os participantes deste canal.",
-    "addPeer": "Adicionar participante",
+    "addPeer": "Adicionar membros",
     "owner": "Proprietário",
     "dissolve": "Encerrar canal",
     "dissolveConfirm": "Encerrar este canal para todos? Os membros manterão o histórico, mas ninguém poderá enviar mensagens nem alterar os membros depois.",
@@ -1188,7 +1222,7 @@
     "copyFailed": "Não foi possível copiar. Selecione as instruções acima e copie-as manualmente.",
     "group": "Grupo",
     "person": "Pessoa",
-    "selectedCount": "{{count}} / 16 selecionadas",
+    "selectedCount": "{{count}} / {{total}} selecionadas",
     "search": "Buscar contatos e grupos",
     "selectedOnly": "Somente selecionadas",
     "noMatches": "Nenhuma conversa encontrada.",

@@ -49,6 +49,23 @@ pub(super) trait SessionBackend {
         conversation: &ConversationId,
         id: &EventId,
     ) -> Result<Option<Event>, LogError>;
+    fn file_message_identity(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> Result<Option<Event>, LogError>;
+    fn accept_file_message_identity(&self, bundle: Event) -> Result<bool, LogError>;
+    fn sticker_file_consent(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+        headers: Vec<Event>,
+    ) -> Result<Option<Event>, LogError>;
+    fn sticker_file_proof(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> Result<Option<Vec<Event>>, LogError>;
 }
 pub(super) struct FramePage<C> {
     page: ExportPage<C>,
@@ -204,6 +221,43 @@ impl<S: SyncStore> SessionBackend for LegacyCollectingNetworkAdapter<'_, S> {
             .expect("store mutex not poisoned")
             .signed_file_consent(c, id)
     }
+    fn file_message_identity(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> Result<Option<Event>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .file_message_identity(file, manifest)
+    }
+    fn accept_file_message_identity(&self, bundle: Event) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .accept_file_message_identity(bundle)
+    }
+    fn sticker_file_consent(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+        headers: Vec<Event>,
+    ) -> Result<Option<Event>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .sticker_file_consent(file, manifest, headers)
+    }
+    fn sticker_file_proof(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> Result<Option<Vec<Event>>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .sticker_file_proof(file, manifest)
+    }
 }
 pub(super) struct PagedNetworkBackend<'a, S>(
     pub(super) &'a Mutex<S>,
@@ -306,6 +360,43 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .lock()
             .expect("store mutex not poisoned")
             .signed_file_consent(c, id)
+    }
+    fn file_message_identity(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> Result<Option<Event>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .file_message_identity(file, manifest)
+    }
+    fn accept_file_message_identity(&self, bundle: Event) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .accept_file_message_identity(bundle)
+    }
+    fn sticker_file_consent(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+        headers: Vec<Event>,
+    ) -> Result<Option<Event>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .sticker_file_consent(file, manifest, headers)
+    }
+    fn sticker_file_proof(
+        &self,
+        file: &ConversationId,
+        manifest: &EventId,
+    ) -> Result<Option<Vec<Event>>, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .sticker_file_proof(file, manifest)
     }
 }
 

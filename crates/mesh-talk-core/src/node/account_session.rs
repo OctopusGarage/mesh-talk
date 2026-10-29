@@ -98,7 +98,8 @@ impl Node {
         let body = AccountSessionRequest::from_frame(&request)
             .ok_or_else(|| NodeError::Channel("invalid reusable account request".into()))?;
         let optional_request = match &body {
-            AccountSessionRequest::AttachmentChecked { .. } => true,
+            AccountSessionRequest::AttachmentChecked { .. }
+            | AccountSessionRequest::FileMessageIdentities { .. } => true,
             AccountSessionRequest::Documents { body } => {
                 super::account_documents::wire::DocumentRequest::decode(body)
                     .is_some_and(|request| request.version > 1)
@@ -211,7 +212,10 @@ impl Node {
                 AccountHistoryFrame::Request { account_id, .. }
                 | AccountHistoryFrame::AttachmentRequest { account_id, .. }
                 | AccountHistoryFrame::Wake { account_id, .. } => account_id,
-                AccountHistoryFrame::AttachmentRequestChecked { account_id, .. } => account_id,
+                AccountHistoryFrame::AttachmentRequestChecked { account_id, .. }
+                | AccountHistoryFrame::FileMessageIdentitiesRequest { account_id, .. } => {
+                    account_id
+                }
                 AccountHistoryFrame::DocumentsRequest { body } => {
                     // The document owner repeats exact account authorization.
                     if super::account_documents::wire::DocumentRequest::decode(body).is_none() {
@@ -247,6 +251,13 @@ impl Node {
                 return;
             }
             let complete = match frame {
+                AccountHistoryFrame::FileMessageIdentitiesRequest {
+                    account_id,
+                    requests,
+                } => {
+                    self.serve_account_file_message_identities(&mut channel, &account_id, requests)
+                        .await
+                }
                 AccountHistoryFrame::AttachmentRequestChecked {
                     account_id,
                     file_conv,

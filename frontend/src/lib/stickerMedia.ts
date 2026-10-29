@@ -1,6 +1,11 @@
+/// <reference lib="es2022.intl" />
 import type { Sticker } from "./stickerPacks";
 
 const PREFIX = "mt-sticker-v1-";
+const LABEL_PREFIX = "mt-sticker-v2-";
+const MAX_NAME = 255;
+const UNSAFE_LABEL =
+  /[\p{Cc}\p{Cs}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/u;
 export const STICKER_MEDIA_CAP = 3 * 1024 * 1024;
 const MIME = {
   png: "image/png",
@@ -9,7 +14,31 @@ const MIME = {
   gif: "image/gif",
 } as const;
 type Extension = keyof typeof MIME;
-type StickerIdentity = { id: string; fallback: string };
+export type StickerIdentity = { id: string; fallback: string; label?: string };
+
+function validLabel(label: string) {
+  return (
+    !!label &&
+    label === label.trim() &&
+    [...label].length <= 80 &&
+    !UNSAFE_LABEL.test(label)
+  );
+}
+
+/** Creator text is display data, never markup or a transport filename. */
+export function cleanStickerLabel(label: string | undefined): string {
+  return (label ?? "")
+    .replace(/\s+/gu, " ")
+    .replace(new RegExp(UNSAFE_LABEL.source, "gu"), "")
+    .trim();
+}
+
+export function stickerSummary(
+  sticker: Pick<StickerIdentity, "label">,
+  generic = "[Sticker]",
+) {
+  return sticker.label ? `[${sticker.label}]` : generic;
+}
 
 function validIdentity(id: string, fallback: string) {
   return (
@@ -31,14 +60,24 @@ export function encodeStickerMediaName(
   id: string,
   fallback: string,
   ext: Extension,
+  label?: string,
 ) {
   if (!validIdentity(id, fallback))
     throw new Error("Invalid sticker identity or fallback");
-  const encoded = base64(new TextEncoder().encode(`${id}\n${fallback}`))
+  if (label !== undefined && !validLabel(label))
+    throw new Error("Invalid sticker label");
+  const encoded = base64(
+    new TextEncoder().encode(
+      `${id}\n${fallback}${label === undefined ? "" : `\n${label}`}`,
+    ),
+  )
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
-  return `${PREFIX}${encoded}.${ext}`;
+  const name = `${label === undefined ? PREFIX : LABEL_PREFIX}${encoded}.${ext}`;
+  if (name.length > (label === undefined ? 233 : MAX_NAME))
+    throw new Error("Sticker metadata exceeds the filename budget");
+  return name;
 }
 export function decodeStickerMedia(file: {
   name: string;
@@ -51,32 +90,34 @@ export function decodeStickerMedia(file: {
     !Number.isSafeInteger(file.size) ||
     file.size < 1 ||
     file.size > STICKER_MEDIA_CAP ||
-    file.name.length > 233
+    file.name.length > MAX_NAME
   )
     return null;
-  const match = /^mt-sticker-v1-([A-Za-z0-9_-]+)\.(png|jpg|webp|gif)$/.exec(
-    file.name,
-  );
-  if (!match || file.mime !== MIME[match[2] as Extension]) return null;
+  const match =
+    /^mt-sticker-v([12])-([A-Za-z0-9_-]+)\.(png|jpg|webp|gif)$/.exec(file.name);
+  if (!match || file.mime !== MIME[match[3] as Extension]) return null;
   try {
-    const encoded = match[1].replace(/-/g, "+").replace(/_/g, "/");
+    const encoded = match[2].replace(/-/g, "+").replace(/_/g, "/");
     const bytes = Uint8Array.from(
       atob(encoded + "=".repeat((4 - (encoded.length % 4)) % 4)),
       (char) => char.charCodeAt(0),
     );
     const identity = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    const [id, fallback, extra] = identity.split("\n");
+    const fields = identity.split("\n");
+    const [id, fallback, label] = fields;
     if (
-      extra !== undefined ||
+      fields.length !== (match[1] === "1" ? 2 : 3) ||
       fallback === undefined ||
-      !validIdentity(id, fallback)
+      !validIdentity(id, fallback) ||
+      (match[1] === "2" && !validLabel(label))
     )
       return null;
     if (
-      encodeStickerMediaName(id, fallback, match[2] as Extension) !== file.name
+      encodeStickerMediaName(id, fallback, match[3] as Extension, label) !==
+      file.name
     )
       return null;
-    return { id, fallback };
+    return label === undefined ? { id, fallback } : { id, fallback, label };
   } catch {
     return null;
   }
@@ -101,10 +142,31 @@ export function snapshotSticker(sticker: Sticker, fallback: string) {
     base64(bytes) !== match[2]
   )
     throw new Error("Invalid sticker artwork");
+  // Fit metadata to a portable filesystem component, at whole grapheme boundaries.
+  // A label is immutable presentation; removing/updating the source pack cannot change it.
+  const clean = cleanStickerLabel(sticker.label);
+  let label = "";
+  for (const { segment } of new Intl.Segmenter(undefined, {
+    granularity: "grapheme",
+  }).segment(clean)) {
+    const candidate = label + segment;
+    if ([...candidate].length > 80) break;
+    try {
+      encodeStickerMediaName(sticker.id, fallback, ext, candidate.trimEnd());
+      label = candidate;
+    } catch {
+      break;
+    }
+  }
   return {
     bytes,
     mime,
     ext,
-    name: encodeStickerMediaName(sticker.id, fallback, ext),
+    name: encodeStickerMediaName(
+      sticker.id,
+      fallback,
+      ext,
+      label.trim() || undefined,
+    ),
   };
 }

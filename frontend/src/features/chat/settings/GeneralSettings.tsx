@@ -1,3 +1,4 @@
+import { ScreenshotShortcutSettings } from "./ScreenshotShortcutSettings";
 import { Languages, MinusSquare, Rocket } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Switch } from "@/components/ui/switch";
@@ -71,6 +72,10 @@ export function GeneralSettings({
                 }
               />
             }
+          />
+          <ScreenshotShortcutSettings
+            key={c.identity ?? "loading"}
+            controller={c}
           />
         </>
       )}

@@ -47,6 +47,21 @@ pub(crate) fn show<R: tauri::Runtime>(window: &Window<R>) -> tauri::Result<()> {
     show_preserving_position(window)
 }
 
+/// Explicit user activation restores both hidden and minimized main windows.
+/// Reuse `show` so startup retirement and platform placement stay authoritative.
+pub(crate) fn restore_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<()> {
+    use tauri::Manager;
+    if let Some(window) = app
+        .get_webview_window("main")
+        .map(|view| view.as_ref().window())
+    {
+        show(&window)?;
+        window.unminimize()?;
+        window.set_focus()?;
+    }
+    Ok(())
+}
+
 fn show_preserving_position<R: tauri::Runtime>(window: &Window<R>) -> tauri::Result<()> {
     #[cfg(target_os = "linux")]
     let position = if is_x11(window)
@@ -159,6 +174,29 @@ pub(crate) fn initial_presentation_ready<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restoring_main_retires_pending_startup_and_tolerates_missing_window() {
+        use tauri::Manager;
+        let app = tauri::test::mock_builder()
+            .manage(InitialPresentation::new(true))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        restore_main(app.handle()).unwrap();
+        assert!(
+            app.state::<InitialPresentation>()
+                .0
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        #[cfg(target_os = "linux")]
+        app.manage(HiddenPositions::default());
+        tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        restore_main(app.handle()).unwrap();
+        restore_main(app.handle()).unwrap();
+        assert!(!app.state::<InitialPresentation>().claim());
+    }
 
     #[test]
     fn initial_presentation_is_one_shot_for_acknowledgement_and_fallback() {

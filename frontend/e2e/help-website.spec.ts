@@ -192,6 +192,11 @@ test("help lookup has a bounded timeout and keeps static topics available", asyn
 test("reader language follows the site while articles explicitly remain English", async ({
   page,
 }) => {
+  // Isolate language/search behavior from wall-clock startup stalls. The bounded
+  // lookup test above explicitly advances and verifies the eight-second deadline.
+  const clockTime = new Date();
+  await page.clock.install({ time: clockTime });
+  await page.clock.pauseAt(new Date(clockTime.getTime() + 60_000));
   await page.goto(`${origin}index.html?lang=zh-Hans`);
   await expect(page.locator("html")).toHaveAttribute("lang", "zh-Hans");
   await expect(page.getByRole("heading", { level: 1 })).not.toHaveText(

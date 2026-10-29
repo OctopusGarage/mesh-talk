@@ -11,7 +11,7 @@ settings to confirm the value before editing it again.
 
 | Category              | Controls                                                                                                   |
 | --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| General               | Display language, launch at OS login, and close to tray.                                 |
+| General               | Display language, launch at OS login, close to tray and screenshot shortcuts.                                 |
 | Appearance            | Theme/library, available theme wallpapers and wallpaper visibility.                                        |
 | Notifications & calls | Notifications, message previews, experimental calling and ringtone.                                        |
 | Connection & delivery | Invisible mode, reply permissions, discovery scope, relay master/send/receive and preferred post office.   |
@@ -32,8 +32,8 @@ account documents. Contact remarks, pins and private contact/group photos share
 account scope; they do not change a contact's public signed nickname.
 
 Local history retention, download destinations, autostart, close-to-tray,
-stay-signed-in, update channel, OS authorization, local-agent grants and device
-sync selection remain local.
+stay-signed-in, update channel, OS authorization, local-agent grants, screenshot
+shortcuts and device sync selection remain local.
 
 Imported linked-device preferences may strengthen local privacy protections,
 but do not silently weaken them. Weaker imported preview, lock, clipboard
@@ -57,9 +57,12 @@ see [backup and recovery](backup-recovery.md).
 
 ## Local agent access
 
+The conversation selector shows selected conversations out of the listed total.
+The separate scope hint states the authorization limit of 16 conversations.
+
 In **Integrations**, expand **Allowed conversations** to choose the contacts or joined
 groups a local agent may send to, then enable **Local agent access**. The collapsed
-picker shows the selected count out of 16. Search contacts and groups or use
+picker shows the selected count out of the listed total. Search contacts and groups or use
 **Selected only** to review and remove grants, including unavailable conversations.
 The list scrolls within a bounded area so large rosters do not grow the settings
 page. Search and filters never change saved permissions. Selecting or removing a
@@ -95,6 +98,58 @@ failures. The app must remain running and unlocked; normal login restores enable
 access and updates the bootstrap to its new endpoint. See the
 [local API guide](bot-integrations.md#desktop-local-agent-access) for discovery,
 authority, credential handling and transport limits.
+
+## Screenshot shortcuts
+
+**General** provides separate bindings for **Capture screen** and **Hide window &
+capture**. Click a binding and press a modifier with a letter, digit or F1–F12;
+Esc cancels recording without closing Settings. Clear removes one binding.
+**Restore defaults** restores both bindings while preserving the global switch.
+The defaults are Ctrl+Shift+X and Ctrl+Alt+Shift+X on Windows/Linux, and
+Command+Shift+X and Command+Option+Shift+X on macOS. Editing/system reservations
+and duplicate bindings are rejected. Shortcuts save with the signed-in local
+user's device preferences, survive restart, and never propagate to linked devices.
+
+**Use screenshot shortcuts globally** is off by default. Application shortcuts
+work while Mesh-Talk is focused, including from the composer. Opting in uses the
+same bindings while another application is active or Mesh-Talk is in the tray.
+The app must be running, signed in and unlocked. Linux global registration
+requires a native X11 session; Wayland retains application shortcuts. Native OS
+registration failures are reported with Retry; a failed replacement preserves
+the previous saved bindings and restores registrations where the OS permits.
+Unexpected rollback failures report degraded global availability instead of
+claiming that a partially restored set is active.
+
+Background activation acquires the screen before showing the editor. It uses
+the existing capture backend and display selection; it does not change the
+platform's screen-recording permissions. With no writable conversation selected,
+the shortcut only shows Mesh-Talk and asks the user to choose a conversation.
+An open modal, shortcut recorder, active capture or editor blocks another capture.
+IME composition and held-key repetition never launch capture. Screenshots retain
+their originating conversation and enter the existing pending-attachment flow;
+only Send/Enter from that flow hands them to delivery.
+
+Composer tooltips show the acknowledged binding and effective scope (App only or
+Global). The editor's floating controls expose their actual shortcuts, including
+native modifier labels and accessible `aria-keyshortcuts`. See the
+[screenshot guide](help/topics/screenshots.md) for editor keys.
+
+`src-tauri/src/screenshot_shortcuts.rs` owns canonical validation, transactional OS
+registration, native session/lock checks and registration tokens. Renderer
+cleanup cannot suspend a newer registration. Runtime replacement, locking and
+logout retire listeners and registrations; capture checks session and lock
+revision again before releasing pixels or restoring a window. The frontend
+`screenshot/useScreenshotShortcuts.ts` connects this owner to attachment intake,
+and `shortcutRouter.ts` admits at most one acquisition independently of native
+event-listener setup. The ordinary settings controller owns acknowledged edits;
+a successful shortcut write updates routing even if full-settings readback fails.
+
+Focused native and frontend tests cover validation, rollback, local persistence,
+event routing, stale generations, delayed cleanup, modal/input ownership and
+save/readback failures. Browser scenarios exercise settings at 1440×1000 and
+760×520, customization, hints and synthetic global events. Browser mocks do not
+prove OS accelerator delivery, tray wakeup, permission dialogs or native window
+restoration. Those remain packaged native acceptance boundaries on each platform.
 
 ## System notification permission
 

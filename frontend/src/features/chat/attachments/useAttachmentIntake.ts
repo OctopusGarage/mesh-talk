@@ -17,6 +17,7 @@ import {
 import { captureChatOwnership, convKey, useChat } from "@/store/chat";
 
 import { AttachmentBatchError } from "./attachmentBatch";
+import { useScreenshotShortcuts } from "../screenshot/useScreenshotShortcuts";
 
 type Current = () => boolean;
 const BYTE_LIMIT = 64 * 1024 * 1024;
@@ -276,6 +277,12 @@ export function useAttachmentIntake(
       capturing.current = false;
     }
   }
+  useScreenshotShortcuts({
+    available: screenshotAvailable,
+    blocked: !!screenshot || capturing.current,
+    writable: writable(),
+    capture: captureScreenshot,
+  });
   async function sendScreenshot(bytes: Uint8Array) {
     const origin = screenshot;
     if (!origin?.current()) return;

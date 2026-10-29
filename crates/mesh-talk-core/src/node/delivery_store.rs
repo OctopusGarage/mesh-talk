@@ -1242,6 +1242,36 @@ impl DeliveryStore {
         self.erased_manifest_events.contains(&original)
     }
 
+    /// Validate the entire requested batch before any visibility tombstone commits.
+    /// Existing cards already reserve their slot; legacy aliases need new slots.
+    pub(crate) fn check_file_erasure_capacity(
+        &self,
+        targets: impl IntoIterator<Item = (ConversationId, EventId)>,
+    ) -> Result<(), LogError> {
+        let additional: BTreeSet<_> = targets
+            .into_iter()
+            .filter(|(conversation, original)| {
+                !self.file_erased(*conversation, *original)
+                    && !self
+                        .files
+                        .get(original)
+                        .is_some_and(|file| file.conversation == *conversation)
+            })
+            .map(|(conversation, original)| (*conversation.as_bytes(), original))
+            .collect();
+        if !additional.is_empty()
+            && self
+                .files
+                .len()
+                .saturating_add(self.erased_files.len())
+                .saturating_add(additional.len())
+                > self.limits.completed_receipts
+        {
+            return Err(invalid("file erasure capacity exhausted"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn erase_file(
         &mut self,
         conversation: ConversationId,
@@ -1250,17 +1280,7 @@ impl DeliveryStore {
         if self.file_erased(conversation, original) {
             return Ok(false);
         }
-        // Legacy imported rows have no reserved slot; fail before deleting them
-        // when permanent suppression cannot fit the bounded metadata store.
-        if !self
-            .files
-            .get(&original)
-            .is_some_and(|file| file.conversation == conversation)
-            && self.files.len().saturating_add(self.erased_files.len())
-                >= self.limits.completed_receipts
-        {
-            return Err(invalid("file erasure capacity exhausted"));
-        }
+        self.check_file_erasure_capacity(std::iter::once((conversation, original)))?;
         self.install_record(OutboxRecord::ErasedFile(conversation, original))?;
         Ok(true)
     }

@@ -46,12 +46,30 @@ impl Node {
         target: EventId,
         account: bool,
     ) -> Result<usize, NodeError> {
-        if account
+        let target = self.file_message_logical_id(conv, target);
+        let suppress = account
             || self
                 .list_channels()
                 .iter()
-                .any(|channel| channel.id == conv)
-        {
+                .any(|channel| channel.id == conv);
+        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        let file_rows = self
+            .received_files
+            .lock()
+            .expect("files lock not poisoned")
+            .entries_ref(&conv)
+            .iter()
+            .filter(|row| self.file_message_row_logical_id(row) == target)
+            .cloned()
+            .collect::<Vec<_>>();
+        delivery
+            .check_file_erasure_capacity(
+                file_rows.iter().map(|row| (row.conversation, row.event_id)),
+            )
+            .map_err(NodeError::Log)?;
+        if suppress {
             self.account_suppression
                 .lock()
                 .expect("account suppression mutex not poisoned")
@@ -61,10 +79,9 @@ impl Node {
         self.my_dm_reactions
             .lock()
             .expect("my_dm_reactions mutex not poisoned")
-            .remove_where(|c, _, payload| c == conv && payload.target == target)
-            .map_err(NodeError::Log)?;
-        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
-        self.recover_delivery(&mut delivery)
+            .remove_where(|c, _, payload| {
+                c == conv && self.file_message_logical_id(c, payload.target) == target
+            })
             .map_err(NodeError::Log)?;
         if delivery.cancel(conv, target).map_err(NodeError::Log)? {
             self.privacy
@@ -88,15 +105,19 @@ impl Node {
             })
             .map_err(NodeError::Log)?;
 
-        // File/media messages (their own ReceivedLog) are always keyed by event id.
-        let file_rows = self
-            .received_files
-            .lock()
-            .expect("files lock not poisoned")
-            .entries(&conv)
-            .into_iter()
-            .filter(|e| e.event_id == target)
-            .collect::<Vec<_>>();
+        // Resolve authenticated device aliases while retaining exact offer erasure.
+
+        let file_ids: std::collections::HashSet<_> =
+            file_rows.iter().map(|row| row.event_id).collect();
+        {
+            let mut suppression = self
+                .account_suppression
+                .lock()
+                .expect("account suppression lock");
+            for id in &file_ids {
+                suppression.suppress(conv, *id).map_err(NodeError::Log)?;
+            }
+        }
         let media_to_remove: Vec<_> = file_rows
             .iter()
             .filter_map(|row| {
@@ -127,7 +148,7 @@ impl Node {
             .received_files
             .lock()
             .expect("received_files mutex not poisoned")
-            .remove_where(|e| e.conversation == conv && e.event_id == target)
+            .remove_where(|e| e.conversation == conv && file_ids.contains(&e.event_id))
             .map_err(NodeError::Log)?;
         self.reseed_live_file_book(&delivery)?;
         self.remove_unreferenced_media(media_to_remove)?;
@@ -196,12 +217,39 @@ impl Node {
         &self,
         should_remove: impl Fn(ConversationId, u64) -> bool,
     ) -> Result<usize, NodeError> {
-        let mut suppressed = Vec::new();
         let channels: std::collections::HashSet<_> = self
             .list_channels()
             .into_iter()
             .map(|channel| channel.id)
             .collect();
+        // raw_sent_history acquires delivery itself; collect only its IDs first.
+        let mut suppressed = Vec::new();
+        for channel in &channels {
+            for (id, entry) in self.raw_sent_history(*channel) {
+                if should_remove(*channel, entry.wall_clock) {
+                    suppressed.push((*channel, id));
+                }
+            }
+        }
+        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        let file_rows = {
+            let files = self.received_files.lock().expect("files lock not poisoned");
+            files
+                .conversations()
+                .iter()
+                .flat_map(|host| files.entries_ref(host))
+                .filter(|row| should_remove(row.conversation, row.wall_clock))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        delivery
+            .check_file_erasure_capacity(
+                file_rows.iter().map(|row| (row.conversation, row.event_id)),
+            )
+            .map_err(NodeError::Log)?;
+
         {
             let received = self.received.lock().expect("received mutex not poisoned");
             for conv in received.conversations() {
@@ -245,11 +293,6 @@ impl Node {
                     }
                 }
             }
-            for (id, entry) in self.raw_sent_history(channel) {
-                if should_remove(channel, entry.wall_clock) {
-                    suppressed.push((channel, id));
-                }
-            }
         }
         {
             let files = self.received_files.lock().expect("files lock not poisoned");
@@ -257,6 +300,7 @@ impl Node {
                 for entry in files.entries_ref(&conv) {
                     if should_remove(conv, entry.wall_clock) {
                         suppressed.push((conv, entry.event_id));
+                        suppressed.push((conv, self.file_message_row_logical_id(entry)));
                     }
                 }
             }
@@ -277,9 +321,6 @@ impl Node {
                 suppression.suppress(conv, id).map_err(NodeError::Log)?;
             }
         }
-        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
-        self.recover_delivery(&mut delivery)
-            .map_err(NodeError::Log)?;
         let cancelled: Result<(), NodeError> = (|| {
             for (conversation, id, clock) in delivery.cancellation_rows() {
                 if should_remove(conversation, clock)
@@ -299,15 +340,6 @@ impl Node {
             .lock()
             .expect("control ids lock not poisoned") = delivery.control_ids();
         cancelled?;
-        let file_rows = {
-            let files = self.received_files.lock().expect("files lock not poisoned");
-            files
-                .conversations()
-                .iter()
-                .flat_map(|c| files.entries(c))
-                .filter(|e| should_remove(e.conversation, e.wall_clock))
-                .collect::<Vec<_>>()
-        };
         let media_to_remove: Vec<_> = file_rows
             .iter()
             .filter_map(|row| {
@@ -359,7 +391,10 @@ impl Node {
         Ok(removed)
     }
 
-    fn remove_unreferenced_media(&self, candidates: Vec<ConversationId>) -> Result<(), NodeError> {
+    pub(in crate::node) fn remove_unreferenced_media(
+        &self,
+        candidates: Vec<ConversationId>,
+    ) -> Result<(), NodeError> {
         if candidates.is_empty() {
             return Ok(());
         }
@@ -368,6 +403,7 @@ impl Node {
             .conversations()
             .iter()
             .flat_map(|conversation| records.entries(conversation))
+            .filter(|row| !self.file_message_row_suppressed(row))
             .filter_map(|row| {
                 super::files::validated_manifest(&row.plaintext)
                     .map(|manifest| manifest.file_conv())
@@ -378,7 +414,7 @@ impl Node {
             if !remaining.contains(&file_conv) {
                 self.media
                     .remove(file_conv)
-                    .map_err(|e| NodeError::File(format!("remove media: {e}")))?;
+                    .map_err(|error| NodeError::Log(crate::eventlog::LogError::Io(error)))?;
             }
         }
         Ok(())

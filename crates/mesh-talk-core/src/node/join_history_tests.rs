@@ -110,6 +110,7 @@ fn join_history_time_and_count_bounds() {
     let now = 10 * DAY_MS;
     let entries = (0..15)
         .map(|i| HistoryEntry {
+            file_message_aliases: Vec::new(),
             id: EventId::new([i; 32]),
             from_me: false,
             who: "author".into(),
@@ -137,6 +138,7 @@ fn join_history_time_and_count_bounds() {
 #[test]
 fn join_history_protected_rows_do_not_consume_count_or_byte_budgets() {
     let ordinary = HistoryEntry {
+        file_message_aliases: Vec::new(),
         id: EventId::new([1; 32]),
         from_me: false,
         who: "author".into(),
@@ -801,6 +803,7 @@ async fn join_history_leave_then_rejoin_off_closes_the_original_permission() {
 #[test]
 fn join_history_snapshot_budget_counts_sticker_metadata_and_skips_large_rows() {
     let row = HistoryEntry {
+        file_message_aliases: Vec::new(),
         id: EventId::new([1; 32]),
         from_me: false,
         who: "author".into(),

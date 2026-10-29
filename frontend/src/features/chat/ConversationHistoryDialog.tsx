@@ -52,6 +52,32 @@ import { MediaPreview } from "./MediaPreview";
 import { fileGlyph } from "./mediaFile";
 import { ReceiveProgress } from "./ReceiveProgress";
 import { ClearHistoryButton } from "./ClearHistoryButton";
+import { messageSticker, messageSummary } from "@/lib/messagePresentation";
+import { usePacks } from "@/store/packs";
+import { MediaSticker } from "./MediaSticker";
+
+function HistoryMedia({ message }: { message: ChatMessage }) {
+  const packs = usePacks((s) => s.packs);
+  const sticker = messageSticker(message, packs);
+  const file = message.file!;
+  return sticker?.media ? (
+    <MediaSticker
+      fileConv={file.fileConv}
+      mime={file.mime}
+      fallback={sticker.fallback}
+      label={sticker.label}
+      readOnly
+    />
+  ) : (
+    <MediaPreview
+      readOnly
+      fileConv={file.fileConv}
+      name={file.name}
+      size={file.size}
+      mime={file.mime}
+    />
+  );
+}
 
 // Per-conversation history pulls the full backlog (the conversation stream itself caps at
 // 200 for live scrolling). The backend history commands clamp to 500, which is the most a
@@ -95,6 +121,7 @@ export function ConversationHistoryDialog({
   conversation: Conversation;
 }) {
   const { t } = useTranslation();
+  const packs = usePacks((s) => s.packs);
   const ready = useChat((s) => s.ready);
   const [open, setOpen] = useState(false);
   const expiryNow = useChat((s) => (open ? s.expiryNow : 0));
@@ -210,8 +237,8 @@ export function ConversationHistoryDialog({
 
   // "All" tab is searchable; the result list filters this conversation's messages.
   const allFiltered = useMemo(
-    () => all.filter((m) => matchesQuery(m, query)),
-    [all, query],
+    () => all.filter((m) => matchesQuery(m, query, packs)),
+    [all, query, packs],
   );
 
   const saveFile = async (file: NonNullable<ChatMessage["file"]>) => {
@@ -355,13 +382,12 @@ export function ConversationHistoryDialog({
                         {m.file && categorize(m) === "media" ? (
                           // Images/videos render like the chat (no filename), but read-only.
                           <div className="mt-1 max-w-[16rem]">
-                            <MediaPreview
-                              readOnly
-                              fileConv={m.file.fileConv}
-                              name={m.file.name}
-                              size={m.file.size}
-                              mime={m.file.mime}
-                            />
+                            <HistoryMedia message={m} />
+                            {messageSticker(m, packs) && (
+                              <p className="mt-2 text-xs text-muted-foreground">
+                                {messageSummary(m, t, packs)}
+                              </p>
+                            )}
                           </div>
                         ) : m.file ? (
                           <span className="inline-flex items-center gap-1.5">
@@ -371,12 +397,16 @@ export function ConversationHistoryDialog({
                                 m.file.name,
                                 m.file.mime,
                                 m.file,
+                                t("message.sticker"),
                               )}
                               term={query}
                             />
                           </span>
                         ) : (
-                          <HighlightedText text={m.text} term={query} />
+                          <HighlightedText
+                            text={messageSummary(m, t, packs)}
+                            term={query}
+                          />
                         )}
                       </div>
                     </div>
@@ -399,20 +429,19 @@ export function ConversationHistoryDialog({
                           <div
                             key={m.id ?? i}
                             data-testid="history-media-item"
-                            className="aspect-square overflow-hidden rounded-lg border bg-muted/40 [&_img]:h-full [&_img]:rounded-none [&_img]:object-cover [&_video]:h-full"
+                            className={
+                              messageSticker(m, packs)
+                                ? "flex aspect-square items-center justify-center overflow-hidden rounded-lg bg-muted/20 p-2 [&_img]:max-h-full [&_img]:object-contain"
+                                : "aspect-square overflow-hidden rounded-lg border bg-muted/40 [&_img]:h-full [&_img]:rounded-none [&_img]:object-cover [&_video]:h-full"
+                            }
                             title={attachmentLabel(
                               m.file.name,
                               m.file.mime,
                               m.file,
+                              t("message.sticker"),
                             )}
                           >
-                            <MediaPreview
-                              readOnly
-                              fileConv={m.file.fileConv}
-                              name={m.file.name}
-                              size={m.file.size}
-                              mime={m.file.mime}
-                            />
+                            <HistoryMedia message={m} />
                           </div>
                         ),
                     )}
@@ -443,6 +472,7 @@ export function ConversationHistoryDialog({
                                 m.file.name,
                                 m.file.mime,
                                 m.file,
+                                t("message.sticker"),
                               )}
                             </div>
                             <div className="flex items-center gap-2 text-xs text-muted-foreground">

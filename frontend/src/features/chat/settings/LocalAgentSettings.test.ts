@@ -520,7 +520,7 @@ it("keeps a large roster collapsed and searches without changing existing grants
   expect(picker).not.toBeNull();
   expect(picker.open).toBe(false);
   expect(picker.querySelector("summary")!.textContent).toContain(
-    "1 / 16 selected",
+    "1 / 300 selected",
   );
   picker.open = true;
   await search("  喵星球  ");
@@ -807,4 +807,25 @@ it("cleans the expiry refresh timer on unmount", async () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("counts listed conversations separately from the authorization limit", async () => {
+  access.destinations = [destination];
+  access.available_destinations.push({
+    destination: { kind: "channel", id: "cd".repeat(32) },
+    label: "Another group",
+  });
+  await render();
+  expect(
+    host.querySelector('[data-testid="agent-conversation-picker"] summary')
+      ?.textContent,
+  ).toContain("1 / 2 selected");
+  await act(async () =>
+    host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(),
+  );
+  expect(
+    host.querySelector('[data-testid="agent-conversation-picker"] summary')
+      ?.textContent,
+  ).toContain("0 / 2 selected");
+  expect(host.textContent).toContain(i18n.t("agentAccess.scopeHint"));
 });

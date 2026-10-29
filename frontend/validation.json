@@ -2,6 +2,109 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-call-media",
+      "paths": [
+        "frontend/src/store/calls.ts",
+        "frontend/src/store/calls.test.ts",
+        "frontend/src/features/chat/CallDialog.tsx",
+        "frontend/src/features/chat/CallConnectionNotice.tsx",
+        "frontend/src/features/chat/CallDialog.test.ts",
+        "frontend/e2e/call-dialog-harness.tsx",
+        "frontend/e2e/helpers/call-media-harness.ts",
+        "frontend/e2e/call-media.spec.ts",
+        "frontend/e2e/call-readiness.spec.ts",
+        "frontend/e2e/call-media-physical.spec.ts",
+        "docs/help/topics/calls.md"
+      ],
+      "frontend": [
+        "src/store/calls.test.ts",
+        "src/features/chat/CallDialog.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/features/chat/WebRtcTestDialog.test.ts",
+        "src/store/settings.test.ts"
+      ],
+      "capability": {
+        "summary": "Play remote voice and video through the shipped call dialog, preserve audio-only fallback, and release playback and capture on termination.",
+        "guide": "docs/help/topics/calls.md#media-playback-and-cleanup",
+        "invariants": [
+          {
+            "name": "A connected remote audio stream has an unmuted playback element even without video; replacement and unmount pause and detach the old stream.",
+            "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"
+          },
+          {
+            "name": "Media connection failure terminates the call as failed and releases local capture and peer connections; browser acceptance uses the production playback UI.",
+            "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"
+          },
+          {
+            "name": "Calls with only explicitly unavailable direct routes explain the limitation before capture; legacy unknown and routed candidates remain attemptable, and session-bound retries resolve current routes. Cross-LAN calls still require live direct authenticated signaling and an independent host-candidate media route; mailboxes provide neither signaling fallback nor TURN.",
+            "reference": "docs/network-design-reference.md#f-calls-live-signaling-and-separate-media"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/call-media.spec.ts for real browser voice/video/fallback playback and hangup cleanup. Synthetic capture and substituted signaling do not establish native permissions, speaker audibility or physical cross-LAN acceptance.",
+        "Use opt-in call-media-physical.spec.ts with prepared SDK fixtures and exact LAN addresses (MESH_TALK_MEDIA_TOPOLOGY=lan) for two-machine voice/video acceptance, or Tailscale addresses for routed media evidence; check physical microphone, camera, acoustic playback and hangup in each claimed native WebView separately."
+      ]
+    },
+    {
+      "id": "frontend-screenshot-shortcuts",
+      "paths": [
+        "frontend/src/lib/screenshotShortcuts.ts",
+        "frontend/src/lib/screenshotShortcuts.test.ts",
+        "frontend/src/lib/api/screenshotShortcuts.ts",
+        "frontend/src/features/chat/screenshot/shortcutRouter.ts",
+        "frontend/src/features/chat/screenshot/shortcutRouter.test.ts",
+        "frontend/src/features/chat/screenshot/useScreenshotShortcuts.ts",
+        "frontend/src/features/chat/screenshot/useScreenshotShortcuts.test.ts",
+        "frontend/src/features/chat/settings/ScreenshotShortcutSettings.tsx",
+        "frontend/src/features/chat/settings/ScreenshotShortcutSettings.test.ts",
+        "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/features/chat/settings/useSettingsController.ts",
+        "frontend/src/features/chat/settings/useSettingsController.test.ts",
+        "frontend/src/store/settings.ts",
+        "frontend/src/store/settings.test.ts",
+        "frontend/src/features/chat/SettingsDialog.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ScreenshotEditor.tsx",
+        "frontend/src/features/chat/screenshot/ScreenshotToolbar.tsx",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/e2e/screenshot-shortcuts.spec.ts",
+        "frontend/e2e/ui-audit-composer.spec.ts",
+        "frontend/e2e/ui-audit-composer.spec.ts-snapshots/composer-screenshot-dark-760x620.png",
+        "frontend/e2e/tauri-mock.ts",
+        "docs/settings.md",
+        "docs/help/topics/screenshots.md"
+      ],
+      "frontend": [
+        "src/lib/screenshotShortcuts.test.ts",
+        "src/store/settings.test.ts",
+        "src/features/chat/screenshot/shortcutRouter.test.ts",
+        "src/features/chat/screenshot/useScreenshotShortcuts.test.ts",
+        "src/features/chat/settings/ScreenshotShortcutSettings.test.ts",
+        "src/features/chat/settings/useSettingsController.test.ts",
+        "src/features/chat/ScreenshotEditor.test.ts",
+        "src/features/chat/ComposerScreenshot.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts"
+      ],
+      "capability": {
+        "summary": "Customize device-local screenshot bindings with default application scope, opt-in native global activation and truthful floating-control hints.",
+        "guide": "docs/settings.md#screenshot-shortcuts",
+        "invariants": [
+          {
+            "name": "Native registration is transactional and scoped to the unlocked session; retired cleanup cannot release a newer registration.",
+            "reference": "docs/settings.md#screenshot-shortcuts"
+          },
+          {
+            "name": "Local and global input share conversation-owned capture; editor and modal input never accidentally launch or send a screenshot.",
+            "reference": "docs/help/topics/screenshots.md#keyboard-shortcuts"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/screenshot-shortcuts.spec.ts and relevant screenshot browser scenarios; verify actual OS key delivery, occupied shortcuts, tray/background wakeup, lock/logout and window restoration in packaged apps. Linux global activation requires native X11. Browser events do not certify native behavior."
+      ]
+    },
+    {
       "id": "frontend-group-file-network-cost",
       "paths": [
         "frontend/src/features/chat/MembersDialog.tsx",
@@ -48,7 +151,34 @@
         "frontend/src/store/conversationModel.ts",
         "frontend/src/store/outgoingIntent.ts",
         "frontend/e2e/stickers.spec.ts",
-        "frontend/e2e/tauri-mock.ts"
+        "frontend/e2e/tauri-mock.ts",
+        "frontend/src/lib/installedStickerSources.ts",
+        "frontend/src/lib/installedStickerSources.test.ts",
+        "frontend/src/lib/linkedCustomizationPacks.ts",
+        "frontend/src/lib/linkedCustomizationPacks.test.ts",
+        "frontend/src/store/reception.ts",
+        "frontend/src/store/reception.test.ts",
+        "frontend/src/lib/unreadStorage.ts",
+        "frontend/src/store/conversationHistory.ts",
+        "frontend/src/store/conversationHistory.test.ts",
+        "frontend/src/store/conversationState.ts",
+        "frontend/src/lib/types.ts",
+        "frontend/src/lib/messagePresentation.ts",
+        "frontend/src/lib/messagePresentation.test.ts",
+        "frontend/src/lib/conversationHistory.ts",
+        "frontend/src/lib/conversationHistory.test.ts",
+        "frontend/src/features/chat/sidebar/ConversationRow.tsx",
+        "frontend/src/features/chat/sidebar/ConversationRow.test.ts",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/DeliveryFooter.tsx",
+        "frontend/src/features/chat/DeliveryDetails.tsx",
+        "frontend/src/features/chat/DeliveryDetails.test.ts",
+        "frontend/src/features/chat/favorites/FavoriteEditor.tsx",
+        "frontend/src/features/chat/favorites/FavoritesDialog.tsx",
+        "frontend/src/features/chat/favorites/FavoriteMessageText.tsx",
+        "frontend/src/lib/attachmentSave.ts",
+        "frontend/src/lib/attachmentSave.test.ts"
       ],
       "frontend": [
         "src/lib/stickerMedia.test.ts",
@@ -58,24 +188,44 @@
         "src/features/chat/mediaFile.test.ts",
         "src/lib/stickerPacks.test.ts",
         "src/store/chat.test.ts",
-        "src/store/outgoingIntent.test.ts"
+        "src/store/outgoingIntent.test.ts",
+        "src/lib/installedStickerSources.test.ts",
+        "src/lib/linkedCustomizationPacks.test.ts",
+        "src/store/reception.test.ts",
+        "src/store/conversationHistory.test.ts",
+        "src/lib/unreadStorage.test.ts",
+        "src/lib/messagePresentation.test.ts",
+        "src/lib/conversationHistory.test.ts",
+        "src/features/chat/sidebar/ConversationRow.test.ts",
+        "src/features/chat/DeliveryDetails.test.ts",
+        "src/features/chat/ConversationHistoryDialog.test.ts",
+        "src/features/chat/favorites/FavoriteEditor.test.ts",
+        "src/lib/attachmentSave.test.ts"
       ],
       "capability": {
         "summary": "Send selected sticker artwork as bounded ordinary media while preserving legacy sticker identities and account-owned file retry.",
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
         "invariants": [
           {
-            "name": "A canonical bounded media filename carries source identity and fallback; the image manifest remains byte identity. Incoming artwork never installs or resolves a pack.",
+            "name": "A canonical bounded filename carries presentation identity; the authenticated manifest binds image bytes. Installed exact-byte snapshots are registered only with the current owner/account runtime and never install incoming packs.",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           },
           {
             "name": "Selected artwork is snapshotted before asynchronous staging; stale account work cannot dispatch, retained file intents retry the same bytes, and retention removes visible blob URLs.",
             "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Authenticated file-message aliases coalesce late live/history copies into one unread identity, preserve any actual read, survive bounded persistence and never merge independent sends by content.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Sent v2 semantic labels survive pack removal and retry; compact surfaces share one summary with localized legacy fallback and protected/recalled/expired content takes priority.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
           }
         ]
       },
       "escalation": [
-        "Run e2e/stickers.spec.ts for receive without installed packs and pack-removal preservation; use existing protected-message/media and native file-delivery acceptance where those boundaries change. Unit tests do not prove native end-to-end transfer."
+        "Run e2e/stickers.spec.ts for semantic previews, replies/history search, receive without installed packs, pack-removal preservation and light/dark short-window layout. Use existing protected-message/media and native file-delivery acceptance where those boundaries change. Unit and mocked browser tests do not prove native transfer, notification appearance or linked-device/backup compatibility."
       ]
     },
     {
@@ -1606,9 +1756,104 @@
       "escalation": [
         "Verify switching, reload persistence, short-window creation and sidebar/settings layout in Portuguese and Korean. Browser mocks cover interface behavior, not native operating-system menus or translated article content."
       ]
+    },
+    {
+      "id": "frontend-image-live-text",
+      "paths": [
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MediaPreview.test.ts",
+        "frontend/src/lib/sensitiveClipboard.ts",
+        "frontend/src/lib/sensitiveClipboard.test.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "docs/help/topics/send-files.md"
+      ],
+      "frontend": [
+        "src/features/chat/MediaPreview.test.ts",
+        "src/lib/sensitiveClipboard.test.ts",
+        "src/features/chat/mediaFileRead.test.ts",
+        "src/features/chat/protectedImage.test.ts"
+      ],
+      "capability": {
+        "summary": "Select and copy text directly in ordinary enlarged macOS chat images through WebKit Live Text and the existing clipboard policy.",
+        "guide": "docs/help/topics/send-files.md#copy-text-from-an-image",
+        "invariants": [
+          {
+            "name": "Only the ordinary enlarged Mac image opts into native selection and context menus; recognized text copy uses current-session admission and the existing confirmation/clear policy. Protected images remain excluded.",
+            "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
+          },
+          {
+            "name": "An image selection drag ending on the backdrop does not close the preview; explicit backdrop clicks, Close and Escape remain available.",
+            "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/media-recovery.spec.ts and e2e/protected-messages.spec.ts. Verify real macOS WKWebView blob-image recognition, drag selection and Command-C/context-menu copy with copy confirmation and clipboard clearing. Browser mocks prove wiring, not native recognition or system menu behavior. Test supported OS/languages and image sizes without globally enabling selection on protected content."
+      ]
+    },
+    {
+      "id": "frontend-reply-preview",
+      "paths": [
+        "frontend/src/features/chat/ReplyPreview.tsx",
+        "frontend/src/features/chat/ReplyPreview.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/e2e/reply-preview.spec.ts",
+        "frontend/src/features/chat/replyNavigation.ts",
+        "frontend/src/features/chat/replyNavigation.test.ts"
+      ],
+      "frontend": [
+        "src/features/chat/ReplyPreview.test.ts",
+        "src/features/chat/useConversationViewport.test.ts",
+        "src/lib/messagePresentation.test.ts",
+        "src/lib/localeParity.test.ts",
+        "src/features/chat/replyNavigation.test.ts"
+      ],
+      "capability": {
+        "summary": "Photo quotes show original authors and thumbnails below replies, share safe previews with the composer and open exact source context beyond loaded history.",
+        "guide": "docs/help/topics/history.md#follow-a-reply",
+        "invariants": [
+          {
+            "name": "Protected, recalled, expired, pending and oversized photo quotes never fetch plaintext preview bytes; ordinary photos reuse owner-scoped availability and object URLs.",
+            "reference": "docs/help/topics/history.md#follow-a-reply"
+          },
+          {
+            "name": "Clicking or keyboard-activating a quote centers and highlights its exact source through the existing virtualized viewport.",
+            "reference": "docs/help/topics/history.md#follow-a-reply"
+          },
+          {
+            "name": "Older-source navigation validates the exact conversation and message identity, owner/runtime lifetime and latest request; unavailable sources do not open substitute content.",
+            "reference": "docs/help/topics/history.md#follow-a-reply"
+          }
+        ]
+      },
+      "escalation": [
+        "Run e2e/reply-preview.spec.ts and the reply-to scenario in e2e/chat.spec.ts to verify thumbnails, keyboard navigation and exact-source scrolling."
+      ]
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-call-media-acceptance",
+      "paths": [
+        "frontend/src/store/calls.ts",
+        "frontend/src/store/calls.test.ts",
+        "frontend/src/features/chat/CallDialog.tsx",
+        "frontend/src/features/chat/CallConnectionNotice.tsx",
+        "frontend/src/features/chat/CallDialog.test.ts",
+        "frontend/e2e/call-dialog-harness.tsx",
+        "frontend/e2e/helpers/call-media-harness.ts",
+        "frontend/e2e/call-media.spec.ts",
+        "frontend/e2e/call-readiness.spec.ts",
+        "frontend/e2e/call-media-physical.spec.ts",
+        "docs/help/topics/calls.md"
+      ],
+      "browser": [
+        "e2e/call-media.spec.ts",
+        "e2e/call-readiness.spec.ts"
+      ]
+    },
     {
       "id": "group-file-network-cost-acceptance",
       "paths": [
@@ -2218,6 +2463,41 @@
         "e2e/language-settings.spec.ts",
         "e2e/login-recovery.spec.ts",
         "e2e/ui-audit-shell.spec.ts"
+      ]
+    },
+    {
+      "id": "frontend-image-live-text-acceptance",
+      "paths": [
+        "frontend/src/features/chat/MediaPreview.tsx",
+        "frontend/src/features/chat/MediaPreview.test.ts",
+        "frontend/src/lib/sensitiveClipboard.ts",
+        "frontend/src/lib/sensitiveClipboard.test.ts",
+        "frontend/e2e/media-recovery.spec.ts",
+        "docs/help/topics/send-files.md"
+      ],
+      "browser": [
+        "e2e/media-recovery.spec.ts",
+        "e2e/protected-messages.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
+    {
+      "id": "frontend-reply-preview-acceptance",
+      "paths": [
+        "frontend/src/features/chat/ReplyPreview.tsx",
+        "frontend/src/features/chat/ReplyPreview.test.ts",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/features/chat/Composer.tsx",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/e2e/reply-preview.spec.ts",
+        "frontend/src/features/chat/replyNavigation.ts",
+        "frontend/src/features/chat/replyNavigation.test.ts"
+      ],
+      "browser": [
+        "e2e/reply-preview.spec.ts",
+        "e2e/chat.spec.ts"
       ]
     }
   ]

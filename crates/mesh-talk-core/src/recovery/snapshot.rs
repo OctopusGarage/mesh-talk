@@ -380,6 +380,8 @@ pub struct SnapshotValidator {
     account_contacts: HashSet<String>,
     event_ids: HashMap<[u8; 32], SignedEventInfo>,
     file_cards: HashMap<[u8; 32], FileCardInfo>,
+    file_identities:
+        HashMap<[u8; 32], crate::node::file_message_identity::FileMessageIdentityBinding>,
     media: HashMap<(bool, [u8; 32]), MediaProgress>,
     favorites: HashSet<String>,
     favorite_files: HashMap<[u8; 32], u64>,
@@ -410,6 +412,7 @@ struct FileCardInfo {
     file_conv: [u8; 32],
     from: String,
     wall_clock: u64,
+    manifest_digest: [u8; 32],
 }
 
 impl SnapshotValidator {
@@ -456,6 +459,7 @@ impl SnapshotValidator {
             account_contacts: HashSet::new(),
             event_ids: HashMap::new(),
             file_cards: HashMap::new(),
+            file_identities: HashMap::new(),
             media: HashMap::new(),
             favorites: HashSet::new(),
             favorite_files: HashMap::new(),
@@ -734,6 +738,25 @@ impl SnapshotValidator {
                 progress.hasher.update(bytes);
             }
             SnapshotRecordV1::SignedEvent { event } => {
+                if crate::node::file_message_identity::is_bundle(event) {
+                    let (binding, aliases) =
+                        crate::node::file_message_identity::validated_snapshot_binding(event)
+                            .ok_or(SnapshotError::InvalidFileCard)?;
+                    if self.file_identities.len() + aliases.len()
+                        > crate::node::file_message_identity::MAX_INDEXED_ALIASES
+                    {
+                        return Err(SnapshotError::SizeLimit);
+                    }
+                    for alias in aliases {
+                        if self
+                            .file_identities
+                            .insert(*alias.as_bytes(), binding.clone())
+                            .is_some_and(|old| old != binding)
+                        {
+                            return Err(SnapshotError::InvalidFileCard);
+                        }
+                    }
+                }
                 if event.ciphertext.len() > MAX_RECORD_BYTES || event.parents.len() > 1024 {
                     return Err(SnapshotError::SizeLimit);
                 }
@@ -777,6 +800,7 @@ impl SnapshotValidator {
                             file_conv: *card.file_conv().as_bytes(),
                             from: from.clone(),
                             wall_clock: *wall_clock,
+                            manifest_digest: Sha256::digest(manifest).into(),
                         },
                     )
                     .is_some()
@@ -818,7 +842,14 @@ impl SnapshotValidator {
             event.kind != EventKind::FileManifest
                 || event.from != card.from
                 || event.wall_clock != card.wall_clock
-                || event.conversation != card.conversation
+                || (event.conversation != card.conversation
+                    && !self.file_identities.get(id).is_some_and(|binding| {
+                        binding.host.as_bytes() == &card.conversation
+                            && binding.file.as_bytes() == &card.file_conv
+                            && binding.source == card.from
+                            && binding.wall_clock == card.wall_clock
+                            && binding.manifest_digest == card.manifest_digest
+                    }))
                 || event.conversation == card.file_conv
                 || card.conversation == card.file_conv
         }) {

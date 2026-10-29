@@ -36,6 +36,18 @@ Use **Received files** in the sidebar to browse locally known file entries. If a
 Completed downloads provide **Reveal**. If writing the download fails,
 check that the destination is writable, then use the file's retry action.
 
+## Copy text from an image
+
+In the macOS desktop app, click an ordinary image in the conversation to enlarge
+it. Move the pointer over the words, pause briefly, then drag to select the text.
+Press **Command-C**, or right-click the selection and choose **Copy**. Recognition
+uses macOS Live Text and depends on the system's support for the image and language.
+Other platforms keep their existing image preview.
+
+Copied text follows your copy-confirmation and clipboard-clearing settings in
+**Privacy & security**. Protected images do not allow text selection or copying.
+Press **Escape** or use the close button to return to the conversation.
+
 ## Further reference
 
 [File receiving settings](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/settings.md#receiving-and-saving-files)

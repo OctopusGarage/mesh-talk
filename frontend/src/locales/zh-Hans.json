@@ -317,6 +317,8 @@
     "source_unscoped": "签名发现记录（网络范围未确定）"
   },
   "message": {
+    "sticker": "[表情]",
+    "recalledSummary": "[消息已撤回]",
     "expiresIn": "发送后倒计时 {{time}}，到期双方消息均消失",
     "delivery": {
       "postOfficeDisabled": "上次尝试时，本机没有已知的直接路由，且邮局发送已关闭。如需使用可信邮局，请检查连接设置。",
@@ -349,6 +351,7 @@
       "help": "已确认的副本表示，其他账号的成员曾向你的某台已关联设备报告持久保存。副本之后可能丢失；这不是送达或已读回执。"
     },
     "sending": "发送中…",
+    "image": "图片",
     "reply": "回复",
     "react": "回应",
     "retry": "重试",
@@ -439,7 +442,30 @@
     "textValue": "标注文字",
     "undo": "撤销标注",
     "cancel": "取消",
-    "send": "发送截图"
+    "send": "发送截图",
+    "shortcuts": {
+      "recording": "请按快捷键…",
+      "recordingHint": "请按修饰键与字母、数字或功能键；Esc 取消。",
+      "bindingHint": "点击修改，仅保存在本设备。",
+      "unassigned": "未设置",
+      "clear": "清除快捷键",
+      "clearAction": "清除“{{action}}”的快捷键",
+      "invalid": "请使用修饰键搭配字母、数字或 F1–F12。",
+      "reserved": "该快捷键用于编辑或系统操作，请选择其他组合。",
+      "duplicate": "请为两种截图方式设置不同的快捷键。",
+      "empty": "请先设置至少一个快捷键，再启用全局触发。",
+      "globalTitle": "允许全局截图快捷键",
+      "globalDescription": "其他应用在前台时也可触发。Mesh-Talk 需要保持运行且已解锁。",
+      "checking": "正在检查全局快捷键…",
+      "globalActive": "全局快捷键已生效",
+      "globalInactive": "全局快捷键不可用，应用内快捷键仍可使用",
+      "appOnly": "快捷键仅在 Mesh-Talk 内生效",
+      "restore": "恢复默认",
+      "registrationFailed": "无法注册全局快捷键。请修改按键或解除其他应用的占用后重试。",
+      "scopeApp": "应用内",
+      "scopeGlobal": "全局",
+      "chooseConversation": "请先选择聊天，再使用截图。"
+    }
   },
   "settings": {
     "originSharing": "共享我的来源邮局",
@@ -801,6 +827,14 @@
     "experimentalHint": "实验性功能——通话可能不稳定",
     "voice": "语音通话",
     "video": "视频通话",
+    "unavailableTitle": "当前连接暂不支持通话",
+    "unavailableHint": "目前没有可用于通话的直接连接。请检查双方网络，或使用允许设备互通的 VPN。",
+    "connectionHint": "无法建立通话连接。请确认双方应用保持打开，并检查网络或 VPN 是否允许设备互通。",
+    "captureHint": "无法使用麦克风。请检查系统权限和设备连接后重试。",
+    "timeoutHint": "对方未及时接听，或媒体连接未能建立。请检查连接后重试。",
+    "checkConnection": "检查连接",
+    "retry": "重试",
+    "technicalDetails": "技术详情",
     "ringtone": {
       "classic": "经典铃声",
       "oldPhone": "老式电话",
@@ -916,7 +950,7 @@
     "trigger": "成员",
     "title": "成员",
     "description": "此频道中的所有成员。",
-    "addPeer": "添加对端",
+    "addPeer": "添加成员",
     "owner": "群主",
     "dissolve": "解散群组",
     "dissolveConfirm": "确定为所有成员解散此群组吗？成员将保留聊天记录，但此后无法发送消息或更改成员。",
@@ -1191,7 +1225,7 @@
     "copyFailed": "复制失败，请选择上方说明并手动复制。",
     "group": "群聊",
     "person": "联系人",
-    "selectedCount": "已选择 {{count}} / 16",
+    "selectedCount": "已选 {{count}} / {{total}} 个",
     "search": "搜索联系人和群组",
     "selectedOnly": "仅显示已选",
     "noMatches": "没有匹配的会话。",

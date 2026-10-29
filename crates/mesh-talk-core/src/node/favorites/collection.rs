@@ -95,7 +95,18 @@ impl Node {
                             || (m.expires_at_ms.is_none_or(|end| end > now)
                                 && (m.text.to_lowercase().contains(&query)
                                     || m.file.as_ref().is_some_and(|file| {
-                                        file.name.to_lowercase().contains(&query)
+                                        if crate::file::sticker::valid_manifest(
+                                            &file.name, &file.mime, file.size, file.media,
+                                        ) && let Some(metadata) =
+                                            crate::file::sticker::from_name(&file.name)
+                                        {
+                                            metadata.fallback.to_lowercase().contains(&query)
+                                                || metadata.label.is_some_and(|label| {
+                                                    label.to_lowercase().contains(&query)
+                                                })
+                                        } else {
+                                            file.name.to_lowercase().contains(&query)
+                                        }
                                     })))
                     })
             })

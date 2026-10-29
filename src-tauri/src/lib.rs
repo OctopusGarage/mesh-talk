@@ -45,6 +45,7 @@ pub mod recovery;
 mod routed_discovery;
 mod runtime_admission;
 mod runtime_bootstrap;
+mod screenshot_shortcuts;
 pub mod services;
 pub mod session_store;
 pub mod settings;
@@ -176,10 +177,8 @@ pub fn run_tauri_configured(
         // so we surface the existing window instead of spawning a duplicate that would
         // fight over the keystore + discovery port.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main").map(|w| w.as_ref().window()) {
-                let _ = window.unminimize();
-                let _ = crate::window_visibility::show(&window);
-                let _ = window.set_focus();
+            if let Err(error) = crate::window_visibility::restore_main(app) {
+                log::warn!("Cannot restore main window on repeated launch: {error}");
             }
         }));
     // Extensions come after single-instance, which must remain the first plugin.
@@ -191,6 +190,11 @@ pub fn run_tauri_configured(
                     tauri_plugin_window_state::StateFlags::all()
                         & !tauri_plugin_window_state::StateFlags::VISIBLE,
                 )
+                .build(),
+        )
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(crate::screenshot_shortcuts::handle_shortcut)
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
@@ -223,6 +227,7 @@ pub fn run_tauri_configured(
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         handle.state::<crate::app_lock::AppLock>().tick(&handle);
+                        crate::screenshot_shortcuts::suspend_retired(&handle).await;
                     }
                 });
             }
@@ -324,6 +329,7 @@ pub fn run_tauri_configured(
         .manage(app_state.app_lock().clone())
         .manage(app_state)
         .manage(settings_state)
+        .manage(crate::screenshot_shortcuts::ScreenshotShortcutState::default())
         .manage(crate::events::NotificationContextState::default())
         .manage(trust_state)
         .manage(favorites_state)
@@ -475,6 +481,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::get_presence,
                 crate::chat_commands::rescan_peers,
                 crate::chat_commands::probe_peer_endpoint,
+                crate::chat_commands::register_sticker_source,
                 crate::chat_commands::write_temp_file,
                 crate::chat_commands::delete_temp_file,
                 crate::chat_commands::capture_screen,
@@ -503,6 +510,10 @@ pub fn run_tauri_configured(
                 crate::drafts::save_conversation_drafts,
                 crate::drafts::publish_legacy_conversation_drafts,
                 crate::settings::set_app_settings,
+                crate::screenshot_shortcuts::sync_screenshot_shortcuts,
+                crate::screenshot_shortcuts::suspend_screenshot_shortcuts,
+                crate::screenshot_shortcuts::pause_screenshot_shortcuts,
+                crate::screenshot_shortcuts::wake_screenshot_window,
                 crate::trust::get_trust,
                 crate::trust::mark_verified,
                 crate::account_documents::get_account_documents,
@@ -540,10 +551,20 @@ pub fn run_tauri_configured(
                 }
             }
         })
-        .run(context)
+        .build(context)
         .unwrap_or_else(|e| {
             // A failed launch must be a non-zero exit, not a silent success.
             log::error!("Error while running tauri application: {e}");
             std::process::exit(1);
+        })
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. })
+                && let Err(error) = crate::window_visibility::restore_main(app)
+            {
+                log::warn!("Cannot restore main window on macOS reopen: {error}");
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
         });
 }

@@ -188,6 +188,7 @@ pub(in crate::node) struct OpaqueMailboxProgress {
     mailbox: RelayMailbox,
     recipient: PublicIdentity,
     relay: PublicIdentity,
+    identity_controls: Option<Vec<Event>>,
     conversation: Option<ConversationId>,
     sync: super::session::SyncProgress,
     uploaded: Vec<(EventId, EventId)>,
@@ -207,6 +208,7 @@ impl OpaqueMailboxProgress {
             mailbox,
             recipient: recipient.clone(),
             relay: relay.clone(),
+            identity_controls: None,
             conversation,
             sync: super::session::SyncProgress::default(),
             uploaded: Vec::new(),
@@ -324,6 +326,31 @@ impl Node {
                     .expect("projection lock not poisoned")
                     .authorized_event_ids(&conv)?;
             }
+            if progress.identity_controls.is_none() {
+                progress.identity_controls =
+                    Some(self.file_message_identity_controls_for(&progress.recipient, false)?);
+            }
+            if let Some(identities) = &progress.identity_controls {
+                let guarded = self.sync_store(&progress.recipient);
+                for bundle in identities {
+                    let mut authorized = false;
+                    for (file, manifest) in super::file_message_identity::bundle_references(bundle)
+                    {
+                        if guarded
+                            .lock()
+                            .expect("projection lock")
+                            .file_message_identity(&file, &manifest)?
+                            .is_some_and(|current| current.id == bundle.id)
+                        {
+                            authorized = true;
+                            break;
+                        }
+                    }
+                    if authorized {
+                        controls.insert(bundle.id, bundle.clone());
+                    }
+                }
+            }
             controls.extend(
                 self.file_consent_events(&progress.recipient)?
                     .into_iter()
@@ -424,6 +451,40 @@ impl Node {
         for (outer_id, event) in inner {
             if !self.relay_receive_allowed(channel.peer_identity()) {
                 break;
+            }
+            if super::file_message_identity::is_bundle(&event) {
+                use super::file_message_identity::FileMessageIdentityImportError;
+                if self
+                    .delivery_suspended
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    break;
+                }
+                let source =
+                    super::file_message_identity::bundle_accounts(&event).map(|(source, _)| source);
+                let actor = self
+                    .historical_author(&progress.recipient.ed25519_pub)
+                    .filter(|proof| proof.public() == progress.recipient)
+                    .and_then(|proof| proof.account_id());
+                if source.is_none()
+                    || source != actor
+                    || !self.known_account_allowed(&progress.recipient)
+                {
+                    processed.push(outer_id);
+                    continue;
+                }
+                match self.import_file_message_identity_checked(event) {
+                    Ok(()) | Err(FileMessageIdentityImportError::Invalid(_)) => {
+                        processed.push(outer_id)
+                    }
+                    Err(
+                        FileMessageIdentityImportError::MissingProof
+                        | FileMessageIdentityImportError::Persistence(_),
+                    ) => {
+                        progress.defer_event(outer_id)?;
+                    }
+                }
+                continue;
             }
             match self.accept_file_consent_event(&event, &progress.recipient) {
                 Ok(true) => {

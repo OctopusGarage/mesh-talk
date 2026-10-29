@@ -153,6 +153,33 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     b.drain_from_post_office().await;
     assert_eq!(offers.try_recv().unwrap().file_conv, file);
     assert!(b.read_file(file).is_err());
+    let identity = a.file_message_identity_bundle(card).unwrap().unwrap();
+    let mut malformed = identity.ciphertext.clone();
+    malformed.push(255);
+    let malformed = crate::eventlog::Event::new(
+        &a.identity,
+        identity.conversation_id,
+        identity.seq,
+        identity.parents.clone(),
+        identity.lamport,
+        identity.wall_clock,
+        identity.kind,
+        malformed,
+    );
+    let identity_mailbox =
+        crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap();
+    let malformed_outer = identity_mailbox.wrap(&malformed).unwrap();
+    qs.lock().unwrap().accept(malformed_outer.clone()).unwrap();
+    b.drain_from_post_office().await;
+    assert!(
+        b.opaque_seen
+            .lock()
+            .unwrap()
+            .get(&identity_mailbox.id())
+            .is_some_and(|seen| seen.contains(&malformed_outer.id)),
+        "malformed reserved identity controls must be consumed, not retained in the deferred queue"
+    );
+    assert!(!b.log.lock().unwrap().has(&malformed.id));
     b.decide_attachment(file, true).unwrap();
     let pending_controls = b.file_consent_events(&ap.public()).unwrap();
     assert!(!pending_controls.is_empty());
@@ -373,6 +400,21 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         "relay custody before recipient save must not confirm completion"
     );
     assert_eq!(b.read_file(file).unwrap(), bytes);
+    let identity = a.file_message_identity_bundle(binding).unwrap().unwrap();
+    let host = super::conversation::account_conversation_id(&a.account_id(), &b.account_id());
+    assert!(
+        b.has_file_message_identity(host, binding),
+        "source identity metadata must cross federation without a direct client route"
+    );
+    assert!(!b.log.lock().unwrap().has(&identity.id));
+    assert!(!ps.lock().unwrap().has(&identity.id));
+    assert!(!qs.lock().unwrap().has(&identity.id));
+    assert!(super::file_consent::Decision::open(&identity).is_none());
+    assert!(
+        b.accept_file_consent_event(&identity, &ap.public())
+            .unwrap(),
+        "legacy reserved-control handling consumes the new identity subtype without creating chat history"
+    );
     let saved = bd.path().join("received.bin");
     b.save_file(file, &saved).unwrap();
     b.drain_from_post_office().await;
@@ -400,11 +442,12 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         "a later policy change must not replace completed delivery with an approval prompt"
     );
     let adopted_account = Account::generate();
-    b.delivery
-        .lock()
-        .unwrap()
-        .prepare_profile_adoption(&adopted_account.account_id())
-        .unwrap();
+    b.persist_account_adoption(
+        &adopted_account.public(),
+        || Ok(()),
+        || Ok(adopted_account.public()),
+    )
+    .unwrap();
     drop(b);
     let (adopted, _, _) = node_with_files(
         bd.path(),

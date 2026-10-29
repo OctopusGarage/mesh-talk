@@ -82,7 +82,7 @@ Paths below are relative to the repository root. `core/` abbreviates
 | Durable outgoing delivery                      | `core/node/delivery_store.rs`, `delivery_runtime.rs`, `delivery_receipt.rs`, `delivery_observation.rs`                                                                          | Storage owns persisted transitions; runtime owns bounded direct/relay progress and scheduling; receipts own exact completion evidence. Runtime observations describe exact attempts under the [delivery observation contract](network-design-reference.md#runtime-delivery-observations). |
 | Post-office routing/federation                 | `core/postoffice/` (including signed network membership in `network.rs`), `core/node/postbox.rs`, `opaque_relay.rs`, `bridge_directory.rs`, `bridge_client.rs`, `relay_policy.rs`                                                     | Reuse relay eligibility, opaque projection and incremental mailbox admission; directory participation does not grant relay or conversation authority.                                                                                  |
 | Transport/session reuse                        | `core/transport/`, `core/node/transport.rs`, `session_pool.rs`, `session.rs`, `account_session.rs`                                                                                                    | Reuse authenticated bounded sessions; `session_pool.rs` also owns exact-endpoint authentication admission before TCP permits. Feature modules do not open ad hoc sockets or create their own retry loops.                                                                                                                      |
-| Files/folders                                  | `core/file/`, `core/node/files.rs`, `sticker_media.rs`, `filebook.rs`, `file_consent.rs`, `file_completion.rs`                                                                                      | Consent, chunk integrity and recipient completion remain distinct transitions. Presentation intake belongs to `ui/features/chat/attachments/useAttachmentIntake.ts`; the store retains intent acceptance/retry.                        |
+| Files/folders                                  | `core/file/`, `core/node/files.rs`, `sticker_media.rs`, `filebook.rs`, `file_consent.rs`, `file_completion.rs`, `file_message_identity.rs`                                                                                      | Consent, chunk integrity and recipient completion remain distinct transitions. Presentation intake belongs to `ui/features/chat/attachments/useAttachmentIntake.ts`; the store retains intent acceptance/retry.                        |
 | History/search/recall/reactions                | `core/node/queries.rs`, `search.rs`, `recall.rs`, `reactions.rs`                                                                                                                | Query through core; [recent-search references](ARCHITECTURE.md#recent-search-references) reuse canonical history identity and coverage. Frontend uses verified account bindings and centralized contact visibility.                                                                                                                                        |
 | Linking and sibling replay                     | `core/node/pairing.rs`, `linking.rs`, `enrollment.rs`, `account_sync*.rs`, `account_preferences.rs`, `account_access.rs`                                                                           | Pairing authority and replay policy stay separate from the dialog. Host adoption belongs to `src-tauri/src/linked_account.rs`; signed-out enrollment belongs to `device_enrollment.rs` and reuses the recovery publication journal; private login application belongs to `shared_account_login.rs`.                                                                                            |
 | Calls                                          | `core/node/call.rs`, `ui/store/calls.ts`, `ui/features/chat/WebRtcTestDialog.tsx`                                                                                               | Core owns authenticated signaling; the call store owns call lifecycle and WebRTC media; the test dialog owns local media diagnostics. Do not reuse mailbox custody as live signaling.                                                  |
@@ -237,7 +237,12 @@ that actually replace runtime-owned resources.
 Account DM arrivals carry the authenticated sender account and the envelope's
 logical message ID from core through desktop IPC. The receipt ledger uses that
 same identity as account history, so live callbacks, repeat delivery and history
-coverage cannot count one logical message twice. Independent messages with equal
+coverage cannot count one logical message twice. File messages use the sender's
+explicit signed binding of device manifests to a logical file message; their
+exact consent/completion IDs remain separate. Core history exposes authenticated
+aliases to the host. The reception ledger merges late alias evidence under that
+canonical identity, preserves read facts and bounds optional alias metadata
+independently of unread entries. Independent messages with equal
 text retain separate IDs and counts. Legacy providers without a logical identity
 retain their compatibility counter path.
 
@@ -327,6 +332,8 @@ it does not choose another account or restore a second theme projection.
 visibility precedence and its bounded fallback. Window-state persistence retains
 geometry and decoration, while launch policy owns visibility. A renderer
 acknowledgement is presentation-only and grants no runtime or content authority.
+Explicit main-window restoration also belongs to this owner: Dock reopen,
+single-instance activation and tray actions reuse its show/unminimize/focus path.
 
 ### Focused validation ownership
 
@@ -494,6 +501,11 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   for retry and cancellation never writes the clipboard. Confirmed screenshots
   join the composer's pending files; only the normal Send action hands them to delivery. `screenshot/` owns image-coordinate geometry,
   annotation painting, floating controls and temporary fullscreen restoration.
+  Its shortcut router shares that intake path for local and opt-in global
+  activation. `src-tauri/src/screenshot_shortcuts.rs` owns OS registration and
+  native session/lock authority; the settings controller owns acknowledged local
+  bindings. Registration tokens prevent retired renderer cleanup from releasing
+  newer keys. See [screenshot shortcuts](settings.md#screenshot-shortcuts).
 - `DiagnosticsDialog.tsx` delegates observations and native actions to
   `diagnostics/useDiagnosticsController.ts`. Each opening owns independent
   refresh generations, serial peer polling, bounded activity history and

@@ -109,6 +109,34 @@ pub trait NetworkSyncStore {
         file: &ConversationId,
         manifest: &EventId,
     ) -> Result<Option<Event>, LogError>;
+    /// Optional signed logical attachment identity; never part of public history.
+    fn file_message_identity(
+        &self,
+        _file: &ConversationId,
+        _manifest: &EventId,
+    ) -> Result<Option<Event>, LogError> {
+        Ok(None)
+    }
+    fn accept_file_message_identity(&mut self, _bundle: Event) -> Result<bool, LogError> {
+        Ok(false)
+    }
+    /// Optional exact sticker reconstruction from ciphertext-free signed headers.
+    fn sticker_file_consent(
+        &mut self,
+        _file: &ConversationId,
+        _manifest: &EventId,
+        _headers: Vec<Event>,
+    ) -> Result<Option<Event>, LogError> {
+        Ok(None)
+    }
+    /// Optional metadata-only recovery for an already authorized exact file offer.
+    fn sticker_file_proof(
+        &self,
+        _file: &ConversationId,
+        _manifest: &EventId,
+    ) -> Result<Option<Vec<Event>>, LogError> {
+        Ok(None)
+    }
     fn admission_denied(&self) -> bool;
 }
 

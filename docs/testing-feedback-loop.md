@@ -936,10 +936,16 @@ to be stopped.
   `MESH_TALK_PHYSICAL_MEDIA=1 npx playwright test e2e/call-media-physical.spec.ts`
   from `frontend/`. Override `MESH_TALK_MEDIA_LOCAL_IP` and
   `MESH_TALK_MEDIA_REMOTE_IP` with the actual directly reachable Tailscale IPs.
-  It uses shared browser media
-  fixtures, authenticated backend signaling and an independently checked
-  Tailscale ICE pair between Chromium and Windows Edge. Synthetic capture
-  verifies transport/decode and cleanup, not native WKWebView or camera quality.
+  For two machines on one physical LAN, also set
+  `MESH_TALK_MEDIA_TOPOLOGY=lan` and supply their private LAN addresses instead.
+  The opt-in spec serially exercises pure voice and video using disposable SDK
+  identities, authenticated backend signaling and an independently checked exact
+  ICE pair between Chromium and Windows Edge. It verifies decoded audio with
+  nonzero energy, video frames where applicable, the shipped call dialog's
+  unmuted playback, and capture/connection cleanup on both machines. Screenshots
+  and JSON evidence persist under the selected Playwright output directory.
+  Synthetic capture verifies transport/decode and cleanup, not native WKWebView,
+  physical microphone/camera quality or acoustic speaker output.
 
 Set `MESH_TALK_E2E_MAC2015_SSH=ys-aquria@192.168.3.72` when the `.local` alias
 is unavailable; `MESH_TALK_E2E_BASE_PORT` isolates disposable port ranges. Keep

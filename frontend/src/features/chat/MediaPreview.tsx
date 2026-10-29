@@ -16,6 +16,8 @@ import {
 } from "@/store/fileAvailability";
 import { ReceiveProgress } from "./ReceiveProgress";
 import { isVideo } from "@/lib/mediaTypes";
+import { isMacOverlay } from "@/lib/platform";
+import { copySensitiveText } from "@/lib/sensitiveClipboard";
 import {
   blobMime,
   useFileObjectUrl,
@@ -45,7 +47,12 @@ export function MediaPreview({
   readOnly?: boolean;
 }) {
   const { t } = useTranslation();
-  const displayName = attachmentLabel(name, mime ?? "", { media: true, size });
+  const displayName = attachmentLabel(
+    name,
+    mime ?? "",
+    { media: true, size },
+    t("message.sticker"),
+  );
   const motionOK = useMotionOK();
   const setError = useChat((s) => s.setError);
   const savedPath = useSavedDownloads()[fileConv];
@@ -60,6 +67,8 @@ export function MediaPreview({
   );
   const [lightbox, setLightbox] = useState(false);
   const [saving, setSaving] = useState(false);
+  const nativeImageText = isMacOverlay();
+  const backdropPointerDown = useRef(false);
   const playerRef = useRef<HTMLVideoElement>(null);
   const closeLightbox = useCallback(() => {
     playerRef.current?.pause();
@@ -74,7 +83,11 @@ export function MediaPreview({
       closeLightbox();
     };
     document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      // WebKit's recognized text belongs to this preview, including during exit.
+      window.getSelection()?.removeAllRanges();
+    };
   }, [lightbox, closeLightbox]);
   const layoutId = motionOK ? `media-${fileConv}` : undefined;
   const layoutTransition = { duration: 0.22, ease };
@@ -90,7 +103,9 @@ export function MediaPreview({
     if (!lease.current() || !available || saving) return;
     try {
       setSaving(true);
-      await saveAttachment({ fileConv, name, mime }, lease, { mode: "as" });
+      await saveAttachment({ fileConv, name, mime, size, media: true }, lease, {
+        mode: "as",
+      });
     } catch (e) {
       if (lease.current() && markUnavailableFileError(fileConv, e)) return;
       if (lease.current())
@@ -361,7 +376,18 @@ export function MediaPreview({
             aria-modal="true"
             aria-label={displayName}
             data-testid="file-image-lightbox"
-            onClick={closeLightbox}
+            onPointerDown={(event) => {
+              backdropPointerDown.current =
+                event.target === event.currentTarget;
+            }}
+            onClick={(event) => {
+              // A selection drag that ends outside the image must not dismiss it.
+              if (
+                event.target === event.currentTarget &&
+                backdropPointerDown.current
+              )
+                closeLightbox();
+            }}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0, pointerEvents: "none" }}
@@ -371,6 +397,7 @@ export function MediaPreview({
             <button
               type="button"
               aria-label={t("common.close")}
+              onClick={closeLightbox}
               className="absolute right-4 top-4 rounded-full bg-background/80 p-2 text-foreground hover:bg-background"
             >
               <X className="h-4 w-4" />
@@ -382,7 +409,30 @@ export function MediaPreview({
               layoutId={layoutId}
               transition={layoutTransition}
               onClick={(e) => e.stopPropagation()}
-              className="max-h-full max-w-full rounded-lg object-contain"
+              onContextMenu={
+                nativeImageText ? (event) => event.stopPropagation() : undefined
+              }
+              onCopy={
+                nativeImageText
+                  ? (event) => {
+                      const text = window.getSelection()?.toString();
+                      if (!text) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      const lease = captureChatOwnership();
+                      if (!lease.current()) return;
+                      void copySensitiveText(
+                        text,
+                        t("settings.confirmCopyPrompt"),
+                        (value) =>
+                          event.clipboardData.setData("text/plain", value),
+                      ).catch(() => {
+                        if (lease.current()) setError(t("common.copyFailed"));
+                      });
+                    }
+                  : undefined
+              }
+              className={`max-h-full max-w-full rounded-lg object-contain${nativeImageText ? " select-text" : ""}`}
             />
             {detailBar}
           </motion.div>

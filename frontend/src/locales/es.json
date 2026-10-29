@@ -317,6 +317,8 @@
     "source_unscoped": "Descubrimiento firmado (ámbito de red no determinado)"
   },
   "message": {
+    "sticker": "[Sticker]",
+    "recalledSummary": "[Mensaje retirado]",
     "expiresIn": "Caduca en {{time}} tras el envío; se elimina en ambos lados",
     "delivery": {
       "postOfficeDisabled": "En el último intento, este dispositivo no conocía una ruta directa y el envío por oficina postal estaba desactivado. Revisa la conexión si quieres usar una oficina postal de confianza.",
@@ -349,6 +351,7 @@
       "help": "Una copia confirmada significa que un miembro externo informó de almacenamiento duradero a uno de tus dispositivos vinculados. Las copias pueden perderse después; no confirma entrega ni lectura."
     },
     "sending": "enviando…",
+    "image": "Foto",
     "reply": "Responder",
     "react": "Reaccionar",
     "retry": "Reintentar",
@@ -439,7 +442,30 @@
     "textValue": "Texto de anotación",
     "undo": "Deshacer anotación",
     "cancel": "Cancelar",
-    "send": "Enviar captura"
+    "send": "Enviar captura",
+    "shortcuts": {
+      "recording": "Pulsa un atajo…",
+      "recordingHint": "Pulsa un modificador y una letra, número o tecla de función. Esc cancela.",
+      "bindingHint": "Haz clic para cambiar. Solo se guarda en este dispositivo.",
+      "unassigned": "Sin asignar",
+      "clear": "Borrar atajo",
+      "clearAction": "Borrar atajo para {{action}}",
+      "invalid": "Usa un modificador con una letra, número o F1–F12.",
+      "reserved": "Este atajo está reservado para edición o acciones del sistema. Elige otro.",
+      "duplicate": "Elige un atajo distinto para cada acción de captura.",
+      "empty": "Asigna al menos un atajo antes de activar el uso global.",
+      "globalTitle": "Usar atajos de captura globales",
+      "globalDescription": "Permite usar estos atajos desde otras aplicaciones. Mesh-Talk debe estar abierto y desbloqueado.",
+      "checking": "Comprobando atajos globales…",
+      "globalActive": "Atajos globales activos",
+      "globalInactive": "Atajos globales no disponibles; los de la aplicación siguen funcionando",
+      "appOnly": "Los atajos funcionan dentro de Mesh-Talk",
+      "restore": "Restaurar valores",
+      "registrationFailed": "No se pudieron registrar los atajos globales. Cambia la combinación o libérala en la otra aplicación y reintenta.",
+      "scopeApp": "En la aplicación",
+      "scopeGlobal": "Global",
+      "chooseConversation": "Elige una conversación antes de tomar una captura."
+    }
   },
   "settings": {
     "originSharing": "Compartir mi oficina postal de origen",
@@ -801,6 +827,14 @@
     "experimentalHint": "Experimental: las llamadas pueden ser poco fiables",
     "voice": "Llamada de voz",
     "video": "Videollamada",
+    "unavailableTitle": "Llamadas no disponibles con esta conexión",
+    "unavailableHint": "No hay una conexión directa disponible para esta llamada. Comprueba ambas redes o utiliza una VPN que permita conectar los dispositivos.",
+    "connectionHint": "No se pudo establecer la llamada. Mantén ambas aplicaciones abiertas y comprueba que la red o la VPN permita conexiones directas.",
+    "captureHint": "No se pudo usar el micrófono. Comprueba sus permisos del sistema y la conexión del dispositivo, e inténtalo de nuevo.",
+    "timeoutHint": "El contacto no respondió a tiempo o no se pudo establecer la conexión multimedia. Comprueba la conexión e inténtalo de nuevo.",
+    "checkConnection": "Comprobar conexión",
+    "retry": "Reintentar",
+    "technicalDetails": "Detalles técnicos",
     "ringtone": {
       "classic": "Clásico",
       "oldPhone": "Teléfono antiguo",
@@ -916,7 +950,7 @@
     "trigger": "Miembros",
     "title": "Miembros",
     "description": "Todos los del canal.",
-    "addPeer": "Añadir un contacto",
+    "addPeer": "Añadir miembros",
     "owner": "Propietario",
     "dissolve": "Disolver canal",
     "dissolveConfirm": "¿Disolver este canal para todos? Los miembros conservarán el historial, pero ya no podrán enviar mensajes ni cambiar los miembros.",
@@ -1188,7 +1222,7 @@
     "copyFailed": "No se pudo copiar. Selecciona las instrucciones y cópialas manualmente.",
     "group": "Grupo",
     "person": "Persona",
-    "selectedCount": "{{count}} / 16 seleccionadas",
+    "selectedCount": "{{count}} / {{total}} seleccionadas",
     "search": "Buscar contactos y grupos",
     "selectedOnly": "Solo seleccionadas",
     "noMatches": "No hay conversaciones coincidentes.",

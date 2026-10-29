@@ -18,6 +18,12 @@ type MediaWindow = Window & {
 test("received media recovers when bytes become available with stable fileConv", async ({
   page,
 }) => {
+  // Chromium exercises the Mac integration wiring, not Apple's recognition engine.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "userAgent", {
+      get: () => "Macintosh; Mac OS X",
+    });
+  });
   await enterChat(page);
   await page.evaluate(() => {
     const w = window as unknown as MediaWindow;
@@ -133,7 +139,19 @@ test("received media recovers when bytes become available with stable fileConv",
     await page.getByRole("button", { name: "View full size" }).click();
     const lightbox = page.getByTestId("file-image-lightbox");
     await expect(lightbox).toBeVisible();
-    await expect(lightbox.locator("img")).toBeVisible();
+    const enlargedImage = lightbox.locator("img");
+    await expect(enlargedImage).toBeVisible();
+    await expect(enlargedImage).toHaveCSS("user-select", "text");
+    await expect(page.getByTestId("file-image")).toHaveCSS(
+      "user-select",
+      "none",
+    );
+    await enlargedImage.click({ button: "right" });
+    await expect(page.getByTestId("message-context-menu")).toHaveCount(0);
+    // Releasing a text-selection drag on the backdrop must keep the preview open.
+    await enlargedImage.dispatchEvent("pointerdown");
+    await lightbox.dispatchEvent("click");
+    await expect(lightbox).toBeVisible();
     await lightbox.getByRole("button", { name: "Close" }).click();
     await expect(lightbox).toHaveCount(0);
     await page.getByRole("button", { name: "View full size" }).click();

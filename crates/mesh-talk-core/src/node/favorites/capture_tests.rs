@@ -1032,3 +1032,61 @@ async fn encrypted_recovery_excludes_canonical_protected_favorites() {
         current = Node::open_recovery_profile(&destination, "fresh-password").unwrap();
     }
 }
+
+#[test]
+fn favorite_search_matches_sticker_presentation_and_respects_expiry() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let mut favorite = node
+        .save_message_favorite_guarded(source(&node), Default::default(), |c| c())
+        .unwrap();
+    let v2 = "mt-sticker-v2-cGFjazpjYXRzOmNhbG0K8J-ZggrpnZnkuIvlv4M.png";
+    for (name, mime, expiry, matched, hidden) in [
+        (v2, "image/png", None, "静下心", "mt-sticker-v2"),
+        (v2, "image/png", None, "🙂", "cGFjaz"),
+        (
+            "mt-sticker-v1-YnVpbHRpbjp3YXZlCvCfkYs.png",
+            "image/png",
+            None,
+            "👋",
+            "mt-sticker-v1",
+        ),
+        ("ordinary-report.png", "image/png", None, "report", "静下心"),
+        (v2, "image/jpeg", None, "mt-sticker-v2", "静下心"),
+        (v2, "image/png", Some(1), "first", "静下心"),
+    ] {
+        favorite.messages[1].file = Some(FavoriteFile {
+            file_conv: hex::encode([91; 32]),
+            name: name.into(),
+            size: 100,
+            mime: mime.into(),
+            media: true,
+        });
+        favorite.messages[1].expires_at_ms = expiry;
+        favorite.revision += 1;
+        node.favorites
+            .lock()
+            .unwrap()
+            .merge(FavoriteRecord {
+                generation: 1,
+                favorite: favorite.clone(),
+                removed: false,
+            })
+            .unwrap();
+        assert_eq!(
+            node.list_message_favorites(matched, 0, 10)
+                .unwrap()
+                .items
+                .len(),
+            1,
+            "{matched}"
+        );
+        assert!(
+            node.list_message_favorites(hidden, 0, 10)
+                .unwrap()
+                .items
+                .is_empty(),
+            "{hidden}"
+        );
+    }
+}

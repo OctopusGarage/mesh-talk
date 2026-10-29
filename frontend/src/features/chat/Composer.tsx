@@ -26,9 +26,12 @@ import { cn } from "@/lib/utils";
 import { ease, useMotionOK } from "@/lib/motion";
 import { installedStickers } from "@/lib/stickerPacks";
 import { usePacks } from "@/store/packs";
+import { ReplyPreview } from "./ReplyPreview";
 import { PackManager } from "@/components/PackManager";
 import type { ChatMessage } from "@/store/chat";
 import { clipboardFiles } from "./clipboardFiles";
+import { useSettings } from "@/store/settings";
+import { ariaShortcut, formatShortcut } from "@/lib/screenshotShortcuts";
 import {
   AttachmentBatchError,
   removeHandedOffFiles,
@@ -114,6 +117,7 @@ export function Composer({
   stagedScreenshot,
   placeholder,
   replyTo,
+  replyAuthorName,
   onCancelReply,
   mentionNames,
   myName,
@@ -149,6 +153,7 @@ export function Composer({
   stagedScreenshot?: File | null;
   placeholder: string;
   replyTo?: ChatMessage | null;
+  replyAuthorName?: string;
   onCancelReply?: () => void;
   mentionNames: string[];
   /** The current user's display name — excluded from mention suggestions (can't @ yourself). */
@@ -165,6 +170,19 @@ export function Composer({
   onExpiryDurationChange?: (durationMs: number | null) => void;
 }) {
   const { t } = useTranslation();
+  const screenshotBindings = useSettings((s) => s.screenshotShortcuts);
+  const globalScreenshotActive = useSettings(
+    (s) => s.screenshotRegistration.global_active,
+  );
+  const screenshotScope = t(
+    globalScreenshotActive
+      ? "screenshot.shortcuts.scopeGlobal"
+      : "screenshot.shortcuts.scopeApp",
+  );
+  const captureHint = (label: string, binding: string | null) =>
+    [label, formatShortcut(binding), binding ? screenshotScope : ""]
+      .filter(Boolean)
+      .join(" · ");
   const installedPacks = usePacks((s) => s.packs);
   const stickers = useMemo(
     () => installedStickers(installedPacks),
@@ -537,13 +555,11 @@ export function Composer({
           className="mx-auto mb-2 flex max-w-[820px] items-center gap-2 rounded-md bg-muted px-3 py-1.5 text-[13px]"
         >
           <CornerUpLeft className="h-3.5 w-3.5 shrink-0 text-signal" />
-          <span className="min-w-0 flex-1 truncate text-muted-foreground">
-            {t("composer.replyingTo")}{" "}
-            <span className="text-foreground">
-              {replyTo.protection
-                ? t("protectedMessage.label")
-                : replyTo.text || t("composer.message")}
+          <span className="min-w-0 flex-1">
+            <span className="mb-0.5 block text-xs text-muted-foreground">
+              {t("composer.replyingTo")}
             </span>
+            <ReplyPreview message={replyTo} authorName={replyAuthorName} />
           </span>
           <button
             onClick={onCancelReply}
@@ -798,11 +814,16 @@ export function Composer({
               animate="visible"
               exit="hidden"
               style={{ transformOrigin: "left bottom" }}
-              className="absolute bottom-full left-0 mb-2 w-56 max-w-full overflow-hidden rounded-lg border bg-popover p-1 shadow-elevation"
+              className="absolute bottom-full left-0 mb-2 w-80 max-w-full overflow-hidden rounded-lg border bg-popover p-1 shadow-elevation"
             >
               <button
                 type="button"
                 data-testid="screenshot-now"
+                title={captureHint(
+                  t("screenshot.now"),
+                  screenshotBindings.capture,
+                )}
+                aria-keyshortcuts={ariaShortcut(screenshotBindings.capture)}
                 onClick={() => {
                   setPanelPointerMotion(false);
                   setShowShot(false);
@@ -810,11 +831,28 @@ export function Composer({
                 }}
                 className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                {t("screenshot.now")}
+                <span className="flex items-center justify-between gap-3">
+                  <span>{t("screenshot.now")}</span>
+                  {screenshotBindings.capture && (
+                    <kbd
+                      aria-hidden
+                      className="shrink-0 text-[11px] text-muted-foreground"
+                    >
+                      {formatShortcut(screenshotBindings.capture)}
+                    </kbd>
+                  )}
+                </span>
               </button>
               <button
                 type="button"
                 data-testid="screenshot-hidden"
+                title={captureHint(
+                  t("screenshot.hidden"),
+                  screenshotBindings.capture_hidden,
+                )}
+                aria-keyshortcuts={ariaShortcut(
+                  screenshotBindings.capture_hidden,
+                )}
                 onClick={() => {
                   setPanelPointerMotion(false);
                   setShowShot(false);
@@ -822,7 +860,17 @@ export function Composer({
                 }}
                 className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                {t("screenshot.hidden")}
+                <span className="flex items-center justify-between gap-3">
+                  <span>{t("screenshot.hidden")}</span>
+                  {screenshotBindings.capture_hidden && (
+                    <kbd
+                      aria-hidden
+                      className="shrink-0 text-[11px] text-muted-foreground"
+                    >
+                      {formatShortcut(screenshotBindings.capture_hidden)}
+                    </kbd>
+                  )}
+                </span>
               </button>
             </motion.div>
           )}
@@ -845,11 +893,14 @@ export function Composer({
                 "h-9 w-9 shrink-0 rounded-md text-muted-foreground",
                 showShot && "bg-accent text-foreground",
               )}
-              title={t(
+              title={
                 screenshotAvailable
-                  ? "screenshot.trigger"
-                  : "screenshot.unavailable",
-              )}
+                  ? captureHint(
+                      t("screenshot.trigger"),
+                      screenshotBindings.capture,
+                    )
+                  : t("screenshot.unavailable")
+              }
               aria-label={t("screenshot.trigger")}
               aria-expanded={showShot}
               aria-controls="composer-screenshot-panel"

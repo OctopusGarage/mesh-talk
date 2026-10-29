@@ -317,6 +317,8 @@
     "source_unscoped": "簽名發現記錄（網路範圍未確定）"
   },
   "message": {
+    "sticker": "[表情]",
+    "recalledSummary": "[訊息已撤回]",
     "expiresIn": "傳送後倒數 {{time}}，到期雙方訊息均消失",
     "delivery": {
       "postOfficeDisabled": "上次嘗試時，本機沒有已知的直接路由，且郵局傳送已關閉。如需使用可信郵局，請檢查連線設定。",
@@ -349,6 +351,7 @@
       "help": "已確認的副本表示，其他帳號的成員曾向你的某台已連結裝置回報持久儲存。副本之後可能遺失；這不是送達或已讀回執。"
     },
     "sending": "傳送中…",
+    "image": "圖片",
     "reply": "回覆",
     "react": "回應",
     "retry": "重試",
@@ -439,7 +442,30 @@
     "textValue": "標註文字",
     "undo": "復原標註",
     "cancel": "取消",
-    "send": "傳送截圖"
+    "send": "傳送截圖",
+    "shortcuts": {
+      "recording": "請按快捷鍵…",
+      "recordingHint": "請按修飾鍵與字母、數字或功能鍵；Esc 取消。",
+      "bindingHint": "點擊修改，僅儲存在本裝置。",
+      "unassigned": "未設定",
+      "clear": "清除快捷鍵",
+      "clearAction": "清除「{{action}}」的快捷鍵",
+      "invalid": "請使用修飾鍵搭配字母、數字或 F1–F12。",
+      "reserved": "此快捷鍵用於編輯或系統操作，請選擇其他組合。",
+      "duplicate": "請為兩種截圖方式設定不同的快捷鍵。",
+      "empty": "請先設定至少一個快捷鍵，再啟用全域觸發。",
+      "globalTitle": "允許全域截圖快捷鍵",
+      "globalDescription": "其他應用程式在前景時也可觸發。Mesh-Talk 需要保持執行且已解鎖。",
+      "checking": "正在檢查全域快捷鍵…",
+      "globalActive": "全域快捷鍵已生效",
+      "globalInactive": "全域快捷鍵無法使用，應用程式內快捷鍵仍可使用",
+      "appOnly": "快捷鍵僅在 Mesh-Talk 內生效",
+      "restore": "恢復預設",
+      "registrationFailed": "無法註冊全域快捷鍵。請修改按鍵或解除其他應用程式的佔用後重試。",
+      "scopeApp": "應用程式內",
+      "scopeGlobal": "全域",
+      "chooseConversation": "請先選擇聊天，再使用截圖。"
+    }
   },
   "settings": {
     "originSharing": "分享我的來源郵局",
@@ -801,6 +827,14 @@
     "experimentalHint": "實驗性功能——通話可能不穩定",
     "voice": "語音通話",
     "video": "視訊通話",
+    "unavailableTitle": "目前連線暫不支援通話",
+    "unavailableHint": "目前沒有可用於通話的直接連線。請檢查雙方網路，或使用允許裝置互通的 VPN。",
+    "connectionHint": "無法建立通話連線。請確認雙方應用程式保持開啟，並檢查網路或 VPN 是否允許裝置互通。",
+    "captureHint": "無法使用麥克風。請檢查系統權限和裝置連線後重試。",
+    "timeoutHint": "對方未及時接聽，或媒體連線未能建立。請檢查連線後重試。",
+    "checkConnection": "檢查連線",
+    "retry": "重試",
+    "technicalDetails": "技術詳情",
     "ringtone": {
       "classic": "經典鈴聲",
       "oldPhone": "舊式電話",
@@ -916,7 +950,7 @@
     "trigger": "成員",
     "title": "成員",
     "description": "此頻道中的所有成員。",
-    "addPeer": "新增對方",
+    "addPeer": "新增成員",
     "owner": "群主",
     "dissolve": "解散群組",
     "dissolveConfirm": "確定要為所有成員解散此群組嗎？成員會保留聊天記錄，但之後無法傳送訊息或變更成員。",
@@ -1191,7 +1225,7 @@
     "copyFailed": "複製失敗，請選取上方說明並手動複製。",
     "group": "群組",
     "person": "聯絡人",
-    "selectedCount": "已選擇 {{count}} / 16",
+    "selectedCount": "已選 {{count}} / {{total}} 個",
     "search": "搜尋聯絡人和群組",
     "selectedOnly": "只顯示已選",
     "noMatches": "沒有符合的對話。",
