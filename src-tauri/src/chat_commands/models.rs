@@ -115,6 +115,9 @@ impl From<mesh_talk_core::node::HistoryEntry> for HistoryItem {
 /// Aggregated reaction for display.
 #[derive(Serialize)]
 pub struct ReactionInfo {
+    /// Certified current-account ownership for channels; legacy and account DMs omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_me: Option<bool>,
     pub target: String, // hex EventId
     pub emoji: String,
     pub who: Vec<String>,
@@ -139,9 +142,14 @@ pub struct ChannelMemberInfo {
 #[derive(Serialize)]
 pub struct ChannelMembersInfo {
     pub history_policy: mesh_talk_core::channel::HistoryPolicy,
+    /// False when a descriptive reference has no source-confirmed policy.
+    pub history_policy_known: bool,
+    pub directory_reconciling: bool,
     pub owner: String,
     pub owner_account_id: Option<String>,
     pub can_manage: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_access: Option<super::channels::AccountGroupAccessInfo>,
     pub members: Vec<ChannelMemberInfo>,
 }
 
@@ -193,8 +201,11 @@ mod tests {
                 owner: "owner".into(),
                 owner_account_id: None,
                 can_manage: false,
+                account_access: None,
                 members: vec![],
                 history_policy: policy,
+                history_policy_known: true,
+                directory_reconciling: false,
             })
             .unwrap();
             assert_eq!(value["history_policy"], expected);

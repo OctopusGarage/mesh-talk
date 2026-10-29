@@ -1122,7 +1122,7 @@ impl Node {
     /// disk reads + per-chunk AEAD + per-chunk encrypted-log appends/flushes, so run it on
     /// the blocking pool to keep it off a tokio worker (the receive/save path is offloaded
     /// the same way). The result is identical — just executed on a blocking thread.
-    async fn stage_file_blocking(
+    pub(in crate::node) async fn stage_file_blocking(
         self: &Arc<Self>,
         path: &Path,
         kind: FileKind,
@@ -1281,6 +1281,9 @@ impl Node {
         let mut buf = vec![0u8; CHUNK_SIZE];
 
         for index in 0..chunk_count {
+            if self.runtime_work.is_closed() {
+                return Err(NodeError::File("participant runtime is stopping".into()));
+            }
             let n = read_full(&mut reader, &mut buf)
                 .map_err(|e| NodeError::File(format!("read: {e}")))?;
             let plain = &buf[..n];
@@ -1325,7 +1328,10 @@ impl Node {
         Ok((manifest, file_conv))
     }
 
-    fn validate_staged_protected_image(&self, manifest: &FileManifestV3) -> Result<(), NodeError> {
+    pub(in crate::node) fn validate_staged_protected_image(
+        &self,
+        manifest: &FileManifestV3,
+    ) -> Result<(), NodeError> {
         let manifest = outgoing_manifest(manifest);
         if !super::media_store::automatic_inline_image(&manifest) {
             return Err(NodeError::InvalidInput(
@@ -1458,12 +1464,13 @@ impl Node {
         if self.expired_received_file(file_conv) {
             return None;
         }
-        let total = self
+        let manifest = self
             .files
             .lock()
             .expect("files mutex not poisoned")
             .manifest(&file_conv)?
-            .chunk_count();
+            .clone();
+        let total = manifest.chunk_count();
         let have = {
             let log = self.log.lock().expect("log mutex not poisoned");
             log.events(&file_conv)
@@ -1471,10 +1478,16 @@ impl Node {
                 .filter(|e| e.kind == EventKind::Message)
                 .count() as u32
         };
-        Some(FileProgress {
-            done: have.min(total),
-            total,
-        })
+        let done = if have < total
+            && self
+                .managed_media_for_export(file_conv, &manifest)
+                .is_some()
+        {
+            total
+        } else {
+            have.min(total)
+        };
+        Some(FileProgress { done, total })
     }
 
     /// Whether a save can attempt current chunks or a retained managed-media copy.
@@ -1939,7 +1952,10 @@ mod part_guard_tests {
 #[path = "personal_files_tests.rs"]
 mod personal_files_tests;
 
-fn validate_protected_image_path(path: &Path, kind: FileKind) -> Result<(), NodeError> {
+pub(in crate::node) fn validate_protected_image_path(
+    path: &Path,
+    kind: FileKind,
+) -> Result<(), NodeError> {
     if path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1977,7 +1993,7 @@ fn validate_protected_image_path(path: &Path, kind: FileKind) -> Result<(), Node
     Ok(())
 }
 
-fn protected_manifest_bytes(
+pub(in crate::node) fn protected_manifest_bytes(
     manifest: &FileManifestV3,
     protection: Option<MessageProtection>,
 ) -> Vec<u8> {

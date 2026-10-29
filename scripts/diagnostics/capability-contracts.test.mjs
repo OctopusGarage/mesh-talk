@@ -190,6 +190,11 @@ test("session capability retains executable generation and retirement obligation
       "runtime_bootstrap::tests::signed_account_nickname_persists_emits_and_rejects_retired_owner",
       "src-tauri/src/runtime_bootstrap.rs",
     ],
+    [
+      "Inbound DM, channel and file presentation queues before acquiring desktop-session authority; UI-thread execution revalidates the exact session and runtime without a worker/main-thread focus-query deadlock.",
+      "events::notification_policy_tests::notification_presentation_queues_without_waiting_for_the_main_thread_session_lock",
+      "src-tauri/src/events.rs",
+    ],
   ];
   assert.deepEqual(
     owner("desktop-session").capability.invariants.map(({ name }) => name),

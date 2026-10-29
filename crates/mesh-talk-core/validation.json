@@ -2,241 +2,217 @@
   "schema": 1,
   "contracts": [
     {
-      "id": "core-group-metadata",
+      "id": "core-account-group-operations",
       "paths": [
-        "crates/mesh-talk-core/src/node/group_metadata.rs",
-        "crates/mesh-talk-core/src/node/group_metadata_tests.rs",
-        "crates/mesh-talk-core/src/node/channel.rs",
-        "crates/mesh-talk-core/src/node/channel_projection_cache.rs",
+        "crates/mesh-talk-core/src/node/account_group/",
+        "crates/mesh-talk-core/src/node/account_documents/group_control.rs",
+        "crates/mesh-talk-core/src/node/account_documents/store.rs",
+        "crates/mesh-talk-core/src/node/delivery_store.rs",
+        "crates/mesh-talk-core/src/node/delivery_store_tests.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/account_documents/group_operations.rs",
+        "crates/mesh-talk-core/src/node/account_documents/group_legacy_operations.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_legacy_leave.rs",
+        "crates/mesh-talk-core/src/node/channels/simple_control.rs",
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/join_history.rs",
-        "crates/mesh-talk-core/src/node/session.rs",
-        "crates/mesh-talk-core/src/node/privacy_sync.rs",
-        "crates/mesh-talk-core/src/eventlog/event.rs",
-        "crates/mesh-talk-core/src/eventlog/store.rs",
-        "crates/mesh-talk-core/src/eventlog/persist.rs",
-        "crates/mesh-talk-core/src/eventlog/sync.rs",
-        "crates/mesh-talk-core/src/node/group_chain_tests.rs",
-        "crates/mesh-talk-core/src/node/node.rs"
+        "crates/mesh-talk-core/src/node/account_sync/wake.rs",
+        "crates/mesh-talk-core/src/node/account_sync/fanout.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_message.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_message_action.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_owner_control.rs",
+        "crates/mesh-talk-core/src/node/channels/owner_control.rs",
+        "crates/mesh-talk-core/src/node/channels/account_invitation.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_invitation.rs",
+        "crates/mesh-talk-core/src/node/channel_account_controls.rs",
+        "crates/mesh-talk-core/src/node/outgoing_message.rs",
+        "crates/mesh-talk-core/src/node/message_actions.rs",
+        "crates/mesh-talk-core/src/node/reaction_store.rs",
+        "crates/mesh-talk-core/src/node/reactions.rs",
+        "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_file.rs",
+        "crates/mesh-talk-core/src/node/channels/account_self_control.rs",
+        "crates/mesh-talk-core/src/node/delivery_store/group_self_control.rs",
+        "crates/mesh-talk-core/src/eventlog/persist.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
-            "node::group_metadata::tests::",
-            "current_group_metadata_crosses_real_tcp_after_owner_goes_offline",
-            "node::session::tests::",
-            "eventlog::event::tests::",
-            "eventlog::persist::tests::",
-            "node::join_history::tests::"
+            "node::account_group::",
+            "local_cancel_ack_during_remote_commit_rolls_forward_without_action_required",
+            "owner_decision_rejects_stale_rejoined_lifetime_with_current_acceptance",
+            "owner_decision_rejects_matching_lifetime_with_false_role_or_wrong_proof",
+            "new_account_group_membership_and_ownership_inherit_over_certified_sibling_sync",
+            "node::reaction_store::",
+            "node::message_actions::",
+            "node::account_documents::store::tests::",
+            "node::account_documents::tests::canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restores_it",
+            "node::account_documents::tests::group_control_signed_heads_and_metadata_reject_forged_or_malformed_records",
+            "node::account_documents::tests::group_control_terminal_sources_keep_other_members_but_dissolution_overrides_stale_roles",
+            "node::account_documents::tests::group_control_current_account_binding_replacement_revokes_old_owner_observation",
+            "node::account_documents::tests::group_control_old_head_replay_and_reopen_preserve_the_latest_signed_observation",
+            "node::account_documents::tests::group_control_restored_older_public_state_cannot_republish_a_newer_own_head_as_owner",
+            "node::account_documents::tests::group_control_rejected_parent_cannot_hide_a_later_applied_owner_transfer_on_restore",
+            "node::account_documents::tests::group_control_unreadable_latest_own_head_cannot_be_overwritten_by_a_restored_owner",
+            "node::account_documents::tests::group_control_source_leave_is_individual_and_all_known_left_sources_project_left",
+            "node::account_documents::tests::group_control_terminal_source_invalidates_other_cached_lifetimes_before_reinvite",
+            "node::account_documents::tests::group_control_unacknowledged_conflicting_sources_remain_reconciling",
+            "node::account_documents::tests::group_control_fresh_reinvite_keeps_private_causal_ancestors_out_of_mandatory_metadata",
+            "node::account_documents::tests::group_control_equivalent_source_knowledge_reaches_a_publication_fixed_point",
+            "node::account_documents::tests::group_control_resource_limit_publishes_a_small_invalidating_head_and_recovers",
+            "node::account_documents::tests::group_control_multifrontier_resource_invalidation_recovers_after_merge_and_reopen",
+            "node::account_documents::tests::group_control_role_control_forks_recover_after_invalidation_merge_and_reopen",
+            "node::account_documents::tests::group_control_acknowledges_present_owner_decisions_that_lose_a_canonical_fork",
+            "node::account_documents::tests::group_control_private_messages_and_reactions_do_not_republish_role_metadata",
+            "node::account_documents::tests::group_control_more_than_4096_concurrent_authorization_controls_do_not_freeze_owner",
+            "node::account_documents::tests::group_control_unavailable_obsolete_cache_cannot_orphan_a_large_negative_head",
+            "node::account_documents::tests::group_control_broken_obsolete_cache_does_not_downgrade_a_large_current_view",
+            "node::account_documents::tests::group_control_normal_authorization_history_growth_keeps_bounded_current_heads",
+            "node::account_documents::tests::group_control_removal_and_reinvite_never_reuse_the_old_membership_lifetime",
+            "node::delivery_store::tests::typed_rename_control_enters_the_bound_effect_wal",
+            "node::delivery_store::tests::group_control_without_completion_adapter_does_not_install_or_retire",
+            "node::delivery_store::tests::failed_group_completion_keeps_exact_effect_for_restart_retry",
+            "node::delivery_store::tests::group_control_rejects_wrong_kind_binding_and_malformed_name",
+            "node::delivery_store::tests::group_control_rejects_a_different_inner_logical_operation_id",
+            "node::delivery_store::tests::typed_history_policy_control_enters_the_bound_effect_wal",
+            "node::delivery_store::tests::typed_dissolve_control_enters_the_bound_effect_wal",
+            "node::delivery_store::tests::group_control_rejects_malformed_policy_and_nonempty_dissolution",
+            "node::delivery_store::tests::group_control_rejects_valid_payload_bound_to_another_kind_or_digest",
+            "node::delivery_store::tests::group_control_requires_exact_original_request_wrappers",
+            "node::account_sync::fanout::tests::",
+            "node::delivery_store::group_message::tests::",
+            "node::delivery_store::group_owner_control::tests::",
+            "node::delivery_store::tests::preexisting_group_request_bincode_bytes_remain_compatible",
+            "node::node::tests::removing_account_removes_linked_devices_in_one_epoch_and_rechecks_stale_enrollment",
+            "node::node::tests::removing_account_uses_durable_bindings_and_controls_when_projection_is_deferred",
+            "node::channel_account_controls::tests::inherited_owner_removes_account_and_transfers_account_authority",
+            "node::delivery_store::group_file::tests::",
+            "node::channels::account_self_control::tests::",
+            "node::channels::account_invitation::tests::",
+            "node::delivery_store::group_invitation::tests::",
+            "node::delivery_store::group_self_control::tests::",
+            "node::channel::tests::modern_account_departure_retains_only_the_original_sources_retry_route_on_replay",
+            "node::channel::tests::modern_owner_or_unregistered_leave_never_creates_a_departure_route",
+            "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route",
+            "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
+            "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
+            "incoming_request_overtakes_a_naturally_hinted_control_and_repays_its_background_turn",
+            "incoming_wake_yields_one_natural_turn_but_protects_replacement_and_resume",
+            "node::account_sync::wake::tests::control_wake_fifo_coalesces_and_consumes_only_the_captured_generation",
+            "node::account_sync::wake::tests::control_wakes_bound_full_identities_and_prune_changed_bindings",
+            "a_new_terminal_publication_retries_a_locally_busy_wake_without_remote_cooldown",
+            "local_capacity_retry_requires_a_new_publication_but_remote_failure_keeps_its_cooldown",
+            "selected_source_receipt_overtakes_its_own_preoperation_background_control_read",
+            "selected_source_lower_key_receipt_preserves_both_partial_control_comparisons",
+            "another_selected_executor_overtakes_a_completed_operations_paired_background_page",
+            "incoming_operation_wake_runs_after_paid_pair_pages_before_unrelated_continuation",
+            "paid_pair_credit_is_spent_after_prefix_and_original_resume_without_followup_renewal",
+            "completed_parked_control_needs_no_resume_credit",
+            "paired_control_pages_preserve_both_partial_checkpoints_and_alternate",
+            "paired_control_deferral_keeps_owner_and_waits_for_both_retry_deadlines",
+            "paired_control_followup_requires_a_new_admitted_operation_or_wake_token",
+            "paired_control_new_publication_reuses_completed_background_without_dropping_partial_foreground",
+            "paired_control_recycles_parked_completed_background_only_for_genuine_followup",
+            "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
+            "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
+            "newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page",
+            "control_checkpoint_preserves_comparison_start_across_partial_pages_and_rollback",
+            "control_checkpoint_refresh_clears_start_only_after_comparison_completion"
           ]
         }
       ],
       "capability": {
-        "summary": "Publish owner-authorized encrypted shared group photos and current announcements while preserving private photo overrides and independent field revisions.",
-        "guide": "docs/help/topics/channels.md",
+        "summary": "Apply one account group role across certified devices while preserving public signer authority and explicit execution availability.",
+        "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
           {
-            "name": "Only the current accepted owner account publishes; former-owner forks cannot replace transferred metadata. Current field keys reach accepted new members through retained holders independently of pre-join message history, without sharing sender chains.",
-            "reference": "docs/help/topics/channels.md"
+            "name": "A legacy leave with a committed physical leg preserves roll-forward after another leg acknowledges cancellation; owner preparation requires each original physical lifetime, acceptance state and certified proof to match as one complete witness.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Announcement deletion tombstones and bounded group artwork survive replay; metadata event kind 19 requires appended V5 sync envelopes before transfer to older decoders.",
-            "reference": "docs/ARCHITECTURE.md"
-          }
-        ]
-      },
-      "consumers": [
-        "desktop-group-metadata"
-      ],
-      "escalation": [
-        "Exercise real linked owner-account devices, removal/re-invitation, source-offline restart and mixed-version native clients. Loopback TCP tests establish encrypted event convergence but not physical LAN reachability."
-      ]
-    },
-    {
-      "id": "core-group-file-network-cost",
-      "paths": [
-        "crates/mesh-talk-core/src/node/network_cost.rs",
-        "crates/mesh-talk-core/src/node/privacy_sync.rs",
-        "crates/mesh-talk-core/src/node/group_chain_tests.rs",
-        "crates/mesh-talk-core/src/node/runtime.rs"
-      ],
-      "rust": [
-        {
-          "package": "mesh-talk-core",
-          "filters": [
-            "node::network_cost::tests::",
-            "node::group_chain_tests::metered_group_file_replica_pauses_both_directions_without_losing_history_or_chunks",
-            "node::group_chain_tests::metered_group_file_replica_preserves_explicit_attachment_consent",
-            "startup_network_options_precede_discovery_and_delivery_launch"
-          ]
-        }
-      ],
-      "capability": {
-        "summary": "Pause optional third-party group attachment export on restricted or unknown host-observed networks without changing signed preferences, consent or retention.",
-        "guide": "docs/network-design-reference.md#cost-aware-group-attachment-sharing",
-        "invariants": [
-          {
-            "name": "Both sync directions and existing stores recheck file-only export; original sends and group text/control/offer recovery continue, and cached chunks survive pause/resume.",
-            "reference": "docs/network-design-reference.md#cost-aware-group-attachment-sharing"
+            "name": "Account-target owner controls retain the original signed input and complete accepted/invited lifetime witness; causal replay validates the saved parent view before append, while old delivery bincode discriminants and field shapes remain unchanged.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Cost-class changes expire session-local exceptions; manual share-off and conversation authorization remain authoritative.",
-            "reference": "docs/help/topics/channels.md#network-data-protection"
-          }
-        ]
-      },
-      "consumers": [
-        "desktop-group-file-network-cost"
-      ],
-      "escalation": [
-        "Native cost signals and physical/VPN routes require platform acceptance separately; loopback policy tests do not establish hotspot classification or a zero-byte handoff guarantee."
-      ]
-    },
-    {
-      "id": "core-sticker-media",
-      "paths": [
-        "crates/mesh-talk-core/src/file/sticker.rs",
-        "crates/mesh-talk-core/src/node/sticker_media.rs",
-        "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
-        "crates/mesh-talk-core/src/node/recall.rs",
-        "crates/mesh-talk-core/src/node/file_completion.rs",
-        "crates/mesh-talk-core/src/node/serving.rs",
-        "crates/mesh-talk-core/src/node/session.rs",
-        "crates/mesh-talk-core/src/node/privacy_sync.rs",
-        "crates/mesh-talk-core/src/eventlog/sync.rs",
-        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
-      ],
-      "rust": [
-        {
-          "package": "mesh-talk-core",
-          "filters": [
-            "file::sticker::tests::",
-            "node::sticker_media_tests::",
-            "node::sticker_media::",
-            "node::files::",
-            "node::recall::",
-            "node::file_completion::",
-            "node::session::tests::"
-          ]
-        }
-      ],
-      "consumers": [
-        "desktop-chat"
-      ],
-      "capability": {
-        "summary": "Deliver immutable encrypted sticker media without requiring recipient pack installation and reuse verified transfer bytes only within the same conversation and deadline.",
-        "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
-        "invariants": [
-          {
-            "name": "Pack installation and message media retention are independent; exact image identity is the authenticated attachment checksum",
-            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+            "name": "Executor selection prioritizes current execution readiness and operation capability over local preference; private authority arriving before its public causal state leaves the same original intent retryable and commits at most once after reconciliation.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Canonical v1 sticker metadata remains readable; v2 carries a bounded safe label through encrypted delivery and retained history without changing authenticated image identity",
-            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+            "name": "Startup and running message-action recovery validate the saved causal view and source-sealed payload before append, persist exact recall sidecars before terminal completion, and preserve cancellation/idempotency independently of evicted target metadata.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Bounded canonical presentation metadata remains compatible ordinary media and never grants cross-conversation read access",
-            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+            "name": "Private explicit channel reactions retain original source/effect identity through compatible encrypted migration and bound executor certificates; views combine verified account devices, preserve causal account lifetimes through adoption, repair unambiguous legacy rows, and keep unknown authors distinct.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "A cached image only completes a new manifest after exact retained ancestry, origin binding and durable byte validation; cache presence alone never proves recipient delivery",
-            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+            "name": "Original group File preparation retains one signed manifest and ciphertext through retries; actual synchronized bytes precede source execution, pending preparations pin the existing cache, and monotonic local copy completion prevents deliberate reclamation from restarting downloads.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Exact installed artwork can reconstruct authenticated original-author chunks from bounded optional headers; signature, checksum, retained manifest authorization and exact completion are unchanged. Missing or incompatible sources use ordinary byte transfer.",
-            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
-          }
-        ]
-      },
-      "escalation": [
-        "Run encrypted loopback delivery, source-removal/restart, same-host reuse and deadline/isolation regressions plus the sticker browser suite. Mocked browser results do not prove native decoder availability, deployed relay retention or linked-device policy."
-      ]
-    },
-    {
-      "id": "core-private-device-hostnames",
-      "paths": [
-        "crates/mesh-talk-core/src/node/account_documents/device_hostname.rs",
-        "crates/mesh-talk-core/src/node/account_documents/mod.rs",
-        "crates/mesh-talk-core/src/node/account_documents/store.rs",
-        "crates/mesh-talk-core/src/node/account_documents/sync.rs",
-        "crates/mesh-talk-core/src/node/account_documents/wire.rs",
-        "crates/mesh-talk-core/src/node/account_documents/tests.rs"
-      ],
-      "rust": [
-        {
-          "package": "mesh-talk-core",
-          "filters": [
-            "node::account_documents::"
-          ]
-        }
-      ],
-      "consumers": [
-        "desktop-private-device-hostnames"
-      ],
-      "capability": {
-        "summary": "Display OS hostnames only within the same account through encrypted certified-sibling device synchronization.",
-        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
-        "invariants": [
+            "name": "Modern self controls bind the original account intent to its exact grant incarnation and saved causal view; valid departure retains only the original source retry route and projects Left over stale sibling membership observations.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
           {
-            "name": "Hostnames never enter public discovery or peer profiles; unrelated Noise peers and stale native owner/account admissions cannot read them.",
+            "name": "Group access and source observations capture privacy and identity state before the event-log mutex; log-held projection never reacquires privacy, roster or host-session locks.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "A verified owner account retains its owner role on owner, member and reference-only sibling devices; reachability cannot downgrade role and descriptive inventory cannot establish it.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Every group action uses account authority with current source lifetime and public signer validation; an owner account must transfer ownership before leaving on any device.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "A required local recovery receipt and its source head share one durable index append; compaction retains the matching receipt, budget failure preserves the previous pair, and a complete replacement may release it.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Prepared account effects recover exact public events and sidecars, durably record the immutable source terminal outcome, then retire before later allocation; canonical control metadata refresh cannot depend on plaintext retry readiness.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick or a held mandatory directory response. Control, directory, optional document and history/favorites work retain independent cursors and one reserved worker each within the existing four-worker and shared TCP budgets; optional document progress preserves its category and entitlement checks independently of held archive responses.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Affected canonical group access and inventory, followed by the exact durable operation result, publish before public fanout waits; canonical no-op retries allocate no invented public effect and obsolete owner authority cannot execute an awaiting control. Exact committed message IDs request durable member/relay custody in the same bounded full-control fanout round, excluding own-account siblings.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Direct or eligible-relay local admission backpressure retains the same committed fanout revision for bounded delayed retry; successful revisions deduplicate and overflow remains owned by the source journal.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Newly admitted account operations and authenticated Wake tokens can preempt a preexisting read of the same executor, retaining one bounded parked metadata checkpoint and independent foreground comparison. Validated pages alternate without combining continuation, digest, support or retry state; polling cannot rearm work, other selected executors retain priority, and accepted mutations and existing worker/TCP budgets remain unchanged.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
-            "name": "Bounded source-device metadata persists encrypted, supports offline display, rejects generic writes and preserves legacy synchronization through an independent cooldown.",
-            "reference": "docs/module-boundaries.md#account-document-projections"
-          }
-        ]
-      }
-    },
-    {
-      "id": "core-discovery-origin",
-      "paths": [
-        "crates/mesh-talk-core/src/node/discovery_origin.rs",
-        "crates/mesh-talk-core/src/discovery/roster.rs",
-        "crates/mesh-talk-core/src/node/bridge_directory.rs",
-        "crates/mesh-talk-core/src/node/bridge_client.rs",
-        "crates/mesh-talk-core/src/node/postbox.rs",
-        "crates/mesh-talk-core/src/postoffice/federation.rs"
-      ],
-      "rust": [
-        {
-          "package": "mesh-talk-core",
-          "filters": [
-            "node::discovery_origin::tests::",
-            "node::bridge_directory::tests::",
-            "node::bridge_client::tests::",
-            "node::postbox::tests::",
-            "postoffice::federation::tests::",
-            "discovery::roster::"
-          ]
-        }
-      ],
-      "consumers": [
-        "desktop-chat",
-        "desktop-settings"
-      ],
-      "capability": {
-        "summary": "Preserve a participant-consented original registration office across encrypted directory and federation hops without disclosing it by default.",
-        "guide": "docs/network-design-reference.md#optional-registration-origin-disclosure",
-        "invariants": [
-          {
-            "name": "Both signatures bind the exact participant and office; optional origin never establishes physical location or transport authority",
-            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+            "name": "Wake local-admission capacity failures retain their unacknowledged revision and existing ten-second retry; only a newer local publication bypasses that local cooldown, while remote failure cooldowns and sender/TCP bounds remain unchanged.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
-            "name": "Opt-out serializes with active sends and invalidates prepared work; original 15-second consent leases cannot be renewed by forwarding or presentation tolerance",
-            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+            "name": "Comparison-start immutable demand and consumed authenticated Wake evidence travel with queued checkpoints, owned rollback and paired swaps. New demand starts a separate fresh comparison before an old queued suffix. A genuine follow-up can reuse a completed comparison slot while retaining the exact unfinished comparison as background; both-partial checkpoints, unchanged demand, refused refresh, cooldowns and full-identity cleanup preserve their existing contracts.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
-            "name": "Legacy discovery and mailbox wire layouts stay compatible and carry no optional origin disclosure",
-            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+            "name": "Initial pair priority pays one foreground page and at most one original resume page; only validated completions spend credit and follow-ups never renew it. After payment, fresh authenticated incoming work overtakes remaining background pages without losing either checkpoint or changing local-operation priority, worker limits or exchange deadlines.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
       },
+      "consumers": [
+        "core-node",
+        "core-channel-account-membership",
+        "desktop-account-group-inventory",
+        "core-message-forwarding"
+      ],
       "escalation": [
-        "Run encrypted loopback registration/federation/viewer and opt-out scenarios, host settings/session and presence projection tests, and frontend independent metadata-expiry tests. Physical Windows/macOS office topology still needs native acceptance; loopback does not certify deployment."
+        "Require signed legacy-owner/member/reference sibling scenarios, current account binding, offline availability, transfer/revocation replay, durable pending operations and exact committed effects. Role display tests do not prove mutation authority or native cross-device convergence."
       ]
     },
     {
@@ -245,13 +221,15 @@
         "crates/mesh-talk-core/src/node/account_documents/inventory.rs",
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
-        "crates/mesh-talk-core/src/node/queries.rs"
+        "crates/mesh-talk-core/src/node/queries.rs",
+        "crates/mesh-talk-core/src/node/channels.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
             "node::account_documents::",
+            "node::account_sync::personal_replay_tests::",
             "node::account_sync::",
             "node::account_profile_io::tests::group_inventory_releases_channels_before_profile_lookup",
             "node::account_profile_io::tests::profile_publication_releases_store_before_channel_delivery"
@@ -273,6 +251,10 @@
           {
             "name": "Mandatory account-directory metadata remains independent of optional personal-data switches; unsupported v4 preserves existing v1/v2/v3 domains and does not create a retry spin.",
             "reference": "docs/module-boundaries.md#account-document-projections"
+          },
+          {
+            "name": "Modern memberships from a previous account remain archived for the exact local device unless the current account has a valid accepted or pending account-wide grant; legacy membership and genuine current-account departure remain distinct.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           }
         ]
       },
@@ -311,7 +293,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. Generic document writes cannot create custody controls.",
+            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. Unused recovery slots may repair reports through authenticated read-only sibling queries without replication or membership grants; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
@@ -364,7 +346,14 @@
       "paths": [
         "crates/mesh-talk-core/src/node/privacy_routing.rs",
         "crates/mesh-talk-core/src/node/privacy_runtime_tests.rs",
-        "crates/mesh-talk-core/src/node/session_pool.rs"
+        "crates/mesh-talk-core/src/node/session_pool.rs",
+        "crates/mesh-talk-core/src/node/session_pool_tests.rs",
+        "crates/mesh-talk-core/src/node/node_tests.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/transport/channel.rs",
+        "crates/mesh-talk-core/src/node/account_session.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs"
       ],
       "rust": [
         {
@@ -376,14 +365,60 @@
             "private_probe_refreshes_public_presence_before_its_lease_expires",
             "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
             "node::session_pool::",
-            "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel"
+            "completed_receipt_scope_keeps_the_authenticated_connection_for_the_next_message",
+            "successful_sync_rounds_reuse_one_authenticated_tcp_connection",
+            "accountless_signed_discovery_reuses_five_completed_generic_rounds",
+            "accountless_cached_sync_preserves_identity_role_and_account_pins",
+            "bare_noise_reuse_never_substitutes_for_an_unconfigured_durable_sibling_pin",
+            "outbound_handshakes_are_bounded_and_cancellation_releases_capacity",
+            "duplicate_hung_endpoint_handshakes_do_not_starve_healthy_sync",
+            "concurrent_live_endpoint_dials_keep_independent_authenticated_channels",
+            "sync_pool_does_not_reuse_for_one_shot_or_wrong_identity_and_drops_cancelled_channels",
+            "sync_pool_isolates_endpoint_and_privacy_generation",
+            "sync_pool_reconnects_after_remote_session_close",
+            "shared_tcp_budget_limits_combined_inbound_and_outbound_and_accepts_after_release",
+            "retained_sync_session_expires_without_further_network_work",
+            "sync_pool_reauthenticates_after_verified_account_or_relay_role_change",
+            "sync_pool_rejects_retired_account_before_new_presence_arrives",
+            "fresh_sync_protocol_errors_do_not_trigger_another_connection",
+            "sync_pool_reuses_authenticated_fallback_route_and_mapped_endpoint",
+            "sync_pool_reuses_authenticated_route_after_verified_hint_loses_route_race",
+            "stalled_channel_peer_does_not_delay_healthy_member",
+            "certified_siblings_transfer_large_typed_document_over_existing_account_session",
+            "group_inventory_v4_cooldown_preserves_fallback_while_v5_interruptions_retry",
+            "account_history_pages_reuse_one_authenticated_connection",
+            "account_session_ready_errors_never_retry_a_legacy_request",
+            "account_and_sync_reuse_separate_authenticated_connections",
+            "old_peer_document_probe_has_negative_cooldown_and_history_still_works",
+            "account_legacy_v2_rejects_one_session_probe_then_keeps_one_shot_requests",
+            "seven_idle_authenticated_inbound_sessions_do_not_block_a_fresh_control_peer",
+            "inbound_capacity_never_retires_an_active_response_and_resumes_after_completion",
+            "private_control_noise_handshake_overtakes_queued_background_without_more_capacity",
+            "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel",
+            "authentication_backpressure_preserves_document_progress_and_recovers",
+            "account_worker_retries_local_authentication_contention_without_a_false_sync_error",
+            "offline_dm_delivered_via_post_office_over_loopback",
+            "signed_own_account_sdk_presence_reuses_five_typed_document_pages",
+            "stalled_recovery_peer_does_not_delay_healthy_replica"
           ]
         }
       ],
       "capability": {
-        "summary": "Keep historical route probing within its background connection budget and rotate only launched devices across canceled rounds.",
+        "summary": "Bound historical route probes and completed sync-session reuse under the shared connection budget, preserving canceled probe turns.",
         "guide": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance",
         "invariants": [
+          {
+            "name": "Identity-authenticated generic sync may reuse a signed accountless non-relay route only with the same full public identity and no conflicting current, historical or linked account pin; reuse never infers account membership and preserves endpoint, generation, I/O and scope checks.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Only completed reusable account sessions may retire under listener/shared pressure: one oldest-idle retirement remains pending until the owner drops real socket permits; ready frames, handshakes and active responses remain protected under unchanged eight shared/seven directional slots and the existing enclosing idle deadline.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "GroupControl fresh authentication overtakes queued Ordinary work only: one active handshake per exact full identity, endpoint and privacy generation remains; FIFO within each class and an Ordinary turn after each Control prevent starvation, while cancellation and the unchanged two-second wait release all tickets.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
           {
             "name": "At most two background device probes race candidates concurrently; canceled queued devices retain their next turn and healthy foreground Noise exchanges retain capacity against this producer.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
@@ -391,6 +426,14 @@
           {
             "name": "Only actual outbound capacity timeouts contribute to a per-pool fixed-window bounded metadata warning; suppressed counts aggregate without sliding the next report.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Local admission backpressure preserves account-sync cursors and verified protocol support, releases bounded workers and resumes through delayed retry without exposing an authentication failure or spinning on coalesced wakes.",
+            "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
+          },
+          {
+            "name": "Completed negotiated Account sessions from SDK siblings without in-band announcements reuse only under exact full identity, current own-account presence, durable sibling certification and consistent configured proofs; generic Sync reuse never confers Account protocol authority.",
+            "reference": "docs/network-design-reference.md#session-reuse-contract"
           }
         ]
       },
@@ -401,28 +444,63 @@
     {
       "id": "core-account-documents",
       "paths": [
-        "crates/mesh-talk-core/src/node/account_documents/"
+        "crates/mesh-talk-core/src/node/account_documents/",
+        "crates/mesh-talk-core/src/node/account_sync/personal_replay_tests.rs",
+        "crates/mesh-talk-core/src/node/account_profile_io.rs",
+        "crates/mesh-talk-core/src/node/account_profile_data.rs",
+        "crates/mesh-talk-core/src/node/lifecycle.rs",
+        "crates/mesh-talk-core/src/node/account_documents/controls.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
-            "node::account_documents::"
+            "node::account_documents::",
+            "node::account_sync::selection_tests::foreign_public_profile_documents_cross_certified_loopback_with_profile_consent",
+            "node::account_sync::personal_replay_tests::",
+            "late_group_clear_preserves_only_fresh_lifetime_ancestry",
+            "known_role_digest_does_not_block_a_new_terminal_result_behind_repeated_role_headers",
+            "terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows",
+            "unchanged_processed_operation_heads_skip_repeated_signature_decodes",
+            "unchanged_local_operation_publication_does_not_repeat_signature_verification",
+            "modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operation_budget",
+            "modern_leave_wake_during_real_noise_timeout_recovers_within_operation_budget",
+            "timed_out_control_refresh_requires_newer_wake_and_preserves_partial_failures",
+            "timed_out_control_demand_requires_original_request_and_same_full_peer",
+            "timed_out_control_accepts_one_new_wake_received_during_the_failed_attempt",
+            "control_wake_receipt_time_never_changes_token_identity",
+            "only_remote_dial_timeout_allows_wake_recovery",
+            "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
+            "access_only_v5_keeps_its_role_scope_when_operation_rows_exist",
+            "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot"
           ]
         }
       ],
       "capability": {
-        "summary": "Synchronize typed private drafts, exact read receipts, customization assets and authenticated DM reaction/recall controls through existing certified account sessions.",
+        "summary": "Synchronize typed private drafts, exact read receipts, customization assets, authenticated DM controls and account-personal conversation removal through existing certified account sessions.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
         "invariants": [
           {
             "name": "Certified same-account authority, bounded versioned records and deletion tombstones preserve convergence without exposing private records to other group members",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Optional public profiles preserve original account signatures and consent; group activity is bounded, source-signed and tied to the selected inventory without importing authority.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Personal removal persists before cleanup, binds optional Leave cleanup to its original committed operation and closed membership lifetime, and preserves Favorites, exports and other accounts' copies. Exact full-device floor acknowledgements gate historical replay; presence alone cannot restore visibility or deleted content.",
+            "reference": "docs/network-design-reference.md#personal-conversation-removal"
+          },
+          {
+            "name": "Negotiated operation patches omit only exactly known nonzero role digests before page limits, complete a normal-operation prefix before loading a following legacy payload, preserve lexical continuations and full-scope authenticated atomic completion, and repair roles or operation heads changed behind a continuation on a fresh scope. Legacy-only pages retain 64 rows and existing byte, worker and deadline bounds. Operation maintenance reuses its existing processed metadata hashes before payload decoding; changed, currently unbound or unfinished foreign inputs retain verification/retry and generic input readers remain complete. A newer authenticated same-device Wake received during or after a failed initial remote-dial attempt may restart that comparison once for an original pending operation without a comparison pair; token identity, partial/parked cooldowns, authentication and local-capacity rules remain unchanged.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
       },
       "escalation": [
-        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence."
+        "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence.",
+        "For conversation removal, require keep/erase choices, pending/rejected/cancelled Leave safety, cleanup failure/restart retry, fresh invitation isolation, stale sibling history/draft/file rejection and exact-device loopback acknowledgements. Public Leave commitment alone is not private cleanup completion."
       ],
       "consumers": [
         "core-node"
@@ -514,18 +592,27 @@
     {
       "id": "core-channel-account-membership",
       "paths": [
+        "crates/mesh-talk-core/src/node/channel.rs",
         "crates/mesh-talk-core/src/node/channel_account_authority.rs",
         "crates/mesh-talk-core/src/node/channel_account_bootstrap.rs",
         "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
-        "crates/mesh-talk-core/src/node/channel_account_controls.rs"
+        "crates/mesh-talk-core/src/node/channel_account_controls.rs",
+        "crates/mesh-talk-core/src/node/account_group/access.rs",
+        "crates/mesh-talk-core/src/node/account_group/wire.rs",
+        "crates/mesh-talk-core/src/node/account_documents/group_control.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
+            "node::channel::tests::content_events_preserve_membership_without_rebuilding_account_proofs",
             "node::channel_account_authority::tests::",
             "node::channel_account_bootstrap::tests::",
             "node::channel_account_maintenance::tests::",
+            "captured_initial_account_upgrade_never_resurrects_a_completed_legacy_departure",
+            "initial_upgrade_after_observed_departure_preserves_legacy_cleanup_provenance",
+            "initial_upgrade_whole_cohort_closure_reaches_a_history_free_certified_reference",
+            "initial_upgrade_partly_observed_cohort_closure_reaches_a_history_free_reference",
             "channel::model::tests::account_invites_receive_no_content_keys_until_the_account_accepts",
             "account_authority_arriving_after_probe_restarts_without_legacy_followup_leak",
             "account_authority_negotiates_v4_and_transfers_in_both_directions",
@@ -541,6 +628,12 @@
             "rejected_account_authority_never_exposes_a_v4_requirement_to_legacy_members",
             "channel::model::tests::routine_receive_snapshot_preserves_small_out_of_order_messages"
           ]
+        },
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "contact_policy::native_mesh_tests::registered_hide_keeps_real_multi_device_delivery_and_restart_history"
+          ]
         }
       ],
       "consumers": [
@@ -553,6 +646,10 @@
         "summary": "Authorize account membership and owner roles once, inherit them on certified independent devices, and revoke every sibling through one signed account grant lifetime.",
         "guide": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery",
         "invariants": [
+          {
+            "name": "Automatic initial migration preserves exact legacy departure lifetimes, remaining original siblings, fresh invitation incarnations and monotonic key epochs; effective permissions exclude closed initial grants while structural descendant controls and complete bounded negative proofs remain valid.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
           {
             "name": "Owner-root signed controls and account-root full-device inheritance bind immutable grants, exact key tuples and causal authority; discovery and late adoption cannot manufacture membership",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
@@ -1486,6 +1583,195 @@
       ]
     },
     {
+      "id": "core-group-file-network-cost",
+      "paths": [
+        "crates/mesh-talk-core/src/node/network_cost.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/file_completion.rs",
+        "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/node/group_chain_tests.rs",
+        "crates/mesh-talk-core/src/node/runtime.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::network_cost::tests::",
+            "node::group_chain_tests::metered_group_file_replica_pauses_both_directions_without_losing_history_or_chunks",
+            "node::group_chain_tests::metered_group_file_replica_preserves_explicit_attachment_consent",
+            "startup_network_options_precede_discovery_and_delivery_launch"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Pause optional third-party group attachment export on restricted or unknown host-observed networks without changing signed preferences, consent or retention.",
+        "guide": "docs/network-design-reference.md#cost-aware-group-attachment-sharing",
+        "invariants": [
+          {
+            "name": "Both sync directions and existing stores recheck file-only export; original sends and group text/control/offer recovery continue, and cached chunks survive pause/resume.",
+            "reference": "docs/network-design-reference.md#cost-aware-group-attachment-sharing"
+          },
+          {
+            "name": "Cost-class changes expire session-local exceptions; manual share-off and conversation authorization remain authoritative.",
+            "reference": "docs/help/topics/channels.md#network-data-protection"
+          }
+        ]
+      },
+      "consumers": [
+        "desktop-group-file-network-cost"
+      ],
+      "escalation": [
+        "Native cost signals and physical/VPN routes require platform acceptance separately; loopback policy tests do not establish hotspot classification or a zero-byte handoff guarantee."
+      ]
+    },
+    {
+      "id": "core-sticker-media",
+      "paths": [
+        "crates/mesh-talk-core/src/file/sticker.rs",
+        "crates/mesh-talk-core/src/node/sticker_media.rs",
+        "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
+        "crates/mesh-talk-core/src/node/recall.rs",
+        "crates/mesh-talk-core/src/node/file_completion.rs",
+        "crates/mesh-talk-core/src/node/serving.rs",
+        "crates/mesh-talk-core/src/node/session.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/eventlog/sync.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "file::sticker::tests::",
+            "node::sticker_media_tests::",
+            "node::sticker_media::",
+            "node::files::",
+            "node::recall::",
+            "node::file_completion::",
+            "node::session::tests::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-chat"
+      ],
+      "capability": {
+        "summary": "Deliver immutable encrypted sticker media without requiring recipient pack installation and reuse verified transfer bytes only within the same conversation and deadline.",
+        "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
+        "invariants": [
+          {
+            "name": "Pack installation and message media retention are independent; exact image identity is the authenticated attachment checksum",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Canonical v1 sticker metadata remains readable; v2 carries a bounded safe label through encrypted delivery and retained history without changing authenticated image identity",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Bounded canonical presentation metadata remains compatible ordinary media and never grants cross-conversation read access",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "A cached image only completes a new manifest after exact retained ancestry, origin binding and durable byte validation; cache presence alone never proves recipient delivery",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
+          {
+            "name": "Exact installed artwork can reconstruct authenticated original-author chunks from bounded optional headers; signature, checksum, retained manifest authorization and exact completion are unchanged. Missing or incompatible sources use ordinary byte transfer.",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          }
+        ]
+      },
+      "escalation": [
+        "Run encrypted loopback delivery, source-removal/restart, same-host reuse and deadline/isolation regressions plus the sticker browser suite. Mocked browser results do not prove native decoder availability, deployed relay retention or linked-device policy."
+      ]
+    },
+    {
+      "id": "core-private-device-hostnames",
+      "paths": [
+        "crates/mesh-talk-core/src/node/account_documents/device_hostname.rs",
+        "crates/mesh-talk-core/src/node/account_documents/mod.rs",
+        "crates/mesh-talk-core/src/node/account_documents/store.rs",
+        "crates/mesh-talk-core/src/node/account_documents/sync.rs",
+        "crates/mesh-talk-core/src/node/account_documents/wire.rs",
+        "crates/mesh-talk-core/src/node/account_documents/tests.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::account_documents::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-private-device-hostnames"
+      ],
+      "capability": {
+        "summary": "Display OS hostnames only within the same account through encrypted certified-sibling device synchronization.",
+        "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
+        "invariants": [
+          {
+            "name": "Hostnames never enter public discovery or peer profiles; unrelated Noise peers and stale native owner/account admissions cannot read them.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Bounded source-device metadata persists encrypted, supports offline display, rejects generic writes and preserves legacy synchronization through an independent cooldown.",
+            "reference": "docs/module-boundaries.md#account-document-projections"
+          }
+        ]
+      }
+    },
+    {
+      "id": "core-discovery-origin",
+      "paths": [
+        "crates/mesh-talk-core/src/node/discovery_origin.rs",
+        "crates/mesh-talk-core/src/discovery/roster.rs",
+        "crates/mesh-talk-core/src/node/bridge_directory.rs",
+        "crates/mesh-talk-core/src/node/bridge_client.rs",
+        "crates/mesh-talk-core/src/node/postbox.rs",
+        "crates/mesh-talk-core/src/postoffice/federation.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::discovery_origin::tests::",
+            "node::bridge_directory::tests::",
+            "node::bridge_client::tests::",
+            "node::postbox::tests::",
+            "postoffice::federation::tests::",
+            "discovery::roster::"
+          ]
+        }
+      ],
+      "consumers": [
+        "desktop-chat",
+        "desktop-settings"
+      ],
+      "capability": {
+        "summary": "Preserve a participant-consented original registration office across encrypted directory and federation hops without disclosing it by default.",
+        "guide": "docs/network-design-reference.md#optional-registration-origin-disclosure",
+        "invariants": [
+          {
+            "name": "Both signatures bind the exact participant and office; optional origin never establishes physical location or transport authority",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Opt-out serializes with active sends and invalidates prepared work; original 15-second consent leases cannot be renewed by forwarding or presentation tolerance",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          },
+          {
+            "name": "Legacy discovery and mailbox wire layouts stay compatible and carry no optional origin disclosure",
+            "reference": "docs/network-design-reference.md#optional-registration-origin-disclosure"
+          }
+        ]
+      },
+      "escalation": [
+        "Run encrypted loopback registration/federation/viewer and opt-out scenarios, host settings/session and presence projection tests, and frontend independent metadata-expiry tests. Physical Windows/macOS office topology still needs native acceptance; loopback does not certify deployment."
+      ]
+    },
+    {
       "id": "core-authenticated-route-order",
       "paths": [
         "crates/mesh-talk-core/src/node/privacy_runtime.rs",
@@ -1577,6 +1863,58 @@
       ]
     },
     {
+      "id": "core-group-metadata",
+      "paths": [
+        "crates/mesh-talk-core/src/node/group_metadata.rs",
+        "crates/mesh-talk-core/src/node/group_metadata_tests.rs",
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/node/channel_projection_cache.rs",
+        "crates/mesh-talk-core/src/node/channels.rs",
+        "crates/mesh-talk-core/src/node/join_history.rs",
+        "crates/mesh-talk-core/src/node/session.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync.rs",
+        "crates/mesh-talk-core/src/eventlog/event.rs",
+        "crates/mesh-talk-core/src/eventlog/store.rs",
+        "crates/mesh-talk-core/src/eventlog/persist.rs",
+        "crates/mesh-talk-core/src/eventlog/sync.rs",
+        "crates/mesh-talk-core/src/node/group_chain_tests.rs",
+        "crates/mesh-talk-core/src/node/node.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::group_metadata::tests::",
+            "current_group_metadata_crosses_real_tcp_after_owner_goes_offline",
+            "node::session::tests::",
+            "eventlog::event::tests::",
+            "eventlog::persist::tests::",
+            "node::join_history::tests::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Publish owner-authorized encrypted shared group photos and current announcements while preserving private photo overrides and independent field revisions.",
+        "guide": "docs/help/topics/channels.md",
+        "invariants": [
+          {
+            "name": "Only the current accepted owner account publishes; former-owner forks cannot replace transferred metadata. Current field keys reach accepted new members through retained holders independently of pre-join message history, without sharing sender chains.",
+            "reference": "docs/help/topics/channels.md"
+          },
+          {
+            "name": "Announcement deletion tombstones and bounded group artwork survive replay; metadata event kind 19 requires appended V5 sync envelopes before transfer to older decoders.",
+            "reference": "docs/ARCHITECTURE.md"
+          }
+        ]
+      },
+      "consumers": [
+        "desktop-group-metadata"
+      ],
+      "escalation": [
+        "Exercise real linked owner-account devices, removal/re-invitation, source-offline restart and mixed-version native clients. Loopback TCP tests establish encrypted event convergence but not physical LAN reachability."
+      ]
+    },
+    {
       "id": "core-group-file-relay",
       "paths": [
         "crates/mesh-talk-core/src/node/group_file_delivery.rs",
@@ -1633,6 +1971,49 @@
       ],
       "escalation": [
         "Run real loopback two-relay federation with unavailable direct client endpoints, pre-approval custody, sender shutdown, recipient approval/save and exact completion; include independent-recipient replay/compaction and revoke/expiry evidence. Installed Mac-to-Mac acceptance and deployed relay capacity/retention remain separate native requirements."
+      ]
+    },
+    {
+      "id": "core-message-forwarding",
+      "paths": [
+        "crates/mesh-talk-core/src/node/forwarding.rs",
+        "crates/mesh-talk-core/src/node/forwarding/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::forwarding::"
+          ]
+        }
+      ],
+      "consumers": [
+        "frontend-message-forwarding"
+      ],
+      "capability": {
+        "summary": "Forward canonical retained sources to accounts or logical account groups through the existing acceptance owners, retaining per-item identity and read-only pending receipt projections.",
+        "guide": "docs/message-forwarding.md",
+        "invariants": [
+          {
+            "name": "Certified reference-only account Owners and Members forward text, files and merged records through the existing group operation journal; metadata never grants physical membership or sender keys",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          },
+          {
+            "name": "Stable origin-bound group operation identities and canonical same-target order survive retry and restart; actual request publication and local execution wait for terminal predecessors, while missing original pending intent remains uncertain, with unchanged stored forwarding record layout",
+            "reference": "docs/message-forwarding.md#reliability-and-verification"
+          },
+          {
+            "name": "Read-only batch listing projects retained committed and pending receipts without rereading source content, advancing query nonces, notifying network work or admitting operations; the existing writer reconciles terminal progress before batch retirement",
+            "reference": "docs/message-forwarding.md#reliability-and-verification"
+          },
+          {
+            "name": "Unauthorized group legs reject before file restaging or network admission while preserving accepted and pending legs; canonical source policy and current runtime authority are rechecked inside admission",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          }
+        ]
+      },
+      "escalation": [
+        "Run the reference-only Owner/Member Noise regressions, text/file/merged delivery, source-policy, partial retry, retirement and restart checks. Public native admission and cross-device behavior require affected host review and protected CI; browser substitutes do not prove encrypted execution."
       ]
     }
   ],

@@ -20,6 +20,8 @@ import {
   type ForwardSource,
 } from "@/lib/api/messageForwarding";
 import type { FavoriteMessage } from "@/lib/api/messageFavorites";
+import { canParticipateChannel } from "../channelPermissions";
+import { useSerialPoll } from "../useSerialPoll";
 
 const targetKey = (target: ForwardTarget) => `${target.kind}:${target.target}`;
 export function ForwardDialog({
@@ -46,11 +48,14 @@ export function ForwardDialog({
   const [request, setRequest] = useState<ForwardRequest | null>(null);
   const alive = useRef(true);
   const inspection = useRef(0);
+  const observation = useRef(0);
+  const [runtime] = useState(captureRuntimeOwner);
+  const [listed, setListed] = useState(false);
   useEffect(() => {
     alive.current = true;
     const lease = captureRuntimeOwner();
     const inspectionId = ++inspection.current;
-    if (!lease.owner || !lease.current()) return;
+    if (!runtime.current() || !lease.owner || !lease.current()) return;
     void messageForwarding
       .inspect(lease.owner, source)
       .then((value) => {
@@ -64,26 +69,66 @@ export function ForwardDialog({
       .catch((e) => {
         if (alive.current && lease.current()) setError(errorMessage(e));
       });
-    void messageForwarding
-      .list(lease.owner)
-      .then((value) => {
-        if (alive.current && lease.current())
-          setResumable(
-            value.filter(
-              (batch) =>
-                batch.request.source.kind === source.kind &&
-                batch.request.source.target === source.target &&
-                batch.result.items.some((item) => item.status === "failed"),
-            ),
-          );
-      })
-      .catch((e) => {
-        if (alive.current && lease.current()) setError(errorMessage(e));
-      });
     return () => {
       alive.current = false;
     };
-  }, [source]);
+  }, [source, runtime]);
+  const pending =
+    result?.items.filter((item) => item.status === "pending").length ?? 0;
+  useSerialPoll(
+    !listed ||
+      (request !== null && result === null) ||
+      pending > 0 ||
+      resumable.some((batch) =>
+        batch.result.items.some((item) => item.status === "pending"),
+      ),
+    2000,
+    async () => {
+      const revision = observation.current;
+      const batches =
+        runtime.owner && runtime.current()
+          ? await messageForwarding.list(runtime.owner)
+          : [];
+      return { batches, revision };
+    },
+    ({ batches, revision }) => {
+      if (
+        !alive.current ||
+        !runtime.current() ||
+        revision !== observation.current
+      )
+        return;
+      setListed(true);
+      setResumable(
+        batches.filter(
+          (batch) =>
+            batch.request.source.kind === source.kind &&
+            batch.request.source.target === source.target &&
+            batch.result.items.some((item) => item.status !== "accepted"),
+        ),
+      );
+      // Observing admitted work never reads the source or submits another request.
+      const observed =
+        request &&
+        batches.find(
+          (batch) =>
+            batch.request.operation_id === request.operation_id &&
+            batch.result.operation_id === request.operation_id,
+        );
+      if (
+        observed &&
+        JSON.stringify(observed.result) !== JSON.stringify(result)
+      ) {
+        setResult(observed.result);
+        onAccepted(observed.result);
+      }
+    },
+    (error) => {
+      if (!alive.current || !runtime.current()) return;
+      setListed(true);
+      setError(errorMessage(error));
+    },
+  );
   const choices: Array<ForwardTarget & { name: string }> = [
     ...accounts.map((account) => ({
       kind: "account" as const,
@@ -94,27 +139,18 @@ export function ForwardDialog({
         account.names[0] ?? account.account_id,
       ),
     })),
-    ...channels
-      .filter(
-        (channel) =>
-          !channel.archived &&
-          !channel.dissolved &&
-          !channel.left &&
-          !channel.pending_invite &&
-          !channel.shared_reference,
-      )
-      .map((channel) => ({
-        kind: "channel" as const,
-        target: channel.channel_id,
-        name: channel.name,
-      })),
+    ...channels.filter(canParticipateChannel).map((channel) => ({
+      kind: "channel" as const,
+      target: channel.channel_id,
+      name: channel.name,
+    })),
   ];
   const nameOf = (target: ForwardTarget) =>
     choices.find((choice) => targetKey(choice) === targetKey(target))?.name ??
     target.target;
   const send = async (resume?: ForwardRequest) => {
     const lease = captureRuntimeOwner();
-    if (!lease.owner || !lease.current() || busy) return;
+    if (!runtime.current() || !lease.owner || !lease.current() || busy) return;
     const next = resume ??
       request ?? {
         operation_id: `${Date.now()}-${crypto.randomUUID()}`,
@@ -123,11 +159,14 @@ export function ForwardDialog({
         mode,
       };
     setRequest(next);
+    // Ignore observations started before or during this mutation's response.
+    observation.current++;
     setBusy(true);
     setError(null);
     try {
       const value = await messageForwarding.send(lease.owner, next);
       if (!alive.current || !lease.current()) return;
+      observation.current++;
       setResult(value);
       onAccepted(value);
     } catch (e) {
@@ -336,7 +375,7 @@ export function ForwardDialog({
                   >
                     {t("messageForwarding.resume", {
                       count: batch.result.items.filter(
-                        (item) => item.status === "failed",
+                        (item) => item.status !== "accepted",
                       ).length,
                     })}
                   </Button>
@@ -355,6 +394,12 @@ export function ForwardDialog({
                         .length ?? 0,
                     failed,
                   })}
+              {pending > 0 && (
+                <>
+                  {" "}
+                  · {t("messageForwarding.pendingCount", { count: pending })}
+                </>
+              )}
             </div>
             <p className="break-words text-sm text-muted-foreground">
               {t(`messageForwarding.${request.mode}`)} ·{" "}

@@ -72,6 +72,13 @@ struct Offer {
     keys: SealedPayload,
     rows: Vec<EncryptedRow>,
 }
+/// Frozen encrypted history preparation. Construct before the delivery/log guards.
+pub(in crate::node) struct PreparedInvitationHistory {
+    offer: Option<Offer>,
+    recipient: PublicIdentity,
+    now: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Release {
     offer: EventId,
@@ -536,8 +543,24 @@ pub(super) fn valid_invitation_transaction(events: &[Event]) -> bool {
         && matches!(decode::<HistoryControl>(&event.ciphertext), Some(HistoryControl::Offer(offer)) if offer.invitation == invitation.id)
 }
 
+/// Reuse the history owner's complete signed causal offer validation for WAL replay.
+/// The exact encrypted snapshot is retained; no current clock or history is read.
+pub(in crate::node) fn valid_saved_invitation_history(causal: &[&Event], batch: &[Event]) -> bool {
+    let mut events = causal.to_vec();
+    events.extend(batch.iter());
+    let view = View::new(&events);
+    batch
+        .iter()
+        .filter(|event| event.kind == EventKind::ChannelJoinHistory)
+        .all(|event| view.offer(event).is_some())
+}
+
 pub(super) fn encode_policy(policy: HistoryPolicy) -> Vec<u8> {
     encode(&policy)
+}
+
+pub(super) fn decode_policy(bytes: &[u8]) -> Option<HistoryPolicy> {
+    decode(bytes)
 }
 
 pub(super) fn policy(events: &[&Event]) -> HistoryPolicy {
@@ -619,7 +642,11 @@ impl Node {
                 }
                 members = state.members().to_vec();
             }
-            self.append_event(channel, EventKind::ChannelHistoryPolicy, encode(&policy))?;
+            self.append_event(
+                channel,
+                EventKind::ChannelHistoryPolicy,
+                encode_policy(policy),
+            )?;
             self.process_channel(channel);
             Ok(())
         })?;
@@ -738,9 +765,8 @@ impl Node {
         additional: impl FnOnce(EventId) -> Result<Option<(EventKind, Vec<u8>)>, NodeError>,
     ) -> Result<(), NodeError> {
         let (selected, policy) = history;
-        let now = super::node::now_millis();
-        let selected = select_history(selected, policy, now);
-        let mut offer = self.prepare_join_history(channel, recipient, selected, policy)?;
+        let prepared = self.prepare_invitation_history(channel, recipient, selected, policy)?;
+        let own_proof = self.own_group_proof();
         let mut delivery = self.delivery.lock().expect("delivery lock");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
@@ -748,18 +774,98 @@ impl Node {
         let state = book
             .state(&channel)
             .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-        if !self.channel_identity_can_manage(state)
+        let log = self.log.lock().expect("log lock");
+        let projection = ChannelBook::project_membership(channel, &log.events(&channel));
+        let transaction = self.prepare_invitation_with_history_and_control_locked(
+            channel,
+            meta,
+            recipient,
+            &log,
+            state,
+            &projection,
+            &own_proof,
+            prepared,
+            additional,
+        )?;
+        log.sync().map_err(NodeError::Log)?;
+        drop(log);
+        drop(book);
+        delivery.begin(transaction).map_err(NodeError::Log)?;
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        Ok(())
+    }
+
+    pub(in crate::node) fn prepare_invitation_history(
+        &self,
+        channel: ConversationId,
+        recipient: &PublicIdentity,
+        selected: Vec<HistoryEntry>,
+        policy: HistoryPolicy,
+    ) -> Result<PreparedInvitationHistory, NodeError> {
+        let now = super::node::now_millis();
+        let selected = select_history(selected, policy, now);
+        let offer = self.prepare_join_history(channel, recipient, selected, policy)?;
+        Ok(PreparedInvitationHistory {
+            offer,
+            recipient: recipient.clone(),
+            now,
+        })
+    }
+
+    /// Prepare the existing invitation batch without acquiring locks or publishing
+    /// effects. The caller supplies its locked membership projection and local
+    /// sender state, and retains responsibility for parent durability and the WAL.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::node) fn prepare_invitation_with_history_and_control_locked(
+        &self,
+        channel: ConversationId,
+        meta: &crate::channel::ChannelMeta,
+        recipient: &PublicIdentity,
+        log: &crate::eventlog::persist::PersistentEventLog,
+        state: &crate::channel::ChannelState,
+        projection: &super::channel::ChannelMembershipProjection,
+        own_proof: &crate::discovery::Announce,
+        prepared: PreparedInvitationHistory,
+        additional: impl FnOnce(EventId) -> Result<Option<(EventKind, Vec<u8>)>, NodeError>,
+    ) -> Result<super::delivery_store::DeliveryTransaction, NodeError> {
+        let PreparedInvitationHistory {
+            mut offer,
+            recipient: prepared_recipient,
+            now,
+        } = prepared;
+        let current = projection
+            .state
+            .as_ref()
+            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+        if prepared_recipient != *recipient
+            || !meta.members.contains(recipient)
+            || own_proof.public() != self.identity.public()
+            || own_proof
+                .account_cert
+                .as_ref()
+                .is_none_or(|cert| cert.account_ed25519_pub != self.account.public().ed25519_pub)
+            || Self::public_account_group_source(
+                channel,
+                projection,
+                &self.identity.public(),
+                own_proof,
+            )
+            .is_none_or(|source| source.role != super::AccountGroupRole::Owner)
+            || current.is_dissolved()
             || state.is_dissolved()
-            || !state.is_accepted_member(&self.user_id())
-            || state.epoch().checked_add(1) != Some(meta.epoch)
-            || state.owner() != meta.owner
+            || current.members() != state.members()
+            || current.epoch() != state.epoch()
+            || current.owner() != state.owner()
+            || !current.is_accepted_member(&self.user_id())
+            || current.epoch().checked_add(1) != Some(meta.epoch)
+            || current.owner() != meta.owner
         {
             return Err(NodeError::Channel(
                 "channel authority changed before invitation".into(),
             ));
         }
         let senders = state.export_my_senders();
-        let log = self.log.lock().expect("log lock");
         let seq = log
             .next_sequence(
                 &channel,
@@ -811,27 +917,19 @@ impl Node {
                 "invitation history exceeds transport frame".into(),
             ));
         }
-        log.sync().map_err(NodeError::Log)?;
-        drop(log);
         let last_seq = events.last().expect("invitation exists").seq;
-        delivery
-            .begin(
-                super::delivery_store::DeliveryTransaction::ChannelOutgoing {
-                    events,
-                    senders,
-                    sent: super::sentlog::SentEntry {
-                        conversation: channel,
-                        seq: last_seq,
-                        wall_clock: now,
-                        plaintext: Vec::new(),
-                    },
+        Ok(
+            super::delivery_store::DeliveryTransaction::ChannelOutgoing {
+                events,
+                senders,
+                sent: super::sentlog::SentEntry {
+                    conversation: channel,
+                    seq: last_seq,
+                    wall_clock: now,
+                    plaintext: Vec::new(),
                 },
-            )
-            .map_err(NodeError::Log)?;
-        drop(book);
-        self.recover_delivery(&mut delivery)
-            .map_err(NodeError::Log)?;
-        Ok(())
+            },
+        )
     }
     /// At most eight ready invitations are released per control tick. All bytes
     /// remain in the durable event log, so an offline source can retry on restart.

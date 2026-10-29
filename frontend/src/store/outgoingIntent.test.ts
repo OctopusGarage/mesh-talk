@@ -6,6 +6,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 import {
   reconcileMessages,
   beginSendIntent,
+  dispatchIntent,
+  settleGroupSendIntents,
+  refreshGroupOperationIntents,
   refreshDeliveryStatuses,
   SEND_INTENT_CAP,
   type SendIntent,
@@ -17,6 +20,7 @@ import {
 } from "./conversationState";
 import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
+import type { AccountGroupOperationStatus } from "@/lib/types";
 import type { ChatMessage, Conversation } from "./conversationModel";
 
 const row = (id: string | null, clientId?: string): ChatMessage => ({
@@ -402,64 +406,53 @@ it("drops queued delivery invalidations when the captured runtime changes", asyn
   expect(invoke).toHaveBeenCalledTimes(1);
 });
 
-it.each(["text", "sticker", "file"] as const)(
-  "settles a channel %s by exact acceptance before network delivery finishes",
-  async (kind) => {
-    const store = session();
-    const channel: Conversation = {
-      kind: "channel",
-      id: "group",
-      name: "Group",
-    };
-    store.setState({ active: channel });
-    invoke.mockImplementation(async (command) => {
-      if (
-        command === "owner_enqueue_channel_text" ||
-        command === "owner_enqueue_channel_sticker"
-      )
-        return "accepted-event";
-      if (command === "owner_enqueue_channel_file")
-        return { id: "accepted-event", fileConv: "photo-bytes" };
-      // The previous channel IPC waits for a stalled optional relay.
-      return new Promise(() => {});
-    });
-    const payload =
-      kind === "text"
-        ? { kind, text: "kk", replyTo: null }
-        : kind === "sticker"
-          ? { kind, stickerId: "heart", fallback: "❤️" }
-          : { kind, path: "/photo.png", media: true };
-    const sending = beginSendIntent(
-      store.setState,
-      store.getState,
-      channel,
-      payload,
-    );
-    await vi.waitFor(
-      () => {
-        expect(store.getState().messages["channel:group"]).toEqual([
-          expect.objectContaining({ id: "accepted-event", pending: false }),
-        ]);
-      },
-      { timeout: 200 },
-    );
-    expect(await sending).toBe(true);
-    const message = store.getState().messages["channel:group"][0];
-    if (kind === "file") expect(message.file?.fileConv).toBe("photo-bytes");
-    const reconciled = reconcileMessages(
-      [{ ...message, clientId: undefined, replicas: 1 }],
-      [message],
-      Object.values(store.getState().intents),
-      [],
-    );
-    expect(reconciled).toHaveLength(1);
-    expect(reconciled[0]).toMatchObject({
-      id: "accepted-event",
+it("settles a channel File only from committed canonical metadata before network delivery", async () => {
+  const store = session();
+  store.setState({ active: groupConversation });
+  invoke.mockImplementation(async (command) => {
+    if (command === "owner_new_account_group_operation_id") return operationId;
+    if (command === "owner_submit_account_group_file")
+      return groupStatus({ kind: "committed" }, "file");
+    return new Promise(() => {});
+  });
+  store.setState({
+    reload: vi.fn(async () => {
+      store.setState({
+        messages: {
+          "channel:group": [
+            {
+              ...row("public-event"),
+              pending: false,
+              metadataPending: false,
+              file: {
+                name: "photo.png",
+                size: 10,
+                mime: "image/png",
+                media: true,
+                fileConv: "photo-bytes",
+              },
+            },
+          ],
+        },
+      });
+      return true;
+    }),
+  });
+  expect(
+    await beginSendIntent(store.setState, store.getState, groupConversation, {
+      kind: "file",
+      path: "/photo.png",
+      media: true,
+    }),
+  ).toBe(true);
+  expect(store.getState().messages["channel:group"]).toEqual([
+    expect.objectContaining({
+      id: "public-event",
       pending: false,
-      replicas: 1,
-    });
-  },
-);
+      file: expect.objectContaining({ fileConv: "photo-bytes" }),
+    }),
+  ]);
+});
 
 it("projects member and post-office custody separately for exact channel IDs", async () => {
   const store = session();
@@ -791,4 +784,569 @@ it("projects only recognized recovery reasons from exact local observations", as
       reason === "future_reason" ? undefined : reason,
     );
   }
+});
+
+const groupConversation: Conversation = {
+  kind: "channel",
+  id: "group",
+  name: "Group",
+};
+const operationId = "ab".repeat(32);
+function groupStatus(
+  phase: AccountGroupOperationStatus["phase"],
+  kind: "text" | "sticker" | "file" = "text",
+): AccountGroupOperationStatus {
+  return {
+    id: operationId,
+    account_id: "local-account",
+    group: "group",
+    kind,
+    phase,
+    executions:
+      phase.kind === "committed"
+        ? [
+            {
+              device_id: "source-device",
+              phase,
+              committed_events: ["public-event"],
+            },
+          ]
+        : [],
+    committed_events: phase.kind === "committed" ? ["public-event"] : [],
+    primary_event: phase.kind === "committed" ? "public-event" : null,
+  };
+}
+it.each(["text", "sticker"] as const)(
+  "retains %s admission as pending and links the original operation before mutation",
+  async (kind) => {
+    const store = session();
+    store.setState({ active: groupConversation });
+    const onAccepted = vi.fn();
+    invoke.mockImplementation(
+      async (command: string, args: Record<string, unknown>) => {
+        if (command === "owner_new_account_group_operation_id")
+          return operationId;
+        expect(command).toBe(`owner_submit_account_group_${kind}`);
+        expect(Object.values(store.getState().intents)[0].operationId).toBe(
+          operationId,
+        );
+        expect(args).toMatchObject({
+          owner: "host",
+          expectedAccount: "local-account",
+          operationId,
+          channelId: "group",
+        });
+        return groupStatus({ kind: "accepted" }, kind);
+      },
+    );
+    const payload =
+      kind === "text"
+        ? { kind, text: "hello", replyTo: null }
+        : { kind, stickerId: "heart", fallback: "❤️" };
+    expect(
+      await beginSendIntent(
+        store.setState,
+        store.getState,
+        groupConversation,
+        payload,
+        { onAccepted },
+      ),
+    ).toBe(true);
+    expect(Object.values(store.getState().intents)[0].message).toMatchObject({
+      id: null,
+      pending: true,
+    });
+    expect(onAccepted).toHaveBeenCalledTimes(1);
+    expect(store.getState().reload).not.toHaveBeenCalled();
+    expect(JSON.stringify(store.getState().groupOperations)).not.toContain(
+      "hello",
+    );
+  },
+);
+it("retries uncertain channel work with its original operation ID and original body", async () => {
+  const store = session();
+  store.setState({ active: groupConversation });
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "owner_new_account_group_operation_id") return operationId;
+    throw new Error("timeoutUnconfirmed");
+  });
+  expect(
+    await beginSendIntent(store.setState, store.getState, groupConversation, {
+      kind: "text",
+      text: "original",
+      replyTo: null,
+    }),
+  ).toBe(true);
+  const intent = Object.values(store.getState().intents)[0];
+  expect(intent).toMatchObject({
+    operationId,
+    message: { id: null, pending: true },
+  });
+  invoke.mockClear();
+  invoke.mockResolvedValue(groupStatus({ kind: "accepted" }));
+  expect(await dispatchIntent(store.setState, store.getState, intent)).toBe(
+    true,
+  );
+  expect(invoke).toHaveBeenCalledExactlyOnceWith(
+    "owner_submit_account_group_text",
+    expect.objectContaining({ operationId, text: "original" }),
+  );
+});
+it("settles a polled committed group operation once and preserves canonical source authorship", async () => {
+  const store = session();
+  store.setState({
+    active: groupConversation,
+    onGroupOperationTerminal: (status) =>
+      settleGroupSendIntents(store.setState, store.getState, status),
+  });
+  invoke
+    .mockResolvedValueOnce(operationId)
+    .mockResolvedValueOnce(groupStatus({ kind: "accepted" }));
+  await beginSendIntent(store.setState, store.getState, groupConversation, {
+    kind: "text",
+    text: "original",
+    replyTo: null,
+  });
+  const canonical = {
+    ...row("public-event"),
+    who: "actual-source",
+    text: "canonical",
+    pending: false,
+  };
+  store.setState((state) => ({
+    messages: {
+      "channel:group": [...state.messages["channel:group"], canonical],
+    },
+  }));
+  invoke.mockImplementation(async (command) =>
+    command === "owner_list_account_group_operations"
+      ? []
+      : groupStatus({ kind: "committed" }),
+  );
+  await refreshGroupOperationIntents(store.setState, store.getState);
+  expect(store.getState().messages["channel:group"]).toEqual([
+    expect.objectContaining({
+      id: "public-event",
+      who: "actual-source",
+      text: "canonical",
+      pending: false,
+    }),
+  ]);
+  expect(Object.values(store.getState().intents)[0].message.id).toBe(
+    "public-event",
+  );
+  expect(
+    store.getState().messages["channel:group"][0].delivery,
+  ).toBeUndefined();
+});
+it("never binds a pending group receipt, operation ID, or committed result without a primary event", () => {
+  const store = session();
+  const pending = row(null, "client");
+  store.setState({
+    intents: {
+      client: {
+        conversation: groupConversation,
+        payload: { kind: "text", text: "original", replyTo: null },
+        message: { ...pending, pending: true },
+        operationId,
+      },
+    },
+    messages: { "channel:group": [{ ...pending, pending: true }] },
+  });
+  settleGroupSendIntents(
+    store.setState,
+    store.getState,
+    groupStatus({ kind: "accepted" }),
+  );
+  settleGroupSendIntents(store.setState, store.getState, {
+    ...groupStatus({ kind: "committed" }),
+    primary_event: null,
+  });
+  expect(store.getState().intents.client.message).toMatchObject({
+    id: null,
+    pending: true,
+  });
+});
+
+it("acknowledges a recovered uncertain group send exactly once on public commitment", async () => {
+  const store = session();
+  const onAccepted = vi.fn();
+  store.setState({
+    active: groupConversation,
+    onGroupOperationTerminal: (status) =>
+      settleGroupSendIntents(store.setState, store.getState, status),
+  });
+  invoke
+    .mockResolvedValueOnce(operationId)
+    .mockRejectedValueOnce(new Error("timeoutUnconfirmed"));
+  await beginSendIntent(
+    store.setState,
+    store.getState,
+    groupConversation,
+    { kind: "text", text: "hello", replyTo: null },
+    { onAccepted },
+  );
+  expect(onAccepted).not.toHaveBeenCalled();
+  invoke.mockImplementation(async (command) =>
+    command === "owner_list_account_group_operations"
+      ? []
+      : groupStatus({ kind: "committed" }),
+  );
+  await refreshGroupOperationIntents(store.setState, store.getState);
+  await refreshGroupOperationIntents(store.setState, store.getState);
+  expect(onAccepted).toHaveBeenCalledTimes(1);
+  expect(store.getState().messages["channel:group"]).toEqual([
+    expect.objectContaining({
+      id: "public-event",
+      who: "source-device",
+      pending: false,
+    }),
+  ]);
+});
+it("keeps an accepted group operation pending when its draft callback throws", async () => {
+  const store = session();
+  invoke
+    .mockResolvedValueOnce(operationId)
+    .mockResolvedValueOnce(groupStatus({ kind: "accepted" }));
+  expect(
+    await beginSendIntent(
+      store.setState,
+      store.getState,
+      groupConversation,
+      { kind: "text", text: "hello", replyTo: null },
+      {
+        onAccepted: () => {
+          throw new Error("UI effect failed");
+        },
+      },
+    ),
+  ).toBe(true);
+  expect(Object.values(store.getState().intents)[0].message).toMatchObject({
+    id: null,
+    pending: true,
+  });
+});
+it("keeps a rejected protected group draft with its composer when failure retention is disabled", async () => {
+  const store = session();
+  const onAccepted = vi.fn();
+  invoke
+    .mockResolvedValueOnce(operationId)
+    .mockResolvedValueOnce(
+      groupStatus({ kind: "rejected", reason: "not_authorized" }),
+    );
+  expect(
+    await beginSendIntent(
+      store.setState,
+      store.getState,
+      groupConversation,
+      { kind: "text", text: "protected", replyTo: null },
+      { onAccepted, retainFailure: false },
+    ),
+  ).toBe(false);
+  expect(store.getState().intents).toEqual({});
+  expect(store.getState().messages["channel:group"]).toEqual([]);
+  expect(onAccepted).not.toHaveBeenCalled();
+});
+it("does not submit a group body after reservation or payload linkage retires its owner", async () => {
+  for (const retireAt of ["ticket", "intent"] as const) {
+    useAuth.setState({ generation: 0 });
+    const store = session();
+    const stop = store.subscribe((state) => {
+      if (
+        retireAt === "ticket"
+          ? !!state.groupOperations?.[operationId]
+          : Object.values(state.intents).some((intent) => !!intent.operationId)
+      )
+        useAuth.setState({ generation: 1 });
+    });
+    invoke.mockReset();
+    invoke.mockResolvedValueOnce(operationId);
+    expect(
+      await beginSendIntent(store.setState, store.getState, groupConversation, {
+        kind: "text",
+        text: "hello",
+        replyTo: null,
+      }),
+    ).toBe(false);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    stop();
+  }
+});
+it("keeps the existing coordinator usable after a runtime restart", async () => {
+  const store = session();
+  invoke
+    .mockResolvedValueOnce(operationId)
+    .mockResolvedValueOnce(groupStatus({ kind: "accepted" }));
+  await beginSendIntent(store.setState, store.getState, groupConversation, {
+    kind: "text",
+    text: "first",
+    replyTo: null,
+  });
+  store.setState({ runEpoch: 1 });
+  const nextId = "cd".repeat(32);
+  invoke.mockResolvedValueOnce(nextId).mockResolvedValueOnce({
+    ...groupStatus({ kind: "accepted" }),
+    id: nextId,
+  });
+  await beginSendIntent(store.setState, store.getState, groupConversation, {
+    kind: "text",
+    text: "second",
+    replyTo: null,
+  });
+  expect(store.getState().groupOperations?.[nextId]?.status?.phase.kind).toBe(
+    "accepted",
+  );
+});
+it("settles an inactive group through its existing cache and does not repopulate an evicted cache", async () => {
+  for (const cached of [true, false]) {
+    const store = session();
+    invoke
+      .mockResolvedValueOnce(operationId)
+      .mockResolvedValueOnce(groupStatus({ kind: "accepted" }));
+    await beginSendIntent(store.setState, store.getState, groupConversation, {
+      kind: "text",
+      text: "hello",
+      replyTo: null,
+    });
+    if (!cached) store.setState({ messages: {} });
+    settleGroupSendIntents(
+      store.setState,
+      store.getState,
+      groupStatus({ kind: "committed" }),
+    );
+    expect(Object.values(store.getState().intents)[0].message).toMatchObject({
+      id: "public-event",
+      who: "source-device",
+      pending: false,
+    });
+    if (cached)
+      expect(store.getState().messages["channel:group"]).toHaveLength(1);
+    else expect(store.getState().messages).toEqual({});
+  }
+});
+it("does not apply a late group mutation after account identity changes", async () => {
+  const store = session();
+  let finish!: (status: AccountGroupOperationStatus) => void;
+  const entered = new Promise<void>((resolve) => {
+    invoke.mockImplementation(async (command) => {
+      if (command === "owner_new_account_group_operation_id")
+        return operationId;
+      resolve();
+      return new Promise((done) => {
+        finish = done;
+      });
+    });
+  });
+  const pending = beginSendIntent(
+    store.setState,
+    store.getState,
+    groupConversation,
+    { kind: "text", text: "hello", replyTo: null },
+  );
+  await entered;
+  store.setState({ myAccountId: "other-account", identityEpoch: 1 });
+  finish(groupStatus({ kind: "committed" }));
+  expect(await pending).toBe(false);
+  expect(Object.values(store.getState().intents)[0].message.id).toBeNull();
+});
+
+it("binds a polled public group event even if draft cleanup throws", async () => {
+  const store = session();
+  store.setState({
+    onGroupOperationTerminal: (status) =>
+      settleGroupSendIntents(store.setState, store.getState, status),
+  });
+  invoke
+    .mockResolvedValueOnce(operationId)
+    .mockRejectedValueOnce(new Error("timeoutUnconfirmed"));
+  expect(
+    await beginSendIntent(
+      store.setState,
+      store.getState,
+      groupConversation,
+      { kind: "text", text: "hello", replyTo: null },
+      {
+        onAccepted: () => {
+          throw new Error("draft cleanup failed");
+        },
+      },
+    ),
+  ).toBe(true);
+  invoke.mockImplementation(async (command) =>
+    command === "owner_list_account_group_operations"
+      ? []
+      : groupStatus({ kind: "committed" }),
+  );
+  await refreshGroupOperationIntents(store.setState, store.getState);
+  expect(Object.values(store.getState().intents)[0].message).toMatchObject({
+    id: "public-event",
+    who: "source-device",
+    pending: false,
+  });
+});
+
+it.each(["account", "channel"] as const)(
+  "does not dispatch an %s body under an owner retired during optimistic insertion",
+  async (kind) => {
+    const store = session();
+    const c = { kind, id: "target", name: "Target" };
+    let retired = false;
+    const stop = store.subscribe((state) => {
+      if (retired || !Object.keys(state.intents).length) return;
+      retired = true;
+      useAuth.setState({
+        user: { id: "replacement-owner", username: "bob", display_name: "Bob" },
+        generation: 1,
+      });
+    });
+    try {
+      const admission = beginSendIntent(store.setState, store.getState, c, {
+        kind: "text",
+        text: "old private body",
+        replyTo: null,
+      });
+      await Promise.resolve();
+      expect(invoke).not.toHaveBeenCalled();
+      expect(admission).toBeNull();
+      expect(store.getState().intents).toEqual({});
+      expect(store.getState().messages[`${kind}:target`]).toEqual([]);
+    } finally {
+      stop();
+    }
+  },
+);
+it("does not mint a group operation when account replacement occurs during optimistic insertion", async () => {
+  const store = session();
+  let retired = false;
+  const stop = store.subscribe((state) => {
+    if (retired || !Object.keys(state.intents).length) return;
+    retired = true;
+    // Account equality is checked explicitly, even before its epoch projection catches up.
+    store.setState({ myAccountId: "replacement-account" });
+  });
+  try {
+    const admission = beginSendIntent(
+      store.setState,
+      store.getState,
+      groupConversation,
+      { kind: "text", text: "old body", replyTo: null },
+    );
+    await Promise.resolve();
+    expect(invoke).not.toHaveBeenCalled();
+    expect(admission).toBeNull();
+    expect(store.getState().intents).toEqual({});
+  } finally {
+    stop();
+  }
+});
+it("does not remove a replacement session's intent that reuses the optimistic key", () => {
+  const store = session();
+  let replacement: SendIntent | undefined;
+  const stop = store.subscribe((state) => {
+    if (replacement) return;
+    const [clientId, original] = Object.entries(state.intents)[0] ?? [];
+    if (!clientId || !original) return;
+    useAuth.setState({ generation: 1 });
+    replacement = {
+      ...original,
+      payload: { kind: "text", text: "new session body", replyTo: null },
+      message: { ...original.message, text: "new session body" },
+    };
+    store.setState({
+      intents: { [clientId]: replacement },
+      messages: { "channel:group": [replacement.message] },
+    });
+  });
+  try {
+    expect(
+      beginSendIntent(store.setState, store.getState, groupConversation, {
+        kind: "text",
+        text: "retired body",
+        replyTo: null,
+      }),
+    ).toBeNull();
+    expect(Object.values(store.getState().intents)).toEqual([replacement]);
+    expect(store.getState().messages["channel:group"]).toEqual([
+      replacement!.message,
+    ]);
+    expect(invoke).not.toHaveBeenCalled();
+  } finally {
+    stop();
+  }
+});
+
+it("retains typed group File admission and retries its original path and ID", async () => {
+  const store = session();
+  store.setState({ active: groupConversation });
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "owner_new_account_group_operation_id") return operationId;
+    throw new Error("lost response");
+  });
+  await beginSendIntent(store.setState, store.getState, groupConversation, {
+    kind: "file",
+    path: "/tmp/original.png",
+    media: true,
+    expiresAtMs: 9000000000000,
+    protection: "authenticate",
+  });
+  const intent = Object.values(store.getState().intents)[0];
+  expect(intent.operationId).toBe(operationId);
+  expect(intent.message).toMatchObject({
+    pending: true,
+    metadataPending: true,
+    id: null,
+  });
+  invoke.mockClear();
+  invoke.mockResolvedValue(groupStatus({ kind: "accepted" }, "file"));
+  await dispatchIntent(store.setState, store.getState, intent);
+  expect(invoke).toHaveBeenCalledExactlyOnceWith(
+    "owner_submit_account_group_file",
+    expect.objectContaining({
+      owner: "host",
+      expectedAccount: "local-account",
+      operationId,
+      channelId: "group",
+      path: "/tmp/original.png",
+      media: true,
+      progressKey: intent.message.clientId,
+      expiresAtMs: 9000000000000,
+      protection: "authenticate",
+    }),
+  );
+  settleGroupSendIntents(
+    store.setState,
+    store.getState,
+    groupStatus({ kind: "committed" }, "file"),
+  );
+  expect(Object.values(store.getState().intents)).toHaveLength(1);
+  const canonical = {
+    ...row("public-event"),
+    metadataPending: false,
+    file: {
+      name: "original.png",
+      size: 10,
+      mime: "image/png",
+      media: true,
+      fileConv: "real-file",
+    },
+  };
+  store.setState((state) => ({
+    messages: {
+      ...state.messages,
+      "channel:group": [...state.messages["channel:group"], canonical],
+    },
+  }));
+  settleGroupSendIntents(
+    store.setState,
+    store.getState,
+    groupStatus({ kind: "committed" }, "file"),
+  );
+  expect(Object.values(store.getState().intents)[0].message).toMatchObject({
+    id: "public-event",
+    pending: false,
+    metadataPending: false,
+  });
+  expect(store.getState().messages["channel:group"][0].file?.fileConv).toBe(
+    "real-file",
+  );
 });

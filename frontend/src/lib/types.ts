@@ -66,6 +66,8 @@ export interface HistoryItem {
 }
 
 export interface ReactionInfo {
+  /** Current certified account ownership for channel reactions; absent on older hosts and DMs. */
+  from_me?: boolean;
   target: string;
   emoji: string;
   who: string[];
@@ -112,7 +114,100 @@ export interface ChannelActivityInfo {
 export type ChannelHistoryPolicy =
   "off" | "last_ten" | "last_three_days" | "last_ten_within_three_days";
 
+export type AccountGroupOperationKind =
+  | "text"
+  | "sticker"
+  | "file"
+  | "reaction"
+  | "recall"
+  | "invite"
+  | "accept_invitation"
+  | "decline_invitation"
+  | "rename"
+  | "remove_account"
+  | "transfer_ownership"
+  | "dissolve"
+  | "history_policy"
+  | "leave_account";
+
+export type AccountGroupOperationRejection =
+  | "not_authorized"
+  | "owner_must_transfer"
+  | "membership_changed"
+  | "original_signer_no_longer_authorized"
+  | "invalid_target"
+  | "expired"
+  | "invalid_payload"
+  | "operation_id_conflict"
+  | "resource_limit";
+
+export type AccountGroupOperationPhase =
+  | {
+      kind:
+        | "waiting_for_executor"
+        | "awaiting_acceptance"
+        | "accepted"
+        | "executing"
+        | "reconciling"
+        | "cancellation_requested"
+        | "cancelled"
+        | "committed";
+    }
+  | {
+      kind: "action_required" | "rejected";
+      reason: AccountGroupOperationRejection;
+    };
+
+/** Lifecycle metadata only; request content and public event identity stay separate. */
+export interface AccountGroupOperationStatus {
+  id: string;
+  account_id: string;
+  group: string;
+  kind: AccountGroupOperationKind;
+  phase: AccountGroupOperationPhase;
+  executions: Array<{
+    device_id: string;
+    phase: AccountGroupOperationPhase;
+    committed_events: string[];
+  }>;
+  committed_events: string[];
+  primary_event: string | null;
+  /** Host-owned cleanup choice; absent for older or restored unknown tickets. */
+  delete_history?: boolean | null;
+  /** Private account cleanup acknowledged for this exact leave operation. */
+  history_cleanup_complete?: boolean | null;
+}
+
+export type AccountGroupControlRequest =
+  | { kind: "rename"; name: string }
+  | {
+      kind: "invite" | "remove_account" | "transfer_ownership";
+      target_account_id: string;
+    }
+  | { kind: "set_history_policy"; policy: ChannelHistoryPolicy }
+  | {
+      kind: "accept_invitation" | "decline_invitation" | "dissolve";
+    }
+  | { kind: "leave_account"; delete_history?: boolean }
+  | { kind: "react"; target: string; emoji: string; remove: boolean }
+  | { kind: "recall"; target: string };
+
+export interface AccountGroupAccessInfo {
+  account_id: string;
+  role: "invited" | "member" | "owner" | "left" | "dissolved" | "unknown";
+  execution:
+    | { kind: "local" }
+    | { kind: "via_device"; device_id: string }
+    | { kind: "waiting_for_device" }
+    | { kind: "requires_upgrade" }
+    | { kind: "reconciling" };
+}
+
 export interface ChannelMembersInfo {
+  /** Absent on older hosts; false means the displayed policy is not yet observed. */
+  history_policy_known?: boolean;
+  directory_reconciling?: boolean;
+  account_access?: AccountGroupAccessInfo | null;
   /** Native authorization for the current certified device/account. */
   can_manage?: boolean;
   owner_account_id?: string | null;
@@ -132,8 +227,16 @@ export interface HiddenContact {
   name: string;
 }
 
+/** Exact-runtime observations of account-personal conversation controls. */
+export interface PersonalConversationState {
+  conversation: { kind: "account" | "channel"; id: string };
+  hidden: boolean;
+  history_floor: string | null;
+  local_cleanup_complete: boolean;
+}
+
 export interface HiddenContactsSnapshot {
-  /** Device-local contact deletions, cleared by fresh online discovery. */
+  /** Personal contact removals; ordinary presence discovery does not undo them. */
   deleted?: string[];
   owner: string;
   contacts: HiddenContact[];
@@ -144,11 +247,15 @@ export interface ChannelRecovery {
   checked_at?: number | null;
 }
 export interface ChannelInfo {
+  account_access?: AccountGroupAccessInfo | null;
+  /** Historical local membership belonging to an account other than the active one. */
+  previous_account?: string | null;
   metadata?: ChannelMetadata | null;
   /** Informational account inventory; never grants membership or management. */
   shared_reference?: boolean;
   legacy_membership?: boolean;
   reference_members_complete?: boolean;
+  directory_reconciling?: boolean;
   /** Native authorization; false overrides legacy device ownership. */
   can_manage?: boolean;
   owner_account_id?: string | null;

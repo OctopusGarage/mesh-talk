@@ -15,6 +15,36 @@ mod tests {
     const ME: &str = "cccccccccccccccccccccccccccccccc";
 
     #[test]
+    fn deleting_a_contact_does_not_depend_on_current_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(dir.path().to_owned());
+        let snapshot = store
+            .delete_unlocked("alice", A, ME, true, || Ok(()))
+            .expect("personal deletion is independent of online presence");
+        assert_eq!(snapshot.deleted, vec![A.to_owned()]);
+    }
+
+    #[test]
+    fn presence_alone_cannot_restore_a_deleted_contact() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HiddenContactsState::new(dir.path().to_owned());
+        store
+            .delete_unlocked("alice", A, ME, false, || Ok(()))
+            .unwrap();
+        assert!(
+            store
+                .visible_accounts("alice", &[A.into()], vec![A.into()])
+                .unwrap()
+                .is_empty(),
+            "discovery does not reopen a deleted conversation"
+        );
+        assert_eq!(
+            store.get(Some("alice"), "alice").unwrap().deleted,
+            vec![A.to_owned()]
+        );
+    }
+
+    #[test]
     fn deleting_offline_contact_persists_without_becoming_hidden() {
         let dir = tempfile::tempdir().unwrap();
         let store = HiddenContactsState::new(dir.path().to_owned());
@@ -32,19 +62,19 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(
-            reopened
-                .visible_accounts("alice", &[A.into()], vec![A.into()])
-                .unwrap(),
-            vec![A.to_owned()]
-        );
         assert!(
             reopened
-                .get(Some("alice"), "alice")
+                .visible_accounts("alice", &[A.into()], vec![A.into()])
                 .unwrap()
-                .deleted
                 .is_empty()
         );
+        assert_eq!(
+            reopened.get(Some("alice"), "alice").unwrap().deleted,
+            vec![A.to_owned()]
+        );
+        reopened
+            .update_unlocked("alice", A, false, "", Some(ME))
+            .unwrap();
         assert_eq!(
             reopened
                 .visible_accounts("alice", &[], vec![A.into()])
@@ -54,14 +84,10 @@ mod tests {
     }
 
     #[test]
-    fn deletion_rejects_online_self_invalid_and_failed_save() {
+    fn deletion_rejects_self_invalid_and_failed_save() {
         let dir = tempfile::tempdir().unwrap();
         let store = HiddenContactsState::new(dir.path().to_owned());
-        assert!(
-            store
-                .delete_unlocked("alice", A, ME, true, || Ok(()))
-                .is_err()
-        );
+
         assert!(
             store
                 .delete_unlocked("alice", ME, ME, false, || Ok(()))
@@ -93,8 +119,8 @@ mod tests {
         let store = HiddenContactsState::new(dir.path().to_owned());
         assert!(
             store
-                .delete_unlocked("alice", A, ME, true, || panic!(
-                    "online history must remain"
+                .delete_unlocked("alice", ME, ME, true, || panic!(
+                    "invalid self deletion must not erase history"
                 ))
                 .is_err()
         );
@@ -601,7 +627,7 @@ mod tests {
                         .parse()
                         .unwrap(),
                         body: tauri::ipc::InvokeBody::Json(serde_json::json!({
-                            "owner": "alice", "account": A, "hidden": true, "name": "Alice"
+                            "owner": "alice", "expectedAccount": A, "account": A, "hidden": true, "name": "Alice"
                         })),
                         headers: Default::default(),
                         invoke_key: tauri::test::INVOKE_KEY.into(),
@@ -698,7 +724,7 @@ mod tests {
                 tauri::webview::InvokeRequest {
                     cmd: cmd.into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
                     url: if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
-                    body: tauri::ipc::InvokeBody::Json(serde_json::json!({"owner":"alice", "account":A, "hidden":true, "name":"Alice"})),
+                    body: tauri::ipc::InvokeBody::Json(serde_json::json!({"owner":"alice", "expectedAccount":A, "account":A, "hidden":true, "name":"Alice"})),
                     headers: Default::default(), invoke_key: tauri::test::INVOKE_KEY.into(),
                 }).is_err()
             });
@@ -851,13 +877,41 @@ mod tests {
         assert!(
             invoke(
                 "delete_contact",
-                serde_json::json!({ "owner": "bob", "account": A })
+                serde_json::json!({ "owner": "bob", "expectedAccount": own, "account": A })
             )
             .is_err()
         );
+        assert!(
+            invoke(
+                "delete_contact",
+                serde_json::json!({"owner":"alice", "account":A})
+            )
+            .is_err(),
+            "destructive IPC requires a captured cryptographic account root"
+        );
+        assert!(
+            invoke(
+                "delete_contact",
+                serde_json::json!({"owner":"alice", "expectedAccount":"00".repeat(16), "account":A})
+            )
+            .is_err(),
+            "a delayed old-root intent must not delete in the current root"
+        );
+        assert!(
+            !node_state
+                .0
+                .blocking_read()
+                .as_ref()
+                .unwrap()
+                .handle()
+                .conversation_personal_state(&mesh_talk_core::node::DocumentConversation::Account(
+                    A.into()
+                ))
+                .known
+        );
         let deleted = invoke(
             "delete_contact",
-            serde_json::json!({ "owner": "alice", "account": A }),
+            serde_json::json!({ "owner": "alice", "expectedAccount": own, "account": A }),
         )
         .unwrap();
         assert_eq!(deleted.deleted, vec![A.to_owned()]);
@@ -865,7 +919,7 @@ mod tests {
         assert!(
             invoke(
                 "delete_contact",
-                serde_json::json!({ "owner": "alice", "account": own })
+                serde_json::json!({ "owner": "alice", "expectedAccount": own, "account": own })
             )
             .is_err()
         );
@@ -1024,6 +1078,7 @@ impl HiddenContactsState {
         })?
     }
 
+    #[cfg(test)]
     pub(crate) fn transaction<T>(
         &self,
         session: &crate::state::SessionState,
@@ -1231,8 +1286,8 @@ impl HiddenContactsState {
         if let Some(expected) = expected
             && records.iter().any(|row| {
                 // Linked preferences cannot clear local deletion suppression.
-                // Explicit local restore uses the non-CAS setter; rediscovery
-                // separately owns clearing a deletion for an online contact.
+                // Explicit local restore uses the non-CAS setter; presence
+                // never clears a deletion.
                 snapshot.deleted.contains(&row.account)
                     || !expected.contains_key(&row.account)
                     || snapshot
@@ -1272,12 +1327,29 @@ impl HiddenContactsState {
 pub async fn get_hidden_contacts(
     owner: String,
     app: tauri::State<'_, crate::state::AppState>,
+    node: tauri::State<'_, crate::chat_commands::NodeState>,
     policy: tauri::State<'_, HiddenContactsState>,
 ) -> Result<HiddenContactsSnapshot, String> {
-    let session = app.session().clone();
+    let admission = crate::runtime_admission::RuntimeAdmission::capture(&app, &node, &owner)
+        .map_err(|error| error.to_string())?;
+    let lease = admission.lease().clone();
+    let app = app.inner().clone();
+    let node = node.inner().clone();
     let policy = policy.inner().clone();
     tokio::task::spawn_blocking(move || {
-        policy.transaction(&session, &owner, || policy.load(&owner))
+        let guard = node.0.blocking_read();
+        policy.transaction_for_lease(&app, &lease, || {
+            if let Some(runtime) = guard
+                .as_ref()
+                .filter(|runtime| runtime.host_account_id() == Some(owner.as_str()))
+            {
+                node.check_installation(&lease)
+                    .map_err(|error| error.to_string())?;
+                policy.personal_snapshot(&owner, &runtime.handle())
+            } else {
+                policy.load(&owner)
+            }
+        })
     })
     .await
     .map_err(|_| "Hidden contacts task failed")?
@@ -1286,6 +1358,7 @@ pub async fn get_hidden_contacts(
 #[tauri::command]
 pub async fn set_contact_hidden(
     owner: String,
+    expected_account: Option<String>,
     account: String,
     hidden: bool,
     name: String,
@@ -1302,17 +1375,23 @@ pub async fn set_contact_hidden(
     let app = app.inner().clone();
     let policy = policy.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let guard = if hidden {
-            #[cfg(test)]
-            if let Some(entered) = captured.lock().unwrap().as_ref() {
-                let _ = entered.send("contact-runtime-wait");
-            }
-            Some(node.0.blocking_read())
-        } else {
-            None
-        };
+        #[cfg(test)]
+        if let Some(entered) = captured.lock().unwrap().as_ref() {
+            let _ = entered.send("contact-runtime-wait");
+        }
+        let guard = Some(node.0.blocking_read());
         policy.transaction_for_lease(&app, &lease, || {
             let own = guard.as_ref().and_then(|guard| guard.as_ref());
+            if let Some(expected) = expected_account.as_deref() {
+                let runtime = own
+                    .filter(|runtime| runtime.host_account_id() == Some(owner.as_str()))
+                    .ok_or("Contact change requires this account's running node")?;
+                node.check_installation(&lease)
+                    .map_err(|error| error.to_string())?;
+                if runtime.account_id() != expected {
+                    return Err("Contact change belongs to another account".into());
+                }
+            }
             if hidden {
                 node.check_installation(&lease)
                     .map_err(|error| error.to_string())?;
@@ -1320,13 +1399,39 @@ pub async fn set_contact_hidden(
                     return Err("Hiding a contact requires this account's running node".into());
                 }
             }
-            policy.update_unlocked(
+            if !hidden
+                && let Some(runtime) =
+                    own.filter(|runtime| runtime.host_account_id() == Some(owner.as_str()))
+            {
+                node.check_installation(&lease)
+                    .map_err(|error| error.to_string())?;
+                let handle = runtime.handle();
+                let personal = handle.conversation_personal_state(
+                    &mesh_talk_core::node::DocumentConversation::Account(account.clone()),
+                );
+                if personal.known && personal.hidden {
+                    let expected = expected_account
+                        .as_deref()
+                        .ok_or("Reopening a deleted contact requires the captured account root")?;
+                    handle
+                        .reopen_account_conversation_if(expected, &account, |commit| commit())
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            let snapshot = policy.update_unlocked(
                 &owner,
                 &account,
                 hidden,
                 &name,
                 own.map(|runtime| runtime.account_id()),
-            )
+            )?;
+            if let Some(runtime) =
+                own.filter(|runtime| runtime.host_account_id() == Some(owner.as_str()))
+            {
+                policy.personal_snapshot(&owner, &runtime.handle())
+            } else {
+                Ok(snapshot)
+            }
         })
     })
     .await
@@ -1374,7 +1479,13 @@ pub async fn set_contact_hidden_batch(
             {
                 return Err("Contact preferences belong to another account".into());
             }
-            policy.update_batch_unlocked(&owner, &records, Some(own.account_id()), Some(&expected))
+            policy.update_batch_unlocked(
+                &owner,
+                &records,
+                Some(own.account_id()),
+                Some(&expected),
+            )?;
+            policy.personal_snapshot(&owner, &own.handle())
         })
     })
     .await

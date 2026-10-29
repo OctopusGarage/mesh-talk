@@ -109,6 +109,9 @@ fn ext_of(name: &str) -> Option<String> {
         .map(|e| e.to_string_lossy().to_lowercase())
 }
 
+#[cfg(test)]
+type PrepareHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>>;
+
 /// The durable chat-media store rooted at `<account_dir>/media`. Cheap to clone (just the
 /// dir); all state is on disk.
 #[derive(Clone)]
@@ -117,9 +120,25 @@ pub struct MediaStore {
     key: Arc<EncryptionKey>,
     owner_id: String,
     legacy_unmigrated: Arc<Mutex<HashSet<ConversationId>>>,
+    #[cfg(test)]
+    prepare_hook: PrepareHook,
+}
+
+/// Encrypted and verified bytes that remain invisible until the owner commits.
+pub(in crate::node) struct PreparedMediaWrite {
+    directory: tempfile::TempDir,
+    destination: PathBuf,
+    conversation: ConversationId,
+    key: Arc<EncryptionKey>,
+    owner_id: String,
 }
 
 impl MediaStore {
+    #[cfg(test)]
+    pub(in crate::node) fn before_prepare_for_test(&self, hook: Box<dyn FnOnce() + Send + Sync>) {
+        *self.prepare_hook.lock().unwrap() = Some(hook);
+    }
+
     /// Open (creating if needed) the media store under `account_dir`.
     pub fn open(account_dir: &Path, password: &str, owner_id: &str) -> std::io::Result<Self> {
         let dir = account_dir.join("media");
@@ -149,6 +168,8 @@ impl MediaStore {
             key: Arc::new(key),
             owner_id: owner_id.into(),
             legacy_unmigrated: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(test)]
+            prepare_hook: Arc::new(Mutex::new(None)),
         };
         store.migrate_plaintext()?;
         Ok(store)
@@ -301,6 +322,58 @@ impl MediaStore {
         Ok(dest)
     }
 
+    /// Perform bulk encryption and verification before acquiring a caller's
+    /// commit guard. The token cannot expose a managed path before publication.
+    pub(in crate::node) fn prepare_from_path_if(
+        &self,
+        conversation: ConversationId,
+        name: &str,
+        source: &Path,
+        mut check: impl FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<PreparedMediaWrite> {
+        let directory = tempfile::Builder::new()
+            .prefix(".pending-media-")
+            .tempdir_in(&self.dir)?;
+        let mut reader = std::io::BufReader::new(std::fs::File::open(source)?);
+        let total = std::fs::metadata(source)?.len();
+        self.encrypt_stream(
+            conversation,
+            &directory.path().join("ciphertext.part"),
+            &mut reader,
+            total,
+            &mut check,
+        )?;
+        Ok(PreparedMediaWrite {
+            directory,
+            destination: self.path_for(conversation, name),
+            conversation,
+            key: Arc::clone(&self.key),
+            owner_id: self.owner_id.clone(),
+        })
+    }
+
+    /// Caller has rechecked authorization under its existing commit guard.
+    pub(in crate::node) fn publish_prepared(
+        &self,
+        prepared: PreparedMediaWrite,
+    ) -> std::io::Result<PathBuf> {
+        if prepared.owner_id != self.owner_id
+            || !Arc::ptr_eq(&prepared.key, &self.key)
+            || prepared.destination.parent() != Some(self.dir.as_path())
+        {
+            return Err(invalid("prepared media belongs to another storage owner"));
+        }
+        std::fs::rename(
+            prepared.directory.path().join("ciphertext.part"),
+            &prepared.destination,
+        )?;
+        sync_parent(&prepared.destination)?;
+        if let Ok(mut legacy) = self.legacy_unmigrated.lock() {
+            legacy.remove(&prepared.conversation);
+        }
+        Ok(prepared.destination.clone())
+    }
+
     /// Write already-decrypted, already-verified `bytes` into the store under `file_conv`
     /// (receive-complete side: the reassembled bytes are in hand). Atomic via a `.part`
     /// rename. Idempotent.
@@ -422,7 +495,31 @@ impl MediaStore {
         total: u64,
     ) -> std::io::Result<()> {
         let part = part_path(dest);
-        let mut file = private_create(&part)?;
+        self.encrypt_stream(conv, &part, reader, total, &mut || Ok(()))?;
+        std::fs::rename(&part, dest)?;
+        sync_parent(dest)?;
+        if let Ok(mut legacy) = self.legacy_unmigrated.lock() {
+            legacy.remove(&conv);
+        }
+        Ok(())
+    }
+
+    fn encrypt_stream(
+        &self,
+        conv: ConversationId,
+        part: &Path,
+        reader: &mut impl Read,
+        total: u64,
+        check: &mut impl FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        #[cfg(test)]
+        {
+            let hook = self.prepare_hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let mut file = private_create(part)?;
         let mut prefix = [0u8; 8];
         rand_core::OsRng.fill_bytes(&mut prefix);
         file.write_all(MAGIC)?;
@@ -433,6 +530,7 @@ impl MediaStore {
         let mut index = 0u32;
         let mut buffer = vec![0u8; CHUNK];
         while done < total || index == 0 {
+            check()?;
             // An empty payload gets one authenticated chunk. Every later pass must
             // still have plaintext to consume; otherwise this loop can write tags
             // indefinitely without making progress.
@@ -461,16 +559,16 @@ impl MediaStore {
                 .ok_or_else(|| invalid("media too large"))?;
         }
         file.sync_all()?;
-        self.verify_file(&part, conv, total)?;
-        std::fs::rename(&part, dest)?;
-        sync_parent(dest)?;
-        if let Ok(mut legacy) = self.legacy_unmigrated.lock() {
-            legacy.remove(&conv);
-        }
-        Ok(())
+        self.verify_file(part, conv, total, check)
     }
 
-    fn verify_file(&self, path: &Path, conv: ConversationId, total: u64) -> std::io::Result<()> {
+    fn verify_file(
+        &self,
+        path: &Path,
+        conv: ConversationId,
+        total: u64,
+        check: &mut impl FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
         // Migration verifies before replacing its plaintext source; the same verifier
         // also detects a damaged new write before the atomic rename.
         let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
@@ -485,6 +583,7 @@ impl MediaStore {
         let mut done = 0u64;
         let mut index = 0u32;
         while done < total || index == 0 {
+            check()?;
             let len = ((total - done).min(CHUNK as u64)) as usize;
             let mut ciphertext = vec![0u8; len + 16];
             file.read_exact(&mut ciphertext)?;

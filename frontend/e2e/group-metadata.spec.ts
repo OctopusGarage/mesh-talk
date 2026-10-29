@@ -7,6 +7,7 @@ test("owner previews, publishes and deletes a durable group announcement", async
   await enterChat(page);
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
   await page.getByTestId("members-trigger").click();
+  await page.getByTestId("group-settings-trigger").click();
   const dialog = page.getByRole("dialog");
   await dialog
     .getByRole("button", { name: "Write announcement", exact: true })
@@ -28,6 +29,7 @@ test("owner previews, publishes and deletes a durable group announcement", async
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("announcement-publication")).toHaveCount(1);
   await page.getByTestId("members-trigger").click();
+  await page.getByTestId("group-settings-trigger").click();
   await expect(dialog.getByTestId("group-announcement-content")).toContainText(
     "Welcome to the group.",
   );
@@ -54,6 +56,7 @@ test("group information fits a narrow window and cancels an unpublished draft", 
   await enterChat(page);
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
   await page.getByTestId("members-trigger").click();
+  await page.getByTestId("group-settings-trigger").click();
   const dialog = page.getByRole("dialog");
   await expect(
     dialog.getByRole("button", { name: "Set group photo", exact: true }),
@@ -192,6 +195,7 @@ test("owner publishes and removes the shared group photo through the crop flow",
   await enterChat(page);
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
   await page.getByTestId("members-trigger").click();
+  await page.getByTestId("group-settings-trigger").click();
   const [chooser] = await Promise.all([
     page.waitForEvent("filechooser"),
     page.getByRole("button", { name: "Set group photo", exact: true }).click(),
@@ -209,6 +213,7 @@ test("owner publishes and removes the shared group photo through the crop flow",
   await expect(headerPhoto).toBeVisible();
   await expect(headerPhoto).toHaveAttribute("src", /^data:image\/jpeg;base64,/);
   await page.getByTestId("members-trigger").click();
+  await page.getByTestId("group-settings-trigger").click();
   await page
     .getByRole("button", { name: "Remove group photo", exact: true })
     .click();

@@ -85,9 +85,9 @@ codegen-units = 4
 
 # Dev-build ergonomics: full-strength Argon2/PBKDF2 are unbearably slow in an unoptimized
 # debug build — `tauri dev` keystore unlock ("unlocking your encrypted stores") can take
-# minutes and looks like a hang. Optimize ONLY the crypto crates so unlock is fast, while our
-# own crates stay at debug opt-level (keeps devtools + fast incremental builds). Same KDF
-# params, so existing keystores still decrypt — just faster. Release builds are unaffected.
+# minutes and looks like a hang. Optimize crypto dependencies so unlock is fast;
+# most application crates keep default debug optimization for incremental builds.
+# KDF parameters stay unchanged, so existing keystores decrypt. Release builds are unaffected.
 [profile.dev.package.argon2]
 opt-level = 3
 [profile.dev.package.blake2]
@@ -109,3 +109,10 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package."curve25519-dalek:5.0.0"]
 opt-level = 3
+
+# AEAD generic loops are instantiated in the protocol caller, so dependency-only
+# optimization leaves large encrypted document pages CPU-bound in debug tests.
+# Keep debug assertions and overflow checks while optimizing this caller modestly.
+# Test and mutation profiles inherit this; release settings remain independent.
+[profile.dev.package.mesh-talk-core]
+opt-level = 1

@@ -434,6 +434,12 @@ impl Node {
         {
             return None;
         }
+        // The stable device key can survive account adoption, but a legacy
+        // outgoing card retains its original account conversation. Never mint
+        // its supplemental identity with the newly loaded account certificate.
+        if card.conversation != account_conversation_id(&self.account_id(), &recipient) {
+            return None;
+        }
         let row = self
             .received_files
             .lock()
@@ -1385,6 +1391,114 @@ mod tests {
         assert!(
             reopened
                 .account_history(&f.sender.account_id(), 10)
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn source_adoption_cannot_mint_a_new_account_identity_for_a_legacy_outgoing_card() {
+        let f = Fixture::new();
+        let (id, _, destinations) = f.send().await;
+        // No explicit bundle, exchange or recovery snapshot has run: this is
+        // the deployed legacy shape, not an artificially deleted identity log.
+        assert!(
+            f.sender
+                .file_message_identities
+                .lock()
+                .unwrap()
+                .snapshot()
+                .is_empty()
+        );
+        let old_host = account_conversation_id(&f.sender.account_id(), &f.receiver.account_id());
+        let adopted = Account::generate();
+        f.sender
+            .delivery
+            .lock()
+            .unwrap()
+            .prepare_profile_adoption(&adopted.account_id())
+            .unwrap();
+        let secrets = f.sender.identity.secret_bytes();
+        let reopened = open_node(
+            &f.dir.path().join("sender"),
+            DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+            &adopted,
+        );
+        assert!(
+            reopened
+                .file_message_identities
+                .lock()
+                .unwrap()
+                .snapshot()
+                .is_empty()
+        );
+        for destination in destinations {
+            assert!(
+                reopened
+                    .file_message_identity_bundle(destination.event.id)
+                    .is_none(),
+                "an old-account card cannot acquire the adopted account certificate through lazy identity repair"
+            );
+        }
+        assert!(reopened.file_message_identity_bundle(id).is_none());
+        assert!(
+            reopened
+                .file_message_identities
+                .lock()
+                .unwrap()
+                .snapshot()
+                .is_empty()
+        );
+        assert_eq!(
+            reopened.history(old_host, 10).len(),
+            1,
+            "refusing a new identity must retain the original historical file row"
+        );
+        assert!(
+            reopened
+                .account_history(&f.receiver.account_id(), 10)
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn source_adoption_preserves_a_preexisting_historical_file_identity() {
+        let f = Fixture::new();
+        let (id, _, destinations) = f.send().await;
+        let original_account = f.sender.account_id();
+        let original = f.sender.file_message_identity_bundle(id).unwrap();
+        assert_eq!(
+            decode(&original).unwrap().source.account_id(),
+            original_account
+        );
+        let adopted = Account::generate();
+        f.sender
+            .delivery
+            .lock()
+            .unwrap()
+            .prepare_profile_adoption(&adopted.account_id())
+            .unwrap();
+        let secrets = f.sender.identity.secret_bytes();
+        let reopened = open_node(
+            &f.dir.path().join("sender"),
+            DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+            &adopted,
+        );
+        for destination in destinations {
+            let retained = reopened
+                .file_message_identity_bundle(destination.event.id)
+                .unwrap();
+            assert_eq!(
+                retained, original,
+                "an existing signed historical bundle remains immutable"
+            );
+            assert_eq!(
+                decode(&retained).unwrap().source.account_id(),
+                original_account
+            );
+        }
+        assert!(
+            reopened
+                .account_history(&f.receiver.account_id(), 10)
                 .is_empty()
         );
     }

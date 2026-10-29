@@ -144,6 +144,12 @@ impl AccountProfileStore {
     pub fn all(&self) -> Vec<AccountProfile> {
         self.profiles.values().cloned().collect()
     }
+    /// Stable lightweight traversal for bounded sibling-publication repair.
+    pub(super) fn account_ids(&self) -> Vec<String> {
+        let mut ids = self.profiles.keys().cloned().collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
     fn order(profile: &AccountProfile) -> (u64, bool, Option<&[u8]>, &[u8; 64]) {
         // Keep avatar tie-breaking identical to the legacy avatar projection;
         // signature ordering resolves metadata-only ties after that shared order.

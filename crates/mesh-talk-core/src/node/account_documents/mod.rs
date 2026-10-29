@@ -7,7 +7,14 @@ use std::fmt;
 mod controls;
 mod custody;
 mod device_hostname;
+mod group_activity;
+mod group_control;
+mod group_legacy_operations;
+mod group_operations;
 mod inventory;
+pub(in crate::node) mod personal;
+pub use personal::ConversationPersonalState;
+mod public_profile;
 pub use inventory::{GroupInventoryMember, GroupInventoryReference};
 pub(super) mod store;
 pub(super) mod sync;
@@ -27,6 +34,20 @@ pub enum AccountDocumentDomain {
     ChannelCustody,
     GroupInventory,
     DeviceHostname,
+    GroupControl,
+    PublicProfile,
+    GroupActivity,
+}
+impl AccountDocumentDomain {
+    /// Hostname and group-control domains independently shipped digest byte8.
+    /// Preserve those opaque, explicitly domain-scoped hints independently of
+    /// their distinct in-memory cursor/index positions after merging the domains.
+    fn digest_discriminator(self) -> u8 {
+        match self {
+            Self::DeviceHostname | Self::GroupControl => 8,
+            _ => self as u8,
+        }
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
@@ -73,6 +94,30 @@ pub enum AccountDocumentKey {
     DeviceHostname {
         device_id: String,
     },
+    GroupControl {
+        channel: String,
+        source_device: String,
+    },
+    GroupOperation {
+        channel: String,
+        source_device: String,
+    },
+    PublicProfile {
+        account: String,
+        source_device: String,
+    },
+    GroupActivity {
+        channel: String,
+        source_device: String,
+    },
+    GroupLegacyOperation {
+        channel: String,
+        source_device: String,
+    },
+    ConversationPersonal {
+        conversation: DocumentConversation,
+        action_id: String,
+    },
 }
 impl DocumentConversation {
     fn valid(&self) -> bool {
@@ -91,6 +136,9 @@ fn hex(value: &str, len: usize) -> bool {
 impl AccountDocumentKey {
     pub fn domain(&self) -> AccountDocumentDomain {
         match self {
+            Self::ConversationPersonal { .. } => AccountDocumentDomain::GroupControl,
+            Self::PublicProfile { .. } => AccountDocumentDomain::PublicProfile,
+            Self::GroupActivity { .. } => AccountDocumentDomain::GroupActivity,
             Self::DeviceHostname { .. } => AccountDocumentDomain::DeviceHostname,
             Self::Draft { .. } => AccountDocumentDomain::Draft,
             Self::ReadReceipt { .. } => AccountDocumentDomain::ReadReceipt,
@@ -100,12 +148,39 @@ impl AccountDocumentKey {
             Self::DmRecall { .. } => AccountDocumentDomain::DmRecall,
             Self::ChannelCustody { .. } => AccountDocumentDomain::ChannelCustody,
             Self::GroupInventory { .. } => AccountDocumentDomain::GroupInventory,
+            Self::GroupControl { .. }
+            | Self::GroupOperation { .. }
+            | Self::GroupLegacyOperation { .. } => AccountDocumentDomain::GroupControl,
         }
     }
     fn valid(&self) -> bool {
         match self {
+            Self::ConversationPersonal {
+                conversation,
+                action_id,
+            } => conversation.valid() && hex(action_id, 64),
+            Self::PublicProfile {
+                account,
+                source_device,
+            } => hex(account, 32) && hex(source_device, 32),
+            Self::GroupActivity {
+                channel,
+                source_device,
+            } => hex(channel, 64) && hex(source_device, 32),
             Self::DeviceHostname { device_id } => hex(device_id, 32),
             Self::GroupInventory {
+                channel,
+                source_device,
+            }
+            | Self::GroupControl {
+                channel,
+                source_device,
+            }
+            | Self::GroupOperation {
+                channel,
+                source_device,
+            }
+            | Self::GroupLegacyOperation {
                 channel,
                 source_device,
             } => hex(channel, 64) && hex(source_device, 32),
@@ -157,8 +232,13 @@ impl AccountDocumentKey {
     }
     fn limit(&self) -> usize {
         match self {
+            Self::ConversationPersonal { .. } => 64 * 1024,
+            Self::PublicProfile { .. } => 1024 * 1024,
+            Self::GroupActivity { .. } => 8 * 1024,
             Self::DeviceHostname { .. } => 255,
             Self::GroupInventory { .. } => 128 * 1024,
+            Self::GroupControl { .. } => super::account_group::wire::MAX_HEAD_BYTES,
+            Self::GroupOperation { .. } | Self::GroupLegacyOperation { .. } => 4 * 1024 * 1024,
             Self::ChannelCustody { .. } => 4096,
             Self::Draft { .. } => 64 * 1024,
             Self::ReadReceipt { .. } => 0,
@@ -170,17 +250,28 @@ impl AccountDocumentKey {
     pub fn is_private_control(&self) -> bool {
         matches!(
             self,
-            Self::DmReaction { .. }
+            Self::ConversationPersonal { .. }
+                | Self::PublicProfile { .. }
+                | Self::GroupActivity { .. }
+                | Self::DmReaction { .. }
                 | Self::DmRecall { .. }
                 | Self::ChannelCustody { .. }
                 | Self::GroupInventory { .. }
+                | Self::GroupControl { .. }
+                | Self::GroupOperation { .. }
+                | Self::GroupLegacyOperation { .. }
                 | Self::DeviceHostname { .. }
         )
     }
     fn protocol_version(&self) -> u8 {
         match self {
+            Self::ConversationPersonal { .. } => 7,
+            Self::PublicProfile { .. } | Self::GroupActivity { .. } => 6,
             Self::DeviceHostname { .. } => 5,
             Self::GroupInventory { .. } => 4,
+            Self::GroupControl { .. }
+            | Self::GroupOperation { .. }
+            | Self::GroupLegacyOperation { .. } => 5,
             Self::ChannelCustody { .. } => 3,
             Self::DmReaction { .. } | Self::DmRecall { .. } => 2,
             _ => 1,
@@ -237,7 +328,10 @@ impl AccountDocumentMeta {
             && self.revision > 0
             && self.revision <= 9_007_199_254_740_991
             && hex(&self.writer_device, 32)
+            && (!matches!(&self.key, AccountDocumentKey::PublicProfile { source_device, .. } | AccountDocumentKey::GroupActivity { source_device, .. } if source_device != &self.writer_device))
             && (!matches!(&self.key, AccountDocumentKey::GroupInventory { source_device, .. } if source_device != &self.writer_device))
+            && (!matches!(&self.key, AccountDocumentKey::GroupControl { source_device, .. } if source_device != &self.writer_device))
+            && (!matches!(&self.key, AccountDocumentKey::GroupLegacyOperation { source_device, .. } if source_device != &self.writer_device))
             && (!matches!(&self.key, AccountDocumentKey::DeviceHostname { device_id } if device_id != &self.writer_device))
             && self.content_len as usize <= self.key.limit()
             && (self.content_len != 0
@@ -314,7 +408,7 @@ impl fmt::Debug for AccountDocument {
             .finish()
     }
 }
-fn content_hash(payload: &[u8]) -> [u8; 32] {
+pub(in crate::node) fn content_hash(payload: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"mesh-talk-account-document-content-v1");
     h.update(payload);
@@ -370,6 +464,13 @@ impl Node {
         self.account_document_updates.subscribe()
     }
     fn documents_changed(&self) {
+        self.documents_imported();
+        self.note_account_local_change();
+    }
+    /// Incoming rows dirty local readers and reconciliation without claiming a
+    /// new local publication. Relaying a sibling import as a publisher wake
+    /// would turn mandatory metadata reconciliation into a feedback loop.
+    fn documents_imported(&self) {
         for status in self
             .account_sync_status
             .lock()
@@ -384,7 +485,6 @@ impl Node {
             .send_modify(|r| *r = r.wrapping_add(1));
         self.account_sync_notify.notify_one();
         self.note_ui_change();
-        self.note_account_local_change();
     }
     pub fn put_account_document_if(
         &self,
@@ -399,15 +499,73 @@ impl Node {
         let payload = zeroize::Zeroizing::new(payload);
         let mut result = None;
         authorize(&mut || {
+            let _membership = matches!(
+                &key,
+                AccountDocumentKey::Draft {
+                    conversation: DocumentConversation::Channel(_)
+                }
+            )
+            .then(|| {
+                self.channel_membership_commit
+                    .lock()
+                    .expect("membership commit mutex")
+            });
+            let draft_source = match &key {
+                AccountDocumentKey::Draft {
+                    conversation: DocumentConversation::Channel(id),
+                } => hex::decode(id)
+                    .ok()
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    .and_then(|id| {
+                        self.account_group_access_with_closed(crate::eventlog::ConversationId::new(
+                            id,
+                        ))
+                        .ok()
+                    })
+                    .and_then(|access| {
+                        access.sources.into_iter().find(|source| {
+                            source.device == self.identity.public()
+                                && matches!(
+                                    source.role,
+                                    super::account_group::AccountGroupRole::Owner
+                                        | super::account_group::AccountGroupRole::Member
+                                )
+                        })
+                    }),
+                _ => None,
+            };
+            let _cut = self
+                .account_sync_commit
+                .lock()
+                .expect("account sync commit mutex");
+            if let AccountDocumentKey::Draft { conversation } = &key {
+                let state = self.conversation_personal_state(conversation);
+                if state.hidden || (!state.local_cleanup_complete && draft_source.is_none()) {
+                    return Err(NodeError::Authorization(
+                        "conversation cleanup or explicit reopen is required".into(),
+                    ));
+                }
+            }
             let mut store = self.account_documents.lock().expect("documents mutex");
-            result = Some(store.put(
-                &self.account,
-                self.identity.public().user_id(),
-                key.clone(),
-                &payload,
-                expected.as_ref(),
-                false,
-            )?);
+            result = Some(if let Some(source) = &draft_source {
+                store.put_local_group_draft(
+                    &self.account,
+                    &self.identity.public(),
+                    key.clone(),
+                    &payload,
+                    expected.as_ref(),
+                    &source.lifetime,
+                )?
+            } else {
+                store.put(
+                    &self.account,
+                    self.identity.public().user_id(),
+                    key.clone(),
+                    &payload,
+                    expected.as_ref(),
+                    false,
+                )?
+            });
             Ok(())
         })?;
         let result = result.ok_or_else(invalid)?;

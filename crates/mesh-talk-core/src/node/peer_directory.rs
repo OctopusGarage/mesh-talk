@@ -63,6 +63,15 @@ struct SnapshotV2 {
     heads: Vec<TransitionHead>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SnapshotV3 {
+    version: u32,
+    records: Vec<Announce>,
+    heads: Vec<TransitionHead>,
+    // Conservative query evidence only; never a current identity/authority grant.
+    ambiguous_accounts: Vec<PublicIdentity>,
+}
+
 /// One serialized owner per file, in a trusted parent directory, as with PrivacyPolicy.
 /// Records establish historical author/account bindings, never a fresh dial endpoint.
 /// Existing symlinks are rejected; filesystem races in an untrusted parent are out of scope.
@@ -72,6 +81,7 @@ pub(crate) struct PeerDirectory {
     key: EncryptionKey,
     records: Vec<Announce>,
     heads: Vec<TransitionHead>,
+    ambiguous_accounts: Vec<PublicIdentity>,
     // Reconstructed from the durable local account-device registry at startup.
     linked_bindings: Vec<super::account_devices::AccountDevice>,
 }
@@ -85,6 +95,7 @@ impl PeerDirectory {
                 key: EncryptionKey::from_password(password, &salt).map_err(invalid_error)?,
                 records: Vec::new(),
                 heads: Vec::new(),
+                ambiguous_accounts: Vec::new(),
                 linked_bindings: Vec::new(),
             };
             directory.save(&[])?;
@@ -110,10 +121,10 @@ impl PeerDirectory {
             .map_err(invalid_error)?;
         let key = EncryptionKey::from_password(password, &salt).map_err(invalid_error)?;
         let plaintext = decrypt_data(&bytes[HEADER..], &nonce, &key).map_err(invalid_error)?;
-        let (snapshot, heads) = match plaintext.get(..4) {
+        let (snapshot, heads, mut ambiguous_accounts) = match plaintext.get(..4) {
             Some([1, 0, 0, 0]) => {
                 let snapshot: Snapshot = codec().deserialize(&plaintext).map_err(invalid_error)?;
-                (snapshot, Vec::new())
+                (snapshot, Vec::new(), Vec::new())
             }
             Some([2, 0, 0, 0]) => {
                 let snapshot: SnapshotV2 =
@@ -124,6 +135,19 @@ impl PeerDirectory {
                         records: snapshot.records,
                     },
                     snapshot.heads,
+                    Vec::new(),
+                )
+            }
+            Some([3, 0, 0, 0]) => {
+                let snapshot: SnapshotV3 =
+                    codec().deserialize(&plaintext).map_err(invalid_error)?;
+                (
+                    Snapshot {
+                        version: 1,
+                        records: snapshot.records,
+                    },
+                    snapshot.heads,
+                    snapshot.ambiguous_accounts,
                 )
             }
             _ => return Err(invalid()),
@@ -151,6 +175,34 @@ impl PeerDirectory {
         {
             return Err(invalid());
         }
+        if ambiguous_accounts.len() > MAX_PEERS
+            || ambiguous_accounts
+                .windows(2)
+                .any(|pair| pair[0].user_id() >= pair[1].user_id())
+            || ambiguous_accounts.iter().any(|public| {
+                !snapshot
+                    .records
+                    .iter()
+                    .any(|record| record.public() == *public)
+            })
+        {
+            return Err(invalid());
+        }
+        // Pre-V3 formats could erase previous roots during explicit acceptance.
+        // Their latest certificate alone cannot establish an old event's account.
+        // Keep current identity/admission records; only historical attribution is
+        // conservative until immutable event-bound or causal proof is available.
+        if matches!(plaintext.get(..4), Some([1, 0, 0, 0] | [2, 0, 0, 0])) {
+            ambiguous_accounts = snapshot.records.iter().map(Announce::public).collect();
+        }
+        // V2 chains already prove a historical root change. Preserve that fact
+        // independently when an explicit acceptance later replaces its head.
+        for head in &heads {
+            if !ambiguous_accounts.contains(&head.public) {
+                ambiguous_accounts.push(head.public.clone());
+            }
+        }
+        ambiguous_accounts.sort_by_key(PublicIdentity::user_id);
         if snapshot.version != 1 || snapshot.records.len() > MAX_PEERS {
             return Err(invalid());
         }
@@ -167,8 +219,14 @@ impl PeerDirectory {
             key,
             records: snapshot.records,
             heads,
+            ambiguous_accounts,
             linked_bindings: Vec::new(),
         })
+    }
+    /// Exact devices whose historical events cannot use today's account root
+    /// without immutable per-event or causal evidence. Not an admission API.
+    pub(in crate::node) fn ambiguous_historical_accounts(&self) -> Vec<PublicIdentity> {
+        self.ambiguous_accounts.clone()
     }
     pub(super) fn transition_patches(&self) -> Vec<AccountBindingPatch> {
         self.heads
@@ -285,9 +343,15 @@ impl PeerDirectory {
             transitions,
         });
         heads.sort_by_key(|h| h.public.user_id());
-        self.save_with_heads(&records, &heads)?;
+        let mut ambiguous_accounts = self.ambiguous_accounts.clone();
+        if !ambiguous_accounts.contains(&announce.public()) {
+            ambiguous_accounts.push(announce.public());
+        }
+        ambiguous_accounts.sort_by_key(PublicIdentity::user_id);
+        self.save_snapshot(&records, &heads, &ambiguous_accounts)?;
         self.records = records;
         self.heads = heads;
+        self.ambiguous_accounts = ambiguous_accounts;
         Ok(())
     }
     pub(crate) fn record(&mut self, announce: &Announce) -> io::Result<()> {
@@ -448,10 +512,20 @@ impl PeerDirectory {
         {
             heads.retain(|h| h.public != announce.public());
         }
-        self.save_with_heads(&next, &heads)
+        let mut ambiguous_accounts = self.ambiguous_accounts.clone();
+        if self
+            .by_author(&announce.ed25519_pub)
+            .is_some_and(|old| old.account_id() != announce.account_id())
+            && !ambiguous_accounts.contains(&announce.public())
+        {
+            ambiguous_accounts.push(announce.public());
+            ambiguous_accounts.sort_by_key(PublicIdentity::user_id);
+        }
+        self.save_snapshot(&next, &heads, &ambiguous_accounts)
             .map_err(io::Error::other)?;
         self.records = next;
         self.heads = heads;
+        self.ambiguous_accounts = ambiguous_accounts;
         Ok(())
     }
     pub(crate) fn account_for(&self, public: &PublicIdentity) -> Option<String> {
@@ -489,12 +563,22 @@ impl PeerDirectory {
         self.save_with_heads(records, &self.heads)
     }
     fn save_with_heads(&self, records: &[Announce], heads: &[TransitionHead]) -> io::Result<()> {
-        let plaintext = if heads.is_empty() {
-            codec().serialize(&(1u32, records))
-        } else {
-            codec().serialize(&(2u32, records, heads))
+        self.save_snapshot(records, heads, &self.ambiguous_accounts)
+    }
+    fn save_snapshot(
+        &self,
+        records: &[Announce],
+        heads: &[TransitionHead],
+        ambiguous_accounts: &[PublicIdentity],
+    ) -> io::Result<()> {
+        if ambiguous_accounts.len() > MAX_PEERS {
+            return Err(invalid());
         }
-        .map_err(invalid_error)?;
+        // V3 records that no root history was lost, even when no device has
+        // changed accounts. Never write an indistinguishable pre-fix snapshot.
+        let plaintext = codec()
+            .serialize(&(3u32, records, heads, ambiguous_accounts))
+            .map_err(invalid_error)?;
         let (ciphertext, nonce) = encrypt_data(&plaintext, &self.key).map_err(invalid_error)?;
         if HEADER + ciphertext.len() > MAX_BYTES as usize {
             return Err(invalid());
@@ -1037,6 +1121,254 @@ mod account_change_tests {
         assert!(
             proofs.account_binding_change(&claim).is_none(),
             "paired own-account certificates are not overridden by recovery"
+        );
+    }
+
+    fn write_snapshot_fixture(directory: &PeerDirectory, snapshot: &impl Serialize) {
+        let plaintext = codec().serialize(snapshot).unwrap();
+        let (ciphertext, nonce) = encrypt_data(&plaintext, &directory.key).unwrap();
+        let bytes = [
+            MAGIC.as_slice(),
+            directory.salt.as_slice(),
+            nonce.as_slice(),
+            ciphertext.as_slice(),
+        ]
+        .concat();
+        fs::write(&directory.path, bytes).unwrap();
+    }
+
+    #[test]
+    fn historical_ambiguity_publishes_atomically_with_current_account_rehome() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proofs");
+        let backup = dir.path().join("proofs-backup");
+        let first = Account::generate();
+        let second = Account::generate();
+        let device = DeviceIdentity::generate();
+        let before = Announce::new_with_account(&device, &first, "before", 9);
+        let after = Announce::new_with_account(&device, &second, "after", 9);
+        let mut directory = PeerDirectory::open(&path, "pw").unwrap();
+        directory.record(&before).unwrap();
+        fs::rename(&path, &backup).unwrap();
+        fs::create_dir(&path).unwrap();
+        let failed = directory.record_explicit_account(&after);
+        fs::remove_dir(&path).unwrap();
+        fs::rename(&backup, &path).unwrap();
+        assert!(failed.is_err());
+        assert!(directory.ambiguous_historical_accounts().is_empty());
+        assert_eq!(
+            directory.account_for(&device.public()),
+            Some(first.account_id())
+        );
+        assert_eq!(
+            PeerDirectory::open(&path, "pw")
+                .unwrap()
+                .account_for(&device.public()),
+            Some(first.account_id())
+        );
+        directory.record_explicit_account(&after).unwrap();
+        assert_eq!(
+            directory.account_for(&device.public()),
+            Some(second.account_id())
+        );
+        assert_eq!(
+            directory.ambiguous_historical_accounts(),
+            vec![device.public()]
+        );
+        let reopened = PeerDirectory::open(&path, "pw").unwrap();
+        assert_eq!(
+            reopened.account_for(&device.public()),
+            Some(second.account_id())
+        );
+        assert_eq!(
+            reopened.ambiguous_historical_accounts(),
+            vec![device.public()]
+        );
+    }
+
+    #[test]
+    fn version_one_and_two_remain_readable_and_transition_ambiguity_survives_head_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proofs");
+        let first = Account::generate();
+        let second = Account::generate();
+        let third = Account::generate();
+        let device = DeviceIdentity::generate();
+        let before = Announce::new_with_account(&device, &first, "before", 9);
+        let after = Announce::new_with_account(&device, &second, "after", 9);
+        let directory = PeerDirectory::open(&path, "pw").unwrap();
+        write_snapshot_fixture(
+            &directory,
+            &Snapshot {
+                version: 1,
+                records: vec![before],
+            },
+        );
+        let v1 = PeerDirectory::open(&path, "pw").unwrap();
+        assert_eq!(v1.account_for(&device.public()), Some(first.account_id()));
+        assert_eq!(
+            v1.ambiguous_historical_accounts(),
+            vec![device.public()],
+            "pre-V3 current bindings do not prove historical account ownership"
+        );
+        let transition = AccountBindingTransition::create(&first, &second, &device, None);
+        write_snapshot_fixture(
+            &directory,
+            &SnapshotV2 {
+                version: 2,
+                records: vec![after],
+                heads: vec![TransitionHead {
+                    public: device.public(),
+                    id: transition.id(),
+                    transitions: vec![transition],
+                }],
+            },
+        );
+        let mut v2 = PeerDirectory::open(&path, "pw").unwrap();
+        assert_eq!(v2.account_for(&device.public()), Some(second.account_id()));
+        assert_eq!(v2.ambiguous_historical_accounts(), vec![device.public()]);
+        v2.record_explicit_account(&Announce::new_with_account(
+            &device,
+            &third,
+            "explicit third",
+            9,
+        ))
+        .unwrap();
+        assert!(
+            v2.transition_patches().is_empty(),
+            "current transition protocol keeps its existing head-reset contract"
+        );
+        let v3 = PeerDirectory::open(&path, "pw").unwrap();
+        assert_eq!(v3.account_for(&device.public()), Some(third.account_id()));
+        assert_eq!(v3.ambiguous_historical_accounts(), vec![device.public()]);
+    }
+
+    #[test]
+    fn version_three_rejects_duplicate_unbound_or_excessive_ambiguity_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proofs");
+        let account = Account::generate();
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "source", 9);
+        let directory = PeerDirectory::open(&path, "pw").unwrap();
+        for ambiguous_accounts in [
+            vec![device.public(), device.public()],
+            vec![DeviceIdentity::generate().public()],
+            vec![device.public(); MAX_PEERS + 1],
+        ] {
+            write_snapshot_fixture(
+                &directory,
+                &SnapshotV3 {
+                    version: 3,
+                    records: vec![proof.clone()],
+                    heads: vec![],
+                    ambiguous_accounts,
+                },
+            );
+            assert!(PeerDirectory::open(&path, "pw").is_err());
+        }
+    }
+
+    #[test]
+    fn pre_version_three_latest_only_bindings_cannot_prove_historical_reaction_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = Account::generate();
+        let device = DeviceIdentity::generate();
+        let latest =
+            Announce::new_with_account(&device, &current, "latest account after lost rehome", 9);
+        let mut migrated = Vec::new();
+        for version in [1, 2] {
+            let path = dir.path().join(format!("proofs-{version}"));
+            let directory = PeerDirectory::open(&path, "pw").unwrap();
+            if version == 1 {
+                write_snapshot_fixture(
+                    &directory,
+                    &Snapshot {
+                        version: 1,
+                        records: vec![latest.clone()],
+                    },
+                );
+            } else {
+                // A V2 file may retain another peer's transition while this
+                // device's explicit rehome erased its own previous certificate.
+                let other = DeviceIdentity::generate();
+                let previous_other = Account::generate();
+                let current_other = Account::generate();
+                let transition =
+                    AccountBindingTransition::create(&previous_other, &current_other, &other, None);
+                let mut records = vec![
+                    latest.clone(),
+                    Announce::new_with_account(&other, &current_other, "other transition", 9),
+                ];
+                records.sort_by(|left, right| left.user_id.cmp(&right.user_id));
+                write_snapshot_fixture(
+                    &directory,
+                    &SnapshotV2 {
+                        version: 2,
+                        records,
+                        heads: vec![TransitionHead {
+                            public: other.public(),
+                            id: transition.id(),
+                            transitions: vec![transition],
+                        }],
+                    },
+                );
+            }
+            let loaded = PeerDirectory::open(&path, "pw").unwrap();
+            assert_eq!(
+                loaded.account_for(&device.public()),
+                Some(current.account_id()),
+                "migration must preserve the current identity/admission binding"
+            );
+            migrated.push((
+                version,
+                loaded
+                    .ambiguous_historical_accounts()
+                    .contains(&device.public()),
+            ));
+        }
+        assert_eq!(
+            migrated,
+            vec![(1, true), (2, true)],
+            "old schemas cannot distinguish an initial proof from a latest-only proof after erased history; unbound reactions must remain device-scoped"
+        );
+    }
+
+    #[test]
+    fn fresh_version_three_empty_history_remains_unambiguous_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proofs");
+        let account = Account::generate();
+        let device = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&device, &account, "first observed binding", 9);
+        let mut directory = PeerDirectory::open(&path, "pw").unwrap();
+        directory.record(&proof).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let nonce = bytes[MAGIC.len() + SALT_SIZE..HEADER].try_into().unwrap();
+        let plaintext = decrypt_data(&bytes[HEADER..], &nonce, &directory.key).unwrap();
+        assert_eq!(
+            plaintext.get(..4),
+            Some([3, 0, 0, 0].as_slice()),
+            "fresh complete history must be distinguishable from pre-fix snapshots even with zero ambiguity markers"
+        );
+        let mut reopened = PeerDirectory::open(&path, "pw").unwrap();
+        assert_eq!(
+            reopened.account_for(&device.public()),
+            Some(account.account_id())
+        );
+        assert!(reopened.ambiguous_historical_accounts().is_empty());
+        reopened
+            .record(&Announce::new_with_account(
+                &device,
+                &account,
+                "renamed without rehome",
+                9,
+            ))
+            .unwrap();
+        let renamed = PeerDirectory::open(&path, "pw").unwrap();
+        assert!(
+            renamed.ambiguous_historical_accounts().is_empty(),
+            "a same-account metadata refresh must not manufacture historical ambiguity"
         );
     }
 }

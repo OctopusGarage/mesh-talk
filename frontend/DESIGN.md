@@ -35,6 +35,8 @@ The composer is a stable bottom dock. Attachment, media, expression and send con
 
 Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
 
+Group member lists show people, their presence and account role. Device counts, routing identities and per-device sharing state stay out of the list. Personal sharing options live in Group settings.
+
 People use one concise status line: Online, Online · slow connection, or Offline
 with recent local observation history. Do not add a long quality paragraph.
 Physical LAN observations expire at 15 seconds; cross-network observations keep

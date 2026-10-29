@@ -14,16 +14,33 @@ export const contactPolicy = {
       records,
       expected,
     }),
-  delete: (owner: string, account: string) =>
-    invoke<HiddenContactsSnapshot>("delete_contact", { owner, account }),
+  delete: (
+    owner: string,
+    expectedAccount: string,
+    account: string,
+    clearHistory = true,
+  ) =>
+    invoke<HiddenContactsSnapshot>("delete_contact", {
+      owner,
+      expectedAccount,
+      account,
+      clearHistory,
+    }),
   get: (owner: string) =>
     invoke<HiddenContactsSnapshot>("get_hidden_contacts", { owner }),
-  set: (owner: string, account: string, hidden: boolean, name: string) =>
+  set: (
+    owner: string,
+    account: string,
+    hidden: boolean,
+    name: string,
+    expectedAccount?: string,
+  ) =>
     invoke<HiddenContactsSnapshot>("set_contact_hidden", {
       owner,
       account,
       hidden,
       name,
+      ...(expectedAccount === undefined ? {} : { expectedAccount }),
     }),
 };
 

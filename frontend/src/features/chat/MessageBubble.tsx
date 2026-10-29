@@ -52,7 +52,12 @@ import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
 import { usePacks } from "@/store/packs";
 import type { ReactionInfo } from "@/lib/types";
-import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
+import {
+  useChat,
+  captureChatOwnership,
+  reactionFromMe,
+  type ChatMessage,
+} from "@/store/chat";
 import {
   useFileStatus,
   refreshFileAvailability,
@@ -170,7 +175,7 @@ function FileBubble({
     withinInlineCap(file.name, file.size)
   ) {
     return (
-      <div className="max-w-xs">
+      <div data-inline-media="" className="max-w-xs">
         <MediaPreview
           fileConv={file.fileConv}
           name={file.name}
@@ -387,8 +392,8 @@ export function MessageBubble({
   /** True when this channel message mentions the current user. */
   mentioned?: boolean;
   reactions: ReactionInfo[];
-  // The id that represents "me" in a reaction's `who`: the ACCOUNT id for account
-  // conversations (who is account-keyed there), the device user-id for channels.
+  // Compatibility fallback when the native channel ownership projection is absent:
+  // account ID for account conversations; device ID for channels.
   selfReactionId: string;
   myName: string;
   onReply: (m: ChatMessage) => void;
@@ -624,11 +629,12 @@ export function MessageBubble({
                 data-context-menu=""
                 className={cn(
                   "min-w-0 text-[14px] leading-[1.55]",
-                  // Stickers float without a bubble; everything else gets the chat bubble.
+                  // Stickers float; actual inline media removes its text-bubble shell.
+                  // File cards and consent prompts retain the ordinary bubble.
                   isSticker
                     ? ""
                     : cn(
-                        "rounded-xl px-3.5 py-2.5",
+                        "rounded-xl px-3.5 py-2.5 [&:has([data-inline-media])]:border-0 [&:has([data-inline-media])]:bg-transparent [&:has([data-inline-media])]:p-0",
                         mine
                           ? "rounded-br-sm bg-bubble-own text-[hsl(var(--bubble-own-foreground))]"
                           : "rounded-bl-sm border border-border bg-muted text-foreground",
@@ -811,7 +817,7 @@ export function MessageBubble({
             className={cn("mt-1 flex flex-wrap gap-1", mine && "justify-end")}
           >
             {reactions.map((r) => {
-              const me = r.who.includes(selfReactionId);
+              const me = reactionFromMe(r, selfReactionId);
               return (
                 <button
                   key={`${r.target}:${r.emoji}`}

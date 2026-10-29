@@ -71,7 +71,12 @@ test("a pushed group change updates an open member list without a message or reo
   ).toHaveCount(0);
   await expect(
     dialog.getByTestId("member-replica-disabled-device_bob_2222"),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByTestId("member-profile-device_bob_2222"),
   ).toBeVisible();
+  await expect(dialog.getByText("Owner", { exact: true })).toBeVisible();
+  await expect(dialog).not.toContainText("Sharing is off");
   await expect(dialog.getByTestId("dissolve-channel-trigger")).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("conversation-header")).toContainText(
