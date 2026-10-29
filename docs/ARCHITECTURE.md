@@ -1440,6 +1440,12 @@ body. Producers install it inside the same SQL transaction as plaintext and
 exact processing evidence, before completing the existing delivery journal or
 channel checkpoint. A separate terminal batch fact survives deletion of its
 former content template. Legacy historical-source migration creates no effects.
+Each receipt stream, exact installation identity, and fixed consumer cursor is
+scoped to the authenticated `participant_profile.account` key. Producers derive
+that key within their existing SQL transaction. Open readers capture the key and
+reject pages, ACKs, and retirement after account adoption; retained accounts keep
+their own pending work and epochs. Runtime/session authority additionally fences
+individual host installations.
 
 Receipt cursors bind a persisted random epoch and local installation sequence;
 sender timestamps never order host work. A finite through-cursor prevents
@@ -1462,6 +1468,17 @@ reception state and cursor before ACK. CLI autosave must retain durable save wor
 before ACK, and a bounded in-memory queue does not satisfy that requirement.
 These repository APIs alone do not switch production runtimes away from their
 legacy unbounded callbacks or prove a bounded Tauri/WebView handoff.
+
+`RuntimeStartup::bounded` and `Node::open_bounded_with_profile_lease` select the
+additive production delivery mode. They allocate no DM, channel, file or profile
+payload queue; durable reception/current-profile commits wake the existing
+coalesced state watch. Legacy callback constructors retain their existing
+caller-owned collecting contract. Ephemeral call signals use a separate inbox
+of at most 16 signals and 256 KiB including sender identifiers; admission fails
+explicitly when full, and a too-small demand read leaves the first signal queued.
+Call signaling remains best-effort and adds no wire acknowledgement or replay.
+Hosts must select this mode and complete their bounded demand handoff before
+these constructor guarantees describe a running desktop or CLI.
 
 `SentStore`, `ReceivedStore` and `IndexedAccountSuppression` require completed
 participant authority; integration must retain `validate_participant_request`

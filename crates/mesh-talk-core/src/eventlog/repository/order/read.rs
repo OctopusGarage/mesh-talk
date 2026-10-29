@@ -1,6 +1,94 @@
 use super::super::pages::PageBudget;
 use super::*;
 impl EventRepository {
+    pub(crate) fn order_generation(
+        &self,
+        conv: &ConversationId,
+        kind: CausalOrder,
+    ) -> Result<Option<OrderGeneration>, LogError> {
+        self.database
+            .read(|c| self.order_generation_on(c, conv, kind))
+    }
+    fn order_generation_on(
+        &self,
+        c: &Connection,
+        conv: &ConversationId,
+        kind: CausalOrder,
+    ) -> Result<Option<OrderGeneration>, LogError> {
+        let Some(metadata) = self.metadata_on(c, conv)?.filter(|m| m.count > 0) else {
+            return Ok(None);
+        };
+        let current: Option<(Vec<u8>, i64)> = c.query_row(
+            "SELECT job,source_revision FROM event_order_current WHERE domain=?1 AND conversation=?2 AND order_kind=?3",
+            params![self.domain.0.as_slice(), conv.as_bytes().as_slice(), kind.code()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        let Some((id, revision)) = current else {
+            return Ok(None);
+        };
+        let id: [u8; 16] = id
+            .try_into()
+            .map_err(|_| corrupt("invalid current order identity"))?;
+        let job = self
+            .order_job(c, conv, kind)?
+            .ok_or_else(|| corrupt("missing current order job"))?;
+        if job.id != id
+            || job.phase != READY
+            || job.revision != metadata.revision
+            || revision != metadata.revision
+            || job.count != job.next_rank
+            || u64::try_from(job.count).ok() != Some(metadata.count)
+        {
+            return Err(corrupt("published order disagrees with source"));
+        }
+        Ok(Some(OrderGeneration {
+            job: id,
+            source_revision: revision,
+            count: metadata.count,
+        }))
+    }
+    /// A durable reducer may resume a known prefix after safe tail appends.
+    /// Unlike an immutable query cursor, this checks generation identity while
+    /// binding the current source revision within the same read transaction.
+    pub(crate) fn causal_headers_after_rank(
+        &self,
+        conv: &ConversationId,
+        kind: CausalOrder,
+        job: [u8; 16],
+        last_rank: i64,
+        budget: PageBudget,
+    ) -> Result<OrderReadState<EventHeader>, LogError> {
+        self.database.read(|c| {
+            let generation = self
+                .order_generation_on(c, conv, kind)?
+                .ok_or(LogError::StaleCursor)?;
+            if generation.job != job
+                || last_rank < -1
+                || u64::try_from(last_rank).is_ok_and(|rank| rank >= generation.count)
+            {
+                return Err(LogError::StaleCursor);
+            }
+            let cursor = OrderCursor {
+                store_uuid: self.store_uuid,
+                domain: self.domain,
+                conversation: *conv,
+                order: kind,
+                bodies: false,
+                job,
+                revision: generation.source_revision,
+                rank: last_rank,
+            };
+            self.causal_page(
+                c,
+                conv,
+                kind,
+                (last_rank >= 0).then_some(&cursor),
+                budget,
+                false,
+                |_, h| Ok(h),
+            )
+        })
+    }
     pub(crate) fn causal_headers_page(
         &self,
         conv: &ConversationId,

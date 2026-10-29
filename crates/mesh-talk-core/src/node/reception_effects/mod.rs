@@ -182,6 +182,7 @@ impl ReceptionConsumer {
 
 pub(crate) struct ReceptionEffects {
     profile: Arc<ProfileStorage>,
+    account: [u8; 32],
     #[cfg(test)]
     body_reads: std::sync::atomic::AtomicUsize,
 }

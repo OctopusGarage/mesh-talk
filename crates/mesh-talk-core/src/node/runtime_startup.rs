@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 pub struct RuntimeStartup<'a> {
     pub(super) config: RuntimeConfig<'a>,
-    pub(super) events: RuntimeEvents,
+    pub(super) events: Option<RuntimeEvents>,
     pub(super) network: RuntimeNetworkOptions,
     pub(super) network_cost: super::NetworkCost,
     pub(super) lease: Option<ProfileStorageLease>,
@@ -19,6 +19,14 @@ pub struct RuntimeStartup<'a> {
 
 impl<'a> RuntimeStartup<'a> {
     pub fn new(config: RuntimeConfig<'a>, events: RuntimeEvents) -> Self {
+        Self::configured(config, Some(events))
+    }
+    /// Production startup without collecting payload callback queues. Observe
+    /// the node's coalesced watch and read bounded durable reception pages.
+    pub fn bounded(config: RuntimeConfig<'a>) -> Self {
+        Self::configured(config, None)
+    }
+    fn configured(config: RuntimeConfig<'a>, events: Option<RuntimeEvents>) -> Self {
         let work = Arc::new(RuntimeWork::default());
         let root = work.admit().expect("fresh startup admission");
         Self {

@@ -16,13 +16,13 @@ impl ReceptionEffects {
     ) -> Result<ReceptionPage, LogError> {
         limit.validate()?;
         self.profile.database().read(|c| {
-            let state=storage::state_on(c)?;
+            let state=storage::state_on(c,&self.account)?;
             storage::validate_cursor(&state,after)?;
             storage::validate_cursor(&state,through)?;
             if after.sequence > through.sequence { return Err(LogError::StaleCursor); }
             if limit.serialized_bytes < JSON_ENVELOPE_BYTES { return Err(LogError::PageBudgetTooSmall {required:JSON_ENVELOPE_BYTES}); }
-            let mut statement=c.prepare("SELECT i.sequence,i.kind,i.conversation,i.event_id,p.metadata,t.ordinal,t.body_bytes,t.sender_bytes,t.clock FROM reception_pending p JOIN reception_identities i ON i.sequence=p.sequence LEFT JOIN transcript_rows t ON i.kind<>4 AND t.kind=CASE WHEN i.kind=3 THEN 3 ELSE 2 END AND t.conversation=i.conversation AND t.row_key=i.event_id AND (t.deadline IS NULL OR t.deadline>?4) AND NOT EXISTS(SELECT 1 FROM transcript_suppression s WHERE s.conversation=t.conversation AND (s.id=t.row_key OR s.id=t.logical_id)) WHERE p.sequence>?1 AND p.sequence<=?2 ORDER BY p.sequence LIMIT ?3")?;
-            let mut rows=statement.query(params![integer(after.sequence)?,integer(through.sequence)?,limit.rows as i64,now.to_be_bytes().as_slice()])?;
+            let mut statement=c.prepare("SELECT i.sequence,i.kind,i.conversation,i.event_id,p.metadata,t.ordinal,t.body_bytes,t.sender_bytes,t.clock FROM reception_pending p JOIN reception_identities i ON i.sequence=p.sequence LEFT JOIN transcript_rows t ON i.kind<>4 AND t.kind=CASE WHEN i.kind=3 THEN 3 ELSE 2 END AND t.conversation=i.conversation AND t.row_key=i.event_id AND (t.deadline IS NULL OR t.deadline>?4) AND NOT EXISTS(SELECT 1 FROM transcript_suppression s WHERE s.conversation=t.conversation AND (s.id=t.row_key OR s.id=t.logical_id)) WHERE p.sequence>?1 AND p.sequence<=?2 AND i.account=?5 ORDER BY p.sequence LIMIT ?3")?;
+            let mut rows=statement.query(params![integer(after.sequence)?,integer(through.sequence)?,limit.rows as i64,now.to_be_bytes().as_slice(),self.account.as_slice()])?;
             let mut result=ReceptionPage { rows:Vec::new(),next:after,through,complete:false,body_bytes:0,serialized_bound:JSON_ENVELOPE_BYTES };
             let mut examined=0;
             while let Some(row)=rows.next()? {

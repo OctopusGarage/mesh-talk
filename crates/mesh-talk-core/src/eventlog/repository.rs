@@ -46,6 +46,14 @@ pub(crate) struct EventHeader {
     pub signature_bytes: usize,
     pub stored_bytes: usize,
 }
+/// Fixed metadata discovery includes retired rows so every examined commit can
+/// advance a durable cursor without scanning an unbounded retired prefix.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CommittedHeader {
+    pub ordinal: i64,
+    pub header: EventHeader,
+    pub active: bool,
+}
 const HEADER_COLUMNS: &str = "id,conversation,author,seq,lamport,wall_clock,kind,parent_count,encoded_bytes,ciphertext_bytes,signature_bytes,stored_bytes";
 
 /// Same-transaction decision after owner validation and before new graph writes.
