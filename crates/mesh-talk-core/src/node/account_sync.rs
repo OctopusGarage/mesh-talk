@@ -357,6 +357,26 @@ impl ControlComparisonPair {
             debug_assert!(refreshed);
             self.followup = false;
         }
+        let current_complete = current.control_comparison_complete();
+        let parked_complete = self.parked.control_comparison_complete();
+        if self.followup
+            && ((self.foreground && !current_complete && parked_complete)
+                || (!self.foreground && current_complete && !parked_complete))
+        {
+            // A new publication need not wait for a stale foreground suffix
+            // when the other comparison has already completed. Reuse only that
+            // completed slot; preserve the unfinished checkpoint as background.
+            if self.foreground {
+                std::mem::swap(current, &mut self.parked);
+            }
+            let refreshed = current.begin_refresh();
+            debug_assert!(refreshed);
+            self.foreground = true;
+            self.followup = false;
+            // The fresh prefix runs next. Its validated page then repays the
+            // exact parked continuation through ordinary page alternation.
+            return false;
+        }
         if current.control_comparison_complete() && self.parked.control_comparison_complete() {
             // Retain the foreground's independently verified comparison, never
             // combine after keys, digest sets or support booleans.
@@ -2814,6 +2834,8 @@ impl Node {
                 })
                 .map(|hint| wake::wake_identity(&hint.public));
             for (key, pair) in &mut control_pairs {
+                #[cfg(test)]
+                let previous_followup = (pair.followup, pair.wake.clone());
                 pair.observe(
                     selected_requests
                         .get(&key.identity())
@@ -2821,6 +2843,12 @@ impl Node {
                         .unwrap_or_default(),
                     hints.iter().find(|hint| hint.public == key.public()),
                 );
+                #[cfg(test)]
+                if pair.followup && (!previous_followup.0 || previous_followup.1 != pair.wake) {
+                    self.trace_account_client(&key.public(), || {
+                        "control_pair_followup_observed".into()
+                    });
+                }
             }
             for (task, key) in &document_owners {
                 let fresh_same_source = key.lane == DocumentLane::Control
@@ -3737,6 +3765,110 @@ mod tests {
         current = Cursor::control_test_page(None).into();
         assert!(pair.finish_page(&mut current));
         assert!(current.control_comparison_complete());
+    }
+
+    #[test]
+    fn paired_control_new_publication_reuses_completed_background_without_dropping_partial_foreground()
+     {
+        use super::super::account_documents::{
+            AccountDocumentKey, sync::DocumentSyncCursor as Cursor,
+        };
+        let key = AccountDocumentKey::GroupOperation {
+            channel: "08".repeat(32),
+            source_device: "01".repeat(16),
+        };
+        let first = super::super::AccountGroupOperationId::from_hex(&hex::encode([1; 32])).unwrap();
+        let requests = ControlDemand::from([first]);
+        let mut background: DocumentCheckpoint =
+            Cursor::control_test_page(Some(key.clone())).into();
+        background.start_control_comparison(&requests, None);
+        let mut pair = ControlComparisonPair::new(background, requests.clone(), None);
+        let mut foreground: DocumentCheckpoint = Cursor::control_test_page(Some(key)).into();
+        foreground.start_control_comparison(&requests, None);
+        foreground.retry_at = Some(std::time::Instant::now() + Duration::from_secs(10));
+        let original_foreground = foreground.clone();
+        assert!(!pair.finish_page(&mut foreground));
+        assert!(!pair.foreground);
+        foreground.cursor = Cursor::control_test_page(None);
+        foreground.retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
+        let public = PublicIdentity {
+            ed25519_pub: [3; 32],
+            x25519_pub: [4; 32],
+        };
+        let token = wake::ControlWakeHint::test_token(public, [1; 16], 3);
+        pair.observe(requests, Some(&token));
+        assert!(pair.followup);
+        let mut expected_fresh = foreground.clone();
+        assert!(expected_fresh.begin_refresh());
+        assert!(!pair.finish_page(&mut foreground));
+        assert_eq!(
+            foreground, expected_fresh,
+            "new publication must use the completed slot for a fresh prefix before the obsolete foreground suffix"
+        );
+        assert!(pair.foreground && !foreground.control_comparison_complete());
+        assert_eq!(
+            pair.parked, original_foreground,
+            "unfinished foreground checkpoint must become the exact parked background"
+        );
+        assert_eq!(
+            pair.deadline(Some(&foreground)),
+            original_foreground.retry_at
+        );
+        assert!(foreground.control_start.is_none());
+        assert!(!pair.followup);
+        foreground.cursor = Cursor::control_test_page(None);
+        assert!(!pair.finish_page(&mut foreground));
+        assert!(!pair.foreground);
+        assert_eq!(
+            foreground, original_foreground,
+            "new prefix pays one protected old page before its next continuation"
+        );
+        foreground.cursor = Cursor::control_test_page(None);
+        assert!(pair.finish_page(&mut foreground));
+        assert!(foreground.up_to_date);
+    }
+
+    #[test]
+    fn paired_control_recycles_parked_completed_background_only_for_genuine_followup() {
+        use super::super::account_documents::{
+            AccountDocumentKey, sync::DocumentSyncCursor as Cursor,
+        };
+        let first = super::super::AccountGroupOperationId::from_hex(&hex::encode([1; 32])).unwrap();
+        let second =
+            super::super::AccountGroupOperationId::from_hex(&hex::encode([2; 32])).unwrap();
+        let requests = ControlDemand::from([first]);
+        let mut background: DocumentCheckpoint = Cursor::control_test_page(None).into();
+        background.start_control_comparison(&ControlDemand::new(), None);
+        background.retry_at = Some(std::time::Instant::now() + Duration::from_secs(10));
+        let mut expected = background.clone();
+        assert!(expected.begin_refresh());
+        let mut pair = ControlComparisonPair::new(background, requests.clone(), None);
+        let mut foreground: DocumentCheckpoint =
+            Cursor::control_test_page(Some(AccountDocumentKey::GroupOperation {
+                channel: "08".repeat(32),
+                source_device: "01".repeat(16),
+            }))
+            .into();
+        foreground.start_control_comparison(&requests, None);
+        foreground.retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
+        let saved = foreground.clone();
+        for _ in 0..64 {
+            pair.observe(requests.clone(), None);
+        }
+        assert!(!pair.finish_page(&mut foreground));
+        assert_eq!(
+            foreground, saved,
+            "unchanged demand cannot discard or rotate a partial foreground"
+        );
+        pair.observe(ControlDemand::from([first, second]), None);
+        assert!(!pair.finish_page(&mut foreground));
+        assert_eq!(
+            foreground, expected,
+            "completed parked slot becomes the fresh foreground"
+        );
+        assert!(pair.foreground && !pair.followup);
+        assert_eq!(pair.parked, saved);
+        assert_eq!(pair.deadline(Some(&foreground)), expected.retry_at);
     }
 
     #[test]

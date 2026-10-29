@@ -1418,6 +1418,12 @@ claim convergence while either comparison remains unfinished.
 
 Only newly admitted immutable operation IDs or a new authenticated Wake token
 coalesce a foreground follow-up; polling and operation status writes do not.
+If one comparison has completed while the other still has a continuation, a
+new follow-up reuses the completed slot for a fresh foreground prefix. The
+unfinished checkpoint becomes the exact protected background, regardless of
+which slot had completed. The fresh prefix pays its next validated page before
+that background resumes. Both-partial comparisons retain their two independent
+checkpoints; failed/deferred pages and unchanged demand cannot rotate a slot.
 The owner retains the current bounded pending-ID snapshot rather than an
 ever-growing history. Once the previous operation settles, a newly selected other
 executor retains its priority over resumed background work. Policy or identity

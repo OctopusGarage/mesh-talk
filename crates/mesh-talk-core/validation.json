@@ -110,6 +110,9 @@
             "paired_control_pages_preserve_both_partial_checkpoints_and_alternate",
             "paired_control_deferral_keeps_owner_and_waits_for_both_retry_deadlines",
             "paired_control_followup_requires_a_new_admitted_operation_or_wake_token",
+            "paired_control_new_publication_reuses_completed_background_without_dropping_partial_foreground",
+            "paired_control_recycles_parked_completed_background_only_for_genuine_followup",
+            "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
             "newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page",
             "control_checkpoint_preserves_comparison_start_across_partial_pages_and_rollback",
@@ -190,7 +193,7 @@
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
-            "name": "Comparison-start immutable demand and consumed authenticated Wake evidence travel with queued checkpoints, owned rollback and paired swaps. New demand starts a separate fresh comparison before an old queued suffix; unchanged demand, refused refresh, cooldowns and full-identity cleanup preserve their existing contracts.",
+            "name": "Comparison-start immutable demand and consumed authenticated Wake evidence travel with queued checkpoints, owned rollback and paired swaps. New demand starts a separate fresh comparison before an old queued suffix. A genuine follow-up can reuse a completed comparison slot while retaining the exact unfinished comparison as protected background; both-partial checkpoints, unchanged demand, refused refresh, cooldowns and full-identity cleanup preserve their existing contracts.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]

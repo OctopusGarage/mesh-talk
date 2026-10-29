@@ -81,6 +81,15 @@ fn install_owner_group(owner: &Node, external: &Node, group: ConversationId) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page() {
+    Box::pin(run_queued_source(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn newer_terminal_reuses_completed_background_before_stale_foreground_suffix() {
+    Box::pin(run_queued_source(true)).await;
+}
+
+async fn run_queued_source(gate_terminal: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let a = node(&dir.path().join("a"), &account);
@@ -197,20 +206,29 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let clock = std::time::Instant::now();
     let operation = Arc::new(Mutex::new(None));
+    let first_foreground = Arc::new(Mutex::new(None::<tokio::task::Id>));
+    let foreground_after = Arc::new(Mutex::new(None::<crate::node::AccountDocumentKey>));
+    let release_intent = Arc::new(Semaphore::new(0));
+    let _release_intent = ReleaseQueuedReads(release_intent.clone());
+    let intent_held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let terminal_published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let terminal_wake = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wake_changed = Arc::new(Semaphore::new(0));
+    let _release_wake = ReleaseQueuedReads(wake_changed.clone());
     *b.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let source = Arc::downgrade(&b);
         let operation = operation.clone();
         let trace = trace.clone();
         let peer = reference.identity.public();
+        let terminal_published = terminal_published.clone();
         move |observed, phase| {
             if phase.starts_with("operation_local_published") {
                 if let Some(source) = source.upgrade() {
-                    record_b_trace(
-                        &trace,
-                        clock,
-                        "B_publication",
-                        result_snapshot(&source, group_b, *operation.lock().unwrap()),
-                    );
+                    let snapshot = result_snapshot(&source, group_b, *operation.lock().unwrap());
+                    if snapshot.contains("matching_terminal=true") {
+                        terminal_published.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    record_b_trace(&trace, clock, "B_publication", snapshot);
                 }
             } else if observed == peer
                 && ((phase.starts_with("control_")
@@ -227,12 +245,27 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
         let trace = trace.clone();
         let peer = b.identity.public();
         let writer = b.user_id();
+        let requester_writer = reference.user_id();
+        let admitted = admitted.clone();
+        let release_intent = release_intent.clone();
+        let intent_held = intent_held.clone();
         move |observed, frame| {
             let trace = trace.clone();
             let peer = peer.clone();
             let writer = writer.clone();
+            let requester_writer = requester_writer.clone();
+            let admitted = admitted.clone();
+            let release_intent = release_intent.clone();
+            let intent_held = intent_held.clone();
             Box::pin(async move {
                 if observed == peer {
+                    if gate_terminal && admitted.load(std::sync::atomic::Ordering::Acquire)
+                        && let AccountHistoryFrame::DocumentHeader{body}=&frame
+                        && serde_json::from_slice::<crate::node::AccountDocumentMeta>(body).ok().is_some_and(|meta|matches!(&meta.key,crate::node::AccountDocumentKey::GroupOperation{channel,source_device} if channel==&hex::encode(group_b.as_bytes()) && source_device==&requester_writer))
+                        && !intent_held.swap(true,std::sync::atomic::Ordering::AcqRel) {
+                        record_b_trace(&trace,clock,"fixture","source_intent_header_held_until_foreground_complete".into());
+                        let _=release_intent.acquire().await;
+                    }
                     record_control_frame(
                         &trace,
                         clock,
@@ -252,7 +285,42 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
         let b_partial = b_partial.clone();
         let b_retired = b_retired.clone();
         let trace = trace.clone();
+        let admitted = admitted.clone();
+        let first_foreground = first_foreground.clone();
+        let release_intent = release_intent.clone();
+        let terminal_published = terminal_published.clone();
+        let terminal_wake = terminal_wake.clone();
+        let wake_changed = wake_changed.clone();
         move |peer, phase| {
+            if gate_terminal
+                && peer == peer_b
+                && admitted.load(std::sync::atomic::Ordering::Acquire)
+            {
+                if phase.starts_with("negotiation_begin domain=Some(GroupControl)") {
+                    let mut first = first_foreground.lock().unwrap();
+                    if first.is_none() {
+                        *first = tokio::task::try_id();
+                    }
+                }
+                if phase.starts_with("page_end")
+                    && phase.contains("pending=true after=true")
+                    && tokio::task::try_id() == *first_foreground.lock().unwrap()
+                {
+                    record_b_trace(
+                        &trace,
+                        clock,
+                        "fixture",
+                        "first_foreground_partial_validated_release_source_intent".into(),
+                    );
+                    release_intent.add_permits(1);
+                }
+                if phase == "control_pair_followup_observed"
+                    && terminal_published.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    terminal_wake.store(true, std::sync::atomic::Ordering::Release);
+                    wake_changed.add_permits(1);
+                }
+            }
             if (peer == peer_a || peer == peer_b)
                 && ((phase.starts_with("control_")
                     && !phase.starts_with("control_queue")
@@ -288,7 +356,10 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
             {
                 b_partial.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            if peer == peer_b && phase == "control_pair_retired" {
+            if peer == peer_b
+                && phase == "control_pair_retired"
+                && admitted.load(std::sync::atomic::Ordering::Acquire)
+            {
                 b_retired.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -341,7 +412,14 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
                         assert!(effective_after(&request).is_none());
                         let _ = first.send(());
                         let _ = release.acquire().await;
-                    } else if b_partial.load(std::sync::atomic::Ordering::Relaxed) {
+                    } else if b_partial.load(std::sync::atomic::Ordering::Relaxed)
+                        && origins.lock().unwrap().iter().rev().take(2).any(|phase| {
+                            phase == "control_turn_origin resumed=true replacement=false"
+                        })
+                        && origins.lock().unwrap().last().is_some_and(|phase| {
+                            phase.starts_with("control_dispatch protected=true")
+                        })
+                    {
                         let resumed = resume_tx.lock().unwrap().take();
                         if let Some(resumed) = resumed {
                             assert!(
@@ -370,6 +448,9 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
         let source = Arc::downgrade(&b);
         let writer = b.user_id();
         let operation = operation.clone();
+        let terminal_wake = terminal_wake.clone();
+        let wake_changed = wake_changed.clone();
+        let foreground_after = foreground_after.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let admitted = admitted.clone();
@@ -379,6 +460,9 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
             let source = source.clone();
             let writer = writer.clone();
             let operation = operation.clone();
+            let terminal_wake = terminal_wake.clone();
+            let wake_changed = wake_changed.clone();
+            let foreground_after = foreground_after.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
@@ -396,6 +480,28 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
                         "B_snapshot_start",
                         result_snapshot(&source, group_b, *operation.lock().unwrap()),
                     );
+                }
+                if gate_terminal
+                    && admitted.load(std::sync::atomic::Ordering::Acquire)
+                    && let AccountHistoryFrame::DocumentsComplete { body } = &frame
+                {
+                    let complete: serde_json::Value = serde_json::from_slice(body).unwrap();
+                    if complete["domain"] == "group_control" {
+                        let last = b_requests.lock().unwrap().last().cloned();
+                        if last == Some(None)
+                            && !complete["next"].is_null()
+                            && foreground_after.lock().unwrap().is_none()
+                        {
+                            *foreground_after.lock().unwrap() =
+                                Some(serde_json::from_value(complete["next"].clone()).unwrap());
+                        }
+                        if last.is_some_and(|after| after.is_some())
+                            && complete["next"].is_null()
+                            && !terminal_wake.load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            let _ = wake_changed.acquire().await;
+                        }
+                    }
                 }
                 match frame {
                     AccountHistoryFrame::DocumentsComplete { body }
@@ -460,7 +566,8 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
         .unwrap();
     *operation.lock().unwrap() = Some(id);
     record_b_trace(&trace, clock, "fixture", "B_admission_begin".into());
-    admitted.store(true, std::sync::atomic::Ordering::Relaxed);
+    b_retired.store(false, std::sync::atomic::Ordering::Relaxed);
+    admitted.store(true, std::sync::atomic::Ordering::Release);
     let accepted = reference
         .submit_account_group_operation_if(
             &account.account_id(),
@@ -517,6 +624,8 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
         }
         .into(),
     );
+    release_intent.close();
+    wake_changed.close();
     release.close();
     let first_fresh = b_requests
         .lock()
@@ -566,6 +675,32 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
         "new selected queued source resumed its OLD suffix instead of a fresh comparison: saved={saved:?}, requests={:?}",
         b_requests.lock().unwrap()
     );
+    if gate_terminal {
+        assert!(
+            intent_held.load(std::sync::atomic::Ordering::Acquire),
+            "the real source intent header was held before admission"
+        );
+        assert!(terminal_wake.load(std::sync::atomic::Ordering::Acquire));
+        let requests = b_requests.lock().unwrap();
+        assert!(
+            requests.get(2).is_some_and(Option::is_none),
+            "new terminal must reuse completed background slot before old foreground suffix: requests={requests:?}; phases={:?}",
+            trace.lock().unwrap()
+        );
+        let saved_foreground = foreground_after
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("first fresh foreground has a real continuation");
+        assert!(
+            requests
+                .iter()
+                .skip(3)
+                .any(|after| after.as_ref() == Some(&saved_foreground)),
+            "old foreground continuation must still be replayed exactly: saved={saved_foreground:?} requests={requests:?}; phases={:?}",
+            trace.lock().unwrap()
+        );
+    }
     let result=receipt.unwrap_or_else(|error|panic!("queued selected source must return its real private receipt within unchanged eight seconds: {error:?}; phases={:?}",trace.lock().unwrap()));
     assert_eq!(result.committed_events.len(), 1);
     let event = b
