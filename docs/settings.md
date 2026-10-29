@@ -16,7 +16,7 @@ an accessible horizontal navigation strip.
 | --- | --- | --- |
 | Experience | App behavior | Launch at OS login and close-to-tray behavior. |
 | Experience | Appearance & language | Display language, themes, theme wallpapers and wallpaper visibility. |
-| Experience | Notifications & calls | Notifications, message previews, experimental calling and ringtone. |
+| Experience | Notifications & calls | Notifications, message previews, experimental calling, ringtone and microphone/camera checks. |
 | Experience | Shortcuts | Screenshot bindings, opt-in global registration, registration status and reset. |
 | Privacy & data | Privacy & security | Privacy preset, lock/sign-in, clipboard protection, hidden contacts and related permission summaries. |
 | Privacy & data | Files & downloads | Attachment receiving defaults and download destination; conversation-specific overrides remain available. |
@@ -112,6 +112,21 @@ failures. The app must remain running and unlocked; normal login restores enable
 access and updates the bootstrap to its new endpoint. See the
 [local API guide](bot-integrations.md#desktop-local-agent-access) for discovery,
 authority, credential handling and transport limits.
+
+## Microphone and camera check
+
+The **Notifications & calls** page contains inline device checks when calling is
+enabled. Explicit microphone/camera actions are independent; no media is acquired
+by opening Settings. Preview and input feedback remain active only until stopped
+or their view/session retires. Active calls and device checks do not compete for
+capture. The More menu does not expose a separate development self-test.
+
+The library runner owns bounded capture, enumeration and advanced negotiation,
+connection and receive-statistics waits. Abort or timeout disposes late streams,
+peers and owned playback. The panel owns microphone analysis and muted local
+camera preview. Advanced diagnostics require actual received-media statistics,
+remain collapsed by default and make no remote-connectivity claim. See
+[calling help](help/topics/calls.md#check-microphone-and-camera).
 
 ## Screenshot shortcuts
 

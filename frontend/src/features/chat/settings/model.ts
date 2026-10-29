@@ -24,6 +24,7 @@ const CONTROL_CATEGORIES: Record<string, SettingsCategory> = {
   "setting-notification-preview": "notifications",
   "setting-calls": "notifications",
   "setting-ringtone": "notifications",
+  "setting-media-device-check": "notifications",
   "setting-privacy-level": "privacy",
   "setting-auto-lock": "privacy",
   "setting-lock-when-hidden": "privacy",

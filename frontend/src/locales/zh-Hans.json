@@ -825,29 +825,34 @@
     "documentsDisabled": "其中一台设备已关闭附加账号数据同步。",
     "documentsError": "附加账号数据暂未同步成功。请保持两端应用开启后重试。"
   },
-  "webrtcTest": {
-    "trigger": "语音/视频自检",
-    "title": "语音/视频自检",
-    "description": "检测当前版本的 webview 能否使用摄像头、麦克风和 WebRTC。请在每个平台（macOS、Windows、Linux）各运行一次。",
-    "run": "运行自检",
-    "running": "检测中…",
-    "localLabel": "你的摄像头",
-    "remoteLabel": "回环回显",
-    "step": {
-      "capture": "摄像头 + 麦克风采集",
-      "devices": "媒体设备",
-      "connect": "WebRTC 对等连接",
-      "media": "媒体流回显"
-    },
-    "captureDetail": "{{video}} 路视频，{{audio}} 路音频",
-    "devicesDetail": "{{cameras}} 个摄像头，{{mics}} 个麦克风",
-    "connectDetail": "对等连接已建立（host 候选，无 STUN/TURN）。",
-    "mediaDetail": "实时媒体帧正通过 WebRTC 传输。",
-    "timeout": "等待连接超时。",
-    "candidatesTitle": "已收集的 ICE 候选",
-    "noCandidates": "暂无 —— 请运行自检。",
-    "candidatesHint": "在局域网内，host 候选就足够了 —— 无需 STUN/TURN。",
-    "loopbackNote": "通过即说明此 webview 在本机支持 getUserMedia + WebRTC。能否呼叫其他设备还取决于局域网（AP 隔离 / 防火墙可能阻断直连媒体）。"
+  "mediaCheck": {
+    "audioMeterUnavailable": "麦克风访问正常，但暂时无法监测输入音量。",
+    "title": "麦克风与摄像头",
+    "description": "通话前，分别检查这台电脑上的设备。",
+    "audio": "检测麦克风",
+    "video": "检测摄像头",
+    "stop": "停止检测",
+    "capturing": "正在等待设备访问权限…",
+    "audioReady": "麦克风已连接。请说话并观察输入音量。",
+    "videoReady": "摄像头已连接。请查看下方预览。",
+    "level": "麦克风输入音量",
+    "cameraPreview": "摄像头预览",
+    "advanced": "高级诊断",
+    "advancedHint": "检测这台电脑上应用内部的媒体接收情况，不代表与另一台设备的通话能够接通。",
+    "runLoopback": "检测本机媒体连接",
+    "checkingLoopback": "正在检测本机媒体接收…",
+    "loopbackPassed": "已验证这台电脑上的媒体接收。",
+    "activeCall": "请先结束当前通话，再检测设备。",
+    "stopped": "设备检测已停止。",
+    "errors": {
+      "permission": "访问被拒绝。请在系统设置中允许此应用使用设备，然后重试。",
+      "notFound": "未找到设备。请连接设备后重试。",
+      "busy": "设备正忙。请关闭其他正在使用它的应用后重试。",
+      "unsupported": "此环境暂不支持设备检测。",
+      "timeout": "检测超时。请检查设备后重试。",
+      "cancelled": "设备检测已取消。",
+      "failed": "无法完成检测。请检查设备后重试。"
+    }
   },
   "call": {
     "start": "发起通话",

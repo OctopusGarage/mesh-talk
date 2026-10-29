@@ -94,6 +94,13 @@
     {
       "id": "frontend-call-media",
       "paths": [
+        "frontend/src/features/chat/WebRtcTestDialog.tsx",
+        "frontend/src/features/chat/WebRtcTestDialog.test.ts",
+        "frontend/src/lib/mediaDeviceCheck.ts",
+        "frontend/src/lib/mediaDeviceCheck.test.ts",
+        "frontend/src/features/chat/settings/MediaDeviceCheck.tsx",
+        "frontend/src/features/chat/settings/MediaDeviceCheck.test.ts",
+        "frontend/e2e/media-device-check.spec.ts",
         "frontend/src/store/calls.ts",
         "frontend/src/store/calls.test.ts",
         "frontend/src/features/chat/CallDialog.tsx",
@@ -110,13 +117,18 @@
         "src/store/calls.test.ts",
         "src/features/chat/CallDialog.test.ts",
         "src/lib/localeParity.test.ts",
-        "src/features/chat/WebRtcTestDialog.test.ts",
+        "src/lib/mediaDeviceCheck.test.ts",
+        "src/features/chat/settings/MediaDeviceCheck.test.ts",
         "src/store/settings.test.ts"
       ],
       "capability": {
         "summary": "Play remote voice and video through the shipped call dialog, preserve audio-only fallback, and release playback and capture on termination.",
         "guide": "docs/help/topics/calls.md#media-playback-and-cleanup",
         "invariants": [
+          {
+            "name": "Local device checks live inside enabled call settings, acquire microphone/camera independently only on explicit action, release resources across view/session/call retirement, and use advancing media statistics for advanced local-only diagnostics.",
+            "reference": "docs/help/topics/calls.md#check-microphone-and-camera"
+          },
           {
             "name": "A connected remote audio stream has an unmuted playback element even without video; replacement and unmount pause and detach the old stream.",
             "reference": "docs/help/topics/calls.md#media-playback-and-cleanup"

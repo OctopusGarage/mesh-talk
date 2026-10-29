@@ -825,29 +825,34 @@
     "documentsDisabled": "La sincronización de datos adicionales de la cuenta está desactivada en uno de los dispositivos.",
     "documentsError": "No se pudieron sincronizar los datos adicionales. Mantén ambas aplicaciones abiertas e inténtalo de nuevo."
   },
-  "webrtcTest": {
-    "trigger": "Autodiagnóstico de voz/vídeo",
-    "title": "Autodiagnóstico de voz/vídeo",
-    "description": "Comprueba si el webview de esta compilación puede usar la cámara, el micrófono y WebRTC. Ejecútalo una vez en cada plataforma (macOS, Windows, Linux).",
-    "run": "Ejecutar diagnóstico",
-    "running": "Probando…",
-    "localLabel": "Tu cámara",
-    "remoteLabel": "Eco de bucle",
-    "step": {
-      "capture": "Captura de cámara y micrófono",
-      "devices": "Dispositivos multimedia",
-      "connect": "Conexión entre pares WebRTC",
-      "media": "Eco del flujo multimedia"
-    },
-    "captureDetail": "{{video}} pista(s) de vídeo, {{audio}} pista(s) de audio",
-    "devicesDetail": "{{cameras}} cámara(s), {{mics}} micrófono(s)",
-    "connectDetail": "Conexión entre pares establecida (candidatos host, sin STUN/TURN).",
-    "mediaDetail": "Fotogramas multimedia fluyendo por WebRTC.",
-    "timeout": "Se agotó el tiempo de espera de la conexión.",
-    "candidatesTitle": "Candidatos ICE recopilados",
-    "noCandidates": "Ninguno todavía: ejecuta la prueba.",
-    "candidatesHint": "En una LAN, los candidatos host bastan: no se necesita STUN/TURN.",
-    "loopbackNote": "Si pasa, demuestra que este webview admite getUserMedia + WebRTC en esta máquina. Llamar a otro dispositivo depende además de la LAN (el aislamiento de AP o el firewall pueden bloquear el medio directo)."
+  "mediaCheck": {
+    "audioMeterUnavailable": "El acceso al micrófono funciona, pero la supervisión del nivel de entrada no está disponible.",
+    "title": "Micrófono y cámara",
+    "description": "Comprueba cada dispositivo de este equipo antes de una llamada.",
+    "audio": "Comprobar micrófono",
+    "video": "Comprobar cámara",
+    "stop": "Detener comprobación",
+    "capturing": "Esperando acceso al dispositivo…",
+    "audioReady": "Micrófono conectado. Habla para comprobar el nivel de entrada.",
+    "videoReady": "Cámara conectada. Comprueba la vista previa.",
+    "level": "Nivel de entrada del micrófono",
+    "cameraPreview": "Vista previa de la cámara",
+    "advanced": "Diagnóstico avanzado",
+    "advancedHint": "Comprueba la recepción multimedia dentro de esta app en este equipo. No comprueba una llamada con otro dispositivo.",
+    "runLoopback": "Comprobar conexión multimedia local",
+    "checkingLoopback": "Comprobando recepción multimedia local…",
+    "loopbackPassed": "Recepción multimedia verificada en este equipo.",
+    "activeCall": "Finaliza la llamada actual antes de comprobar los dispositivos.",
+    "stopped": "Comprobación detenida.",
+    "errors": {
+      "permission": "Acceso denegado. Permite el uso del dispositivo en los ajustes del sistema y vuelve a intentarlo.",
+      "notFound": "No se encontró ningún dispositivo. Conecta uno y vuelve a intentarlo.",
+      "busy": "El dispositivo está ocupado. Cierra otras apps que lo usen y vuelve a intentarlo.",
+      "unsupported": "Esta comprobación no es compatible con este entorno.",
+      "timeout": "La comprobación agotó el tiempo. Revisa el dispositivo y vuelve a intentarlo.",
+      "cancelled": "Comprobación cancelada.",
+      "failed": "No se pudo completar la comprobación. Revisa el dispositivo y vuelve a intentarlo."
+    }
   },
   "call": {
     "start": "Iniciar llamada",

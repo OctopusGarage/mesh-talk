@@ -825,29 +825,34 @@
     "documentsDisabled": "A sincronização de dados adicionais da conta está desativada em um dos dispositivos.",
     "documentsError": "Não foi possível sincronizar dados adicionais da conta. Mantenha os dois aplicativos abertos e tente novamente."
   },
-  "webrtcTest": {
-    "trigger": "Autoteste de voz e vídeo",
-    "title": "Autoteste de voz e vídeo",
-    "description": "Verifique se a visualização web desta versão pode usar a câmera, o microfone e o WebRTC. Execute uma vez em cada plataforma (macOS, Windows, Linux).",
-    "run": "Executar autoteste",
-    "running": "Testando…",
-    "localLabel": "Sua câmera",
-    "remoteLabel": "Retorno local",
-    "step": {
-      "capture": "Captura de câmera e microfone",
-      "devices": "Dispositivos de mídia",
-      "connect": "Conexão entre participantes via WebRTC",
-      "media": "Retorno do fluxo de mídia"
-    },
-    "captureDetail": "Trilhas de vídeo: {{video}}; trilhas de áudio: {{audio}}",
-    "devicesDetail": "Câmeras: {{cameras}}; microfones: {{mics}}",
-    "connectDetail": "Conexão entre participantes estabelecida (candidatos locais, sem STUN/TURN).",
-    "mediaDetail": "Quadros de mídia ao vivo passando pelo WebRTC.",
-    "timeout": "O tempo limite de espera pela conexão foi excedido.",
-    "candidatesTitle": "Candidatos ICE coletados",
-    "noCandidates": "Nenhum ainda. Execute o teste.",
-    "candidatesHint": "Em uma rede local, candidatos locais bastam; não é necessário STUN/TURN.",
-    "loopbackNote": "Um resultado positivo comprova que esta visualização web oferece suporte a getUserMedia e WebRTC nesta máquina. Chamadas para outro dispositivo também dependem da rede local (isolamento do ponto de acesso e firewall podem bloquear a mídia direta)."
+  "mediaCheck": {
+    "audioMeterUnavailable": "O acesso ao microfone funciona, mas o monitoramento do nível de entrada está indisponível.",
+    "title": "Microfone e câmera",
+    "description": "Verifique cada dispositivo deste computador antes de uma chamada.",
+    "audio": "Verificar microfone",
+    "video": "Verificar câmera",
+    "stop": "Parar verificação",
+    "capturing": "Aguardando acesso ao dispositivo…",
+    "audioReady": "Microfone conectado. Fale para verificar o nível de entrada.",
+    "videoReady": "Câmera conectada. Confira a prévia abaixo.",
+    "level": "Nível de entrada do microfone",
+    "cameraPreview": "Prévia da câmera",
+    "advanced": "Diagnóstico avançado",
+    "advancedHint": "Verifica a recepção de mídia dentro deste app neste computador. Não verifica uma chamada com outro dispositivo.",
+    "runLoopback": "Verificar conexão de mídia local",
+    "checkingLoopback": "Verificando recepção de mídia local…",
+    "loopbackPassed": "Recepção de mídia verificada neste computador.",
+    "activeCall": "Encerre a chamada atual antes de verificar os dispositivos.",
+    "stopped": "Verificação do dispositivo interrompida.",
+    "errors": {
+      "permission": "Acesso negado. Permita o uso do dispositivo nos ajustes do sistema e tente novamente.",
+      "notFound": "Nenhum dispositivo encontrado. Conecte um e tente novamente.",
+      "busy": "O dispositivo está ocupado. Feche outros apps que o utilizem e tente novamente.",
+      "unsupported": "Esta verificação não é compatível com este ambiente.",
+      "timeout": "A verificação excedeu o tempo. Confira o dispositivo e tente novamente.",
+      "cancelled": "Verificação do dispositivo cancelada.",
+      "failed": "Não foi possível concluir a verificação. Confira o dispositivo e tente novamente."
+    }
   },
   "call": {
     "start": "Iniciar chamada",

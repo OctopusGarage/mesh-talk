@@ -46,6 +46,7 @@ export function SettingsDialog({
   const [category, setCategory] = useState<SettingsCategory>("general");
   const [presetDraft, setPresetDraft] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
+  const navigation = useRef<HTMLElement>(null);
   const focusTarget = useRef<string | null>(null);
   const controller = useSettingsController(open);
   const initialCategory =
@@ -73,6 +74,38 @@ export function SettingsDialog({
     else editor.focus();
     focusTarget.current = null;
   }, [open, category, controller.settings, controller.identity]);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const nav = navigation.current;
+    if (!nav) return;
+    const revealCategory = () => {
+      const active = nav.querySelector<HTMLElement>('[aria-current="page"]');
+      if (!active) return;
+      const bounds = nav.getBoundingClientRect();
+      const item = active.getBoundingClientRect();
+      if (nav.scrollWidth > nav.clientWidth) {
+        if (item.left < bounds.left) nav.scrollLeft += item.left - bounds.left;
+        else if (item.right > bounds.left + nav.clientWidth)
+          nav.scrollLeft += item.right - bounds.left - nav.clientWidth;
+      }
+      if (nav.scrollHeight > nav.clientHeight) {
+        if (item.top < bounds.top) nav.scrollTop += item.top - bounds.top;
+        else if (item.bottom > bounds.top + nav.clientHeight)
+          nav.scrollTop += item.bottom - bounds.top - nav.clientHeight;
+      }
+    };
+    revealCategory();
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(revealCategory);
+    observer?.observe(nav);
+    window.addEventListener("resize", revealCategory);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", revealCategory);
+    };
+  }, [open, category]);
   const showControl = (controlId: string) => {
     const destination = settingsCategoryForControl(controlId);
     if (!destination) return;
@@ -143,6 +176,7 @@ export function SettingsDialog({
         </DialogHeader>
         <div className="flex min-h-0 min-w-0 gap-5 max-[700px]:flex-col max-[700px]:gap-3">
           <nav
+            ref={navigation}
             aria-label={t("redesign.settingsNav")}
             className="flex w-40 shrink-0 flex-col gap-1 overflow-y-auto border-r pr-3 max-[700px]:w-auto max-[700px]:flex-row max-[700px]:overflow-x-auto max-[700px]:border-b max-[700px]:border-r-0 max-[700px]:pb-2 max-[700px]:pr-0"
           >

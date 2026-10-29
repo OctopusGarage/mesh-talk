@@ -26,6 +26,9 @@ it("provides one unique destination for every approved settings task", () => {
     "connectionExtensions",
   ]);
   expect(settingsCategoryForControl("setting-language")).toBe("appearance");
+  expect(settingsCategoryForControl("setting-media-device-check")).toBe(
+    "notifications",
+  );
   expect(settingsCategoryForControl("setting-screenshot-capture")).toBe(
     "shortcuts",
   );

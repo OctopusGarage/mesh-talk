@@ -9,7 +9,24 @@ Enable calling in settings, then use a reachable direct conversation.
 3. Open a direct conversation and use its call control.
 4. Grant microphone or camera access when the operating system asks.
 
-The **Voice / video self-test** utility appears in More when calling is enabled. Use it to distinguish device-permission problems from peer-connectivity problems.
+## Check microphone and camera
+
+With calling enabled, stay in **Settings → Notifications & calls** and use
+**Microphone & camera**. Choose **Test microphone** or **Test camera** separately.
+Opening Settings does not request device access. Microphone checking shows the
+input level without playing your voice through the speakers. Camera checking
+shows a muted preview; a camera failure does not prevent a microphone check.
+
+Use **Stop check** when finished. Leaving the category, closing Settings, locking,
+signing out, disabling calling or starting a call releases the check's devices.
+Checks are unavailable during an active or incoming/outgoing call.
+
+**Advanced diagnostics** is collapsed by default. With a device check running,
+**Check local media connection** verifies advancing received audio samples or
+decoded video frames through a same-app WebRTC connection. A track event alone
+is not a passing result. This checks this computer's local media reception; it
+does not establish another device's reachability, speaker output or call quality.
+Permission, device availability and timeout failures include retry guidance.
 
 ## Availability and retry
 
@@ -45,7 +62,7 @@ reachable WebRTC host candidates, such as through a permitted routed VPN.
 Calling currently configures no STUN/TURN servers and has no mailbox signaling
 fallback, so ordinary NAT-separated networks are not guaranteed to work.
 
-If a call fails, inspect device permissions, the self-test, and **More → Connection**. See [Connect across networks](routed-networks.md) for topology limits.
+If a call fails, use the microphone/camera check and **More → Connection**. See [Connect across networks](routed-networks.md) for topology limits.
 
 ## Further reference
 

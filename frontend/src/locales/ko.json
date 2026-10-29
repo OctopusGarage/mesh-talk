@@ -825,29 +825,34 @@
     "documentsDisabled": "한 기기에서 추가 계정 데이터 동기화가 꺼져 있습니다.",
     "documentsError": "추가 계정 데이터를 동기화하지 못했습니다. 두 앱을 모두 열어 두고 다시 시도하세요."
   },
-  "webrtcTest": {
-    "trigger": "음성 및 영상 자체 진단",
-    "title": "음성 및 영상 자체 진단",
-    "description": "이 빌드의 웹뷰에서 카메라, 마이크, WebRTC를 사용할 수 있는지 확인합니다. 각 플랫폼(macOS, Windows, Linux)에서 한 번씩 실행하세요.",
-    "run": "자체 진단 실행",
-    "running": "진단 중…",
-    "localLabel": "내 카메라",
-    "remoteLabel": "루프백 에코",
-    "step": {
-      "capture": "카메라 및 마이크 캡처",
-      "devices": "미디어 기기",
-      "connect": "WebRTC 피어 연결",
-      "media": "미디어 스트림 에코"
-    },
-    "captureDetail": "영상 트랙 {{video}}개, 오디오 트랙 {{audio}}개",
-    "devicesDetail": "카메라 {{cameras}}대, 마이크 {{mics}}개",
-    "connectDetail": "피어 연결이 설정되었습니다 (호스트 후보 사용, STUN/TURN 없음).",
-    "mediaDetail": "WebRTC를 통해 실시간 미디어 프레임이 전송되고 있습니다.",
-    "timeout": "연결 대기 시간이 초과되었습니다.",
-    "candidatesTitle": "수집된 ICE 후보",
-    "noCandidates": "아직 없습니다. 진단을 실행하세요.",
-    "candidatesHint": "로컬 네트워크에서는 호스트 후보만으로 충분하며 STUN/TURN은 필요하지 않습니다.",
-    "loopbackNote": "통과하면 이 기기의 웹뷰가 getUserMedia와 WebRTC를 지원한다는 뜻입니다. 다른 기기와의 통화는 로컬 네트워크 환경에도 영향을 받습니다 (AP 격리 또는 방화벽이 직접 미디어 전송을 차단할 수 있음)."
+  "mediaCheck": {
+    "audioMeterUnavailable": "마이크 접근은 가능하지만 입력 수준 모니터링을 사용할 수 없습니다.",
+    "title": "마이크 및 카메라",
+    "description": "통화 전에 이 컴퓨터의 각 기기를 확인하세요.",
+    "audio": "마이크 확인",
+    "video": "카메라 확인",
+    "stop": "확인 중지",
+    "capturing": "기기 접근을 기다리는 중…",
+    "audioReady": "마이크가 연결되었습니다. 말하면서 입력 수준을 확인하세요.",
+    "videoReady": "카메라가 연결되었습니다. 아래 미리보기를 확인하세요.",
+    "level": "마이크 입력 수준",
+    "cameraPreview": "카메라 미리보기",
+    "advanced": "고급 진단",
+    "advancedHint": "이 컴퓨터의 앱 내부 미디어 수신을 확인합니다. 다른 기기와의 통화 연결을 검증하지는 않습니다.",
+    "runLoopback": "로컬 미디어 연결 확인",
+    "checkingLoopback": "로컬 미디어 수신 확인 중…",
+    "loopbackPassed": "이 컴퓨터의 미디어 수신이 확인되었습니다.",
+    "activeCall": "현재 통화를 종료한 후 기기를 확인하세요.",
+    "stopped": "기기 확인이 중지되었습니다.",
+    "errors": {
+      "permission": "접근이 거부되었습니다. 시스템 설정에서 이 앱의 기기 사용을 허용한 후 다시 시도하세요.",
+      "notFound": "기기를 찾을 수 없습니다. 연결 후 다시 시도하세요.",
+      "busy": "기기가 사용 중입니다. 사용 중인 다른 앱을 닫고 다시 시도하세요.",
+      "unsupported": "이 환경에서는 기기 확인을 지원하지 않습니다.",
+      "timeout": "확인 시간이 초과되었습니다. 기기를 점검한 후 다시 시도하세요.",
+      "cancelled": "기기 확인이 취소되었습니다.",
+      "failed": "확인을 완료하지 못했습니다. 기기를 점검한 후 다시 시도하세요."
+    }
   },
   "call": {
     "start": "통화 시작",

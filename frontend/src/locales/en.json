@@ -825,29 +825,34 @@
     "documentsDisabled": "Additional account data sync is turned off on one of these devices.",
     "documentsError": "Additional account data could not sync. Keep both apps open and retry."
   },
-  "webrtcTest": {
-    "trigger": "Voice / video self-test",
-    "title": "Voice / video self-test",
-    "description": "Check whether this build's webview can use the camera, microphone, and WebRTC. Run it once on each platform (macOS, Windows, Linux).",
-    "run": "Run self-test",
-    "running": "Testing…",
-    "localLabel": "Your camera",
-    "remoteLabel": "Loopback echo",
-    "step": {
-      "capture": "Camera + microphone capture",
-      "devices": "Media devices",
-      "connect": "WebRTC peer connection",
-      "media": "Media stream echo"
-    },
-    "captureDetail": "{{video}} video track(s), {{audio}} audio track(s)",
-    "devicesDetail": "{{cameras}} camera(s), {{mics}} microphone(s)",
-    "connectDetail": "Peer connection established (host candidates, no STUN/TURN).",
-    "mediaDetail": "Live media frames flowing through WebRTC.",
-    "timeout": "Timed out waiting for the connection.",
-    "candidatesTitle": "ICE candidates gathered",
-    "noCandidates": "None yet — run the test.",
-    "candidatesHint": "On a LAN, host candidates are enough — no STUN/TURN needed.",
-    "loopbackNote": "A pass proves this webview supports getUserMedia + WebRTC on this machine. Calling another device additionally depends on the LAN (AP isolation / firewall can block direct media)."
+  "mediaCheck": {
+    "audioMeterUnavailable": "Microphone access works, but input-level monitoring is unavailable.",
+    "title": "Microphone & camera",
+    "description": "Check each device on this computer before a call.",
+    "audio": "Test microphone",
+    "video": "Test camera",
+    "stop": "Stop check",
+    "capturing": "Waiting for device access…",
+    "audioReady": "Microphone connected. Speak to check the input level.",
+    "videoReady": "Camera connected. Check the preview below.",
+    "level": "Microphone input level",
+    "cameraPreview": "Camera preview",
+    "advanced": "Advanced diagnostics",
+    "advancedHint": "Tests media reception inside this app on this computer. This does not test a call to another device.",
+    "runLoopback": "Check local media connection",
+    "checkingLoopback": "Checking local media reception…",
+    "loopbackPassed": "Media reception verified on this computer.",
+    "activeCall": "Finish the current call before checking devices.",
+    "stopped": "Device check stopped.",
+    "errors": {
+      "permission": "Access was denied. Allow this app to use the device in system settings, then retry.",
+      "notFound": "No device was found. Connect one and retry.",
+      "busy": "The device is busy. Close other apps using it and retry.",
+      "unsupported": "This device check is not supported here.",
+      "timeout": "The check timed out. Check the device and try again.",
+      "cancelled": "Device check cancelled.",
+      "failed": "Could not complete the check. Check the device and retry."
+    }
   },
   "call": {
     "start": "Start call",

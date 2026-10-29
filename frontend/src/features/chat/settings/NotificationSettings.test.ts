@@ -14,7 +14,8 @@ const mocks = vi.hoisted(() => ({
   preview: vi.fn(),
 }));
 vi.mock("@/lib/api/notifications", () => ({ notifications: mocks }));
-vi.mock("@/lib/ringtones", () => ({
+vi.mock("@/lib/ringtones", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ringtones")>()),
   asRingtoneId: (id: string) => id,
   previewRingtone: mocks.preview,
   RINGTONE_IDS: ["classic", "digital"],

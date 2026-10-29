@@ -21,11 +21,9 @@ import {
 import { useTheme } from "@/lib/theme";
 import { useAuth } from "@/store/auth";
 import { useAppLock } from "@/store/appLock";
-import { useSettings } from "@/store/settings";
 import { LinkDeviceDialog } from "../LinkDeviceDialog";
 import { DiagnosticsDialog } from "../DiagnosticsDialog";
 import { SettingsDialog } from "../SettingsDialog";
-import { WebRtcTestDialog } from "../WebRtcTestDialog";
 import { AboutDialog } from "../AboutDialog";
 import { HelpDialog } from "@/features/help/HelpDialog";
 import { resolveHelpTarget } from "@/features/help/targets";
@@ -73,8 +71,6 @@ export function SidebarUtilities() {
   const toggleTheme = useTheme((s) => s.toggle);
   const logout = useAuth((s) => s.logout);
   const lockApp = useAppLock((s) => s.lock);
-  // The WebRTC self-test only makes sense for the calls feature, so it rides the same gate.
-  const callsEnabled = useSettings((s) => s.callsEnabled);
 
   return (
     <>
@@ -125,7 +121,6 @@ export function SidebarUtilities() {
               <Settings className="h-4 w-4" />
               {t("settings.title")}
             </Button>
-            {callsEnabled && <WebRtcTestDialog menuItem />}
             <Button
               variant="ghost"
               size="sm"
