@@ -2139,7 +2139,11 @@ fn private_recall_witness_cannot_recall_another_accounts_target() {
             .unwrap()
             .contains(&target)
     );
-    assert!(!observer.private_dm_message_recalled(&peer.account_id(), target, &own.account_id()));
+    assert!(
+        !observer
+            .private_dm_message_recalled(&peer.account_id(), target, &own.account_id())
+            .unwrap()
+    );
     assert!(
         observer
             .account_history(&peer.account_id(), 10)

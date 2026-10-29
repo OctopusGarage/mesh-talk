@@ -1,13 +1,134 @@
 //! Bounded CLI autosaves: a durable file card can precede its immutable chunks.
+use mesh_talk_core::node::{Node, ParticipantWork, ReceiveDecision};
+#[cfg(test)]
 use mesh_talk_core::{
     eventlog::ConversationId,
-    node::{FileProgress, Node, ParticipantWork, ReceiveDecision, ReceivedFile},
+    node::{FileProgress, ReceivedFile},
 };
-use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
+#[cfg(test)]
+use std::{collections::VecDeque, time::Duration};
+use std::{path::PathBuf, sync::Arc};
+#[cfg(test)]
 use tokio::{sync::mpsc, task::JoinSet};
 
+#[cfg(test)]
 const MAX_FILES: usize = 256;
 
+/// The durable receipt prefix remains unacknowledged until every admitted file
+/// is saved, declined, or no longer visible. Capacity and temporary save failure
+/// never discard the sole autosave schedule. Later pages remain on disk.
+pub(super) async fn run_bounded(
+    node: Arc<Node>,
+    directory: PathBuf,
+    mut cursor: mesh_talk_core::node::ReceptionCursor,
+    emit: impl Fn(&str) + Send + Sync + 'static,
+    work: ParticipantWork,
+) {
+    use mesh_talk_core::node::{HostReception, ReceptionConsumer, ReceptionLimit};
+    let mut changes = node.subscribe_ui_changes();
+    let mut through = None;
+    loop {
+        let reader = node.clone();
+        let Some(page) = super::reception::blocking(&work, move || {
+            reader.reception_page(
+                cursor,
+                through,
+                ReceptionLimit {
+                    rows: 32,
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+        else {
+            return;
+        };
+        let page = match page {
+            Ok(page) => page,
+            Err(error) => {
+                emit(&format!(
+                    "file receipt page unavailable; will retry: {error}"
+                ));
+                super::reception::retry(&mut changes).await;
+                continue;
+            }
+        };
+        let mut pending = page
+            .receipts
+            .into_iter()
+            .filter_map(|receipt| match receipt {
+                HostReception::File(file) => Some(file),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut announced = std::collections::HashSet::new();
+        while !pending.is_empty() {
+            let reader = node.clone();
+            let destination = directory.clone();
+            let Some(result)=super::reception::blocking(&work,move ||{
+                let mut remaining=Vec::new();let mut observations=Vec::new();let mut saved=false;
+                for file in pending {
+                    let result=(||->Result<Option<PathBuf>,mesh_talk_core::node::NodeError>{
+                        match reader.attachment_consent_status(file.file_conv)? {
+                            Some(ReceiveDecision::Declined)=>return Ok(None),
+                            Some(ReceiveDecision::Pending)=>{observations.push((file.file_conv,format!("file offer from {}: {} ({} bytes) id {} — /receive {} or /decline {}",file.from,file.name,file.size,hex::encode(file.file_conv.as_bytes()),hex::encode(file.file_conv.as_bytes()),hex::encode(file.file_conv.as_bytes()))));remaining.push(file.clone());return Ok(None);},
+                            _=>{},
+                        }
+                        if reader.file_progress(file.file_conv)?.is_none() {return Ok(None);}
+                        if saved || !reader.file_ready_to_save(file.file_conv)? {remaining.push(file.clone());return Ok(None);}
+                        saved=true;
+                        reader.save_file_into_dir(file.file_conv,&destination).map(Some)
+                    })();
+                    match result {
+                        Ok(Some(path))=>observations.push((file.file_conv,format!("file from {}: {} ({} bytes) saved {}",file.from,file.name,file.size,path.display()))),
+                        Ok(None)=>{},
+                        Err(error)=>{observations.push((file.file_conv,format!("file from {}: {} ({} bytes) save failed; will retry: {error}",file.from,file.name,file.size)));remaining.push(file);},
+                    }
+                }
+                (remaining,observations)
+            }).await else{return};
+            pending = result.0;
+            for (file, message) in result.1 {
+                if announced.insert((file, message.clone())) {
+                    emit(&message);
+                }
+            }
+            // The page bounds all retained metadata; keep diagnostic evidence
+            // bounded too while a disk or consent failure persists.
+            if announced.len() > 64 {
+                announced.clear();
+            }
+            if !pending.is_empty() {
+                super::reception::retry(&mut changes).await;
+            }
+        }
+        let next = page.next;
+        let writer = node.clone();
+        let Some(result) = super::reception::blocking(&work, move || {
+            writer.acknowledge_reception(ReceptionConsumer::CliAutosave, cursor, next)
+        })
+        .await
+        else {
+            return;
+        };
+        if let Err(error) = result {
+            emit(&format!(
+                "file receipt acknowledgement failed; will retry: {error}"
+            ));
+            super::reception::retry(&mut changes).await;
+            continue;
+        }
+        cursor = next;
+        through = (!page.complete).then_some(page.through);
+        if page.complete {
+            super::reception::retry(&mut changes).await;
+        } else {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[cfg(test)]
 enum SaveWork {
     Readiness(Vec<(ConversationId, Option<FileProgress>)>),
     Saved(
@@ -16,12 +137,14 @@ enum SaveWork {
     ),
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct PendingSaves {
     pending: VecDeque<(ReceivedFile, bool)>,
     recent: VecDeque<ConversationId>,
 }
 
+#[cfg(test)]
 impl PendingSaves {
     fn enqueue(&mut self, file: ReceivedFile) -> Result<bool, ()> {
         if self.recent.contains(&file.file_conv)
@@ -66,6 +189,7 @@ impl PendingSaves {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn run(
     node: Arc<Node>,
     directory: PathBuf,

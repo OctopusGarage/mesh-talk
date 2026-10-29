@@ -387,12 +387,9 @@ impl Node {
             self.sentlog
                 .lock()
                 .expect("sent lock not poisoned")
-                .entries(&conv)
-                .iter()
-                .map(|e| e.seq)
-                .max()
-                .unwrap_or(0)
-                + 1
+                .maximum_sequence(&conv)?
+                .checked_add(1)
+                .ok_or(crate::eventlog::LogError::RepositoryCounterExhausted)?
         } else {
             destinations[0].event.seq
         };

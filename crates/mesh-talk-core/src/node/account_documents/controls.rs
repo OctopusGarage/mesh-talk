@@ -201,30 +201,34 @@ impl Node {
     pub(in crate::node) fn private_account_reactions(
         &self,
         peer: &str,
-    ) -> Vec<(String, u64, ReactionPayload)> {
+    ) -> Result<Vec<(String, u64, ReactionPayload)>, crate::eventlog::LogError> {
         let entries = self.private_control_entries(AccountDocumentDomain::DmReaction, peer);
         let conversation = account_conversation_id(&self.account_id(), peer);
         let suppression = self
             .account_suppression
             .lock()
             .expect("account suppression mutex");
-        entries
-            .into_iter()
-            .filter_map(|(key, value)| {
-                let AccountDocumentKey::DmReaction {
-                    target,
-                    actor_account,
-                    emoji,
-                    ..
-                } = key
-                else {
-                    return None;
-                };
-                let target = EventId::new(hex::decode(target).ok()?.try_into().ok()?);
-                if suppression.contains(conversation, target) {
-                    return None;
-                }
-                Some((
+        let mut out = Vec::new();
+        for (key, value) in entries {
+            let AccountDocumentKey::DmReaction {
+                target,
+                actor_account,
+                emoji,
+                ..
+            } = key
+            else {
+                continue;
+            };
+            let target = EventId::new(
+                hex::decode(target)
+                    .ok()
+                    .and_then(|b| b.try_into().ok())
+                    .ok_or_else(|| {
+                        crate::eventlog::LogError::CorruptFile("invalid reaction identity".into())
+                    })?,
+            );
+            if !suppression.contains(conversation, target)? {
+                out.push((
                     actor_account,
                     value.wall,
                     ReactionPayload {
@@ -232,9 +236,10 @@ impl Node {
                         emoji,
                         remove: value.remove,
                     },
-                ))
-            })
-            .collect()
+                ));
+            }
+        }
+        Ok(out)
     }
     pub(in crate::node) fn private_dm_recall_claims(&self, peer: &str) -> Vec<(EventId, String)> {
         self.private_control_entries(AccountDocumentDomain::DmRecall, peer)
@@ -255,6 +260,30 @@ impl Node {
             })
             .collect()
     }
+    pub(in crate::node) fn private_dm_recall_selected(
+        &self,
+        peer: &str,
+        target: EventId,
+        author_account: &str,
+    ) -> Result<bool, crate::eventlog::LogError> {
+        if author_account != self.account_id() && author_account != peer {
+            return Ok(false);
+        }
+        let key = AccountDocumentKey::DmRecall {
+            peer_account: peer.into(),
+            target: target.to_hex(),
+            actor_account: author_account.into(),
+        };
+        let store = self.account_documents.lock().expect("documents mutex");
+        let Some(document) = store.get(&key)? else {
+            return Ok(false);
+        };
+        let value: Control = serde_json::from_slice(document.payload()).map_err(|_| {
+            crate::eventlog::LogError::CorruptFile("invalid selected recall control".into())
+        })?;
+        Ok(value.remove)
+    }
+
     pub(in crate::node) fn private_dm_control_revision(&self) -> (u64, [u8; 32]) {
         let local = { self.recalls.lock().expect("recalls mutex").revision() };
         let canonical = {
@@ -272,110 +301,184 @@ impl Node {
         peer: &str,
         target: EventId,
         author: &str,
-    ) -> bool {
-        let host = super::super::conversation::account_conversation_id(&self.account_id(), peer);
-        let target = self.file_message_logical_id(host, target);
-        self.private_dm_recall_claims(peer)
-            .iter()
-            .any(|(id, actor)| self.file_message_logical_id(host, *id) == target && actor == author)
+    ) -> Result<bool, crate::eventlog::LogError> {
+        let host = account_conversation_id(&self.account_id(), peer);
+        let logical = self.file_message_logical_id(host, target)?;
+        self.private_dm_recall_selected(peer, logical, author)
     }
     pub(in crate::node) fn project_private_dm_controls(
         &self,
         conv: ConversationId,
     ) -> Result<(), NodeError> {
-        let events: Vec<_> = self
+        let ids = self
             .log
             .lock()
             .expect("log mutex")
-            .events(&conv)?
-            .into_iter()
-            .filter(|e| matches!(e.kind, EventKind::React | EventKind::Delete))
-            .collect();
-        for event in events {
-            let Some(author) = self.historical_author(event.author.ed25519_pub()) else {
+            .repository()?
+            .pending_control_ids(conv, 128, 8 * 1024 * 1024)?;
+        for id in ids {
+            let Some(event) = self.log.lock().expect("log mutex").get(&id)? else {
                 continue;
             };
-            if conv != dm_conversation_id(&self.identity.public(), &author.public())
-                || !event.verify_integrity()
-                || !event.verify_signature()
-            {
-                continue;
-            }
-            let Some(actor) = author.account_id() else {
-                continue;
-            };
-            let Ok(plain) = crate::dm::open(&self.identity, &author.x25519_pub, &event.ciphertext)
-            else {
-                continue;
-            };
-            let (sender, recipient, target, emoji, remove) = if event.kind == EventKind::React {
-                let Some(env) = crate::node::ReactionEnvelope::decode(&plain) else {
-                    continue;
-                };
-                (
-                    env.route.sender_account,
-                    env.route.recipient_account,
-                    EventId::new(env.target),
-                    Some(env.emoji),
-                    env.remove,
-                )
-            } else {
-                let Some(env) = crate::node::RecallEnvelope::decode(&plain) else {
-                    continue;
-                };
-                (
-                    env.route.sender_account,
-                    env.route.recipient_account,
-                    EventId::new(env.target),
-                    None,
-                    true,
-                )
-            };
-            let own = self.account_id();
-            if sender != actor || (sender != own && recipient != own) {
-                continue;
-            }
-            let peer = if sender == own { recipient } else { sender };
-            let key = if let Some(emoji) = emoji {
-                AccountDocumentKey::DmReaction {
-                    peer_account: peer,
-                    target: target.to_hex(),
-                    actor_account: actor,
-                    emoji,
-                }
-            } else {
-                AccountDocumentKey::DmRecall {
-                    peer_account: peer,
-                    target: target.to_hex(),
-                    actor_account: actor,
-                }
-            };
-            let wall = event.wall_clock;
-            self.install_private_control(
-                key,
-                Control {
-                    wall,
-                    remove,
-                    witness: Witness::Observed {
-                        author: Box::new(author),
-                        observer: Box::new(Announce::new_with_account(
-                            &self.identity,
-                            &self.account,
-                            "",
-                            0,
-                        )),
-                        event: Box::new(event),
-                    },
-                },
-            )?;
+            self.project_private_dm_control(event)?;
         }
         Ok(())
+    }
+    fn project_private_dm_control(&self, event: Event) -> Result<bool, NodeError> {
+        let conv = event.conversation_id;
+        let id = event.id;
+        let Some(author) = self.historical_author(event.author.ed25519_pub()) else {
+            return Ok(false);
+        };
+        if conv != dm_conversation_id(&self.identity.public(), &author.public())
+            || !event.verify_integrity()
+            || !event.verify_signature()
+        {
+            return Ok(false);
+        }
+        let Some(actor) = author.account_id() else {
+            return Ok(false);
+        };
+        let Ok(plain) = crate::dm::open(&self.identity, &author.x25519_pub, &event.ciphertext)
+        else {
+            return Ok(false);
+        };
+        let (sender, recipient, target, emoji, remove) = if event.kind == EventKind::React {
+            let Some(env) = crate::node::ReactionEnvelope::decode(&plain) else {
+                return Ok(false);
+            };
+            (
+                env.route.sender_account,
+                env.route.recipient_account,
+                EventId::new(env.target),
+                Some(env.emoji),
+                env.remove,
+            )
+        } else {
+            let Some(env) = crate::node::RecallEnvelope::decode(&plain) else {
+                return Ok(false);
+            };
+            (
+                env.route.sender_account,
+                env.route.recipient_account,
+                EventId::new(env.target),
+                None,
+                true,
+            )
+        };
+        let own = self.account_id();
+        if sender != actor || (sender != own && recipient != own) {
+            return Ok(false);
+        }
+        let peer = if sender == own { recipient } else { sender };
+        let key = if let Some(emoji) = emoji {
+            AccountDocumentKey::DmReaction {
+                peer_account: peer,
+                target: target.to_hex(),
+                actor_account: actor,
+                emoji,
+            }
+        } else {
+            AccountDocumentKey::DmRecall {
+                peer_account: peer,
+                target: target.to_hex(),
+                actor_account: actor,
+            }
+        };
+        let wall = event.wall_clock;
+        let value = Control {
+            wall,
+            remove,
+            witness: Witness::Observed {
+                author: Box::new(author),
+                observer: Box::new(Announce::new_with_account(
+                    &self.identity,
+                    &self.account,
+                    "",
+                    0,
+                )),
+                event: Box::new(event),
+            },
+        };
+        // Invalid authenticated peer controls must not prevent profile opening.
+        // Only persistence errors abort projection; unknown keys remain retryable.
+        if !key.valid()
+            || revision(&key, &value).is_none()
+            || serde_json::to_vec(&value).map_err(|_| invalid())?.len() > key.limit()
+        {
+            self.log
+                .lock()
+                .expect("log mutex")
+                .repository()?
+                .complete_control(id)?;
+            return Ok(false);
+        }
+        self.install_private_control(key, value)?;
+        self.log
+            .lock()
+            .expect("log mutex")
+            .repository()?
+            .complete_control(id)?;
+        Ok(true)
+    }
+    pub(in crate::node) fn bootstrap_private_dm_controls(&self) -> Result<(), NodeError> {
+        loop {
+            let (after, through) = self
+                .log
+                .lock()
+                .expect("log mutex")
+                .repository()?
+                .bootstrap_control_position()?;
+            if after >= through {
+                return Ok(());
+            }
+            let page = self
+                .log
+                .lock()
+                .expect("log mutex")
+                .repository()?
+                .committed_headers_page((after >= 0).then_some(after), 128)?;
+            let mut progressed = after;
+            let mut bytes = 0usize;
+            for row in page {
+                if row.ordinal > through {
+                    break;
+                }
+                let header = row.header;
+                if row.active && matches!(header.kind, EventKind::React | EventKind::Delete) {
+                    let cost = header.stored_bytes.saturating_mul(3);
+                    if cost > 8 * 1024 * 1024 {
+                        // Preserve the pending identity; normal retry reports
+                        // its required byte budget without blocking migration.
+                        progressed = row.ordinal;
+                        continue;
+                    }
+                    if bytes.saturating_add(cost) > 8 * 1024 * 1024 {
+                        break;
+                    }
+                    bytes += cost;
+                    let event = self.log.lock().expect("log mutex").get(&header.id)?;
+                    if let Some(event) = event {
+                        self.project_private_dm_control(event)?;
+                    }
+                }
+                progressed = row.ordinal;
+            }
+            if progressed == after {
+                progressed = through;
+            }
+            self.log
+                .lock()
+                .expect("log mutex")
+                .repository()?
+                .advance_control_bootstrap(progressed)?;
+        }
     }
     /// Called only by explicit KEEP SOURCE preparation, before a code is issued.
     /// Ordinary startup/joining never attributes an old local cache to a new root.
     pub fn publish_legacy_account_controls(&self) -> Result<(), NodeError> {
         let own = self.account_id();
-        let mut peers = self.known_account_ids();
+        let mut peers = self.known_account_ids()?;
         peers.push(own.clone());
         peers.sort();
         peers.dedup();
@@ -394,22 +497,35 @@ impl Node {
             }
             // Validate old unscoped recall marks against a retained account route;
             // a local delete/clear never enters RecallLog and cannot be promoted.
-            let marks = self.recalls.lock().expect("recalls mutex").targets(&conv);
-            for target in marks {
-                if let Some((sender, recipient, wall)) = self.private_dm_target_route(&peer, target)
-                {
-                    self.install_private_control(
-                        AccountDocumentKey::DmRecall {
-                            peer_account: peer.clone(),
-                            target: target.to_hex(),
-                            actor_account: sender.clone(),
-                        },
-                        Control {
-                            wall,
-                            remove: true,
-                            witness: Witness::RetainedRecall { sender, recipient },
-                        },
-                    )?;
+            let mut cursor = None;
+            loop {
+                let marks =
+                    self.recalls
+                        .lock()
+                        .expect("recalls mutex")
+                        .page(Some(conv), cursor, 128)?;
+                if marks.is_empty() {
+                    break;
+                }
+                cursor = marks.last().map(|m| (m.conversation, m.target));
+                for mark in marks {
+                    let target = mark.target;
+                    if let Some((sender, recipient, wall)) =
+                        self.private_dm_target_route(&peer, target)?
+                    {
+                        self.install_private_control(
+                            AccountDocumentKey::DmRecall {
+                                peer_account: peer.clone(),
+                                target: target.to_hex(),
+                                actor_account: sender.clone(),
+                            },
+                            Control {
+                                wall,
+                                remove: true,
+                                witness: Witness::RetainedRecall { sender, recipient },
+                            },
+                        )?;
+                    }
                 }
             }
         }
@@ -427,64 +543,74 @@ impl Node {
         &self,
         peer: &str,
         target: EventId,
-    ) -> Option<(String, String, u64)> {
+    ) -> Result<Option<(String, String, u64)>, NodeError> {
         let own = self.account_id();
         let conv = account_conversation_id(&own, peer);
-        let sent = self.sentlog.lock().expect("sentlog mutex");
-        for row in sent.entries_ref(&conv) {
-            if let Some(env) = crate::node::DmEnvelope::decode(&row.plaintext)
-                && env.msg_id == *target.as_bytes()
-                && env.route.sender_account == own
-                && env.route.recipient_account == peer
-            {
-                return Some((
-                    env.route.sender_account,
-                    env.route.recipient_account,
-                    row.wall_clock,
-                ));
-            }
+        if let Some(row) = self
+            .sentlog
+            .lock()
+            .expect("sent mutex")
+            .account_entry(&conv, *target.as_bytes())?
+            && let Some(env) = crate::node::DmEnvelope::decode(&row.plaintext)
+            && env.route.sender_account == own
+            && env.route.recipient_account == peer
+        {
+            return Ok(Some((
+                env.route.sender_account,
+                env.route.recipient_account,
+                row.wall_clock,
+            )));
         }
-        drop(sent);
-        let received = self.received.lock().expect("received mutex");
-        for row in received.entries_ref(&conv) {
-            if let Some(env) = crate::node::DmEnvelope::decode(&row.plaintext)
-                && env.msg_id == *target.as_bytes()
-                && env.route.sender_account == row.from
-                && ((env.route.sender_account == own && env.route.recipient_account == peer)
-                    || (env.route.sender_account == peer && env.route.recipient_account == own))
-            {
-                return Some((
-                    env.route.sender_account,
-                    env.route.recipient_account,
-                    row.wall_clock,
-                ));
-            }
+        if let Some(row) = self
+            .received
+            .lock()
+            .expect("received mutex")
+            .account_entry(&conv, target)?
+            && let Some(env) = crate::node::DmEnvelope::decode(&row.plaintext)
+            && env.route.sender_account == row.from
+            && ((env.route.sender_account == own && env.route.recipient_account == peer)
+                || (env.route.sender_account == peer && env.route.recipient_account == own))
+        {
+            return Ok(Some((
+                env.route.sender_account,
+                env.route.recipient_account,
+                row.wall_clock,
+            )));
         }
-        drop(received);
-        let own_devices: std::collections::HashSet<_> = self
-            .linked_devices()
-            .into_iter()
-            .map(|d| d.public.user_id())
-            .chain(std::iter::once(self.user_id()))
-            .collect();
-        let authors: std::collections::HashMap<_, _> = self
-            .historical_dm_peers()
-            .into_iter()
-            .filter_map(|p| p.account_id().map(|a| (p.user_id, a)))
-            .collect();
-        let files = self.received_files.lock().expect("received files mutex");
-        for row in files.entries_ref(&conv) {
-            if row.event_id != target
-                || super::super::files::validated_manifest(&row.plaintext)
-                    .is_none_or(|m| m.protection().is_none())
+        let aliases = self
+            .file_message_identities
+            .lock()
+            .expect("identity mutex")
+            .aliases(conv, target)?;
+        for id in aliases.into_iter().chain(std::iter::once(target)) {
+            let Some(row) = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .entry_in(&conv, id)?
+            else {
+                continue;
+            };
+            if super::super::files::validated_manifest(&row.plaintext)
+                .is_none_or(|m| m.protection().is_none())
             {
                 continue;
             }
-            let actor = if own_devices.contains(&row.from) {
-                Some(own.clone())
-            } else {
-                authors.get(&row.from).cloned()
-            };
+            let actor = self
+                .file_message_identities
+                .lock()
+                .expect("identity mutex")
+                .row_author_account(&row)?;
+            let actor = actor.or_else(|| {
+                if row.from == self.user_id() {
+                    Some(own.clone())
+                } else {
+                    self.historical_dm_peers()
+                        .into_iter()
+                        .find(|p| p.user_id == row.from)
+                        .and_then(|p| p.account_id())
+                }
+            });
             if let Some(actor) = actor
                 && (actor == own || actor == peer)
             {
@@ -493,9 +619,9 @@ impl Node {
                 } else {
                     own.clone()
                 };
-                return Some((actor, recipient, row.wall_clock));
+                return Ok(Some((actor, recipient, row.wall_clock)));
             }
         }
-        None
+        Ok(None)
     }
 }

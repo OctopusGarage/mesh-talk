@@ -566,7 +566,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
         .unwrap()
         .entry(prior[0].id)
         .unwrap()
-        .clone();
+        .unwrap();
     b.received_files
         .lock()
         .unwrap()

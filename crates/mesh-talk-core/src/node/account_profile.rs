@@ -57,6 +57,23 @@ impl AccountProfiles {
             .map(|(id, _, avatar)| (id, avatar))
             .collect()
     }
+    pub(super) fn page(
+        &self,
+        revision: Option<u64>,
+        after: Option<&str>,
+    ) -> Result<super::profile_store::AvatarPage, LogError> {
+        let state = self.state();
+        state
+            .avatars
+            .page(if revision == Some(state.avatars.revision()) {
+                after
+            } else {
+                None
+            })
+    }
+    pub(super) fn revision(&self) -> u64 {
+        self.state().avatars.revision()
+    }
     /// An identical avatar is a no-op, including an existing clear tombstone.
     pub fn set_avatar(&self, avatar: Option<Vec<u8>>) -> Result<Option<ProfilePayload>, NodeError> {
         if let Some(bytes) = &avatar

@@ -112,6 +112,78 @@ fn metadata() -> ReceptionMetadata {
         reception_only: false,
     }
 }
+
+#[test]
+fn account_adoption_fences_old_handles_and_keeps_each_accounts_pending_work() {
+    use crate::storage::profile::participant::{finish_adoption, prepare_adoption};
+    let mut f = Fixture::new();
+    let zero = f.zero();
+    let (source, original_sequence) = f.insert(1, 20);
+    let original_head = f.effects.head().unwrap();
+    f.effects
+        .register(ReceptionConsumer::Desktop, zero)
+        .unwrap();
+    let next_account = Account::generate();
+    let database = f.effects.profile.database();
+    prepare_adoption(database, &f.account.public(), &next_account.public()).unwrap();
+    finish_adoption(database, &next_account.public()).unwrap();
+    assert!(matches!(f.effects.head(), Err(LogError::StaleCursor)));
+    assert!(matches!(
+        f.effects.page(zero, original_head, limit(10, 1000), 100),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        f.effects.register(ReceptionConsumer::Desktop, zero),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        f.effects
+            .acknowledge(ReceptionConsumer::Desktop, zero, original_head),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(f.effects.retire(10), Err(LogError::StaleCursor)));
+
+    // The producer derives authority inside the body transaction, even before
+    // a new runtime has opened a reader for the adopted account.
+    let installed = database
+        .transaction(|c| install_on(c, source, &metadata()))
+        .unwrap();
+    assert_ne!(installed, original_sequence);
+    let next = ReceptionEffects::open(f.effects.profile.clone()).unwrap();
+    let next_head = next.head().unwrap();
+    assert_ne!(next_head.epoch, original_head.epoch);
+    let next_zero = ReceptionCursor {
+        sequence: 0,
+        ..next_head
+    };
+    let page = next
+        .page(next_zero, next_head, limit(10, 1000), 100)
+        .unwrap();
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].sequence, installed);
+    next.register(ReceptionConsumer::Desktop, next_zero)
+        .unwrap();
+    next.acknowledge(ReceptionConsumer::Desktop, next_zero, next_head)
+        .unwrap();
+    assert_eq!(next.retire(10).unwrap(), 1);
+
+    prepare_adoption(database, &next_account.public(), &f.account.public()).unwrap();
+    finish_adoption(database, &f.account.public()).unwrap();
+    let restored = ReceptionEffects::open(f.effects.profile.clone()).unwrap();
+    assert_eq!(restored.head().unwrap(), original_head);
+    let restored_page = restored
+        .page(zero, original_head, limit(10, 1000), 100)
+        .unwrap();
+    assert_eq!(restored_page.rows.len(), 1);
+    assert_eq!(restored_page.rows[0].sequence, original_sequence);
+    assert_eq!(
+        restored
+            .register(ReceptionConsumer::Desktop, original_head)
+            .unwrap(),
+        zero
+    );
+    assert!(matches!(next.head(), Err(LogError::StaleCursor)));
+}
 fn limit(rows: usize, bytes: usize) -> ReceptionLimit {
     ReceptionLimit {
         rows,

@@ -111,17 +111,20 @@ impl Node {
 
     /// Surface an inbound, already-decoded call-signal to the app, binding its sender to the
     /// channel's cryptographically-authenticated identity. Non-persisted; best-effort (a
-    /// dropped receiver just means no app is listening).
+    /// dropped legacy receiver means no app is listening). Bounded production
+    /// inbox pressure is an explicit admission failure, never an unbounded queue.
     pub(in crate::node) fn serve_call_signal(
         &self,
         channel: &SecureChannel<TcpStream>,
         signal: CallSignal,
-    ) {
+    ) -> Result<(), SessionError> {
         let from = channel.peer_identity().user_id();
-        let _ = self.call_signal_incoming.send(ReceivedCallSignal {
-            from,
-            payload: signal.payload,
-        });
+        self.call_signal_incoming
+            .send(ReceivedCallSignal {
+                from,
+                payload: signal.payload,
+            })
+            .map_err(|_| SessionError::Transport(crate::transport::TransportError::AdmissionDenied))
     }
 }
 

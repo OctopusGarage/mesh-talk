@@ -972,6 +972,19 @@ fn preflight_authenticates_without_publication_and_warm_reads_no_frames() {
     .unwrap();
     assert!(owner.participant_database().is_none());
     assert!(
+        PublishedHistorySource::authenticate_legacy_with::<SentEntry>(
+            &owner,
+            &path,
+            "pw",
+            SENT,
+            b"MTSENT",
+            |_| Err(invalid("rejected semantic source"))
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+
+    assert!(
         PublishedHistorySource::authenticate_legacy::<SentEntry>(
             &owner, &path, "wrong", SENT, b"MTSENT"
         )

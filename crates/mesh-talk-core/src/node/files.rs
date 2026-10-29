@@ -4,6 +4,8 @@
 //! the chunk events ride the normal bounded sync, which already re-requests only the
 //! events a peer is missing — so transfer RESUMES across reconnects for free.
 
+mod reception;
+
 use super::node::MAX_FILE_SIZE;
 use super::*;
 
@@ -302,16 +304,21 @@ impl Node {
                 .account_file_proofs
                 .lock()
                 .expect("file proofs lock not poisoned");
-            for conversation in records.conversations() {
-                for entry in records.entries(&conversation) {
+            let mut after = None;
+            loop {
+                let page = records.scan_page(None, after, Default::default())?;
+                for entry in page.rows {
                     if delivery.file_erased(entry.conversation, entry.event_id)
                         || delivery.manifest_event_erased(entry.event_id)
-                        || self.file_message_row_suppressed(&entry)
+                        || self.file_message_row_suppressed(&entry)?
                     {
                         continue;
                     }
-                    let selected = log.get(&entry.event_id)?;
-                    let original = selected.as_ref().or_else(|| proofs.get(&entry.event_id));
+                    let selected = match log.get(&entry.event_id)? {
+                        Some(event) => Some(event),
+                        None => proofs.get(&entry.event_id)?,
+                    };
+                    let original = selected.as_ref();
                     let decoded = validated_manifest(&entry.plaintext);
                     let existing = decoded.as_ref().and_then(|m| book.manifest(&m.file_conv()));
                     if let Some(manifest) = eligible_manifest_row(&entry, original, existing) {
@@ -319,6 +326,10 @@ impl Node {
                         book.record_event(entry.event_id, original.unwrap().author, manifest);
                         book.mark_emitted(entry.event_id);
                     }
+                }
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => break,
                 }
             }
         }
@@ -1361,26 +1372,43 @@ impl Node {
     /// not yet received-complete). This is the DURABLE display path — distinct from
     /// [`Node::read_file`], which reassembles the transient chunks (gone after prune).
     pub fn read_media(&self, file_conv: ConversationId) -> Option<Vec<u8>> {
+        self.read_media_checked(file_conv).unwrap_or_else(|error| {
+            log::warn!("media read deferred: {error}");
+            None
+        })
+    }
+
+    pub fn read_media_checked(
+        &self,
+        file_conv: ConversationId,
+    ) -> Result<Option<Vec<u8>>, NodeError> {
         // Cleanup retires manifest metadata before removing the encrypted blob.
         // Missing policy metadata must never turn a protected image into ordinary media.
-        let manifest = self
+        let Some(manifest) = self
             .files
             .lock()
             .expect("files lock")
-            .manifest(&file_conv)?
-            .clone();
-        if manifest.protection().is_some() || self.expired_received_file(file_conv) {
-            return None;
+            .manifest(&file_conv)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if manifest.protection().is_some() || self.expired_received_file(file_conv)? {
+            return Ok(None);
         }
-        let bytes = self.media.read(file_conv)?;
+        let Some(bytes) = self.media.read(file_conv) else {
+            return Ok(None);
+        };
         if crate::file::sticker::is_sticker_name(manifest.name()) {
             if bytes.len() as u64 != manifest.size() || file_checksum(&bytes) != manifest.checksum()
             {
-                return None;
+                return Ok(None);
             }
-            super::sticker_media::validate(manifest.name(), manifest.mime(), &bytes).ok()?;
+            if super::sticker_media::validate(manifest.name(), manifest.mime(), &bytes).is_err() {
+                return Ok(None);
+            }
         }
-        Some(bytes)
+        Ok(Some(bytes))
     }
 
     /// Whether durable media bytes for `file_conv` exist (drives the UI's store-vs-chunk
@@ -1422,7 +1450,14 @@ impl Node {
                 log::warn!("sticker completion deferred: {error}");
                 return false;
             }
-            if !self.pending_sticker_aliases(file_conv) {
+            let pending = match self.pending_sticker_aliases(file_conv) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    log::warn!("sticker completion deferred: {error}");
+                    return false;
+                }
+            };
+            if !pending {
                 return false; // every retained offer is already complete
             }
         }
@@ -1463,7 +1498,7 @@ impl Node {
         &self,
         file_conv: ConversationId,
     ) -> Result<Option<FileProgress>, NodeError> {
-        if self.expired_received_file(file_conv) {
+        if self.expired_received_file(file_conv)? {
             return Ok(None);
         }
         let total = self
@@ -1529,7 +1564,7 @@ impl Node {
         &self,
         file_conv: ConversationId,
     ) -> Result<Vec<u8>, NodeError> {
-        if self.expired_received_file(file_conv) {
+        if self.expired_received_file(file_conv)? {
             return Err(NodeError::File("file expired".into()));
         }
         let manifest = self
@@ -1590,7 +1625,7 @@ impl Node {
         dir: &Path,
     ) -> Result<std::path::PathBuf, NodeError> {
         self.reject_protected_file(file_conv)?;
-        if self.expired_received_file(file_conv) {
+        if self.expired_received_file(file_conv)? {
             return Err(NodeError::File("file expired".into()));
         }
         let manifest = self
@@ -1628,7 +1663,7 @@ impl Node {
         on_progress: impl FnMut(FileProgress),
     ) -> Result<(), NodeError> {
         self.reject_protected_file(file_conv)?;
-        if self.expired_received_file(file_conv) {
+        if self.expired_received_file(file_conv)? {
             return Err(NodeError::File("file expired".into()));
         }
         self.save_file_progress_inner(file_conv, dest, on_progress, true)

@@ -185,7 +185,7 @@ async fn personal_file_signed_proof_binds_plaintext_and_host() {
         .unwrap()
         .get(&id)
         .unwrap()
-        .clone();
+        .unwrap();
     assert!(eligible_manifest_row(&row, Some(&proof), None).is_some());
     let mut forged = row.clone();
     // Alter only display metadata: transfer identity remains the same, but signed

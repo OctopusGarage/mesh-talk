@@ -21,6 +21,155 @@ import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
 import { useAvatars } from "./avatars";
 
+it("pulls bounded native receipts through the existing unread owner and commits before ACK", async () => {
+  vi.useFakeTimers();
+  const values = new Map<string, string>();
+  const committedSnapshots: Array<Record<string, unknown>> = [];
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      values.set(key, value);
+      if (key.startsWith("mesh-talk-reception-commit-v1:"))
+        committedSnapshots.push(JSON.parse(value));
+    },
+  });
+  const scope = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "installed",
+  };
+  const cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "1" };
+  let pulls = 0;
+  let stop: (() => void) | undefined;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({ ...scope, supports_bounded_delivery: true });
+    if (command === "owner_startup_identity")
+      return Promise.resolve({
+        ...scope,
+        startup_id: "installed",
+        phase: "ready",
+      });
+    if (command === "owner_reception_page") {
+      pulls++;
+      return Promise.resolve({
+        scope,
+        token: "page",
+        after: { ...cursor, sequence: "0" },
+        next: cursor,
+        through: cursor,
+        complete: true,
+        receipts: [
+          {
+            kind: "dm",
+            event: {
+              message_id: "durable-message",
+              from_account: "friend",
+              from: "peer-device",
+              from_name: "Friend",
+              text: "hello",
+            },
+          },
+        ],
+      });
+    }
+    if (command === "owner_reception_ack") {
+      const encoded = values.get(
+        "mesh-talk-reception-commit-v1:host:myacct:me",
+      );
+      expect(encoded).toBeDefined();
+      const snapshot = JSON.parse(encoded!);
+      expect(snapshot.cursor).toEqual(cursor);
+      expect(snapshot.unread["account:friend"]).toBe(1);
+      return Promise.resolve(false);
+    }
+    return Promise.resolve([]);
+  });
+  try {
+    stop = useChat.getState().start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().unread["account:friend"]).toBe(1);
+    expect(pulls).toBe(1);
+    expect(committedSnapshots[0].cursor).toEqual({ ...cursor, sequence: "0" });
+    expect(committedSnapshots[0].unread).toEqual({});
+    expect(
+      invoke.mock.calls.some(([command]) => command === "peer_avatars"),
+    ).toBe(false);
+    expect(
+      invoke.mock.calls.filter(
+        ([command]) => command === "owner_reception_ack",
+      ),
+    ).toHaveLength(1);
+    captured.current?.onReceptionWake({ ...scope, runtime_id: "retired" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pulls).toBe(1);
+  } finally {
+    stop?.();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("replaces a reserved native page after losing a later pull response", async () => {
+  vi.useFakeTimers();
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  });
+  const scope = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "installed",
+  };
+  const cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "0" };
+  const resets: boolean[] = [];
+  invoke.mockImplementation(
+    (command: string, input: Record<string, unknown>) => {
+      if (command === "owner_node_identity")
+        return Promise.resolve({ ...scope, supports_bounded_delivery: true });
+      if (command === "owner_startup_identity")
+        return Promise.resolve({
+          ...scope,
+          startup_id: "installed",
+          phase: "ready",
+        });
+      if (command === "owner_reception_page") {
+        resets.push(input.reset as boolean);
+        if (resets.length === 2)
+          return Promise.reject(
+            new Error("reply lost after native reservation"),
+          );
+        return Promise.resolve({
+          scope,
+          token: `page-${resets.length}`,
+          after: cursor,
+          next: cursor,
+          through: cursor,
+          complete: true,
+          receipts: [],
+        });
+      }
+      if (command === "owner_reception_ack") return Promise.resolve(false);
+      return Promise.resolve([]);
+    },
+  );
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    captured.current?.onReceptionWake(scope);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(resets).toEqual([true, false, true]);
+  } finally {
+    stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
 it("coalesces roster invalidations and preserves readiness after an older failure", async () => {
   let reject!: (e: Error) => void;
   let count = 0;
@@ -570,6 +719,7 @@ const reset = () =>
     bootBusy: false,
     bootRequest: 0,
     startupId: null,
+    deliveryRuntime: null,
     intents: {},
     deleted: {},
     statusBusy: false,

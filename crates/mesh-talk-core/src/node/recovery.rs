@@ -23,64 +23,6 @@ const MEDIA_CHUNK_BYTES: usize = 64 * 1024;
 const RECOVERY_ORIGIN_MAGIC: &[u8; 6] = b"MTORIG";
 const RECOVERY_CONTACT_MAGIC: &[u8; 6] = b"MTRACC";
 
-/// Process-local first-DM metadata. Append-only revisions scan only unseen suffixes;
-/// rewrites discard positions and routes, including an erased first envelope.
-#[derive(Default)]
-pub(in crate::node) struct KnownAccountCache {
-    sent: FirstDmIndex,
-    received: FirstDmIndex,
-    #[cfg(test)]
-    pub(in crate::node) scanned_rows: usize,
-}
-
-#[derive(Default)]
-struct FirstDmIndex {
-    revision: Option<u64>,
-    rewrite_revision: u64,
-    conversations: HashMap<ConversationId, FirstDmConversation>,
-}
-
-#[derive(Default)]
-struct FirstDmConversation {
-    scanned: usize,
-    route: Option<super::DmRoute>,
-}
-
-impl FirstDmIndex {
-    fn refresh(&mut self, revision: u64, rewrite_revision: u64) -> bool {
-        if self.revision == Some(revision) {
-            return false;
-        }
-        if self.rewrite_revision != rewrite_revision {
-            self.conversations.clear();
-        }
-        self.revision = Some(revision);
-        self.rewrite_revision = rewrite_revision;
-        true
-    }
-
-    fn scan<'a>(
-        &mut self,
-        conversation: ConversationId,
-        rows: impl Iterator<Item = &'a [u8]>,
-    ) -> usize {
-        let state = self.conversations.entry(conversation).or_default();
-        if state.route.is_some() {
-            return 0;
-        }
-        let mut scanned = 0;
-        for plaintext in rows.skip(state.scanned) {
-            scanned += 1;
-            state.scanned += 1;
-            if let Some(envelope) = super::DmEnvelope::decode(plaintext) {
-                state.route = Some(envelope.route);
-                break;
-            }
-        }
-        scanned
-    }
-}
-
 struct MediaDigest(Sha256);
 
 impl Write for MediaDigest {
@@ -94,15 +36,15 @@ impl Write for MediaDigest {
     }
 }
 
-struct MediaRecordSink<'a, W: Write> {
-    writer: &'a mut SnapshotWriter<W>,
+struct MediaRecordSink<'a> {
+    emit: &'a mut dyn FnMut(SnapshotRecordV1) -> Result<(), SnapshotError>,
     file_conv: ConversationId,
     favorite: bool,
     buffer: Vec<u8>,
     index: u32,
 }
 
-impl<W: Write> MediaRecordSink<'_, W> {
+impl MediaRecordSink<'_> {
     fn push_buffer(&mut self) -> Result<(), SnapshotError> {
         let bytes = std::mem::take(&mut self.buffer);
         let record = if self.favorite {
@@ -118,7 +60,7 @@ impl<W: Write> MediaRecordSink<'_, W> {
                 bytes,
             }
         };
-        self.writer.push(&record)?;
+        (self.emit)(record)?;
         self.index = self.index.checked_add(1).ok_or(SnapshotError::SizeLimit)?;
         Ok(())
     }
@@ -131,7 +73,7 @@ impl<W: Write> MediaRecordSink<'_, W> {
     }
 }
 
-impl<W: Write> Write for MediaRecordSink<'_, W> {
+impl Write for MediaRecordSink<'_> {
     fn write(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
         let total = bytes.len();
         while !bytes.is_empty() {
@@ -474,6 +416,7 @@ impl Node {
                             .lock()
                             .expect("account suppression mutex not poisoned")
                             .contains(ConversationId::new(conversation), EventId::new(message_id))
+                            .map_err(|_| SnapshotError::Io)?
                         {
                             return Ok(());
                         }
@@ -535,8 +478,14 @@ impl Node {
                             .account_suppression
                             .lock()
                             .expect("account suppression mutex not poisoned");
-                        let erased = suppression.contains(host, EventId::new(event_id))
-                            || logical.is_some_and(|id| suppression.contains(host, id));
+                        let erased = suppression
+                            .contains(host, EventId::new(event_id))
+                            .map_err(|_| SnapshotError::Io)?
+                            || logical
+                                .map(|id| suppression.contains(host, id))
+                                .transpose()
+                                .map_err(|_| SnapshotError::Io)?
+                                .unwrap_or(false);
                         drop(suppression);
                         if erased {
                             return Ok(());
@@ -662,6 +611,7 @@ impl Node {
                             .lock()
                             .expect("account suppression mutex not poisoned")
                             .contains(ConversationId::new(conversation), EventId::new(event_id))
+                            .map_err(|_| SnapshotError::Io)?
                         {
                             return Ok(());
                         }
@@ -726,86 +676,56 @@ impl Node {
 
     /// Account IDs represented in durable message or file history, even when no
     /// device is currently discoverable.
-    pub fn known_account_ids(&self) -> Vec<String> {
+    pub fn known_account_ids(&self) -> Result<Vec<String>, super::NodeError> {
         let own = self.account.account_id();
         let mut ids: BTreeSet<String> = self.recovery_contacts.iter().cloned().collect();
-        let mut cache = self
-            .known_account_cache
-            .lock()
-            .expect("known account cache mutex not poisoned");
-        let mut scanned = 0;
-        let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
-        if cache.sent.refresh(sent.revision(), sent.rewrite_revision()) {
-            for conversation in sent.conversations() {
-                scanned += cache.sent.scan(
-                    conversation,
-                    sent.entries_ref(&conversation)
-                        .iter()
-                        .map(|entry| entry.plaintext.as_slice()),
-                );
+        for received in [false, true] {
+            let mut after = None;
+            loop {
+                let page = if received {
+                    self.received
+                        .lock()
+                        .expect("received mutex")
+                        .account_routes_page(after, 128)?
+                } else {
+                    self.sentlog
+                        .lock()
+                        .expect("sent mutex")
+                        .account_routes_page(after, 128)?
+                };
+                if page.is_empty() {
+                    break;
+                }
+                after = page.last().map(|(conversation, _)| *conversation);
+                for (_, route) in page {
+                    let Some(route) = route else {
+                        continue;
+                    };
+                    let other = if route.sender_account == own {
+                        route.recipient_account
+                    } else if route.recipient_account == own {
+                        route.sender_account
+                    } else {
+                        continue;
+                    };
+                    if other != own {
+                        ids.insert(other);
+                    }
+                }
             }
         }
-        drop(sent);
-        let received = self.received.lock().expect("received mutex not poisoned");
-        if cache
-            .received
-            .refresh(received.revision(), received.rewrite_revision())
-        {
-            for conversation in received.conversations() {
-                scanned += cache.received.scan(
-                    conversation,
-                    received
-                        .entries_ref(&conversation)
-                        .iter()
-                        .map(|entry| entry.plaintext.as_slice()),
-                );
-            }
-        }
-        drop(received);
-        #[cfg(test)]
-        {
-            cache.scanned_rows += scanned;
-        }
-        #[cfg(not(test))]
-        let _ = scanned;
-        for route in cache
-            .sent
-            .conversations
-            .values()
-            .chain(cache.received.conversations.values())
-            .filter_map(|state| state.route.as_ref())
-        {
-            let other = if route.sender_account == own {
-                &route.recipient_account
-            } else if route.recipient_account == own {
-                &route.sender_account
-            } else {
-                continue;
-            };
-            if other != &own && other.len() == 32 && other.bytes().all(|c| c.is_ascii_hexdigit()) {
-                ids.insert(other.clone());
-            }
-        }
-        drop(cache);
-        let peers = self.historical_dm_peers();
-        let files = self
-            .received_files
-            .lock()
-            .expect("received_files mutex not poisoned");
-        for proof in peers {
-            if let Some(account_id) = proof.account_id()
-                && account_id != own
-                && !files
-                    .entries_ref(&super::conversation::account_conversation_id(
-                        &own,
-                        &account_id,
-                    ))
-                    .is_empty()
+        let files = self.received_files.lock().expect("files mutex");
+        for proof in self.historical_dm_peers() {
+            if let Some(account) = proof.account_id()
+                && account != own
+                && files.count(Some(&super::conversation::account_conversation_id(
+                    &own, &account,
+                )))? > 0
             {
-                ids.insert(account_id);
+                ids.insert(account);
             }
         }
-        ids.into_iter().collect()
+        Ok(ids.into_iter().collect())
     }
 
     /// Write the currently supported local plaintext records as typed snapshot
@@ -815,366 +735,451 @@ impl Node {
         destination: W,
         created_at_ms: u64,
     ) -> Result<(), SnapshotError> {
-        let identity_bundles = self.file_message_identity_snapshot();
-        let detached_file_proofs = self
-            .account_file_proofs
-            .lock()
-            .expect("file proofs lock")
-            .snapshot();
-        let own_account = self.account_id();
-        let candidate_contacts = self.known_account_ids();
-        let now = self.expiry_now();
-        let favorites = self.favorites.lock().expect("favorites mutex");
-        // Protection projection reads canonical history. Resolve it before taking
-        // the snapshot's history locks, then reuse it for records, files and count.
-        let portable_favorites = favorites.portable_projection(self);
-        let favorite_files = portable_favorites.portable_files(now)?;
-        let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
-        let received = self.received.lock().expect("received mutex not poisoned");
-        let log = self.log.lock().expect("event log mutex not poisoned");
-        let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-        let received_files = self
-            .received_files
-            .lock()
-            .expect("received_files mutex not poisoned");
-        let recovered_sent_ids = self
-            .recovered_sent_ids
-            .lock()
-            .expect("recovered sent ids mutex not poisoned");
-        let sent_conversations = sent.conversations();
-        let received_conversations = received.conversations();
-        let event_conversations = log.conversations().map_err(|_| SnapshotError::Io)?;
-        let file_conversations = received_files.conversations();
-        let retained_file_ids: HashSet<_> = file_conversations
-            .iter()
-            .flat_map(|host| {
-                received_files
-                    .entries_ref(host)
-                    .iter()
-                    .filter(|row| !self.file_message_row_suppressed(row))
-                    .map(|row| row.event_id)
-            })
-            .collect();
-        let supplemental_events: Vec<_> = detached_file_proofs
-            .into_iter()
-            .filter(|event| retained_file_ids.contains(&event.id))
-            .chain(identity_bundles)
-            .filter_map(|event| match log.get(&event.id) {
-                Ok(None) => Some(Ok(event)),
-                Ok(Some(_)) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<Result<_, _>>()
+        self.prune_expired_received()
             .map_err(|_| SnapshotError::Io)?;
-        let file_contacts: Vec<_> = candidate_contacts
-            .into_iter()
-            .filter(|account_id| {
-                let conversation =
-                    super::conversation::account_conversation_id(&own_account, account_id);
-                received_files
-                    .entries_ref(&conversation)
-                    .iter()
-                    .any(|entry| {
-                        !delivery.file_erased(entry.conversation, entry.event_id)
-                            && !delivery.manifest_event_erased(entry.event_id)
-                            && !self.file_message_row_suppressed(entry)
-                    })
-            })
-            .collect();
-        let sent_count: usize = sent_conversations
-            .iter()
-            .map(|conversation| sent.entries_ref(conversation).len())
-            .sum();
-        let received_count: usize = received_conversations
-            .iter()
-            .map(|conversation| received.entries_ref(conversation).len())
-            .sum();
-        let event_count: usize = event_conversations
-            .iter()
-            .try_fold(0usize, |total, conversation| {
-                Ok::<_, LogError>(total + log.conversation_len(conversation)?)
-            })
-            .map_err(|_| SnapshotError::Io)?;
-        let file_count: usize = file_conversations
-            .iter()
-            .map(|conversation| {
-                received_files
-                    .entries_ref(conversation)
-                    .iter()
-                    .filter(|entry| {
-                        !delivery.file_erased(entry.conversation, entry.event_id)
-                            && !delivery.manifest_event_erased(entry.event_id)
-                            && !self.file_message_row_suppressed(entry)
-                    })
-                    .count()
-            })
-            .sum();
-        let visible_media: HashSet<_> = file_conversations
-            .iter()
-            .flat_map(|conversation| received_files.entries_ref(conversation))
-            .filter(|entry| {
-                !delivery.file_erased(entry.conversation, entry.event_id)
-                    && !delivery.manifest_event_erased(entry.event_id)
-                    && !self.file_message_row_suppressed(entry)
-            })
-            .filter_map(|entry| crate::file::decode_manifest(&entry.plaintext))
-            .map(|manifest| manifest.file_conv())
-            .collect();
-        let recalls = self
-            .recalls
-            .lock()
-            .expect("recalls mutex not poisoned")
-            .snapshot_marks();
-        let profiles = self.account_profiles.snapshot();
-        let current_profiles = self
-            .profiles
-            .lock()
-            .expect("profiles mutex not poisoned")
-            .all();
-        let trust_cards = self
-            .trust_cards
-            .lock()
-            .expect("trust cards mutex not poisoned")
-            .all();
-        let suppression = self
-            .account_suppression
-            .lock()
-            .expect("account suppression mutex not poisoned");
-        let mut record_count = u64::try_from(
-            sent_count
-                .checked_add(received_count)
-                .and_then(|count| count.checked_add(recalls.len()))
-                .and_then(|count| count.checked_add(profiles.len()))
-                .and_then(|count| count.checked_add(trust_cards.len()))
-                .and_then(|count| count.checked_add(current_profiles.len()))
-                .and_then(|count| count.checked_add(1))
-                .and_then(|count| count.checked_add(event_count))
-                .and_then(|count| count.checked_add(supplemental_events.len()))
-                .and_then(|count| count.checked_add(file_count))
-                .and_then(|count| count.checked_add(file_contacts.len()))
-                .and_then(|count| count.checked_add(portable_favorites.len()))
-                .and_then(|count| count.checked_add(suppression.len()))
-                .ok_or(SnapshotError::SizeLimit)?,
-        )
-        .map_err(|_| SnapshotError::SizeLimit)?;
-        let mut media = Vec::new();
-        let visible_favorite_media = favorite_files
-            .iter()
-            .filter(|(_, file)| file.size <= super::favorites::recovery::PORTABLE_FILE_LIMIT)
-            .map(|(conv, _)| *conv)
-            .collect::<HashSet<_>>();
-        for (favorite, store, visible) in [
-            (false, &self.media, &visible_media),
-            (true, &self.favorite_media, &visible_favorite_media),
-        ] {
-            for (file_conv, _) in store.managed_files().map_err(|_| SnapshotError::Io)? {
-                if !visible.contains(&file_conv) {
-                    continue;
-                }
-                // Authenticate every source chunk before wrapping portable plaintext
-                // in the independently encrypted recovery archive.
-                let mut digest = MediaDigest(Sha256::new());
-                let size = store
-                    .copy_decrypted(file_conv, &mut digest)
-                    .map_err(|_| SnapshotError::InvalidMedia)?;
-                if favorite
-                    && favorite_files
-                        .get(&file_conv)
-                        .is_none_or(|file| file.size != size)
-                {
-                    return Err(SnapshotError::InvalidMedia);
-                }
-                record_count = record_count
-                    .checked_add(1)
-                    .and_then(|count| count.checked_add(size.div_ceil(MEDIA_CHUNK_BYTES as u64)))
-                    .ok_or(SnapshotError::SizeLimit)?;
-                media.push((
-                    favorite,
-                    file_conv,
-                    size,
-                    <[u8; 32]>::from(digest.0.finalize()),
-                ));
-            }
-        }
-        let mut source_device_ed25519_pubs: Vec<_> = self
+        let mut record_count = 0u64;
+        self.visit_recovery_records(&mut |_| {
+            record_count = record_count
+                .checked_add(1)
+                .ok_or(SnapshotError::SizeLimit)?;
+            Ok(())
+        })?;
+        let mut sources: Vec<_> = self
             .recovery_origins
             .iter()
-            .map(|author| *author.ed25519_pub())
+            .map(|a| *a.ed25519_pub())
             .collect();
-        let current_author = self.identity.public().ed25519_pub;
-        if !source_device_ed25519_pubs.contains(&current_author) {
-            source_device_ed25519_pubs.push(current_author);
+        let current = self.identity.public().ed25519_pub;
+        if !sources.contains(&current) {
+            sources.push(current);
         }
         let header = SnapshotHeaderV1 {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
             account_secret: self.account.secret_bytes(),
-            account_id: self.account.account_id(),
-            source_device_ed25519_pubs,
+            account_id: self.account_id(),
+            source_device_ed25519_pubs: sources,
             created_at_ms,
             record_count,
         };
         let mut writer = SnapshotWriter::new(destination, &header)?;
-        for (conversation, id) in suppression.records() {
-            writer.push(&SnapshotRecordV1::LocalSuppression {
-                conversation: *conversation.as_bytes(),
-                message_id: *id.as_bytes(),
-            })?;
-        }
-        drop(suppression);
-        for conversation in sent_conversations {
-            let own_author =
-                crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
-            let signed_ids: HashMap<_, _> = log
-                .events(&conversation)
-                .map_err(|_| SnapshotError::Io)?
-                .into_iter()
-                .filter(|event| {
-                    event.kind == crate::eventlog::EventKind::Message && event.author == own_author
-                })
-                .map(|event| (event.seq, event.id))
-                .collect();
-            for entry in sent.entries_ref(&conversation) {
-                if super::expiry_policy::plaintext_deadline(&entry.plaintext)
-                    .is_some_and(|deadline| deadline <= self.expiry_now())
-                {
-                    continue;
-                }
-                let message_id = super::DmEnvelope::decode(&entry.plaintext)
-                    .map(|envelope| envelope.msg_id)
-                    .or_else(|| {
-                        recovered_sent_ids
-                            .as_ref()
-                            .and_then(|ids| ids.id_for(entry))
-                            .map(|id| *id.as_bytes())
-                    })
-                    .or_else(|| signed_ids.get(&entry.seq).map(|id| *id.as_bytes()))
-                    .unwrap_or_else(|| {
-                        let mut hash = Sha256::new();
-                        hash.update(b"mesh-talk-recovery-legacy-sent-v1");
-                        hash.update(conversation.as_bytes());
-                        hash.update(entry.seq.to_be_bytes());
-                        hash.finalize().into()
-                    });
-                writer.push(&SnapshotRecordV1::SentDm {
+        self.visit_recovery_records(&mut |record| writer.push(&record))?;
+        writer.finish()
+    }
+
+    /// Offline snapshot passes retain at most one body page and one media chunk.
+    fn visit_recovery_records(
+        &self,
+        emit: &mut dyn FnMut(SnapshotRecordV1) -> Result<(), SnapshotError>,
+    ) -> Result<(), SnapshotError> {
+        use super::transcript_repository::TranscriptPageLimit;
+        use crate::eventlog::repository::pages::PageBudget;
+        let io = |_| SnapshotError::Io;
+        let mut cursor = None;
+        loop {
+            let page = self
+                .account_suppression
+                .lock()
+                .expect("suppression mutex")
+                .page(cursor, 128)
+                .map_err(io)?;
+            if page.is_empty() {
+                break;
+            }
+            for (conversation, id) in page {
+                cursor = Some((conversation, id));
+                emit(SnapshotRecordV1::LocalSuppression {
                     conversation: *conversation.as_bytes(),
-                    message_id,
+                    message_id: *id.as_bytes(),
+                })?;
+            }
+        }
+        let mut cursor = None;
+        loop {
+            let page = self
+                .sentlog
+                .lock()
+                .expect("sent mutex")
+                .header_scan_page(None, cursor, TranscriptPageLimit::default())
+                .map_err(io)?;
+            if page.rows.is_empty() {
+                break;
+            }
+            for header in page.rows {
+                cursor = Some(header.ordinal);
+                let Some(entry) = self
+                    .sentlog
+                    .lock()
+                    .expect("sent mutex")
+                    .row_by_ordinal(header.ordinal)
+                    .map_err(io)?
+                else {
+                    continue;
+                };
+                let mut id = header
+                    .logical_id
+                    .map_or_else(|| self.sent_header_identity(&header), Ok)
+                    .map_err(io)?;
+                if id == EventId::new([0; 32]) {
+                    let mut hash = Sha256::new();
+                    hash.update(b"mesh-talk-recovery-legacy-sent-v1");
+                    hash.update(header.conversation.as_bytes());
+                    hash.update(header.sequence.to_be_bytes());
+                    id = EventId::new(hash.finalize().into());
+                }
+                emit(SnapshotRecordV1::SentDm {
+                    conversation: *entry.conversation.as_bytes(),
+                    message_id: *id.as_bytes(),
                     seq: entry.seq,
                     wall_clock: entry.wall_clock,
-                    plaintext: entry.plaintext.clone(),
+                    plaintext: entry.plaintext,
                 })?;
             }
         }
-        for conversation in received_conversations {
-            for entry in received.entries_ref(&conversation) {
-                let envelope = super::DmEnvelope::decode(&entry.plaintext);
-                let inner = envelope
-                    .as_ref()
-                    .map_or(entry.plaintext.as_slice(), |env| env.body.as_slice());
-                if self.recipient_expired(inner, entry.event_id, entry.wall_clock) {
-                    continue;
-                }
-                writer.push(&SnapshotRecordV1::ReceivedDm {
-                    conversation: *conversation.as_bytes(),
-                    event_id: *entry.event_id.as_bytes(),
-                    from: entry.from.clone(),
-                    wall_clock: entry.wall_clock,
-                    plaintext: entry.plaintext.clone(),
-                })?;
-            }
-        }
-        for conversation in event_conversations {
-            for event in log.events(&conversation).map_err(|_| SnapshotError::Io)? {
-                writer.push(&SnapshotRecordV1::SignedEvent {
-                    event: event.clone(),
-                })?;
-            }
-        }
-        for event in supplemental_events {
-            writer.push(&SnapshotRecordV1::SignedEvent { event })?;
-        }
-        for account_id in file_contacts {
-            writer.push(&SnapshotRecordV1::AccountContact { account_id })?;
-        }
-        for conversation in file_conversations {
-            for entry in received_files.entries_ref(&conversation) {
-                if delivery.file_erased(entry.conversation, entry.event_id)
-                    || delivery.manifest_event_erased(entry.event_id)
-                    || self.file_message_row_suppressed(entry)
-                    || self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
-                {
-                    continue;
-                }
-                writer.push(&SnapshotRecordV1::FileCard {
+        let mut cursor = None;
+        loop {
+            let page = self
+                .received
+                .lock()
+                .expect("received mutex")
+                .scan_page(None, cursor, TranscriptPageLimit::default())
+                .map_err(io)?;
+            for entry in page.rows {
+                emit(SnapshotRecordV1::ReceivedDm {
                     conversation: *entry.conversation.as_bytes(),
                     event_id: *entry.event_id.as_bytes(),
-                    from: entry.from.clone(),
+                    from: entry.from,
                     wall_clock: entry.wall_clock,
-                    manifest: entry.plaintext.clone(),
+                    plaintext: entry.plaintext,
+                })?;
+            }
+            let Some(next) = page.next else {
+                break;
+            };
+            cursor = Some(next);
+        }
+        let mut conversations = None;
+        loop {
+            let page = self
+                .log
+                .lock()
+                .expect("log mutex")
+                .repository()
+                .map_err(io)?
+                .conversations_page(
+                    conversations.as_ref(),
+                    PageBudget {
+                        rows: 128,
+                        bytes: 8 * 1024 * 1024,
+                    },
+                )
+                .map_err(io)?;
+            for conversation in page.items {
+                let mut cursor = None;
+                loop {
+                    let events = self
+                        .log
+                        .lock()
+                        .expect("log mutex")
+                        .repository()
+                        .map_err(io)?
+                        .events_page(
+                            &conversation.conversation,
+                            cursor.as_ref(),
+                            PageBudget {
+                                rows: 128,
+                                bytes: 8 * 1024 * 1024,
+                            },
+                        )
+                        .map_err(io)?;
+                    for event in events.items {
+                        emit(SnapshotRecordV1::SignedEvent { event })?;
+                    }
+                    let Some(next) = events.next else {
+                        break;
+                    };
+                    cursor = Some(next);
+                }
+            }
+            let Some(next) = page.next else {
+                break;
+            };
+            conversations = Some(next);
+        }
+        // The auxiliary owners enumerate unique proof identities in bounded pages.
+        self.account_file_proofs
+            .lock()
+            .expect("proofs mutex")
+            .visit(|event| {
+                if self
+                    .log
+                    .lock()
+                    .expect("log mutex")
+                    .get(&event.id)?
+                    .is_none()
+                    && let Some(row) = self
+                        .received_files
+                        .lock()
+                        .expect("files mutex")
+                        .entry(event.id)?
+                    && !self.file_message_row_suppressed(&row)?
+                {
+                    emit(SnapshotRecordV1::SignedEvent { event })
+                        .map_err(|_| LogError::CorruptFile("snapshot proof write failed".into()))?;
+                }
+                Ok(())
+            })
+            .map_err(io)?;
+        let mut identities_after = None;
+        loop {
+            let page = self
+                .file_message_identities
+                .lock()
+                .expect("identity mutex")
+                .page(identities_after, 128)
+                .map_err(io)?;
+            if page.is_empty() {
+                break;
+            }
+            for event in page {
+                let (binding, aliases) =
+                    super::file_message_identity::validated_snapshot_binding(&event)
+                        .ok_or(SnapshotError::InvalidFileCard)?;
+                identities_after = Some((binding.host, binding.logical));
+                let local_source = event.author.ed25519_pub()
+                    == &self.identity.public().ed25519_pub
+                    || self
+                        .recovery_origins
+                        .iter()
+                        .any(|author| author == &event.author);
+                let mut retained = false;
+                for alias in aliases {
+                    let row = {
+                        let files = self.received_files.lock().expect("files mutex");
+                        if local_source {
+                            files.entry(alias)
+                        } else {
+                            files.entry_in(&binding.host, alias)
+                        }
+                    }
+                    .map_err(io)?;
+                    if let Some(row) = row
+                        && self.snapshot_file_visible(&row)?
+                    {
+                        retained = true;
+                        break;
+                    }
+                }
+                // Restore authenticates each identity against an included card.
+                // Erased aliases travel as suppression records, without either
+                // their plaintext card or a now-unverifiable identity bundle.
+                if retained
+                    && self
+                        .log
+                        .lock()
+                        .expect("log mutex")
+                        .get(&event.id)
+                        .map_err(io)?
+                        .is_none()
+                {
+                    emit(SnapshotRecordV1::SignedEvent { event })?;
+                }
+            }
+        }
+        let own = self.account_id();
+        for account in self.known_account_ids().map_err(|_| SnapshotError::Io)? {
+            let host = super::conversation::account_conversation_id(&own, &account);
+            let mut cursor = None;
+            let mut visible = false;
+            loop {
+                let page = self
+                    .received_files
+                    .lock()
+                    .expect("files mutex")
+                    .scan_page(Some(&host), cursor, TranscriptPageLimit::default())
+                    .map_err(io)?;
+                for row in page.rows {
+                    if self.snapshot_file_visible(&row)? {
+                        visible = true;
+                        break;
+                    }
+                }
+                if visible {
+                    break;
+                }
+                let Some(next) = page.next else {
+                    break;
+                };
+                cursor = Some(next);
+            }
+            if visible {
+                emit(SnapshotRecordV1::AccountContact {
+                    account_id: account,
                 })?;
             }
         }
-        for mark in recalls {
-            writer.push(&SnapshotRecordV1::Recall {
-                conversation: *mark.conversation.as_bytes(),
-                target: *mark.target.as_bytes(),
-                wall_clock: mark.wall_clock,
-            })?;
+        let mut cursor = None;
+        loop {
+            let page = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .scan_page(None, cursor, TranscriptPageLimit::default())
+                .map_err(io)?;
+            for row in page.rows {
+                if self.snapshot_file_visible(&row)? {
+                    emit(SnapshotRecordV1::FileCard {
+                        conversation: *row.conversation.as_bytes(),
+                        event_id: *row.event_id.as_bytes(),
+                        from: row.from,
+                        wall_clock: row.wall_clock,
+                        manifest: row.plaintext,
+                    })?;
+                }
+            }
+            let Some(next) = page.next else {
+                break;
+            };
+            cursor = Some(next);
         }
-        for (account_id, updated_at, avatar) in profiles {
-            writer.push(&SnapshotRecordV1::Profile {
+        let mut cursor = None;
+        loop {
+            let page = self
+                .recalls
+                .lock()
+                .expect("recalls mutex")
+                .page(None, cursor, 128)
+                .map_err(io)?;
+            if page.is_empty() {
+                break;
+            }
+            for mark in page {
+                cursor = Some((mark.conversation, mark.target));
+                emit(SnapshotRecordV1::Recall {
+                    conversation: *mark.conversation.as_bytes(),
+                    target: *mark.target.as_bytes(),
+                    wall_clock: mark.wall_clock,
+                })?;
+            }
+        }
+        for (account_id, updated_at, avatar) in self.account_profiles.snapshot() {
+            emit(SnapshotRecordV1::Profile {
                 account_id,
                 updated_at,
                 avatar,
             })?;
         }
-        writer.push(&SnapshotRecordV1::AccountCreation {
+        emit(SnapshotRecordV1::AccountCreation {
             created_at_ms: self.account.created_at_ms(),
         })?;
-        for profile in current_profiles {
-            writer.push(&SnapshotRecordV1::AccountProfile { profile })?;
+        for profile in self.profiles.lock().expect("profiles mutex").all() {
+            emit(SnapshotRecordV1::AccountProfile { profile })?;
         }
-        for card in trust_cards {
-            writer.push(&SnapshotRecordV1::PeerTrustCard { card })?;
+        for card in self.trust_cards.lock().expect("trust cards mutex").all() {
+            emit(SnapshotRecordV1::PeerTrustCard { card })?;
         }
-        for payload in portable_favorites.portable_records(&own_account, now) {
-            writer.push(&SnapshotRecordV1::Favorite { payload: payload? })?;
+        let now = self.expiry_now();
+        let favorites = self.favorites.lock().expect("favorites mutex");
+        let portable = favorites.portable_projection(self);
+        let favorite_files = portable.portable_files(now)?;
+        for payload in portable.portable_records(&own, now) {
+            emit(SnapshotRecordV1::Favorite { payload: payload? })?;
         }
-        for (favorite, file_conv, size, digest) in media {
-            let descriptor = if favorite {
-                SnapshotRecordV1::FavoriteMediaDescriptor {
-                    file_conv: *file_conv.as_bytes(),
-                    size,
-                    sha256: digest,
+        for (favorite, store) in [(false, &self.media), (true, &self.favorite_media)] {
+            for (file_conv, _) in store.managed_files().map_err(|_| SnapshotError::Io)? {
+                let visible = if favorite {
+                    favorite_files
+                        .get(&file_conv)
+                        .is_some_and(|f| f.size <= super::favorites::recovery::PORTABLE_FILE_LIMIT)
+                } else {
+                    self.snapshot_media_visible(file_conv)?
+                };
+                if !visible {
+                    continue;
                 }
-            } else {
-                SnapshotRecordV1::MediaDescriptor {
-                    file_conv: *file_conv.as_bytes(),
-                    size,
-                    sha256: digest,
+                let mut hash = MediaDigest(Sha256::new());
+                let size = store
+                    .copy_decrypted(file_conv, &mut hash)
+                    .map_err(|_| SnapshotError::InvalidMedia)?;
+                if favorite
+                    && favorite_files
+                        .get(&file_conv)
+                        .is_none_or(|f| f.size != size)
+                {
+                    return Err(SnapshotError::InvalidMedia);
                 }
-            };
-            writer.push(&descriptor)?;
-            let mut sink = MediaRecordSink {
-                writer: &mut writer,
-                file_conv,
-                favorite,
-                buffer: Vec::with_capacity(MEDIA_CHUNK_BYTES),
-                index: 0,
-            };
-            let store = if favorite {
-                &self.favorite_media
-            } else {
-                &self.media
-            };
-            let written = store
-                .copy_decrypted(file_conv, &mut sink)
-                .map_err(|_| SnapshotError::InvalidMedia)?;
-            if written != size {
-                return Err(SnapshotError::InvalidMedia);
+                let sha256 = hash.0.finalize().into();
+                emit(if favorite {
+                    SnapshotRecordV1::FavoriteMediaDescriptor {
+                        file_conv: *file_conv.as_bytes(),
+                        size,
+                        sha256,
+                    }
+                } else {
+                    SnapshotRecordV1::MediaDescriptor {
+                        file_conv: *file_conv.as_bytes(),
+                        size,
+                        sha256,
+                    }
+                })?;
+                let mut sink = MediaRecordSink {
+                    emit,
+                    file_conv,
+                    favorite,
+                    buffer: Vec::with_capacity(MEDIA_CHUNK_BYTES),
+                    index: 0,
+                };
+                let written = store
+                    .copy_decrypted(file_conv, &mut sink)
+                    .map_err(|_| SnapshotError::InvalidMedia)?;
+                if written != size {
+                    return Err(SnapshotError::InvalidMedia);
+                }
+                sink.finish()?;
             }
-            sink.finish()?;
         }
-        writer.finish()
+        Ok(())
+    }
+    fn snapshot_file_visible(
+        &self,
+        row: &super::received_log::ReceivedEntry,
+    ) -> Result<bool, SnapshotError> {
+        let delivery = self.delivery.lock().expect("delivery mutex");
+        Ok(!delivery.file_erased(row.conversation, row.event_id)
+            && !delivery.manifest_event_erased(row.event_id)
+            && !self
+                .file_message_row_suppressed(row)
+                .map_err(|_| SnapshotError::Io)?)
+    }
+    fn snapshot_media_visible(&self, file: ConversationId) -> Result<bool, SnapshotError> {
+        let mut cursor = None;
+        loop {
+            let page = self
+                .received_files
+                .lock()
+                .expect("files mutex")
+                .file_headers(
+                    &file,
+                    cursor,
+                    super::transcript_repository::TranscriptPageLimit::default(),
+                )
+                .map_err(|_| SnapshotError::Io)?;
+            if page.rows.is_empty() {
+                return Ok(false);
+            }
+            for header in page.rows {
+                cursor = Some(header.ordinal);
+                if let Some(row) = self
+                    .received_files
+                    .lock()
+                    .expect("files mutex")
+                    .row_by_ordinal(header.ordinal)
+                    .map_err(|_| SnapshotError::Io)?
+                    && self.snapshot_file_visible(&row)?
+                {
+                    return Ok(true);
+                }
+            }
+        }
     }
 }
 
@@ -1296,6 +1301,7 @@ mod suppression_recovery_tests {
                 .lock()
                 .unwrap()
                 .entry(EventId::new(wire))
+                .unwrap()
                 .is_none(),
             "a logical account erasure must hide every transport copy before installation"
         );
@@ -1375,7 +1381,8 @@ mod suppression_recovery_tests {
                 .unwrap()
                 .as_ref()
                 .unwrap()
-                .id_for(&kept[0]),
+                .id_for(&kept[0])
+                .unwrap(),
             Some(EventId::new(id))
         );
         assert!(
@@ -1384,9 +1391,13 @@ mod suppression_recovery_tests {
                 .lock()
                 .unwrap()
                 .entry(EventId::new(received_id))
+                .unwrap()
                 .is_none()
         );
-        assert_eq!(restored.account_suppression.lock().unwrap().len(), 2);
+        assert_eq!(
+            restored.account_suppression.lock().unwrap().len().unwrap(),
+            2
+        );
     }
 
     fn open(root: &Path) -> Arc<Node> {
@@ -1454,10 +1465,14 @@ mod suppression_recovery_tests {
             .unwrap();
         let rows = restored.received.lock().unwrap();
         assert!(
-            rows.entry(EventId::new(erased.event_id)).is_none(),
+            rows.entry(EventId::new(erased.event_id)).unwrap().is_none(),
             "restoring an archive must preserve exact erasure evidence before sibling catch-up"
         );
-        assert!(rows.entry(EventId::new(retained.event_id)).is_some());
+        assert!(
+            rows.entry(EventId::new(retained.event_id))
+                .unwrap()
+                .is_some()
+        );
         drop(rows);
         let new_row = backfill(&restored, &peer, 43);
         restored
@@ -1469,6 +1484,7 @@ mod suppression_recovery_tests {
                 .lock()
                 .unwrap()
                 .entry(EventId::new(new_row.event_id))
+                .unwrap()
                 .is_some()
         );
         let mut second = Vec::new();
@@ -1486,6 +1502,7 @@ mod suppression_recovery_tests {
                 .lock()
                 .unwrap()
                 .entry(EventId::new([41; 32]))
+                .unwrap()
                 .is_none()
         );
     }

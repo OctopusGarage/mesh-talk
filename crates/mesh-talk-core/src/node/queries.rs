@@ -73,9 +73,8 @@ impl Node {
             .map(|context| context.map_or_else(Vec::new, |context| context.messages))
     }
 
-    /// Build canonical identity/order from borrowed rows, then decode only the
-    /// selected window. Metadata and causal traversal remain O(retained rows);
-    /// copied plaintext is proportional to the selected rows, not retention.
+    /// Canonical metadata ranks persist across ordinary reads. SQL selects the
+    /// requested ranks and admits their byte cost before any transcript body load.
     pub(in crate::node) fn project_history(
         &self,
         conversation: ConversationId,
@@ -83,22 +82,32 @@ impl Node {
         selection: HistorySelection<'_>,
     ) -> Result<Option<super::search::SearchContext>, super::NodeError> {
         use super::delivery_store::DeliveryTransaction;
+        use super::transcript_repository::{FILES, RECEIVED, SENT, TranscriptPageLimit};
+        use crate::eventlog::repository::order::{
+            CausalOrder, OrderReadiness, OrderWorkBudget, combined::HistorySelector,
+        };
         use std::collections::{HashMap, HashSet};
-
         let selected_ids: Vec<EventId>;
         let selection = match selection {
             HistorySelection::Selected(ids) => {
+                if ids
+                    .len()
+                    .checked_mul(std::mem::size_of::<EventId>())
+                    .is_none_or(|bytes| bytes > 8 * 1024 * 1024)
+                {
+                    return Err(crate::eventlog::LogError::InvalidPageBudget.into());
+                }
                 selected_ids = ids
                     .iter()
                     .map(|id| self.file_message_logical_id(conversation, *id))
-                    .collect();
+                    .collect::<Result<_, _>>()?;
                 HistorySelection::Selected(&selected_ids)
             }
             HistorySelection::Context(id) => {
-                HistorySelection::Context(self.file_message_logical_id(conversation, id))
+                HistorySelection::Context(self.file_message_logical_id(conversation, id)?)
             }
             HistorySelection::Protected(id) => {
-                HistorySelection::Protected(self.file_message_logical_id(conversation, id))
+                HistorySelection::Protected(self.file_message_logical_id(conversation, id)?)
             }
             other => other,
         };
@@ -111,300 +120,440 @@ impl Node {
                 || self
                     .channels
                     .lock()
-                    .expect("channels mutex not poisoned")
+                    .expect("channels mutex")
                     .state(&conversation)
                     .is_some());
-        let my_account = self.account.account_id();
-        let me = self.identity.public().user_id();
+        let now = self.expiry_now();
+        let me = self.user_id();
+        let my_account = self.account_id();
         let own_devices: HashSet<_> = self
             .linked_devices()
             .into_iter()
-            .map(|device| device.public.user_id())
+            .map(|d| d.public.user_id())
             .collect();
-        let recovered_me: HashSet<_> = self
-            .recovery_origins
-            .iter()
-            .map(|author| author.user_id())
-            .collect();
-        // Match the delivery owner's lock ordering. No guard escapes this read.
-        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
-        let log = self.log.lock().expect("log mutex not poisoned");
-        let events = log.project_events(&conversation, |mut event| {
-            event.ciphertext.clear();
-            event.sig.clear();
-            event
-        })?;
-        let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
-        let mut sent_ids: HashMap<_, _> = if account.is_none() {
-            events
-                .iter()
-                .filter(|event| {
-                    event.kind == crate::eventlog::EventKind::Message && event.author == author
-                })
-                .map(|event| (event.seq, event.id))
-                .collect()
-        } else {
-            HashMap::new()
-        };
-        let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
-        let recovered = self
-            .recovered_sent_ids
-            .lock()
-            .expect("recovered sent ids mutex not poisoned");
-        let received = self.received.lock().expect("received mutex not poisoned");
-        let files = self
-            .received_files
-            .lock()
-            .expect("received_files mutex not poisoned");
-        let pending = delivery.pending_transactions();
-        for transaction in pending {
-            if let DeliveryTransaction::Outgoing { message, sent, .. } = transaction.body()
-                && sent.conversation == conversation
-            {
-                sent_ids.insert(sent.seq, message.logical_id);
-            }
-        }
-        let pending_sent = pending
-            .iter()
-            .filter_map(|transaction| match transaction.body() {
-                DeliveryTransaction::Outgoing { sent, .. } if sent.conversation == conversation => {
-                    Some(sent)
-                }
-                _ => None,
-            });
-        let mut rows = Vec::new();
-        let mut seen = HashSet::new();
-        // Preserve the former sidecar-copy ordering before first-ID dedup.
-        // Arrival order can disagree with wall clocks for sibling imports.
-        let mut sent_rows: Vec<_> = sentlog.entries_ref(&conversation).iter().collect();
-        sent_rows.sort_by_key(|row| (row.wall_clock, row.seq));
-        for sent in sent_rows.into_iter().chain(pending_sent) {
-            let envelope = DmEnvelope::decode_ref(&sent.plaintext);
-            let inner = envelope
-                .as_ref()
-                .map_or(sent.plaintext.as_slice(), |env| env.body);
-            let expires_at_ms = crate::expiry::deadline(inner);
-            if expires_at_ms.is_some_and(|deadline| deadline <= self.expiry_now()) {
-                continue;
-            }
-            let id = if account.is_some() {
-                envelope
-                    .as_ref()
-                    .map_or(EventId::new([0; 32]), |env| EventId::new(env.msg_id))
-            } else {
-                recovered
-                    .as_ref()
-                    .and_then(|saved| saved.id_for(sent))
-                    .or_else(|| sent_ids.get(&sent.seq).copied())
-                    .unwrap_or(EventId::new([0; 32]))
-            };
-            if seen.insert(id) {
-                rows.push(HistoryRow {
-                    id,
-                    wall_clock: sent.wall_clock,
-                    from_me: true,
-                    who: "you",
-                    plaintext: if account.is_some() {
-                        inner
-                    } else {
-                        &sent.plaintext
-                    },
-                    expires_at_ms,
-                    file: false,
-                });
-            }
-        }
-        let mut received_rows: Vec<_> = received.entries_ref(&conversation).iter().collect();
-        received_rows.sort_by_key(|row| row.wall_clock);
-        for row in received_rows {
-            let envelope = account.and_then(|_| DmEnvelope::decode_ref(&row.plaintext));
-            let inner = envelope
-                .as_ref()
-                .map_or(row.plaintext.as_slice(), |env| env.body);
-            if self.recipient_expired(inner, row.event_id, row.wall_clock) {
-                continue;
-            }
-            let id = if account.is_some() {
-                envelope
-                    .as_ref()
-                    .map_or(EventId::new([0; 32]), |env| EventId::new(env.msg_id))
-            } else {
-                row.event_id
-            };
-            let from_me = if account.is_some() {
-                row.from == my_account
-            } else {
-                own_devices.contains(&row.from)
-            };
-            if seen.insert(id) {
-                rows.push(HistoryRow {
-                    id,
-                    wall_clock: row.wall_clock,
-                    from_me,
-                    who: if from_me { "you" } else { &row.from },
-                    plaintext: inner,
-                    expires_at_ms: DmEnvelope::decode_ref(&row.plaintext).map_or_else(
-                        || crate::expiry::deadline(&row.plaintext),
-                        |envelope| crate::expiry::deadline(envelope.body),
-                    ),
-                    file: false,
-                });
-            }
-        }
-        let durable_files = files.entries_ref(&conversation);
-        let pending_files = pending.iter().filter_map(|transaction| match transaction {
-            DeliveryTransaction::OutgoingManifest { received, .. }
-                if received.conversation == conversation
-                    && !durable_files
-                        .iter()
-                        .any(|row| row.event_id == received.event_id) =>
-            {
-                Some(received.as_ref())
-            }
-            _ => None,
-        });
+        let recovered_me: HashSet<_> = self.recovery_origins.iter().map(|a| a.user_id()).collect();
+        let delivery = self.delivery.lock().expect("delivery mutex");
+        let log = self.log.lock().expect("log mutex");
+        let repository = log.repository()?;
+        let sent = self.sentlog.lock().expect("sent mutex");
+        let recovered = self.recovered_sent_ids.lock().expect("recovered ids mutex");
+        let received = self.received.lock().expect("received mutex");
+        let files = self.received_files.lock().expect("file transcript mutex");
         let identities = self
             .file_message_identities
             .lock()
-            .expect("file identity lock");
-        let suppression = self
-            .account_suppression
-            .lock()
-            .expect("account suppression lock");
-        let mut file_ids = HashSet::new();
-        let mut file_rows: Vec<_> = durable_files.iter().collect();
-        file_rows.sort_by_key(|row| row.wall_clock);
-        for row in file_rows.into_iter().chain(pending_files) {
-            if !file_ids.insert(row.event_id)
-                || delivery.file_erased(row.conversation, row.event_id)
-                || self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
-                || crate::file::decode_manifest(&row.plaintext).is_none()
+            .expect("file identity mutex");
+        let suppression = self.account_suppression.lock().expect("suppression mutex");
+        let pending = delivery.pending_transactions();
+        let pending_ids: HashMap<_, _> = pending
+            .iter()
+            .filter_map(|tx| match tx.body() {
+                DeliveryTransaction::Outgoing { message, sent, .. }
+                    if sent.conversation == conversation =>
+                {
+                    Some((sent.seq, message.logical_id))
+                }
+                _ => None,
+            })
+            .collect();
+        let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
+        let mut token = Vec::new();
+        token.extend(my_account.as_bytes());
+        token.extend(self.identity.public().ed25519_pub);
+        token.push(u8::from(account.is_some()));
+        token.push(u8::from(is_channel));
+        for revision in [
+            sent.conversation_revision(&conversation)?,
+            received.conversation_revision(&conversation)?,
+            files.conversation_revision(&conversation)?,
+            recovered
+                .as_ref()
+                .map(|r| r.revision())
+                .transpose()?
+                .unwrap_or(0),
+            identities.revision()?,
+            suppression.len()? as u64,
+            repository
+                .metadata(&conversation)?
+                .map_or(0, |m| m.revision as u64),
+        ] {
+            token.extend(revision.to_be_bytes());
+        }
+        for tx in pending {
+            token.extend(tx.id().as_bytes());
+        }
+        repository.initialize_history_order()?;
+        let signed = if is_channel {
+            while repository.ensure_order(&conversation, CausalOrder::WallClock)?
+                != OrderReadiness::Ready
             {
+                repository.order_step(
+                    &conversation,
+                    CausalOrder::WallClock,
+                    OrderWorkBudget::default(),
+                )?;
+            }
+            repository.order_generation(&conversation, CausalOrder::WallClock)?
+        } else {
+            None
+        };
+        let mut generation = repository.history_generation(&conversation, &token, now, signed)?;
+        if !generation.ready {
+            for kind in [SENT, RECEIVED, FILES] {
+                let mut after = None;
+                loop {
+                    let page = match kind {
+                        SENT => sent.header_scan_page(
+                            Some(&conversation),
+                            after,
+                            TranscriptPageLimit::default(),
+                        )?,
+                        RECEIVED => received.header_scan_page(
+                            Some(&conversation),
+                            after,
+                            TranscriptPageLimit::default(),
+                        )?,
+                        _ => files.header_scan_page(
+                            Some(&conversation),
+                            after,
+                            TranscriptPageLimit::default(),
+                        )?,
+                    };
+                    if page.rows.is_empty() {
+                        break;
+                    }
+                    for header in page.rows {
+                        after = Some(header.ordinal);
+                        if header.deadline.is_some_and(|d| d <= now) {
+                            continue;
+                        }
+                        let original = if kind == SENT {
+                            None
+                        } else {
+                            Some(EventId::new(header.key.as_slice().try_into().map_err(
+                                |_| {
+                                    crate::eventlog::LogError::CorruptFile(
+                                        "invalid history event key".into(),
+                                    )
+                                },
+                            )?))
+                        };
+                        let id = if kind == SENT {
+                            if account.is_some() {
+                                header.logical_id.unwrap_or(EventId::new([0; 32]))
+                            } else {
+                                recovered
+                                    .as_ref()
+                                    .map(|r| r.id_for_header(&header))
+                                    .transpose()?
+                                    .flatten()
+                                    .or(pending_ids.get(&header.sequence).copied())
+                                    .or(repository
+                                        .authored_header(&conversation, author, header.sequence)?
+                                        .map(|h| h.id))
+                                    .unwrap_or(EventId::new([0; 32]))
+                            }
+                        } else if kind == RECEIVED {
+                            if account.is_some() {
+                                header.logical_id.unwrap_or(EventId::new([0; 32]))
+                            } else {
+                                original.unwrap()
+                            }
+                        } else {
+                            if header.file_conversation.is_none()
+                                || delivery.file_erased(conversation, original.unwrap())
+                            {
+                                continue;
+                            }
+                            identities
+                                .logical_for_ordinal(header.ordinal)?
+                                .ok_or_else(|| {
+                                    crate::eventlog::LogError::CorruptFile(
+                                        "file selector disappeared".into(),
+                                    )
+                                })?
+                        };
+                        if suppression.contains(conversation, id)? {
+                            continue;
+                        }
+                        let bytes = header
+                            .body_bytes
+                            .checked_add(header.sender_bytes)
+                            .and_then(|n| n.checked_mul(3))
+                            .and_then(|n| {
+                                n.checked_add(if kind == FILES { 32 * 1024 } else { 512 })
+                            })
+                            .ok_or(crate::eventlog::LogError::RepositoryCounterExhausted)?;
+                        repository.history_add(
+                            &conversation,
+                            generation.job,
+                            HistorySelector {
+                                id,
+                                clock: header.wall_clock,
+                                source_kind: kind,
+                                ordinal: header.ordinal,
+                                priority: kind * 2,
+                                sequence: header.sequence,
+                                charged_bytes: bytes,
+                            },
+                            header.deadline,
+                        )?;
+                    }
+                }
+            }
+            // The delivery journal is already bounded to 32 transactions/8 MiB.
+            // Pending accepted rows remain visible until their ordinary projection commits.
+            for (index, tx) in pending.iter().enumerate() {
+                let row = match tx.body() {
+                    DeliveryTransaction::Outgoing { message, sent, .. }
+                        if sent.conversation == conversation =>
+                    {
+                        Some((
+                            message.logical_id,
+                            sent.wall_clock,
+                            4,
+                            3,
+                            sent.seq,
+                            sent.plaintext.as_slice(),
+                        ))
+                    }
+                    DeliveryTransaction::OutgoingManifest { received, .. }
+                        if received.conversation == conversation =>
+                    {
+                        Some((
+                            identities.row_logical(received)?,
+                            received.wall_clock,
+                            5,
+                            7,
+                            0,
+                            received.plaintext.as_slice(),
+                        ))
+                    }
+                    DeliveryTransaction::ChannelOutgoing { events, sent, .. }
+                        if sent.conversation == conversation
+                            && events.last().is_some_and(|e| {
+                                e.kind == crate::eventlog::EventKind::FileManifest
+                            }) =>
+                    {
+                        Some((
+                            events.last().unwrap().id,
+                            sent.wall_clock,
+                            6,
+                            8,
+                            sent.seq,
+                            sent.plaintext.as_slice(),
+                        ))
+                    }
+                    _ => None,
+                };
+                let Some((id, clock, kind, priority, sequence, plain)) = row else {
+                    continue;
+                };
+                let deadline = super::expiry_policy::plaintext_deadline(plain);
+                if deadline.is_some_and(|d| d <= now)
+                    || suppression.contains(conversation, id)?
+                    || (kind != 4 && delivery.file_erased(conversation, id))
+                {
+                    continue;
+                }
+                repository.history_add(
+                    &conversation,
+                    generation.job,
+                    HistorySelector {
+                        id,
+                        clock,
+                        source_kind: kind,
+                        ordinal: index as i64,
+                        priority,
+                        sequence,
+                        charged_bytes: plain.len() * 3 + if kind == 4 { 512 } else { 32 * 1024 },
+                    },
+                    deadline,
+                )?;
+            }
+            while !generation.ready {
+                generation = repository.history_order_step(generation.job)?;
+            }
+        }
+        let (start, end, newer) = match selection {
+            HistorySelection::Recent(limit) => {
+                (generation.count.saturating_sub(limit), generation.count, 0)
+            }
+            HistorySelection::Selected(_) => (0, 0, 0),
+            HistorySelection::Context(id) | HistorySelection::Protected(id) => {
+                let Some(rank) = repository.history_rank(generation.job, id)? else {
+                    return Ok(None);
+                };
+                if matches!(selection, HistorySelection::Protected(_)) {
+                    (rank, rank + 1, generation.count - rank - 1)
+                } else {
+                    (
+                        rank.saturating_sub(25),
+                        (rank + 26).min(generation.count),
+                        generation.count - rank - 1,
+                    )
+                }
+            }
+        };
+        let mut selectors = Vec::new();
+        let mut budget = 8 * 1024 * 1024usize;
+        if let HistorySelection::Selected(ids) = selection {
+            for id in ids {
+                if let Some(rank) = repository.history_rank(generation.job, *id)? {
+                    let page =
+                        repository.history_selectors(generation.job, rank, rank + 1, budget)?;
+                    for row in page {
+                        budget -= row.charged_bytes;
+                        selectors.push((rank, row));
+                    }
+                }
+            }
+            selectors.sort_by_key(|(rank, _)| *rank);
+            selectors.dedup_by_key(|(_, row)| row.id);
+        } else {
+            let mut cursor = start;
+            while cursor < end {
+                let page = repository.history_selectors(
+                    generation.job,
+                    cursor,
+                    (cursor + 128).min(end),
+                    budget,
+                )?;
+                for row in page {
+                    budget -= row.charged_bytes;
+                    selectors.push((cursor, row));
+                    cursor += 1;
+                }
+            }
+        }
+        let mut messages = Vec::new();
+        let mut authors = Vec::new();
+        for (_, selector) in selectors {
+            let mut author_account = None;
+            let (plain, from, file) = match selector.source_kind {
+                SENT => {
+                    let row = sent.row_by_ordinal(selector.ordinal)?.ok_or_else(|| {
+                        crate::eventlog::LogError::CorruptFile("sent selector disappeared".into())
+                    })?;
+                    (row.plaintext, None, false)
+                }
+                RECEIVED | FILES => {
+                    let row = if selector.source_kind == RECEIVED {
+                        received.row_by_ordinal(selector.ordinal)?
+                    } else {
+                        files.row_by_ordinal(selector.ordinal)?
+                    }
+                    .ok_or_else(|| {
+                        crate::eventlog::LogError::CorruptFile(
+                            "received selector disappeared".into(),
+                        )
+                    })?;
+                    if selector.source_kind == FILES {
+                        author_account = identities.row_author_account(&row)?;
+                    }
+                    (row.plaintext, Some(row.from), selector.source_kind == FILES)
+                }
+                _ => match pending
+                    .get(usize::try_from(selector.ordinal).map_err(|_| {
+                        crate::eventlog::LogError::CorruptFile("invalid pending ordinal".into())
+                    })?)
+                    .ok_or_else(|| {
+                        crate::eventlog::LogError::CorruptFile(
+                            "pending history selector disappeared".into(),
+                        )
+                    })?
+                    .body()
+                {
+                    DeliveryTransaction::Outgoing { sent, .. } => {
+                        (sent.plaintext.clone(), None, false)
+                    }
+                    DeliveryTransaction::OutgoingManifest { received, .. } => (
+                        received.plaintext.clone(),
+                        Some(received.from.clone()),
+                        true,
+                    ),
+                    DeliveryTransaction::ChannelOutgoing { sent, .. } => {
+                        (sent.plaintext.clone(), None, true)
+                    }
+                    _ => {
+                        return Err(crate::eventlog::LogError::CorruptFile(
+                            "invalid pending history selector".into(),
+                        )
+                        .into());
+                    }
+                },
+            };
+            let from_me = from.as_ref().is_none_or(|from| {
+                if file {
+                    from == &me || own_devices.contains(from) || recovered_me.contains(from)
+                } else if account.is_some() {
+                    from == &my_account
+                } else {
+                    own_devices.contains(from)
+                }
+            });
+            let envelope = account.and_then(|_| DmEnvelope::decode_ref(&plain));
+            let inner = if file {
+                plain.as_slice()
+            } else {
+                envelope.as_ref().map_or(plain.as_slice(), |e| e.body)
+            };
+            if from.is_some() && self.recipient_expired(inner, selector.id, selector.clock) {
                 continue;
             }
-            let from_me = row.from == me
-                || recovered_me.contains(&row.from)
-                || own_devices.contains(&row.from);
-            let logical = identities.row_logical(row);
-            if suppression.contains(conversation, logical) {
-                continue;
+            let row = HistoryRow {
+                id: selector.id,
+                wall_clock: selector.clock,
+                from_me,
+                who: if from_me {
+                    "you"
+                } else {
+                    from.as_deref().unwrap_or("you")
+                },
+                plaintext: inner,
+                expires_at_ms: super::expiry_policy::plaintext_deadline(&plain),
+                file,
+            };
+            let mut entry = row.decode();
+            entry.reply_to = entry
+                .reply_to
+                .map(|target| identities.logical(conversation, target))
+                .transpose()?;
+            if file {
+                entry.file_message_aliases = identities.aliases(conversation, selector.id)?;
             }
-            if seen.insert(logical) {
-                rows.push(HistoryRow {
-                    id: logical,
-                    wall_clock: row.wall_clock,
-                    from_me,
-                    who: if from_me { "you" } else { &row.from },
-                    plaintext: &row.plaintext,
-                    expires_at_ms: crate::expiry::deadline(&row.plaintext),
-                    file: true,
-                });
+            if matches!(selection,HistorySelection::Protected(id) if id==selector.id)
+                && entry.protection.is_some()
+                && !file
+            {
+                entry.text = MessageBody::decode_revealed(inner).text;
             }
+            authors.push(if from_me {
+                Some(my_account.clone())
+            } else if file {
+                author_account
+            } else if account.is_some() {
+                from.clone()
+            } else {
+                None
+            });
+            messages.push(entry);
         }
         drop(suppression);
         drop(identities);
-        // Channel file acceptance is durable before its history sidecar is
-        // projected. Read the same retained manifest from that pending WAL entry.
-        for transaction in pending {
-            if let DeliveryTransaction::ChannelOutgoing { events, sent, .. } = transaction.body()
-                && sent.conversation == conversation
-                && let Some(event) = events.last()
-                && event.kind == crate::eventlog::EventKind::FileManifest
-                && !seen.contains(&event.id)
-                && !delivery.file_erased(conversation, event.id)
-                && !self.recipient_expired(&sent.plaintext, event.id, sent.wall_clock)
-                && crate::file::decode_manifest(&sent.plaintext).is_some()
-            {
-                seen.insert(event.id);
-                rows.push(HistoryRow {
-                    id: event.id,
-                    wall_clock: sent.wall_clock,
-                    from_me: true,
-                    who: "you",
-                    plaintext: &sent.plaintext,
-                    expires_at_ms: crate::expiry::deadline(&sent.plaintext),
-                    file: true,
-                });
-            }
-        }
-        if is_channel {
-            let archive: Vec<_> = rows.iter().map(|row| (row.id, row.wall_clock)).collect();
-            let ranks: HashMap<_, _> =
-                super::timeline::ordered_ids(&events.iter().collect::<Vec<_>>(), &archive, false)
-                    .into_iter()
-                    .enumerate()
-                    .map(|(rank, id)| (id, rank))
-                    .collect();
-            rows.sort_by_key(|row| ranks.get(&row.id).copied().unwrap_or(usize::MAX));
-        } else {
-            rows.sort_by_key(|row| (row.wall_clock, row.id));
-        }
-        if let HistorySelection::Selected(ids) = selection {
-            rows.retain(|row| ids.contains(&row.id));
-        }
-        let (start, end, newer_entries) = match selection {
-            HistorySelection::Selected(_) => (0, rows.len(), 0),
-            HistorySelection::Recent(limit) => (rows.len().saturating_sub(limit), rows.len(), 0),
-            HistorySelection::Protected(id) => {
-                let Some(target) = rows.iter().position(|row| row.id == id) else {
-                    return Ok(None);
-                };
-                (target, target + 1, rows.len() - target - 1)
-            }
-            HistorySelection::Context(id) => {
-                let Some(target) = rows.iter().position(|row| row.id == id) else {
-                    return Ok(None);
-                };
-                (
-                    target.saturating_sub(25),
-                    target.saturating_add(26).min(rows.len()),
-                    rows.len() - target - 1,
-                )
-            }
-        };
-        let mut messages: Vec<_> = rows[start..end]
-            .iter()
-            .map(|row| {
-                let mut entry = row.decode();
-                entry.reply_to = entry
-                    .reply_to
-                    .map(|target| self.file_message_logical_id(conversation, target));
-                if row.file {
-                    entry.file_message_aliases = self
-                        .file_message_identities
-                        .lock()
-                        .expect("file identity lock")
-                        .aliases(conversation, row.id);
-                }
-                if let HistorySelection::Protected(id) = selection
-                    && row.id == id
-                    && entry.protection.is_some()
-                    && entry.file.is_none()
-                {
-                    entry.text = MessageBody::decode_revealed(row.plaintext).text;
-                }
-                entry
-            })
-            .collect();
-        // Recall resolution can acquire the same stores. Release the borrowed
-        // snapshot first, then apply the latest authorized recall projection.
-        drop(rows);
-        drop(events);
         drop(files);
         drop(received);
         drop(recovered);
-        drop(sentlog);
+        drop(sent);
         drop(log);
         drop(delivery);
-        let recalled = if let Some(peer) = account {
-            self.recalled_targets_account(peer)?
-        } else if is_channel {
-            self.recalled_targets_channel(conversation)?
-        } else {
-            HashSet::new()
-        };
-        if let HistorySelection::Context(id) | HistorySelection::Protected(id) = selection
-            && recalled.contains(&id)
+        let mut recalled = HashSet::new();
+        for (entry, author) in messages.iter().zip(&authors) {
+            if self.message_recalled_selected(conversation, entry.id, account, author.as_deref())? {
+                recalled.insert(entry.id);
+            }
+        }
+        if matches!(selection,HistorySelection::Context(id)|HistorySelection::Protected(id) if recalled.contains(&id))
         {
             return Ok(None);
         }
@@ -419,7 +568,7 @@ impl Node {
         }
         Ok(Some(super::search::SearchContext {
             messages,
-            newer_entries,
+            newer_entries: newer,
         }))
     }
 }

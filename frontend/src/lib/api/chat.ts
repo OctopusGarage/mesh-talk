@@ -219,6 +219,8 @@ export const chat = {
       display_name?: string;
       history_revision?: number;
       supports_push_state?: boolean;
+      supports_bounded_delivery?: boolean;
+      runtime_id?: string;
     }>("owner_node_identity", { owner }),
   enqueueText: (
     owner: string,

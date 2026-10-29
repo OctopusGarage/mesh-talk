@@ -55,7 +55,7 @@ async fn pairing_without_backfill_case(wanted: bool, source_enabled: bool, versi
             EventId::new([13; 32]),
         )
         .unwrap();
-    assert_eq!(linker.export_account_backfill().len(), 1);
+    assert_eq!(linker.export_account_backfill().unwrap().len(), 1);
     let code = PairingCode::from_hex(&linker.start_linking()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

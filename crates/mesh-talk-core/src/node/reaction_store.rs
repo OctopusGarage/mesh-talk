@@ -108,6 +108,30 @@ impl ReactionStore {
         Ok(())
     }
 
+    pub(super) fn try_remove_where(
+        &mut self,
+        remove: impl Fn(ConversationId, u64, &ReactionPayload) -> Result<bool, LogError>,
+    ) -> Result<(), LogError> {
+        let mut kept = Vec::new();
+        for ((conversation, _, _), (wall, payload)) in &self.entries {
+            if !remove(*conversation, *wall, payload)? {
+                kept.push(Record {
+                    conversation: *conversation,
+                    wall: *wall,
+                    payload: payload.clone(),
+                });
+            }
+        }
+        if kept.len() != self.entries.len() {
+            self.file.rewrite(&kept)?;
+            self.records = kept.len();
+            self.entries.clear();
+            for record in kept {
+                self.merge(record);
+            }
+        }
+        Ok(())
+    }
     fn records_kept(
         &self,
         remove: impl Fn(ConversationId, u64, &ReactionPayload) -> bool,
