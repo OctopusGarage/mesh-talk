@@ -181,15 +181,19 @@ test("received media recovers when bytes become available with stable fileConv",
         },
       )
       .toBe(true);
+    // The 1200×900 fixture and provisional frame are both 4:3: decoding keeps
+    // the row stable while fitting the original image within the 320px cap.
+    await expect
+      .poll(async () => {
+        const thumbnail = await page.getByTestId("file-image").boundingBox();
+        return { width: thumbnail?.width, height: thumbnail?.height };
+      })
+      .toEqual({ width: 320, height: 240 });
     await expect
       .poll(() =>
         messageRow.evaluate((row) => row.getBoundingClientRect().height),
       )
-      .toBeLessThan(receivingHeight);
-    // This 2px fixture must retain its original size after first decode.
-    const thumbnail = (await page.getByTestId("file-image").boundingBox())!;
-    expect(thumbnail.width).toBeLessThanOrEqual(2);
-    expect(thumbnail.height).toBeLessThanOrEqual(2);
+      .toBe(receivingHeight);
     await page.getByRole("button", { name: "View full size" }).click();
     const lightbox = page.getByTestId("file-image-lightbox");
     await expect(lightbox).toBeVisible();
