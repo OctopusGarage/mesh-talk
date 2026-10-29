@@ -7,6 +7,7 @@ type Diagnostic = {
   identity: string;
   historyCalls: number;
   png: ArrayBuffer;
+  actions: Array<{ cmd: string; args: Record<string, unknown> }>;
 };
 type MediaWindow = Window & {
   __mediaDiagnostic: Diagnostic;
@@ -24,6 +25,7 @@ test("received media recovers when bytes become available with stable fileConv",
       get: () => "Macintosh; Mac OS X",
     });
   });
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await enterChat(page);
   await page.evaluate(() => {
     const w = window as unknown as MediaWindow;
@@ -33,6 +35,7 @@ test("received media recovers when bytes become available with stable fileConv",
       identity: "fc_early_media_diagnostic",
       historyCalls: 0,
       png: new ArrayBuffer(0),
+      actions: [],
     };
     const original = w.__TAURI_INTERNALS__.invoke;
     w.__TAURI_INTERNALS__.invoke = async (
@@ -40,6 +43,16 @@ test("received media recovers when bytes become available with stable fileConv",
       args: Record<string, unknown>,
     ) => {
       const d = w.__mediaDiagnostic;
+      if (
+        [
+          "plugin:dialog|save",
+          "save_file",
+          "plugin:opener|reveal_item_in_dir",
+        ].includes(cmd)
+      ) {
+        d.actions.push({ cmd, args });
+        return cmd === "plugin:dialog|save" ? "/tmp/image-menu-test.png" : null;
+      }
       if (cmd === "file_statuses") {
         return (args.fileConvs as string[]).map((file_conv) =>
           file_conv === d.identity
@@ -157,8 +170,59 @@ test("received media recovers when bytes become available with stable fileConv",
       "user-select",
       "none",
     );
+    await lightbox
+      .getByRole("button", { name: "Zoom in", exact: true })
+      .click();
     await enlargedImage.click({ button: "right" });
-    await expect(page.getByRole("menu")).toHaveCount(0);
+    const menu = page.getByRole("menu");
+    await expect(menu).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy image", exact: true }),
+    ).toBeVisible();
+    await expect(menu.getByText("Open Image in New Window")).toHaveCount(0);
+    await expect(menu.getByText("Copy Subject")).toHaveCount(0);
+    await menu
+      .getByRole("menuitem", { name: "Copy image", exact: true })
+      .click();
+    const copied = await page.evaluate(async () => {
+      const items = await navigator.clipboard.read();
+      const png = await items[0].getType("image/png");
+      const bitmap = await createImageBitmap(png);
+      const size = [bitmap.width, bitmap.height];
+      bitmap.close();
+      return size;
+    });
+    expect(copied).toEqual([1200, 900]);
+    await enlargedImage.click({ button: "right" });
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(lightbox).toBeVisible();
+    await enlargedImage.click({ button: "right" });
+    await menu.getByRole("menuitem", { name: "Save as…", exact: true }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (window as unknown as MediaWindow).__mediaDiagnostic.actions.some(
+            (action) => action.cmd === "save_file",
+          ),
+        ),
+      )
+      .toBe(true);
+    await enlargedImage.click({ button: "right" });
+    await expect(
+      menu.getByRole("menuitem", { name: "Reveal", exact: true }),
+    ).toBeVisible();
+    await menu.getByRole("menuitem", { name: "Reveal", exact: true }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (window as unknown as MediaWindow).__mediaDiagnostic.actions.some(
+            (action) => action.cmd === "plugin:opener|reveal_item_in_dir",
+          ),
+        ),
+      )
+      .toBe(true);
+    await lightbox.getByRole("button", { name: "Fit to window" }).click();
     // Releasing a text-selection drag on the backdrop must keep the preview open.
     await enlargedImage.hover();
     await page.mouse.down();

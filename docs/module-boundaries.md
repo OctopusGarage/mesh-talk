@@ -113,6 +113,13 @@ keyboard zoom (+/−/0). Resize clamps the current position; reopening resets it
 Controls remain outside the clipped image stage. Escape restores trigger focus.
 On macOS, unzoomed images retain native text selection; Option/Alt-drag bypasses
 panning when zoomed. Actual recognition and selection require WKWebView evidence.
+Ordinary-image context actions use the shared accessible menu, suppress WebKit
+browser defaults and reuse the attachment save/reveal owners. `ui/lib/imageClipboard.ts`
+exports the entire decoded image as PNG, starts the write within user activation,
+and guards delayed encoding with current-session authority. Image copying honors
+confirmation and best-effort unchanged-content clearing. File sharing is exposed
+only after a platform capability check; native subject extraction is not exposed.
+Escape dismisses the action menu before dismissing the preview.
 Attachment consent remains owned by `FileBubble` and the existing file policy.
 
 `mediaFile.tsx` owns durable-first reads and explicitly opts ordinary previews

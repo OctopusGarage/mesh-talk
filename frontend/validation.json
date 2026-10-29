@@ -1847,6 +1847,8 @@
     {
       "id": "frontend-image-live-text",
       "paths": [
+        "frontend/src/lib/imageClipboard.ts",
+        "frontend/src/lib/imageClipboard.test.ts",
         "frontend/src/features/chat/MediaPreview.tsx",
         "frontend/src/features/chat/MediaPreview.test.ts",
         "frontend/src/lib/sensitiveClipboard.ts",
@@ -1855,6 +1857,7 @@
         "docs/help/topics/send-files.md"
       ],
       "frontend": [
+        "src/lib/imageClipboard.test.ts",
         "src/features/chat/MediaPreview.test.ts",
         "src/lib/sensitiveClipboard.test.ts",
         "src/features/chat/mediaFileRead.test.ts",
@@ -1865,7 +1868,7 @@
         "guide": "docs/help/topics/send-files.md#copy-text-from-an-image",
         "invariants": [
           {
-            "name": "Only the ordinary enlarged Mac image opts into native selection and context menus; recognized text copy uses current-session admission and the existing confirmation/clear policy. Protected images remain excluded.",
+            "name": "Ordinary image previews use controlled copy/save/reveal actions and capability-gated file sharing, suppress browser defaults, and preserve Mac text selection. Image/text copy requires current-session admission and honors confirmation/clear policy; protected images remain excluded.",
             "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
           },
           {

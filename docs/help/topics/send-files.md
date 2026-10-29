@@ -40,12 +40,29 @@ check that the destination is writable, then use the file's retry action.
 
 In the macOS desktop app, click an ordinary image in the conversation to enlarge
 it. Move the pointer over the words, pause briefly, then drag to select the text.
-Press **Command-C**, or right-click the selection and choose **Copy**. Recognition
+Press **Command-C**, or right-click the selection and choose **Copy text**. Recognition
 uses macOS Live Text and depends on the system's support for the image and language.
-Other platforms keep their existing image preview.
+When zoomed in, hold **Option** while dragging to select text rather than pan.
 
-Copied text follows your copy-confirmation and clipboard-clearing settings in
-**Privacy & security**. Protected images do not allow text selection or copying.
+## Image actions
+
+Right-click an enlarged ordinary image to open the app's image menu:
+
+- **Copy image** copies the whole decoded image as PNG, independent of zoom or pan.
+  This action appears when the platform provides image clipboard support. If the
+  clipboard refuses access, the app reports the failure; use **Save as…** instead.
+- **Save as…** uses the app's file-saving dialog. Cancelling creates no saved file.
+- **Reveal** appears after saving and opens the file's location.
+- **Share image…** appears only when the platform reports file-sharing support.
+
+The browser's new-window/download commands and automatic **Copy Subject** action
+are not exposed. Copying a subject would remove its background; it is different
+from copying the whole image and is not currently integrated.
+
+Copied images and text follow your copy-confirmation and clipboard-clearing settings in
+**Privacy & security**. Clipboard clearing is best-effort: if read access is denied
+or the system has changed the PNG representation, the app leaves the clipboard
+untouched rather than overwriting unknown content. Protected images do not allow text selection or copying.
 Press **Escape** or use the close button to return to the conversation.
 
 ## Further reference

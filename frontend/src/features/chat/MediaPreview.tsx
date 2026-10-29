@@ -15,6 +15,8 @@ import {
   ZoomIn,
   ZoomOut,
   Maximize,
+  Copy,
+  Share2,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { attachmentLabel } from "@/lib/directoryAttachment";
@@ -28,6 +30,13 @@ import {
   useFileStatus,
   markUnavailableFileError,
 } from "@/store/fileAvailability";
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+} from "@/components/ui/context-menu";
+import { canCopyImage, copyImage } from "@/lib/imageClipboard";
 import { ReceiveProgress } from "./ReceiveProgress";
 import { isVideo } from "@/lib/mediaTypes";
 import { isMacOverlay } from "@/lib/platform";
@@ -133,6 +142,9 @@ export function MediaPreview({
     },
     [updateView],
   );
+  const [selectedText, setSelectedText] = useState("");
+  const [shareFile, setShareFile] = useState<File | null>(null);
+  const [copying, setCopying] = useState(false);
   const [saving, setSaving] = useState(false);
   const nativeImageText = isMacOverlay();
   const backdropPointerDown = useRef(false);
@@ -146,6 +158,8 @@ export function MediaPreview({
     if (!lightbox) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (document.querySelector('[data-image-actions][data-state="open"]'))
+        return;
       event.preventDefault();
       event.stopPropagation();
       closeLightbox();
@@ -192,6 +206,53 @@ export function MediaPreview({
       stage.removeEventListener("wheel", wheel);
     };
   }, [lightbox, video, zoom, updateView]);
+  useEffect(() => {
+    setShareFile(null);
+    if (!lightbox || video || !url || !navigator.canShare || !navigator.share)
+      return;
+    let active = true;
+    const lease = captureChatOwnership();
+    void fetch(url)
+      .then((response) => response.blob())
+      .then((blob) => {
+        const file = new File([blob], displayName, { type: blob.type });
+        if (active && lease.current() && navigator.canShare({ files: [file] }))
+          setShareFile(file);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [lightbox, video, url, displayName]);
+  const copyFullImage = async () => {
+    const lease = captureChatOwnership();
+    if (!imageRef.current || copying || !lease.current()) return;
+    setCopying(true);
+    try {
+      await copyImage(
+        imageRef.current,
+        t("settings.confirmCopyPrompt"),
+        lease.current,
+      );
+    } catch {
+      if (lease.current()) setError(t("common.copyFailed"));
+    } finally {
+      setCopying(false);
+    }
+  };
+  const shareImage = async () => {
+    const lease = captureChatOwnership();
+    if (!shareFile || !lease.current()) return;
+    try {
+      await navigator.share({ files: [shareFile] });
+    } catch (error) {
+      if (
+        lease.current() &&
+        !(error instanceof DOMException && error.name === "AbortError")
+      )
+        setError(t("files.shareFailed"));
+    }
+  };
   const layoutId = motionOK ? `media-${fileConv}` : undefined;
   const layoutTransition = { duration: 0.22, ease };
   const backdropTransition = { duration: motionOK ? 0.16 : 0.08, ease };
@@ -547,6 +608,8 @@ export function MediaPreview({
                 );
               }}
               onPointerDown={(event) => {
+                // Portalled action-menu events also bubble through the React stage.
+                if (!event.currentTarget.contains(event.target as Node)) return;
                 backdropPointerDown.current =
                   event.target === event.currentTarget;
                 if (
@@ -604,57 +667,124 @@ export function MediaPreview({
                 else if (backdropPointerDown.current) closeLightbox();
               }}
             >
-              <div
-                data-testid="image-transform"
-                className="pointer-events-none flex h-full w-full items-center justify-center"
-                style={{
-                  transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
-                  cursor:
-                    view.scale > 1
-                      ? dragging
-                        ? "grabbing"
-                        : "grab"
-                      : "zoom-in",
+              <ContextMenu
+                onOpenChange={(open) => {
+                  if (open)
+                    setSelectedText(window.getSelection()?.toString() ?? "");
                 }}
               >
-                <motion.img
-                  ref={imageRef}
-                  draggable={false}
-                  onLoad={() => updateView(1)}
-                  src={url}
-                  alt={displayName}
-                  layoutId={layoutId}
-                  transition={layoutTransition}
-                  onClick={(e) => e.stopPropagation()}
-                  onContextMenu={
-                    nativeImageText
-                      ? (event) => event.stopPropagation()
-                      : undefined
-                  }
-                  onCopy={
-                    nativeImageText
-                      ? (event) => {
-                          const text = window.getSelection()?.toString();
-                          if (!text) return;
-                          event.preventDefault();
-                          event.stopPropagation();
-                          const lease = captureChatOwnership();
-                          if (!lease.current()) return;
+                <ContextMenuTrigger
+                  asChild
+                  onContextMenu={(event) => event.stopPropagation()}
+                >
+                  <div
+                    data-testid="image-transform"
+                    className="pointer-events-none flex h-full w-full items-center justify-center"
+                    style={{
+                      transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+                      cursor:
+                        view.scale > 1
+                          ? dragging
+                            ? "grabbing"
+                            : "grab"
+                          : "zoom-in",
+                    }}
+                  >
+                    <motion.img
+                      ref={imageRef}
+                      draggable={false}
+                      onLoad={() => updateView(1)}
+                      src={url}
+                      alt={displayName}
+                      layoutId={layoutId}
+                      transition={layoutTransition}
+                      onClick={(e) => e.stopPropagation()}
+                      onCopy={
+                        nativeImageText
+                          ? (event) => {
+                              const text = window.getSelection()?.toString();
+                              if (!text) return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              const lease = captureChatOwnership();
+                              if (!lease.current()) return;
+                              void copySensitiveText(
+                                text,
+                                t("settings.confirmCopyPrompt"),
+                                (value) =>
+                                  event.clipboardData.setData(
+                                    "text/plain",
+                                    value,
+                                  ),
+                              ).catch(() => {
+                                if (lease.current())
+                                  setError(t("common.copyFailed"));
+                              });
+                            }
+                          : undefined
+                      }
+                      className={`pointer-events-auto max-h-full max-w-full rounded-lg object-contain${nativeImageText ? " select-text" : ""}`}
+                    />
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent
+                  data-image-actions=""
+                  className="z-[60]"
+                  onCloseAutoFocus={(event) => {
+                    event.preventDefault();
+                    closeRef.current?.focus();
+                  }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {canCopyImage() && (
+                    <ContextMenuItem
+                      disabled={copying}
+                      onSelect={() => void copyFullImage()}
+                    >
+                      <Copy className="h-4 w-4" />
+                      {t("files.copyImage")}
+                    </ContextMenuItem>
+                  )}
+                  {nativeImageText && selectedText && (
+                    <ContextMenuItem
+                      onSelect={() => {
+                        const lease = captureChatOwnership();
+                        const text = selectedText;
+                        if (text && lease.current())
                           void copySensitiveText(
                             text,
                             t("settings.confirmCopyPrompt"),
-                            (value) =>
-                              event.clipboardData.setData("text/plain", value),
                           ).catch(() => {
                             if (lease.current())
                               setError(t("common.copyFailed"));
                           });
-                        }
-                      : undefined
-                  }
-                  className={`pointer-events-auto max-h-full max-w-full rounded-lg object-contain${nativeImageText ? " select-text" : ""}`}
-                />
-              </div>
+                      }}
+                    >
+                      <Copy className="h-4 w-4" />
+                      {t("files.copyText")}
+                    </ContextMenuItem>
+                  )}
+                  <ContextMenuItem
+                    disabled={saving}
+                    onSelect={() => void saveAs()}
+                  >
+                    <Download className="h-4 w-4" />
+                    {t("files.saveAs")}
+                  </ContextMenuItem>
+                  {savedPath && (
+                    <ContextMenuItem onSelect={() => void reveal()}>
+                      <FolderOpen className="h-4 w-4" />
+                      {t("files.reveal")}
+                    </ContextMenuItem>
+                  )}
+                  {shareFile && (
+                    <ContextMenuItem onSelect={() => void shareImage()}>
+                      <Share2 className="h-4 w-4" />
+                      {t("files.shareImage")}
+                    </ContextMenuItem>
+                  )}
+                </ContextMenuContent>
+              </ContextMenu>
             </div>
             <div
               role="group"

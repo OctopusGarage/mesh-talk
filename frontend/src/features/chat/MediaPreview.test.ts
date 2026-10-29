@@ -142,7 +142,7 @@ async function copySelection(image: HTMLImageElement, text = "图片里的文字
   return event;
 }
 
-it("enables native selection only on the enlarged Mac image and isolates its context menu", async () => {
+it("keeps native text selection while replacing the browser image menu", async () => {
   const image = await openImage();
   expect(image.classList.contains("select-text")).toBe(true);
   expect(
@@ -155,7 +155,7 @@ it("enables native selection only on the enlarged Mac image and isolates its con
     cancelable: true,
   });
   image.dispatchEvent(context);
-  expect(context.defaultPrevented).toBe(false);
+  expect(context.defaultPrevented).toBe(true);
   expect(ancestorMenu).not.toHaveBeenCalled();
 });
 
@@ -189,12 +189,12 @@ it("blocks stale session copies and reports current clipboard failures", async (
   expect(state.setError).toHaveBeenCalledWith("common.copyFailed");
 });
 
-it("keeps other platforms' existing preview and message context menu", async () => {
+it("isolates image actions from message menus on other platforms", async () => {
   state.mac = false;
   const image = await openImage();
   expect(image.classList.contains("select-text")).toBe(false);
   image.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
-  expect(ancestorMenu).toHaveBeenCalledTimes(1);
+  expect(ancestorMenu).not.toHaveBeenCalled();
 });
 
 it("does not dismiss when image selection ends on the backdrop; a backdrop click still closes", async () => {
