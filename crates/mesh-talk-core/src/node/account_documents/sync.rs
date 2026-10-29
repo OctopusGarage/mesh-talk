@@ -824,6 +824,19 @@ impl Node {
         let result = self.pull_account_documents_page_inner(peer, cursor).await;
         #[cfg(test)]
         if let Some(started) = started {
+            if result.is_ok()
+                && cursor.page_completed
+                && matches!(
+                    cursor.scope,
+                    DocumentSyncScope::Control | DocumentSyncScope::Directory
+                )
+                && cursor.status(self.device_sync_policy())
+                    == (super::super::SyncPhase::UpToDate, None, false)
+            {
+                self.trace_account_client(&peer.public, || {
+                    format!("document_scope_settled scope={:?}", cursor.scope)
+                });
+            }
             self.trace_account_client(&peer.public, || {
                 format!(
                     "page_end elapsed_ms={} outcome={} {}",

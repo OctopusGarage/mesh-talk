@@ -382,6 +382,13 @@ establish the fixture's real connection state; they are not an eight-second
 operation or custody latency assertion, and they do not drive extra RPCs, warm
 session pools, retry submissions or suppress background workers.
 
+Modern self-control fixtures observe validated Directory and Control scope
+completions in both directions for the selected full peer identities. These
+observations reset before final requester enrollment. The aggregate device sync
+phase includes unrelated lanes and is not a prerequisite for group admission.
+Keep the original role, capability and retained-membership proofs alongside these
+scope completions; the observations neither issue requests nor stop workers.
+
 Once the original operation is admitted, or the external possession proof starts,
 the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit

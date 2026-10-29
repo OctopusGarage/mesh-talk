@@ -1126,6 +1126,7 @@ pub(in crate::node) mod tests {
         let selected_trace_peer = std::sync::Arc::new(std::sync::Mutex::new(
             None::<crate::identity::device::PublicIdentity>,
         ));
+        let settled_scopes = std::sync::Arc::new(std::sync::Mutex::new([[false; 2]; 2]));
         let peer_labels: std::collections::HashMap<_, _> = nodes
             .iter()
             .map(|(label, node)| (node.identity.public().user_id(), *label))
@@ -1138,6 +1139,7 @@ pub(in crate::node) mod tests {
             let selected_trace_peer = selected_trace_peer.clone();
             let own_public = node.identity.public();
             let reference_public = reference.identity.public();
+            let completed_scopes = settled_scopes.clone();
             let queue_samples = std::sync::Mutex::new(std::collections::HashMap::new());
             *node.account_client_test_hook.lock().unwrap() =
                 Some(std::sync::Arc::new(move |peer, event| {
@@ -1150,6 +1152,17 @@ pub(in crate::node) mod tests {
                                 (own_public == reference_public && &peer == online)
                                     || (&own_public == online && peer == reference_public)
                             });
+                    if selected_pair {
+                        let scope = match event.as_str() {
+                            "document_scope_settled scope=Control" => Some(0),
+                            "document_scope_settled scope=Directory" => Some(1),
+                            _ => None,
+                        };
+                        if let Some(scope) = scope {
+                            let direction = usize::from(own_public != reference_public);
+                            completed_scopes.lock().unwrap()[direction][scope] = true;
+                        }
+                    }
                     if event.starts_with("control_queue") || event.starts_with("control_refresh") {
                         if !selected_pair {
                             return;
@@ -1183,6 +1196,7 @@ pub(in crate::node) mod tests {
                             &own_public == online || own_public == reference_public
                         });
                     if (selected_responder && event.starts_with("responder_"))
+                        || event.starts_with("document_scope_settled")
                         || event.starts_with("operation_local_published")
                         || event.starts_with("wake_")
                         || (selected_pair
@@ -1434,15 +1448,16 @@ pub(in crate::node) mod tests {
                 }
             }
         }
+        *settled_scopes.lock().unwrap() = [[false; 2]; 2];
         handles[1] = Some(tokio::spawn(
             reference
                 .clone()
                 .run_accept_loop(reference_listener.take().unwrap()),
         ));
         let kind = input.operation().kind();
-        // Cold document enrollment belongs to the existing setup budget. These
-        // passive observations neither send a probe nor begin the timed action.
-        let documents_ready = |node: &Node, peer: &Node| {
+        // Require actual completed mandatory scopes from the final topology,
+        // independently of unrelated optional-lane aggregate progress.
+        let documents_ready = |node: &Node, peer: &Node, direction: usize| {
             let public = peer.identity.public();
             let exact_protocol = node
                 .account_group_versions
@@ -1453,13 +1468,8 @@ pub(in crate::node) mod tests {
             let exact_route = node
                 .routing_peer(&peer.user_id())
                 .is_some_and(|route| route.public == public);
-            let settled = node.device_sync_status().into_iter().any(|status| {
-                status.device_id == peer.user_id()
-                    && status.document_phase == crate::node::SyncPhase::UpToDate
-                    && status.document_error.is_none()
-                    && !status.document_requires_upgrade
-            });
-            exact_protocol && exact_route && settled
+            let settled = settled_scopes.lock().unwrap()[direction];
+            exact_protocol && exact_route && settled.into_iter().all(|complete| complete)
         };
         let readiness = || {
             let role_ready = reference.account_group_access(group).unwrap().role
@@ -1496,8 +1506,8 @@ pub(in crate::node) mod tests {
                 capability_ready,
                 reverse_ready,
                 old_head_ready,
-                documents_ready(&reference, &online),
-                documents_ready(&online, &reference),
+                documents_ready(&reference, &online, 0),
+                documents_ready(&online, &reference, 1),
             ]
         };
         let online_label = nodes
@@ -1535,8 +1545,9 @@ pub(in crate::node) mod tests {
                 node.group_control_heads(group).iter().any(|head| head.proof.public() == *public
                     && head.access.observation.role == AccountGroupRole::Member)
             }));
-            format!("real private role/capability and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_forward_reverse_old_documents_forward_reverse={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}",
+            format!("real private role/capability and old Member provenance must arrive before self-control admission: readiness_elapsed_ms={}; ready_role_forward_reverse_old_mandatory_scopes_forward_reverse={:?}; forward_full_identity_kind={:?}; reverse_full_identity={:?}; old_head_reference_online={:?}; settled_control_directory_forward_reverse={:?}; certified_reference_online={:?}; routed_full_identity_reference_online={:?}; chosen_online={online_label}; trace_omitted={}; bounded_request_header_trace_tail={:?}",
                 readiness_started.elapsed().as_millis(), readiness(), forward, reverse, old_heads,
+                *settled_scopes.lock().unwrap(),
                 [reference.certified_sibling(&online.identity.public()), online.certified_sibling(&reference.identity.public())],
                 [reference.routing_peer(&online.user_id()).is_some_and(|peer| peer.public == online.identity.public()),
                  online.routing_peer(&reference.user_id()).is_some_and(|peer| peer.public == reference.identity.public())],
@@ -1544,7 +1555,7 @@ pub(in crate::node) mod tests {
                 trace.lock().unwrap().iter().cloned().collect::<Vec<_>>())
         }).await;
         eprintln!(
-            "self control readiness completed chosen_online={online_label} readiness_elapsed_ms={} ready_role_forward_reverse_old_documents_forward_reverse={:?} trace_omitted={} bounded_trace={:?}",
+            "self control readiness completed chosen_online={online_label} readiness_elapsed_ms={} ready_role_forward_reverse_old_mandatory_scopes_forward_reverse={:?} trace_omitted={} bounded_trace={:?}",
             readiness_started.elapsed().as_millis(),
             readiness(),
             trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
