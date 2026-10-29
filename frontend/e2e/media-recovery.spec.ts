@@ -181,12 +181,27 @@ test("received media recovers when bytes become available with stable fileConv",
     ).toBeVisible();
     await expect(menu.getByText("Open Image in New Window")).toHaveCount(0);
     await expect(menu.getByText("Copy Subject")).toHaveCount(0);
+    await page.evaluate(() =>
+      navigator.clipboard.writeText("before image copy"),
+    );
     await menu
       .getByRole("menuitem", { name: "Copy image", exact: true })
       .click();
+    // The click starts asynchronous PNG encoding and the OS clipboard write.
+    // Wait for that write before reading its pixels, rather than the old value.
+    await expect
+      .poll(async () =>
+        page.evaluate(async () => {
+          const items = await navigator.clipboard.read();
+          return items.some((item) => item.types.includes("image/png"));
+        }),
+      )
+      .toBe(true);
     const copied = await page.evaluate(async () => {
       const items = await navigator.clipboard.read();
-      const png = await items[0].getType("image/png");
+      const png = await items
+        .find((item) => item.types.includes("image/png"))!
+        .getType("image/png");
       const bitmap = await createImageBitmap(png);
       const size = [bitmap.width, bitmap.height];
       bitmap.close();

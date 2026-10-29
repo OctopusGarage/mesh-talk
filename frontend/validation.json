@@ -1947,6 +1947,7 @@
       "paths": [
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-1280x800.png",
         "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-760x620.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-oled-760x620-win32.png",
         "frontend/e2e/sidebar-row-layout.spec.ts",
         "frontend/src/store/reception.ts",
         "frontend/src/store/reception.test.ts",
@@ -2015,7 +2016,7 @@
         ]
       },
       "escalation": [
-        "Run frontend/e2e/unread-badge.spec.ts and relevant e2e/ui-visual-regression.spec.ts cases for unread review, keyboard focus, narrow/short windows and light/dark layouts. Browser mocks verify IPC requests, not physical Dock/tray appearance; real packaged macOS/Linux badge repaint and logout evidence remain separate native acceptance. Windows count badges retain their documented unsupported behavior."
+        "Run frontend/e2e/ui-audit-shell.spec.ts and frontend/e2e/sidebar-row-layout.spec.ts for compact tool labels, full accessible names and side-by-side geometry. Run frontend/e2e/unread-badge.spec.ts and relevant e2e/ui-visual-regression.spec.ts cases for unread review, keyboard focus, narrow/short windows and light/dark layouts. Browser mocks verify IPC requests, not physical Dock/tray appearance; real packaged macOS/Linux badge repaint and logout evidence remain separate native acceptance. Windows count badges retain their documented unsupported behavior."
       ]
     },
     {
@@ -2694,7 +2695,8 @@
       "browser": [
         "e2e/language-settings.spec.ts",
         "e2e/login-recovery.spec.ts",
-        "e2e/ui-audit-shell.spec.ts"
+        "e2e/ui-audit-shell.spec.ts",
+        "e2e/person-presence.spec.ts"
       ]
     },
     {

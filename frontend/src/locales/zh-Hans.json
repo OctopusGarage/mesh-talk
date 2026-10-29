@@ -333,7 +333,7 @@
     "invalidResponse": "无法读取返回的在线状态信息。",
     "observedDevices": "发现 {{count}} 台在线设备",
     "source_local": "本地网络发现",
-    "source_routed": "可见性与跨网络发现",
+    "source_routed": "跨网络发现",
     "source_directory": "经邮局发现",
     "source_authenticated": "已验证的通信记录（网络范围未确定）",
     "source_self": "本机节点运行中",

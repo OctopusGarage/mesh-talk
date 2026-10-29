@@ -333,7 +333,7 @@
     "invalidResponse": "The online status response could not be read.",
     "observedDevices": "Freshly observed devices: {{count}}",
     "source_local": "Local network discovery",
-    "source_routed": "Visibility & cross-network discovery",
+    "source_routed": "Cross-network discovery",
     "source_directory": "Discovered through a post office",
     "source_authenticated": "Authenticated observation (network scope unspecified)",
     "source_self": "This device is running",

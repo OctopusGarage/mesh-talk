@@ -333,7 +333,7 @@
     "invalidResponse": "Não foi possível ler a resposta de status online.",
     "observedDevices": "Dispositivos observados recentemente: {{count}}",
     "source_local": "Descoberta na rede local",
-    "source_routed": "Visibilidade e descoberta entre redes",
+    "source_routed": "Descoberta entre redes",
     "source_directory": "Descoberto por meio de um posto de correio",
     "source_authenticated": "Observação autenticada (escopo de rede não especificado)",
     "source_self": "Este dispositivo está em execução",

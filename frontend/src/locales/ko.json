@@ -333,7 +333,7 @@
     "invalidResponse": "온라인 상태 응답을 읽지 못했습니다.",
     "observedDevices": "최근 확인된 기기: {{count}}대",
     "source_local": "로컬 네트워크 검색",
-    "source_routed": "공개 범위 및 네트워크 간 검색",
+    "source_routed": "네트워크 간 검색",
     "source_directory": "우체국을 통해 발견됨",
     "source_authenticated": "인증된 관측 (네트워크 범위 미지정)",
     "source_self": "이 기기 실행 중",
