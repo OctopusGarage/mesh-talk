@@ -13,6 +13,9 @@ use std::{
     path::Path,
 };
 
+mod indexed;
+pub(crate) use indexed::IndexedFileMessageIdentities;
+
 const MAGIC: &[u8; 6] = b"MTFMID";
 const PREFIX: &[u8] =
     b"mesh-talk-file-consent-control-v1\0\0\0\0\0\0\0\0\xffmesh-talk-file-message-identity-v1\0";
@@ -326,30 +329,35 @@ impl Node {
         &self,
         host: ConversationId,
         manifest: EventId,
-    ) -> bool {
+    ) -> Result<bool, LogError> {
         self.file_message_identities
             .lock()
             .expect("file identity lock")
-            .aliases
-            .contains_key(&(host, manifest))
+            .contains(host, manifest)
     }
     pub(in crate::node) fn file_message_logical_id(
         &self,
         host: ConversationId,
         event: EventId,
-    ) -> EventId {
+    ) -> Result<EventId, LogError> {
         self.file_message_identities
             .lock()
             .expect("file identity lock")
             .logical(host, event)
     }
-    pub(in crate::node) fn file_message_row_logical_id(&self, row: &ReceivedEntry) -> EventId {
+    pub(in crate::node) fn file_message_row_logical_id(
+        &self,
+        row: &ReceivedEntry,
+    ) -> Result<EventId, LogError> {
         self.file_message_identities
             .lock()
             .expect("file identity lock")
             .row_logical(row)
     }
-    pub(in crate::node) fn file_message_row_suppressed(&self, row: &ReceivedEntry) -> bool {
+    pub(in crate::node) fn file_message_row_suppressed(
+        &self,
+        row: &ReceivedEntry,
+    ) -> Result<bool, LogError> {
         let identities = self
             .file_message_identities
             .lock()
@@ -360,54 +368,6 @@ impl Node {
             .expect("account suppression lock");
         identities.row_suppressed(row, &suppression)
     }
-    pub(in crate::node) fn file_message_identity_snapshot(&self) -> Vec<Event> {
-        let source_ids: Vec<_> = self
-            .delivery
-            .lock()
-            .expect("delivery lock")
-            .file_cards()
-            .filter(|card| card.completion_binding.is_none())
-            .map(|card| card.id)
-            .collect();
-        for id in source_ids {
-            let _ = self.file_message_identity_bundle(id);
-        }
-        let retained: HashSet<_> = {
-            let files = self.received_files.lock().expect("files lock");
-            files
-                .conversations()
-                .into_iter()
-                .flat_map(|host| {
-                    files
-                        .entries_ref(&host)
-                        .iter()
-                        .filter(|row| !self.file_message_row_suppressed(row))
-                        .map(|row| (host, row.event_id))
-                        .collect::<Vec<_>>()
-                })
-                .collect()
-        };
-        let retained_ids: HashSet<_> = retained.iter().map(|(_, id)| *id).collect();
-        self.file_message_identities
-            .lock()
-            .expect("file identity lock")
-            .snapshot()
-            .into_iter()
-            .filter(|bundle| {
-                decode(bundle).is_some_and(|identity| {
-                    let local_source = identity.source.device_ed25519_pub
-                        == self.identity.public().ed25519_pub
-                        || self.recovery_origins.iter().any(|author| {
-                            author.ed25519_pub() == &identity.source.device_ed25519_pub
-                        });
-                    identity.aliases.iter().any(|alias| {
-                        retained.contains(&(identity.host(), *alias))
-                            || local_source && retained_ids.contains(alias)
-                    })
-                })
-            })
-            .collect()
-    }
     /// Retained source cards repair old per-device copies without re-sending artwork.
     pub(in crate::node) fn file_message_identity_bundle(
         &self,
@@ -417,7 +377,7 @@ impl Node {
             .file_message_identities
             .lock()
             .expect("file identity lock")
-            .bundle(manifest)
+            .bundle(manifest)?
         {
             return Ok(Some(bundle));
         }
@@ -460,10 +420,7 @@ impl Node {
             .received_files
             .lock()
             .expect("files lock")
-            .entries_ref(&card.conversation)
-            .iter()
-            .find(|row| row.event_id == card.id)
-            .cloned()
+            .entry_in(&card.conversation, card.id)?
         else {
             return Ok(None);
         };
@@ -561,37 +518,17 @@ impl Node {
                 .recovery_origins
                 .iter()
                 .any(|author| author.ed25519_pub() == &identity.source.device_ed25519_pub);
-        let alias_ids: HashSet<_> = identity.aliases.iter().copied().collect();
-        let rows = {
-            let files = self.received_files.lock().expect("files lock");
-            let hosts = if local_source {
-                files.conversations()
-            } else {
-                vec![identity.host()]
-            };
-            hosts
-                .iter()
-                .flat_map(|host| files.entries_ref(host))
-                .filter(|row| alias_ids.contains(&row.event_id))
-                .take(MAX_ALIASES)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
         let own = self.account_id();
-        if own != identity.source.account_id()
-            && own != identity.recipient_account
-            && !local_source
-            && !rows.iter().any(|row| identity.matches(row))
-        {
-            return Err(NodeError::Authorization(
-                "logical file identity belongs to another account".into(),
-            ));
-        }
+        let mut matching_host = false;
         let mut matched = false;
         let log = self.log.lock().expect("log lock");
         let proofs = self.account_file_proofs.lock().expect("file proofs lock");
         for alias in &identity.aliases {
-            if let Some(proof) = log.get(alias)?.or_else(|| proofs.get(alias).cloned()) {
+            let selected = match log.get(alias)? {
+                Some(event) => Some(event),
+                None => proofs.get(alias)?,
+            };
+            if let Some(proof) = selected {
                 if proof.author.ed25519_pub() != &identity.source.device_ed25519_pub
                     || proof.kind != EventKind::FileManifest
                     || proof.wall_clock != bundle.wall_clock
@@ -602,8 +539,16 @@ impl Node {
                         "logical file identity conflicts with signed manifest".into(),
                     ));
                 }
-                if let Some(row) = rows.iter().find(|row| row.event_id == *alias) {
-                    if !(identity.matches(row) || local_source && identity.matches_content(row))
+                let row = {
+                    let files = self.received_files.lock().expect("files lock");
+                    if local_source {
+                        files.entry(*alias)?
+                    } else {
+                        files.entry_in(&identity.host(), *alias)?
+                    }
+                };
+                if let Some(row) = row {
+                    if !(identity.matches(&row) || local_source && identity.matches_content(&row))
                         || super::files::validated_manifest(&row.plaintext)
                             .is_none_or(|manifest| manifest.file_conv() != identity.file)
                     {
@@ -612,38 +557,42 @@ impl Node {
                         ));
                     }
                     matched = true;
+                    matching_host |= identity.matches(&row);
                 }
             }
+        }
+        if own != identity.source.account_id()
+            && own != identity.recipient_account
+            && !local_source
+            && !matching_host
+        {
+            return Err(NodeError::Authorization(
+                "logical file identity belongs to another account".into(),
+            ));
         }
         if !matched {
             return Ok(false);
         }
         drop(proofs);
         drop(log);
-        let clashes_with_text = self
-            .sentlog
-            .lock()
-            .expect("sent log lock")
-            .entries_ref(&identity.host())
-            .iter()
-            .any(|row| {
-                super::DmEnvelope::decode_ref(&row.plaintext)
-                    .is_some_and(|envelope| alias_ids.contains(&EventId::new(envelope.msg_id)))
-            })
-            || self
-                .received
+        for alias in &identity.aliases {
+            if self
+                .sentlog
                 .lock()
-                .expect("received log lock")
-                .entries_ref(&identity.host())
-                .iter()
-                .any(|row| {
-                    super::DmEnvelope::decode_ref(&row.plaintext)
-                        .is_some_and(|envelope| alias_ids.contains(&EventId::new(envelope.msg_id)))
-                });
-        if clashes_with_text {
-            return Err(NodeError::Authorization(
-                "logical file identity conflicts with text message identity".into(),
-            ));
+                .expect("sent log lock")
+                .account_entry(&identity.host(), *alias.as_bytes())?
+                .is_some()
+                || self
+                    .received
+                    .lock()
+                    .expect("received log lock")
+                    .account_entry(&identity.host(), *alias)?
+                    .is_some()
+            {
+                return Err(NodeError::Authorization(
+                    "logical file identity conflicts with text message identity".into(),
+                ));
+            }
         }
         let erased = {
             let delivery = self.delivery.lock().expect("delivery lock");
@@ -656,12 +605,11 @@ impl Node {
                 .account_suppression
                 .lock()
                 .expect("account suppression lock");
-            let suppressed = erased
-                || suppression.contains(identity.host(), identity.logical)
-                || identity
-                    .aliases
-                    .iter()
-                    .any(|id| suppression.contains(identity.host(), *id));
+            let mut suppressed =
+                erased || suppression.contains(identity.host(), identity.logical)?;
+            for id in &identity.aliases {
+                suppressed |= suppression.contains(identity.host(), *id)?;
+            }
             if suppressed {
                 // Tombstones precede publishing the canonical alias index.
                 for id in &identity.aliases {
@@ -1201,6 +1149,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get(&detached)
+                .unwrap()
                 .is_some()
         );
         let mut source_snapshot = Vec::new();
@@ -1298,11 +1247,13 @@ mod tests {
             .unwrap();
         assert_eq!(history.len(), 2);
         assert!(first_destinations.iter().all(|destination| {
-            f.receiver.private_dm_message_recalled(
-                &f.sender.account_id(),
-                destination.event.id,
-                &f.sender.account_id(),
-            )
+            f.receiver
+                .private_dm_message_recalled(
+                    &f.sender.account_id(),
+                    destination.event.id,
+                    &f.sender.account_id(),
+                )
+                .unwrap()
         }));
         assert!(
             history
@@ -1331,10 +1282,14 @@ mod tests {
             .unwrap()
             .event
             .id;
-        assert!(!f.receiver.has_file_message_identity(
-            account_conversation_id(&f.sender.account_id(), &f.receiver.account_id()),
-            direct
-        ));
+        assert!(
+            !f.receiver
+                .has_file_message_identity(
+                    account_conversation_id(&f.sender.account_id(), &f.receiver.account_id()),
+                    direct
+                )
+                .unwrap()
+        );
         f.receiver
             .delete_account_message(&f.sender.account_id(), direct)
             .unwrap();
@@ -1357,6 +1312,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains(host, id)
+                .unwrap()
         );
         assert!(destinations.iter().all(|destination| {
             f.receiver
@@ -1364,6 +1320,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains(host, destination.event.id)
+                .unwrap()
         }));
         let secrets = f.receiver.identity.secret_bytes();
         f.receiver.close_profile().unwrap();
@@ -1491,13 +1448,10 @@ mod tests {
             .unwrap();
         f.copy_other_device(id, &destinations);
         let bundle = f.sender.file_message_identity_bundle(id).unwrap().unwrap();
-        f.receiver
-            .file_message_identities
-            .lock()
-            .unwrap()
-            .log
-            .fail_appends_for_test(true)
-            .unwrap();
+        f.receiver.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER fail_identity BEFORE INSERT ON file_identity_headers BEGIN SELECT RAISE(ABORT, 'injected identity write failure'); END")?;
+            Ok(())
+        }).unwrap();
         assert!(f.receiver.import_file_message_identity(bundle).is_err());
         assert!(
             f.receiver
@@ -1620,6 +1574,7 @@ mod tests {
                 .unwrap()
                 .entry(row.event_id)
                 .unwrap()
+                .unwrap()
                 .conversation,
             row.conversation
         );
@@ -1726,7 +1681,8 @@ mod tests {
                     .account_suppression
                     .lock()
                     .unwrap()
-                    .contains(host, destination.event.id)),
+                    .contains(host, destination.event.id)
+                    .unwrap()),
                 "refused batch must not suppress any alias"
             );
             assert!(

@@ -109,85 +109,58 @@ impl Node {
     pub(super) fn pending_file_message_identities(
         &self,
         peer: &PublicIdentity,
-    ) -> Vec<(ConversationId, EventId)> {
+    ) -> Result<Vec<(ConversationId, EventId)>, LogError> {
         let sibling = self.certified_sibling(peer);
-        let peer_account = self
+        let peer_host = self
             .historical_author(&peer.ed25519_pub)
-            .and_then(|proof| proof.account_id());
-        let peer_host = peer_account.map(|account| {
-            super::conversation::account_conversation_id(&self.account_id(), &account)
-        });
-        let snapshot = {
-            let rows = self.received_files.lock().expect("received files lock");
-            let mut hosts = rows.conversations();
-            hosts.sort_unstable_by_key(|host| *host.as_bytes());
-            let total: usize = hosts.iter().map(|host| rows.entries_ref(host).len()).sum();
-            let offset = self.sessions.file_identity_scan_offset(peer, 0, total, 256);
-            let mut remaining = total.min(256);
-            let mut snapshot = Vec::new();
-            for start in [offset, 0] {
-                let mut skip = start;
-                for host in &hosts {
-                    let entries = rows.entries_ref(host);
-                    if skip >= entries.len() {
-                        skip -= entries.len();
-                        continue;
-                    }
-                    let count = remaining.min(entries.len() - skip);
-                    snapshot.extend(
-                        entries[skip..skip + count]
-                            .iter()
-                            .filter(|row| {
-                                sibling
-                                    || row.from == peer.user_id()
-                                        && Some(row.conversation) == peer_host
-                            })
-                            .cloned(),
-                    );
-                    remaining -= count;
-                    skip = 0;
-                    if remaining == 0 {
-                        break;
-                    }
-                }
-                if remaining == 0 {
-                    break;
-                }
-            }
-            snapshot
-        };
+            .and_then(|proof| proof.account_id())
+            .map(|account| {
+                super::conversation::account_conversation_id(&self.account_id(), &account)
+            });
+        let after = self.sessions.file_identity_scan_after(peer);
+        let page = self
+            .received_files
+            .lock()
+            .expect("received files lock")
+            .scan_page(
+                None,
+                after,
+                super::transcript_repository::TranscriptPageLimit::new(16, 8 * 1024 * 1024)?,
+            )?;
         let personal_host =
             super::conversation::account_conversation_id(&self.account_id(), &self.account_id());
-        let mut candidates: Vec<_> = snapshot
-            .into_iter()
-            .filter(|row| {
-                row.conversation != personal_host
-                    && self
-                        .channels
-                        .lock()
-                        .expect("channels lock")
-                        .state(&row.conversation)
-                        .is_none()
-            })
-            .filter(|row| !self.has_file_message_identity(row.conversation, row.event_id))
-            .filter(|row| !self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock))
-            .filter(|row| {
-                let logical = self.file_message_row_logical_id(row);
-                let delivery = self.delivery.lock().expect("delivery lock");
-                if delivery.file_erased(row.conversation, row.event_id)
-                    || delivery.manifest_event_erased(row.event_id)
-                {
-                    return false;
-                }
-                let suppression = self.account_suppression.lock().expect("suppression lock");
-                !suppression.contains(row.conversation, row.event_id)
-                    && !suppression.contains(row.conversation, logical)
-            })
-            .filter_map(|row| {
-                super::files::validated_manifest(&row.plaintext)
-                    .map(|manifest| (manifest.file_conv(), row.event_id))
-            })
-            .collect();
+        let mut candidates = Vec::new();
+        for row in page.rows {
+            if !(sibling || row.from == peer.user_id() && Some(row.conversation) == peer_host)
+                || row.conversation == personal_host
+                || self
+                    .channels
+                    .lock()
+                    .expect("channels lock")
+                    .state(&row.conversation)
+                    .is_some()
+                || self.has_file_message_identity(row.conversation, row.event_id)?
+                || self.recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
+            {
+                continue;
+            }
+            let logical = self.file_message_row_logical_id(&row)?;
+            let delivery = self.delivery.lock().expect("delivery lock");
+            if delivery.file_erased(row.conversation, row.event_id)
+                || delivery.manifest_event_erased(row.event_id)
+            {
+                continue;
+            }
+            let suppression = self.account_suppression.lock().expect("suppression lock");
+            if suppression.contains(row.conversation, row.event_id)?
+                || suppression.contains(row.conversation, logical)?
+            {
+                continue;
+            }
+            if let Some(manifest) = super::files::validated_manifest(&row.plaintext) {
+                candidates.push((manifest.file_conv(), row.event_id));
+            }
+        }
         if !candidates.is_empty() {
             let offset = self.sessions.file_identity_scan_offset(
                 peer,
@@ -198,7 +171,8 @@ impl Node {
             candidates.rotate_left(offset);
             candidates.truncate(super::session::MAX_FILE_IDENTITIES);
         }
-        candidates
+        self.sessions.advance_file_identity_scan(peer, page.next);
+        Ok(candidates)
     }
 
     pub(super) fn file_message_identity_controls_for(
@@ -233,22 +207,24 @@ impl Node {
                 })
                 .collect()
         };
-        let manifests = manifests
-            .into_iter()
-            .filter(|(host, _, manifest)| {
-                !missing_only || !self.has_file_message_identity(*host, *manifest)
-            })
-            .take(super::session::MAX_FILE_IDENTITIES);
         let store = self.sync_store(peer);
-        manifests
-            .filter_map(|(_, file, manifest)| {
-                store
-                    .lock()
-                    .expect("sync store lock")
-                    .file_message_identity(&file, &manifest)
-                    .transpose()
-            })
-            .collect()
+        let mut selected = Vec::new();
+        for (host, file, manifest) in manifests {
+            if missing_only && self.has_file_message_identity(host, manifest)? {
+                continue;
+            }
+            if let Some(event) = store
+                .lock()
+                .expect("sync store lock")
+                .file_message_identity(&file, &manifest)?
+            {
+                selected.push(event);
+            }
+            if selected.len() == super::session::MAX_FILE_IDENTITIES {
+                break;
+            }
+        }
+        Ok(selected)
     }
 
     /// Exchange supplemental identities without changing existing media/history bytes.
@@ -1627,52 +1603,53 @@ impl SyncStore for GuardedSyncStore<'_> {
             }
         }
         let references = super::file_message_identity::bundle_references(&bundle);
-        let alias_ids: HashSet<_> = references.iter().map(|(_, alias)| *alias).collect();
         let local_source = source_account == self.node.account_id();
         let host =
             super::conversation::account_conversation_id(&source_account, &recipient_account);
-        let rows = {
-            let files = self
-                .node
-                .received_files
-                .lock()
-                .expect("received files lock");
-            let mut rows: Vec<_> = files
-                .entries_ref(&host)
-                .iter()
-                .filter(|row| alias_ids.contains(&row.event_id))
-                .take(64)
-                .cloned()
-                .collect();
-            if rows.is_empty() && local_source {
-                rows = references
-                    .iter()
-                    .filter_map(|(_, alias)| files.entry(*alias).cloned())
-                    .collect();
+        for (_, alias) in references {
+            let row = {
+                let files = self
+                    .node
+                    .received_files
+                    .lock()
+                    .expect("received files lock");
+                match files.entry_in(&host, alias)? {
+                    Some(row) => Some(row),
+                    None if local_source => files.entry(alias)?,
+                    None => None,
+                }
+            };
+            let Some(row) = row else {
+                continue;
+            };
+            if !(super::file_message_identity::bundle_matches_row(&bundle, &row)
+                || local_source
+                    && super::file_message_identity::bundle_matches_source_row(&bundle, &row))
+                || self
+                    .node
+                    .recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
+            {
+                continue;
             }
-            rows
-        };
-        let delivery = self.node.delivery.lock().expect("delivery lock");
-        let suppression = self
-            .node
-            .account_suppression
-            .lock()
-            .expect("suppression lock");
-        Ok(rows
-            .iter()
-            .any(|row| {
-                (super::file_message_identity::bundle_matches_row(&bundle, row)
-                    || local_source
-                        && super::file_message_identity::bundle_matches_source_row(&bundle, row))
-                    && !self
-                        .node
-                        .recipient_expired(&row.plaintext, row.event_id, row.wall_clock)
-                    && !delivery.file_erased(row.conversation, row.event_id)
-                    && !delivery.manifest_event_erased(row.event_id)
-                    && !suppression.contains(row.conversation, row.event_id)
-            })
-            .then_some(bundle))
+            let delivery = self.node.delivery.lock().expect("delivery lock");
+            if delivery.file_erased(row.conversation, row.event_id)
+                || delivery.manifest_event_erased(row.event_id)
+            {
+                continue;
+            }
+            if !self
+                .node
+                .account_suppression
+                .lock()
+                .expect("suppression lock")
+                .contains(row.conversation, row.event_id)?
+            {
+                return Ok(Some(bundle));
+            }
+        }
+        Ok(None)
     }
+
     fn accept_file_message_identity(&mut self, bundle: Event) -> Result<bool, LogError> {
         if self.denied
             || self.pull_only

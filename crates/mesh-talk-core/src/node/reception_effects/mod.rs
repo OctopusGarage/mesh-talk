@@ -118,13 +118,13 @@ pub(crate) struct ReceptionSource {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ReceptionCursor {
+pub struct ReceptionCursor {
     pub epoch: [u8; 16],
     pub sequence: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ReceptionLimit {
+pub struct ReceptionLimit {
     pub rows: usize,
     pub body_bytes: usize,
     pub serialized_bytes: usize,
@@ -164,7 +164,7 @@ pub(crate) struct ReceptionPage {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum ReceptionConsumer {
+pub enum ReceptionConsumer {
     Desktop,
     CliOutput,
     CliAutosave,

@@ -155,7 +155,39 @@ impl ReceptionEffects {
             .database()
             .read(|c| Ok(state_on(c, &self.account)?.head))
     }
+    pub(crate) fn oldest(&self) -> Result<ReceptionCursor, LogError> {
+        self.profile.database().read(|c| {
+            let state = state_on(c, &self.account)?;
+            Ok(ReceptionCursor {
+                sequence: state.retired,
+                ..state.head
+            })
+        })
+    }
 
+    pub(crate) fn registered(
+        &self,
+        consumer: ReceptionConsumer,
+    ) -> Result<Option<ReceptionCursor>, LogError> {
+        self.profile.database().read(|c| {
+            let state = state_on(c, &self.account)?;
+            let sequence: Option<i64> = c
+                .query_row(
+                    "SELECT acknowledged FROM reception_consumers WHERE account=?1 AND kind=?2",
+                    params![self.account.as_slice(), consumer.tag()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            sequence
+                .map(|sequence| {
+                    Ok(ReceptionCursor {
+                        sequence: natural(sequence)?,
+                        ..state.head
+                    })
+                })
+                .transpose()
+        })
+    }
     /// A consumer name is fixed by the host role, never allocated per window or
     /// per reconnect. Existing durable progress wins over a caller's baseline.
     pub(crate) fn register(

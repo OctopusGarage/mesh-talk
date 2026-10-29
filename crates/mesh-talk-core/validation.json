@@ -7,17 +7,27 @@
         "crates/mesh-talk-core/src/node/reception_effects/",
         "crates/mesh-talk-core/src/node/runtime_delivery.rs",
         "crates/mesh-talk-core/src/node/runtime_startup.rs",
-        "crates/mesh-talk-core/src/node/ui_state.rs"
+        "crates/mesh-talk-core/src/node/ui_state.rs",
+        "crates/mesh-talk-core/src/node/host_reception.rs",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node/reception.rs",
+        "crates/mesh-talk-core/src/node/files/reception.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::reception_effects::tests::", "node::runtime_delivery::tests::"]
+          "filters": [
+            "node::reception_effects::tests::",
+            "node::runtime_delivery::tests::",
+            "node::host_reception::tests::"
+          ]
         }
       ],
-      "consumers": ["core-node", "desktop-chat"],
+      "consumers": [
+        "core-node",
+        "desktop-chat"
+      ],
       "capability": {
-        "summary": "Provide bodyless durable reception work and bounded demand pages for host integration without changing frontend read-state ownership or claiming production callback cutover.",
+        "summary": "Deliver durable reception work through bounded runtime observations, on-demand materialization and fixed consumer acknowledgement without changing read-state ownership.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
@@ -89,6 +99,7 @@
         "crates/mesh-talk-core/src/node/sticker_media.rs",
         "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
         "crates/mesh-talk-core/src/node/recall.rs",
+        "crates/mesh-talk-core/src/node/recall/",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
         "crates/mesh-talk-core/src/node/session.rs",
@@ -1136,6 +1147,7 @@
       "paths": [
         "crates/mesh-talk-core/src/node/sent_store.rs",
         "crates/mesh-talk-core/src/node/received_store.rs",
+        "crates/mesh-talk-core/src/node/account_file_repository.rs",
         "crates/mesh-talk-core/src/node/recovered_sent_ids.rs",
         "crates/mesh-talk-core/src/node/transcript_repository/",
         "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
@@ -1147,6 +1159,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::transcript_repository::tests::",
+            "node::account_file_repository::tests::",
             "runtime_metadata_",
             "node::recovered_sent_ids::tests::",
             "node::account_suppression::tests::"
@@ -1326,7 +1339,8 @@
         "crates/mesh-talk-core/src/node/account_profile_io_tests.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/runtime_routed_tests.rs",
-        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs"
+        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
+        "crates/mesh-talk-core/src/node/profile_receive_work.rs"
       ],
       "rust": [
         {
@@ -1349,7 +1363,10 @@
             "node::node::tests::account_profile_terminal_legacy_avatar_reconciles_on_restart",
             "node::node::tests::account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent",
             "node::account_profile_data::tests::",
-            "node::account_profile_io::tests::"
+            "node::account_profile_io::tests::",
+            "node::profile_receive_work::tests::",
+            "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
         },
         {
@@ -1374,7 +1391,10 @@
             "node::runtime::tests::account_nickname_preserves_bio_and_wins_over_host_name_on_restart",
             "node::runtime::tests::contact_nickname_survives_a_stale_signed_card_name_and_restart",
             "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
-            "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback"
+            "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
+            "node::profile_receive_work::tests::",
+            "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
         }
       ],
@@ -1777,6 +1797,7 @@
       "id": "core-file-message-identity",
       "paths": [
         "crates/mesh-talk-core/src/node/file_message_identity.rs",
+        "crates/mesh-talk-core/src/node/file_message_identity/",
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/delivery_store.rs",
         "crates/mesh-talk-core/src/node/node.rs",

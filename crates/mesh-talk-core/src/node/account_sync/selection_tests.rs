@@ -243,7 +243,9 @@ async fn account_history_pages_reuse_one_authenticated_connection() {
     }
     let external_host = account_conversation_id(&receiver.account_id(), &external.account_id());
     assert!(
-        receiver.has_file_message_identity(external_host, external_id),
+        receiver
+            .has_file_message_identity(external_host, external_id)
+            .unwrap(),
         "external attachment identity metadata must arrive on the existing account socket"
     );
     assert!(!receiver.has_media(external_file));
@@ -1327,7 +1329,7 @@ fn pairing_export_stops_at_record_budget_before_building_the_remaining_archive()
         sent.record(conv, index, index, &wire).unwrap();
     }
     drop(sent);
-    assert_eq!(source.export_account_backfill().len(), 4096);
+    assert_eq!(source.export_account_backfill().unwrap().len(), 4096);
 }
 
 #[tokio::test]
@@ -1444,7 +1446,7 @@ async fn archive_selectors_reuse_pages_and_scan_only_appends_but_invalidate_eras
 
 #[test]
 fn known_account_index_skips_unchanged_group_rows_and_invalidates_erased_routes() {
-    let (_dir, source, receiver) = sibling_nodes();
+    let (_dir, source, _receiver) = sibling_nodes();
     let conversation = ConversationId::new([77; 32]);
     let record = |index: u64, plaintext: &[u8]| {
         let mut id = [0; 32];
@@ -1465,34 +1467,14 @@ fn known_account_index_skips_unchanged_group_rows_and_invalidates_erased_routes(
     for index in 0..500 {
         record(index, b"group plaintext");
     }
-    source.known_account_ids();
-    let scanned = source.known_account_cache.lock().unwrap().scanned_rows;
-    assert_eq!(scanned, 500);
+    let before = source.received.lock().unwrap().body_reads();
     for _ in 0..3 {
-        source.export_sync_records(
-            &receiver.identity.public(),
-            None,
-            true,
-            true,
-            AccountSyncVersion::V2,
-        );
+        source.known_account_ids().unwrap();
     }
-    assert_eq!(
-        source.known_account_cache.lock().unwrap().scanned_rows,
-        scanned
-    );
+    assert_eq!(source.received.lock().unwrap().body_reads(), before);
     record(500, b"one group append");
-    source.export_sync_records(
-        &receiver.identity.public(),
-        None,
-        true,
-        true,
-        AccountSyncVersion::V2,
-    );
-    assert_eq!(
-        source.known_account_cache.lock().unwrap().scanned_rows,
-        scanned + 1
-    );
+    source.known_account_ids().unwrap();
+    assert_eq!(source.received.lock().unwrap().body_reads(), before);
     let other = "a".repeat(32);
     let envelope = super::super::DmEnvelope::new(
         source.account_id(),
@@ -1502,21 +1484,20 @@ fn known_account_index_skips_unchanged_group_rows_and_invalidates_erased_routes(
     )
     .encode();
     record(501, &envelope);
-    assert!(source.known_account_ids().contains(&other));
+    assert!(source.known_account_ids().unwrap().contains(&other));
+    assert_eq!(source.received.lock().unwrap().body_reads(), before);
     source
         .received
         .lock()
         .unwrap()
         .remove_where(|entry| entry.wall_clock == 501)
         .unwrap();
+    let after_erase = source.received.lock().unwrap().body_reads();
     assert!(
-        !source.known_account_ids().contains(&other),
+        !source.known_account_ids().unwrap().contains(&other),
         "erased first-DM metadata must not retain authority"
     );
-    assert_eq!(
-        source.known_account_cache.lock().unwrap().scanned_rows,
-        scanned + 503
-    );
+    assert_eq!(source.received.lock().unwrap().body_reads(), after_erase);
 }
 
 #[tokio::test]
@@ -2910,7 +2891,10 @@ async fn recalled_private_file_blocks_late_cards_and_stale_sibling_byte_release(
                 .await
                 .unwrap();
         }
-        assert!(node.private_dm_message_recalled(&node.account_id(), target, &node.account_id()));
+        assert!(
+            node.private_dm_message_recalled(&node.account_id(), target, &node.account_id())
+                .unwrap()
+        );
     }
     late.apply_account_history_page(&cards, AccountSyncVersion::V2)
         .unwrap();
@@ -3190,7 +3174,11 @@ async fn account_file_history_deduplicates_recipient_device_manifest_copies() {
         .event
         .id;
     let host = account_conversation_id(&source.account_id(), &sender.account_id());
-    assert!(source.has_file_message_identity(host, source_manifest));
+    assert!(
+        source
+            .has_file_message_identity(host, source_manifest)
+            .unwrap()
+    );
     assert!(
         !source.has_media(file),
         "identity reconciliation does not fetch image or attachment bytes"
@@ -3218,6 +3206,7 @@ async fn file_identity_repair_bounds_each_history_scan_and_advances_past_legacy_
         .unwrap()
         .entry(id)
         .unwrap()
+        .unwrap()
         .clone();
     {
         let mut rows = receiver.received_files.lock().unwrap();
@@ -3234,11 +3223,14 @@ async fn file_identity_repair_bounds_each_history_scan_and_advances_past_legacy_
     assert!(
         receiver
             .pending_file_message_identities(&sender.identity.public())
+            .unwrap()
             .is_empty(),
         "one pass must not parse beyond its256-row budget"
     );
     assert_eq!(
-        receiver.pending_file_message_identities(&sender.identity.public()),
+        receiver
+            .pending_file_message_identities(&sender.identity.public())
+            .unwrap(),
         vec![(file, id)],
         "the next bounded pass reaches later metadata instead of restarting at old rows"
     );

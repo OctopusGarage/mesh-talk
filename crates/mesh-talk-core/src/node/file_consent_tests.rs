@@ -403,7 +403,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     let identity = a.file_message_identity_bundle(binding).unwrap().unwrap();
     let host = super::conversation::account_conversation_id(&a.account_id(), &b.account_id());
     assert!(
-        b.has_file_message_identity(host, binding),
+        b.has_file_message_identity(host, binding).unwrap(),
         "source identity metadata must cross federation without a direct client route"
     );
     assert!(!b.log.lock().unwrap().has(&identity.id).unwrap());

@@ -285,7 +285,11 @@ pub async fn publish_legacy_conversation_drafts(
             let (texts, protections) = read_legacy_drafts(&path, runtime.restart_password())?;
             let mut known: std::collections::BTreeSet<_> =
                 runtime.known_account_names().into_keys().collect();
-            known.extend(runtime.known_account_ids());
+            known.extend(
+                runtime
+                    .known_account_ids()
+                    .map_err(|e| CommandError::Internal(e.to_string()))?,
+            );
             known.insert(runtime.account_id().to_owned());
             seed_legacy_documents(&runtime.handle(), texts, protections, &known)
         })

@@ -1,8 +1,6 @@
 //! Operate a separate bot identity or a scoped desktop-local integration.
 use clap::{Parser, Subcommand};
-use mesh_talk_core::node::{
-    NodeRuntime, RuntimeConfig, RuntimeEvents, RuntimeNetworkOptions, RuntimeStartup,
-};
+use mesh_talk_core::node::{NodeRuntime, RuntimeConfig, RuntimeNetworkOptions, RuntimeStartup};
 use mesh_talk_integrations::{
     Destination, IntegrationError, IntegrationService,
     client::{ClientConfig, EndpointManifest, LocalClient, endpoint_reference},
@@ -420,24 +418,15 @@ async fn serve(options: ServeOptions) -> Result<(), IntegrationError> {
         .ok_or_else(|| invalid("Missing runtime directory"))?;
     let server = LocalServer::bind(runtime_dir).await?;
     let runtime = NodeRuntime::start_owned(
-        RuntimeStartup::new(
-            RuntimeConfig {
-                base_dir: &data_dir,
-                account_id: &profile,
-                display_name: &name,
-                password: &password.password,
-                discovery_port,
-                post_office_enabled: false,
-                candidate_source: None,
-            },
-            RuntimeEvents {
-                on_dm: Box::new(|_| {}),
-                on_channel: Box::new(|_| {}),
-                on_file: Box::new(|_| {}),
-                on_profile: Box::new(|_| {}),
-                on_call_signal: Box::new(|_| {}),
-            },
-        )
+        RuntimeStartup::bounded(RuntimeConfig {
+            base_dir: &data_dir,
+            account_id: &profile,
+            display_name: &name,
+            password: &password.password,
+            discovery_port,
+            post_office_enabled: false,
+            candidate_source: None,
+        })
         .with_lease(storage_lease)
         .with_network(RuntimeNetworkOptions {
             post_office_send_enabled: use_post_office,
@@ -597,7 +586,7 @@ mod tests {
                 post_office_enabled: false,
                 candidate_source: None,
             },
-            RuntimeEvents {
+            mesh_talk_core::node::RuntimeEvents {
                 on_dm: Box::new(|_| {}),
                 on_channel: Box::new(|_| {}),
                 on_file: Box::new(|_| {}),

@@ -1842,7 +1842,7 @@ impl Node {
             .received
             .lock()
             .expect("received mutex")
-            .entry(id)
+            .entry(id)?
             .is_some_and(|row| row.conversation == channel && own_devices.contains(&row.from));
         if !own_signed && !own_archived {
             return Ok(None);

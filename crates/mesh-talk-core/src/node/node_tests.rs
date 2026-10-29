@@ -728,7 +728,7 @@ async fn expired_outgoing_account_message_is_hidden_and_erased() {
         node.account_history(&peer, 20).unwrap()[0].expires_at_ms,
         Some(deadline)
     );
-    let backfill = node.export_account_backfill();
+    let backfill = node.export_account_backfill().unwrap();
     assert_eq!(backfill.len(), 1);
     Arc::get_mut(&mut node).unwrap().expiry_clock_start = (std::time::Instant::now(), deadline + 1);
     assert!(
@@ -736,7 +736,7 @@ async fn expired_outgoing_account_message_is_hidden_and_erased() {
         "sender history must expire without waiting for maintenance"
     );
     assert!(node.search("ephemeral secret").unwrap().is_empty());
-    assert!(node.export_account_backfill().is_empty());
+    assert!(node.export_account_backfill().unwrap().is_empty());
     node.import_account_backfill(&backfill).unwrap();
     let conv = crate::node::conversation::account_conversation_id(&node.account_id(), &peer);
     assert!(node.received.lock().unwrap().entries(&conv).is_empty());
@@ -746,7 +746,13 @@ async fn expired_outgoing_account_message_is_hidden_and_erased() {
         node.sent_entries_for_history(conv).is_empty(),
         "maintenance must erase sender plaintext including pending delivery"
     );
-    assert!(node.account_suppression.lock().unwrap().contains(conv, id));
+    assert!(
+        node.account_suppression
+            .lock()
+            .unwrap()
+            .contains(conv, id)
+            .unwrap()
+    );
     let secret = node.identity.secret_bytes();
     drop(node);
     let (dm, _) = mpsc::unbounded_channel();
@@ -878,6 +884,7 @@ fn restart_erases_unexpired_recipient_copy_without_erasing_sender_copy() {
             .lock()
             .unwrap()
             .contains(conv, crate::eventlog::EventId::new([13; 32]))
+            .unwrap()
     );
 }
 
@@ -1201,7 +1208,7 @@ fn account_history_keeps_a_contact_visible_after_discovery_expires() {
             EventId::new([8; 32]),
         )
         .unwrap();
-    assert_eq!(node.known_account_ids(), vec![peer.clone()]);
+    assert_eq!(node.known_account_ids().unwrap(), vec![peer.clone()]);
     drop(node);
     let (dm_tx, _dm_rx) = mpsc::unbounded_channel();
     let (channel_tx, _channel_rx) = mpsc::unbounded_channel();
@@ -1217,7 +1224,7 @@ fn account_history_keeps_a_contact_visible_after_discovery_expires() {
         "password",
     )
     .unwrap();
-    assert_eq!(reopened.known_account_ids(), vec![peer]);
+    assert_eq!(reopened.known_account_ids().unwrap(), vec![peer]);
 }
 
 #[test]
@@ -1611,7 +1618,7 @@ fn file_only_account_contact_remains_visible_after_recovery() {
         "new password",
     )
     .unwrap();
-    assert!(restored.known_account_ids().contains(&contact));
+    assert!(restored.known_account_ids().unwrap().contains(&contact));
     assert_eq!(restored.history(conversation, 10).unwrap().len(), 1);
     let mut second_snapshot = Vec::new();
     restored
@@ -1623,7 +1630,12 @@ fn file_only_account_contact_remains_visible_after_recovery() {
         "third password",
     )
     .unwrap();
-    assert!(twice_restored.known_account_ids().contains(&contact));
+    assert!(
+        twice_restored
+            .known_account_ids()
+            .unwrap()
+            .contains(&contact)
+    );
 }
 
 #[test]
@@ -8542,6 +8554,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             .lock()
             .unwrap()
             .get(&attachment_id)
+            .unwrap()
             .is_some()
     );
     assert!(
@@ -8550,6 +8563,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             .lock()
             .unwrap()
             .get(&channel_attachment_id)
+            .unwrap()
             .is_some()
     );
     let saved = dir.path().join("sibling-copy.bin");
@@ -8608,6 +8622,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .lock()
         .unwrap()
         .get(&attachment_id)
+        .unwrap()
         .is_some();
     assert!(
         ready,
@@ -8713,7 +8728,7 @@ fn account_history_deduplicates_direct_and_linked_copies_by_message_id() {
             EventId::new([20; 32]),
         )
         .unwrap();
-    assert_eq!(node.export_account_backfill().len(), 1);
+    assert_eq!(node.export_account_backfill().unwrap().len(), 1);
     let mut invalid = record.clone();
     invalid.conv = *previous_conv.as_bytes();
     node.import_account_backfill(&[invalid]).unwrap();
@@ -9295,7 +9310,7 @@ async fn account_history_backfills_to_a_linked_device() {
         .await
         .unwrap();
 
-    let records = alice_node.export_account_backfill();
+    let records = alice_node.export_account_backfill().unwrap();
     assert!(!records.is_empty(), "there is history to back-fill");
 
     // A new device links into account A: import the backfill, then it shows history.
@@ -9334,6 +9349,7 @@ async fn account_history_backfills_to_a_linked_device() {
 async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
+    let bob_keys = bob.secret_bytes();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let alice_roster = seed_roster(
         &bob,
@@ -9343,6 +9359,10 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
     );
     let bob_roster = seed_roster(&alice, "Alice", 4000, &bob.public().user_id());
     let dir = tempfile::tempdir().unwrap();
+    let alice_dir = dir.path().join("alice");
+    let bob_dir = dir.path().join("bob");
+    std::fs::create_dir_all(&alice_dir).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
     let (a_dm, _a_rx) = mpsc::unbounded_channel();
     let (a_ch, _a_ch_rx) = mpsc::unbounded_channel();
     let (a_file, _a_file_rx) = mpsc::unbounded_channel();
@@ -9355,12 +9375,12 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
         a_dm,
         a_ch,
         a_file,
-        &dir.path().join("alice.log"),
-        &dir.path().join("alice-sent.log"),
+        &alice_dir.join("alice.log"),
+        &alice_dir.join("alice-sent.log"),
         "pw",
     )
     .unwrap();
-    let bob_path = dir.path().join("bob.log");
+    let bob_path = bob_dir.join("bob.log");
     let bob_node = Node::open(
         bob,
         bob_roster,
@@ -9368,7 +9388,7 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
         b_ch,
         b_file,
         &bob_path,
-        &dir.path().join("bob-sent.log"),
+        &bob_dir.join("bob-sent.log"),
         "pw",
     )
     .unwrap();
@@ -9449,23 +9469,45 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
         bob_node.peer_avatar(&alice_node.account.account_id()),
         Some(vec![9])
     );
-    let reopened = PersistentEventLog::open(&bob_path, "pw").unwrap();
-    assert_eq!(reopened.conversation_len(&conv).unwrap(), 3);
-    assert_eq!(
-        reopened
-            .events(&conv)
-            .unwrap()
-            .iter()
-            .filter(|e| e.kind == EventKind::Message)
-            .count(),
-        1
-    );
-    // Compaction must leave the live append handle attached to the rewritten file.
+    // The live indexed writer remains usable after incremental compaction.
     bob_node
         .append_event(conv, EventKind::Message, b"after compaction".to_vec())
         .unwrap();
-    let reopened = PersistentEventLog::open(&bob_path, "pw").unwrap();
-    assert_eq!(reopened.conversation_len(&conv).unwrap(), 4);
+    let roster = bob_node.roster.clone();
+    bob_node.close_profile().unwrap();
+    let reopened = Node::open(
+        DeviceIdentity::from_secret_bytes(bob_keys.0, bob_keys.1),
+        roster,
+        mpsc::unbounded_channel().0,
+        mpsc::unbounded_channel().0,
+        mpsc::unbounded_channel().0,
+        &bob_path,
+        &bob_dir.join("bob-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    assert_eq!(
+        reopened
+            .log
+            .lock()
+            .unwrap()
+            .conversation_len(&conv)
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        reopened
+            .log
+            .lock()
+            .unwrap()
+            .events(&conv)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == EventKind::Message)
+            .count(),
+        2
+    );
+    reopened.close_profile().unwrap();
 }
 
 #[tokio::test]
@@ -10121,10 +10163,11 @@ async fn sibling_history_policy_retains_ciphertext_and_replays_without_network()
     );
     assert!(
         !receiver
-            .emitted
+            .received
             .lock()
             .unwrap()
-            .contains(&destination.event.id)
+            .processed(destination.event.id)
+            .unwrap()
     );
     receiver
         .set_device_sync_category(SyncCategory::History, true)
@@ -10986,6 +11029,10 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
     let alice_uid = alice.public().user_id();
     let bob_uid = bob.public().user_id();
     let dir = tempfile::tempdir().unwrap();
+    let alice_dir = dir.path().join("alice");
+    let bob_dir = dir.path().join("bob");
+    std::fs::create_dir_all(&alice_dir).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
 
     let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bob_addr = bob_listener.local_addr().unwrap();
@@ -11020,8 +11067,8 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &alice_dir.join("a.log"),
+        &alice_dir.join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -11036,13 +11083,13 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &bob_dir.join("b.log"),
+        &bob_dir.join("b-sent.log"),
         "pw",
     )
     .unwrap();
 
-    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let accept = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
 
     alice_node
         .save_account_profile_if("Alice".into(), "Self-declared bio".into(), |commit| {
@@ -11076,6 +11123,8 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
             .created_at_ms,
         alice_acct.created_at_ms()
     );
+    accept.abort();
+    let _ = accept.await;
 }
 
 #[tokio::test]

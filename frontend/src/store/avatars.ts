@@ -47,7 +47,10 @@ interface AvatarsState {
    * cache is empty after a restart — so without this, a contact discovered after we relaunch
    * never gets our photo until we manually re-set it. Re-asserting on boot fixes that.
    */
-  reassertOwn: (current?: () => boolean) => Promise<void>;
+  reassertOwn: (
+    current?: () => boolean,
+    peersLoaded?: boolean,
+  ) => Promise<void>;
 }
 
 /** Stable empty map so a "no avatars yet" load keeps a constant ref. */
@@ -249,7 +252,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     await task;
   },
 
-  reassertOwn: async (current = () => true) => {
+  reassertOwn: async (current = () => true, peersLoaded = false) => {
     const lease = captureRuntimeOwner();
     const ownId = get().ownId;
     const active = () => lease.current() && current();
@@ -260,7 +263,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     await get().load(active);
     if (!active()) return;
     const revision = localRevision;
-    if (!(await get().loadPeers(active))) return;
+    if (!peersLoaded && !(await get().loadPeers(active))) return;
     if (!active() || revision !== localRevision || get().ownId !== ownId)
       return;
     const mine =

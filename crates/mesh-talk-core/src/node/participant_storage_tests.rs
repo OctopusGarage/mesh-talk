@@ -878,7 +878,7 @@ fn explicit_external_parent_aliases_share_the_same_owned_source() {
 fn header_only_legacy_sources_are_valid_bootstrap_input() {
     let directory = tempfile::tempdir().unwrap();
     drop(PersistentEventLog::open(&directory.path().join("messages.log"), "pw").unwrap());
-    drop(SentLog::open(&directory.path().join("sent.log"), "pw").unwrap());
+    drop(crate::node::sentlog::SentLog::open(&directory.path().join("sent.log"), "pw").unwrap());
     let node = open_profile(
         directory.path(),
         DeviceIdentity::generate(),

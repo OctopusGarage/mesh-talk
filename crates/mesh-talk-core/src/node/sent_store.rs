@@ -317,3 +317,41 @@ impl SentStore {
         self.repository.fail_appends_for_test(enabled)
     }
 }
+
+// Explicit fixture materialization only. Production callers use owned lookups
+// and bounded pages; these compatibility names do not exist in release builds.
+#[cfg(test)]
+impl SentStore {
+    pub(crate) fn entries_ref(&self, conversation: &ConversationId) -> Vec<SentEntry> {
+        let mut rows = Vec::new();
+        self.visit(Some(conversation), |row| {
+            rows.push(row.clone());
+            Ok(true)
+        })
+        .expect("fixture transcript read");
+        rows
+    }
+    pub(crate) fn entries(&self, conversation: &ConversationId) -> Vec<SentEntry> {
+        let mut rows = self.entries_ref(conversation);
+        rows.sort_by_key(|entry| (entry.wall_clock, entry.seq));
+        rows
+    }
+}
+
+#[cfg(test)]
+impl SentStore {
+    pub(crate) fn conversations(&self) -> Vec<ConversationId> {
+        let mut cursor = None;
+        let mut result = Vec::new();
+        loop {
+            let page = self
+                .conversation_page(cursor, 128)
+                .expect("fixture conversations");
+            if page.is_empty() {
+                return result;
+            }
+            cursor = page.last().copied();
+            result.extend(page);
+        }
+    }
+}

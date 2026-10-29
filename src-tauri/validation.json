@@ -1310,6 +1310,46 @@
       "escalation": [
         "Require source-to-target V4 native relogin, collision and stale-session evidence. Packaged native saved-login authorization must be observed separately from mocks."
       ]
+    },
+    {
+      "id": "desktop-bounded-reception",
+      "paths": [
+        "src-tauri/src/reception_host.rs",
+        "src-tauri/src/reception_host/",
+        "src-tauri/src/events.rs",
+        "src-tauri/src/runtime_bootstrap.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "reception_host::",
+            "events::notification_policy_tests::",
+            "runtime_bootstrap::tests::"
+          ]
+        }
+      ],
+      "consumers": [
+        "frontend-chat",
+        "frontend-bounded-reception"
+      ],
+      "capability": {
+        "summary": "Bound the actual native-to-WebView reception boundary with one scoped wake and one acknowledged demand page.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Runtime, local user, account and device authority fence every page and ACK; current state/progress use the same coalesced wake.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Notifications begin at launch high-water and coalesce a bounded live window independently of durable unread processing.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Verify actual native IPC stalls, WebView reload, storage failure, app lock and runtime/account replacement; pure gate tests do not establish packaged native memory bounds."
+      ]
     }
   ],
   "prScenarios": [

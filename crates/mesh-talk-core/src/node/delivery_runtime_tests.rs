@@ -2329,9 +2329,6 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
         let keys = identity.secret_bytes();
         let account_keys = account.secret_bytes();
         let (mut a, _) = node(dir.path(), identity, account, &bp);
-        let sidecar = dir.path().join("sidecar");
-        *a.received_files.lock().unwrap() =
-            ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
         a.received_files
             .lock()
             .unwrap()
@@ -2457,8 +2454,6 @@ async fn live_receive_recovery_emits_exactly_one_callback_after_durable_install(
         .event
         .clone();
     b.log.lock().unwrap().append_durable(event.clone()).unwrap();
-    let sidecar = bd.path().join("sidecar");
-    *b.received.lock().unwrap() = ReceivedLog::open(&sidecar.join("received"), "pw").unwrap();
     b.received
         .lock()
         .unwrap()
@@ -2529,9 +2524,6 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
             .event
             .clone();
         b.log.lock().unwrap().append_durable(event.clone()).unwrap();
-        let sidecar = bd.path().join("sidecar");
-        *b.received_files.lock().unwrap() =
-            ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
         b.received_files
             .lock()
             .unwrap()
@@ -2978,11 +2970,20 @@ fn file_book_rebuild_does_not_restore_outgoing_card_scope_from_mismatched_row() 
     let id = a
         .accept_staged_manifest(&[target], host, proof.account_id(), &manifest)
         .unwrap();
-    let mut row = a.received_files.lock().unwrap().entry(id).unwrap().clone();
+    let mut row = a
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(id)
+        .unwrap()
+        .unwrap()
+        .clone();
     row.wall_clock += 1;
-    let mut rows = ReceivedLog::open(&dir.path().join("corrupted-files.log"), "pw").unwrap();
-    rows.record_durable(&row).unwrap();
-    *a.received_files.lock().unwrap() = rows;
+    {
+        let mut rows = a.received_files.lock().unwrap();
+        rows.remove_where(|_| true).unwrap();
+        rows.record_durable(&row).unwrap();
+    }
     a.configure_privacy(
         dir.path(),
         "pw",
@@ -3039,12 +3040,11 @@ fn durable_file_erase_removes_live_key_even_when_sidecar_rewrite_fails() {
     b.process_file_events(conv);
     let host =
         super::conversation::account_conversation_id(&b.account_id(), &ap.account_id().unwrap());
-    let row = b.received_files.lock().unwrap().entries(&host)[0].clone();
-    let sidecar = dir.path().join("sidecar");
-    let mut files = ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
-    files.record_durable(&row).unwrap();
-    *b.received_files.lock().unwrap() = files;
-    std::fs::create_dir(sidecar.join("files.compact-tmp")).unwrap();
+    b.received_files
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
     assert!(
         b.delete_account_message(&ap.account_id().unwrap(), event.id)
             .is_err()
@@ -3135,7 +3135,11 @@ fn legacy_file_erasure_capacity_refusal_preserves_durable_row_and_key() {
             .is_err()
     );
     assert!(
-        !b.account_suppression.lock().unwrap().contains(host, id),
+        !b.account_suppression
+            .lock()
+            .unwrap()
+            .contains(host, id)
+            .unwrap(),
         "a refused erase must not commit a visibility tombstone"
     );
     assert_eq!(
@@ -3519,6 +3523,7 @@ async fn accepted_account_file_card_carries_fixed_deadline() {
         .unwrap()
         .entry(id)
         .unwrap()
+        .unwrap()
         .clone();
     assert_eq!(crate::expiry::deadline(&row.plaintext), Some(deadline));
     assert!(crate::file::decode_manifest(&row.plaintext).is_some());
@@ -3533,7 +3538,14 @@ async fn accepted_account_file_card_carries_fixed_deadline() {
             .is_empty()
     );
     assert!(node.prune_expired_received().unwrap() > 0);
-    assert!(node.received_files.lock().unwrap().entry(id).is_none());
+    assert!(
+        node.received_files
+            .lock()
+            .unwrap()
+            .entry(id)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -3721,7 +3733,13 @@ async fn expiring_account_message_arrives_over_loopback_and_expires_on_both_side
     let conv = super::conversation::account_conversation_id(&a.account_id(), &b.account_id());
     assert!(a.sent_entries_for_history(conv).is_empty());
     assert!(b.received.lock().unwrap().entries(&conv).is_empty());
-    assert!(a.account_suppression.lock().unwrap().contains(conv, id));
+    assert!(
+        a.account_suppression
+            .lock()
+            .unwrap()
+            .contains(conv, id)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -3818,7 +3836,13 @@ async fn protected_account_message_arrives_redacted_and_exact_reveal_expires() {
     let conv = super::conversation::account_conversation_id(&a.account_id(), &b.account_id());
     assert!(a.sent_entries_for_history(conv).is_empty());
     assert!(b.received.lock().unwrap().entries(&conv).is_empty());
-    assert!(a.account_suppression.lock().unwrap().contains(conv, id));
+    assert!(
+        a.account_suppression
+            .lock()
+            .unwrap()
+            .contains(conv, id)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -5734,20 +5758,20 @@ async fn completion_alias_erasure_keeps_other_alias_and_failed_row_cleanup_never
         b.historical_file_completion(file, final_chunk, &ap.public())
             .unwrap()
     );
-    let row = b
-        .received_files
+    b.received_files
         .lock()
         .unwrap()
-        .entry(alias.id)
-        .unwrap()
-        .clone();
-    let sidecar = bd.path().join("alternate-sidecar");
-    let mut files = ReceivedLog::open(&sidecar.join("files"), "pw").unwrap();
-    files.record_durable(&row).unwrap();
-    *b.received_files.lock().unwrap() = files;
-    std::fs::create_dir(sidecar.join("files.compact-tmp")).unwrap();
+        .fail_appends_for_test(true)
+        .unwrap();
     assert!(b.delete_message(host, alias.id, false).is_err());
-    assert!(b.received_files.lock().unwrap().entry(alias.id).is_some());
+    assert!(
+        b.received_files
+            .lock()
+            .unwrap()
+            .entry(alias.id)
+            .unwrap()
+            .is_some()
+    );
     assert!(
         !b.historical_file_completion(file, final_chunk, &ap.public())
             .unwrap()
@@ -6101,9 +6125,6 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
         Account::generate(),
         &proof,
     );
-    let sidecar_dir = dir.path().join("sidecar");
-    *a.sentlog.lock().unwrap() =
-        super::sentlog::SentLog::open(&sidecar_dir.join("sent"), "pw").unwrap();
     a.sentlog
         .lock()
         .unwrap()
@@ -6385,8 +6406,6 @@ async fn receiver_write_failure_keeps_plaintext_intent_until_restart_and_no_earl
         .event
         .clone();
     b.log.lock().unwrap().append_durable(event.clone()).unwrap();
-    let sidecar = bd.path().join("sidecar");
-    *b.received.lock().unwrap() = ReceivedLog::open(&sidecar.join("received"), "pw").unwrap();
     b.received
         .lock()
         .unwrap()

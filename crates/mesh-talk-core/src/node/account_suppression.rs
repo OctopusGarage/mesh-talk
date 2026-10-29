@@ -87,6 +87,22 @@ pub(super) struct IndexedAccountSuppression {
     repository: super::transcript_repository::TranscriptRepository,
 }
 impl IndexedAccountSuppression {
+    pub(crate) fn authenticate_legacy(
+        profile: &crate::storage::profile::context::ProfileStorage,
+        path: &Path,
+        password: &str,
+    ) -> Result<(), LogError> {
+        super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<
+            Suppressed,
+        >(
+            profile,
+            path,
+            password,
+            super::transcript_repository::SUPPRESSION,
+            MAGIC,
+        )
+    }
+
     pub(super) fn from_profile(
         profile: std::sync::Arc<crate::storage::profile::context::ProfileStorage>,
         path: &Path,

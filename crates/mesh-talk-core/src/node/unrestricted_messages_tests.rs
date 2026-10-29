@@ -116,7 +116,7 @@ async fn retired_hidden_decisions_do_not_hide_loopback_history_search_or_recover
         text.as_bytes()
     );
     assert!(!b.search("项目").unwrap().is_empty());
-    assert!(!b.export_account_backfill().is_empty());
+    assert!(!b.export_account_backfill().unwrap().is_empty());
     drop(b);
     let (reopened, _, _) = test_support::node_with_files(
         bd.path(),
