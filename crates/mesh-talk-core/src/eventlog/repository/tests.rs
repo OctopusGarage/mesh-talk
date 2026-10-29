@@ -1643,12 +1643,41 @@ fn runtime_metadata_oversized_receive_cannot_starve_later_valid_event() {
     let later = event(&peer, 2, vec![], 2, EventKind::Message);
     repo.append(&oversized).unwrap();
     repo.append(&later).unwrap();
+    let mut parents = Vec::new();
+    for n in 0..1025 {
+        let parent = event(&local, n + 1, vec![], n, EventKind::Message);
+        repo.append(&parent).unwrap();
+        parents.push(parent.id);
+    }
+    let wide = event(&peer, 3, parents, 1027, EventKind::Message);
+    repo.append(&wide).unwrap();
     repo.initialize_receiving(Author::from_ed25519(local.public().ed25519_pub))
         .unwrap();
     assert_eq!(
-        repo.pending_receive_ids(later.conversation_id, 2, 4096)
+        repo.pending_receive_ids(later.conversation_id, 3, 4096)
             .unwrap(),
         vec![later.id]
+    );
+    let retry = repo
+        .pending_receive_ids(later.conversation_id, 3, 8 * 1024 * 1024)
+        .unwrap();
+    assert!(
+        retry.contains(&oversized.id),
+        "a byte-budget defer must preserve later eligibility"
+    );
+    assert!(
+        retry.contains(&wide.id),
+        "valid events with 1025 parents remain eligible"
+    );
+    assert!(matches!(
+        repo.pending_receive_ids(later.conversation_id, 1, 1),
+        Err(LogError::PageBudgetTooSmall { .. })
+    ));
+    assert_eq!(
+        repo.pending_receive_ids(later.conversation_id, 3, 8 * 1024 * 1024)
+            .unwrap()
+            .len(),
+        3
     );
     assert_eq!(repo.body_read_counts(), (0, 0));
 }

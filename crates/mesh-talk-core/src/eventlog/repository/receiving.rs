@@ -118,32 +118,39 @@ impl EventRepository {
             return Err(LogError::InvalidPageBudget);
         }
         self.discover_receives()?;
-        self.database.transaction(|c| {
+        let (ids, required) = self.database.transaction(|c| {
             let mut ticket:i64=c.query_row("SELECT next_ticket FROM participant_receive_scan WHERE domain=?1",[self.domain.0.as_slice()],|r|r.get(0))?;
-            let mut statement=c.prepare("SELECT p.id,e.stored_bytes,(s.lifecycle<>0 OR e.ciphertext_bytes>262144 OR e.parent_count>1024 OR (e.kind=0 AND EXISTS(SELECT 1 FROM transcript_received_evidence d WHERE d.id=p.id)) OR (e.kind<>0 AND EXISTS(SELECT 1 FROM participant_control_processed d WHERE d.domain=p.domain AND d.id=p.id))) FROM participant_receive_pending p JOIN retained_events e ON e.domain=p.domain AND e.id=p.id JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE p.domain=?1 AND p.conversation=?2 AND p.purpose=?4 ORDER BY p.ticket,p.id LIMIT ?3")?;
+            let mut statement=c.prepare("SELECT p.id,e.stored_bytes,(s.lifecycle<>0 OR (e.kind=0 AND EXISTS(SELECT 1 FROM transcript_received_evidence d WHERE d.id=p.id)) OR (e.kind<>0 AND EXISTS(SELECT 1 FROM participant_control_processed d WHERE d.domain=p.domain AND d.id=p.id))) FROM participant_receive_pending p JOIN retained_events e ON e.domain=p.domain AND e.id=p.id JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE p.domain=?1 AND p.conversation=?2 AND p.purpose=?4 ORDER BY p.ticket,p.id LIMIT ?3")?;
             let mut rows=statement.query(params![self.domain.0.as_slice(),conversation.as_bytes().as_slice(),integer(limit)?,controls])?;
             // Keep only fixed keys before mutating the queue's ordering index.
-            let mut selected=Vec::new();let mut charged=0usize;
+            let mut selected=Vec::new();let mut charged=0usize;let mut required:Option<usize>=None;
             while let Some(row)=rows.next()? {
                 let id=blob::<32>(row,0)?;
                 let done:bool=row.get(2)?;
                 let cost=if done {0}else{usize::try_from(nonnegative(row.get(1)?)?).ok().and_then(|n|n.checked_mul(3)).and_then(|n|n.checked_add(std::mem::size_of::<Event>())).ok_or(LogError::RepositoryCounterExhausted)?};
-                if charged.checked_add(cost).is_none_or(|total|total>bytes) {
-                    if selected.is_empty(){return Err(LogError::PageBudgetTooSmall{required:cost});}
-                    break;
-                }
-                charged+=cost;selected.push((id,done));
+                let admitted=!done && charged.checked_add(cost).is_some_and(|total|total<=bytes);
+                if admitted {charged+=cost;} else if !done {required=Some(required.map_or(cost,|old|old.min(cost)));}
+                // Even an oversized attempt advances its fair turn. It remains
+                // eligible and never becomes processing evidence merely because
+                // this caller supplied a smaller byte budget.
+                selected.push((id,done,admitted));
             }
             drop(rows);drop(statement);
             let mut ids=Vec::new();
-            for (id,done) in selected {
+            for (id,done,admitted) in selected {
                 if done {c.execute("DELETE FROM participant_receive_pending WHERE domain=?1 AND id=?2",params![self.domain.0.as_slice(),id.as_slice()])?;} else {
                     c.execute("UPDATE participant_receive_pending SET ticket=?3 WHERE domain=?1 AND id=?2",params![self.domain.0.as_slice(),id.as_slice(),ticket])?;
-                    ticket=advance(ticket)?;ids.push(EventId::new(id));
+                    ticket=advance(ticket)?;if admitted {ids.push(EventId::new(id));}
                 }
             }
             c.execute("UPDATE participant_receive_scan SET next_ticket=?2 WHERE domain=?1",params![self.domain.0.as_slice(),ticket])?;
-            Ok(ids)
-        })
+            Ok((ids,required))
+        })?;
+        if ids.is_empty()
+            && let Some(required) = required
+        {
+            return Err(LogError::PageBudgetTooSmall { required });
+        }
+        Ok(ids)
     }
 }
