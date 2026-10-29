@@ -37,15 +37,24 @@ fn charges(profile: &ProfileStorage) -> (i64, i64, i64) {
     profile.database().read(|c| Ok(c.query_row("SELECT session_rows,staged_rows,staged_bytes FROM relay_federation_runtime WHERE singleton=1", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?)).unwrap()
 }
 
-/// Count actual compilation of staging-table operations, including writes. This
-/// covers the session path that inventory-only metadata observations omit.
-struct StagingCompiles<'a> {
+/// Count real SQLite compilation at the selected storage boundary.
+struct SqlCompiles<'a> {
     database: &'a EncryptedDatabase,
-    count: Option<Box<std::sync::atomic::AtomicUsize>>,
+    count: Option<Box<CompileCounter>>,
 }
-impl<'a> StagingCompiles<'a> {
+struct CompileCounter {
+    count: std::sync::atomic::AtomicUsize,
+    guards: bool,
+}
+impl<'a> SqlCompiles<'a> {
     fn install(database: &'a EncryptedDatabase) -> Self {
-        let count = Box::new(std::sync::atomic::AtomicUsize::new(0));
+        Self::install_for(database, false)
+    }
+    fn install_for(database: &'a EncryptedDatabase, guards: bool) -> Self {
+        let count = Box::new(CompileCounter {
+            count: std::sync::atomic::AtomicUsize::new(0),
+            guards,
+        });
         database
             .read(|c| {
                 // SAFETY: the connection is locked and the boxed counter remains
@@ -54,9 +63,7 @@ impl<'a> StagingCompiles<'a> {
                     rusqlite::ffi::sqlite3_set_authorizer(
                         c.handle(),
                         Some(staging_compile),
-                        (&*count as *const std::sync::atomic::AtomicUsize)
-                            .cast_mut()
-                            .cast(),
+                        (&*count as *const CompileCounter).cast_mut().cast(),
                     )
                 };
                 assert_eq!(result, rusqlite::ffi::SQLITE_OK);
@@ -69,10 +76,14 @@ impl<'a> StagingCompiles<'a> {
         }
     }
     fn take(&self) -> usize {
-        self.count.as_ref().unwrap().swap(0, Ordering::Relaxed)
+        self.count
+            .as_ref()
+            .unwrap()
+            .count
+            .swap(0, Ordering::Relaxed)
     }
 }
-impl Drop for StagingCompiles<'_> {
+impl Drop for SqlCompiles<'_> {
     fn drop(&mut self) {
         let removed = self.database.read(|c| {
             // SAFETY: removal is serialized before the callback data is freed.
@@ -92,7 +103,7 @@ unsafe extern "C" fn staging_compile(
     userdata: *mut std::ffi::c_void,
     action: std::ffi::c_int,
     table: *const std::ffi::c_char,
-    _column: *const std::ffi::c_char,
+    column: *const std::ffi::c_char,
     _database: *const std::ffi::c_char,
     _view: *const std::ffi::c_char,
 ) -> std::ffi::c_int {
@@ -106,14 +117,43 @@ unsafe extern "C" fn staging_compile(
         let (table, count) = unsafe {
             (
                 std::ffi::CStr::from_ptr(table).to_bytes(),
-                &*userdata.cast::<std::sync::atomic::AtomicUsize>(),
+                &*userdata.cast::<CompileCounter>(),
             )
         };
-        if matches!(
-            table,
-            b"relay_federation_entries" | b"relay_federation_local_entries"
-        ) {
-            count.fetch_add(1, Ordering::Relaxed);
+        let selected = if count.guards {
+            // SQLCipher may recompile bounded cursor SELECTs on LIMIT rebinding.
+            // Observe fixed authority/header reads rather than cursor-only
+            // projections; session staging has its separate page-cost regression.
+            let column = if column.is_null() {
+                &[][..]
+            } else {
+                // SAFETY: SQLite supplies a live column name for READ.
+                unsafe { std::ffi::CStr::from_ptr(column).to_bytes() }
+            };
+            action == rusqlite::ffi::SQLITE_READ
+                && (matches!(
+                    table,
+                    b"relay_runtime"
+                        | b"event_conversations"
+                        | b"event_domains"
+                        | b"event_retirement_jobs"
+                        | b"relay_digest_preparation"
+                ) || (table == b"relay_mailboxes"
+                    && matches!(column, b"first_seen" | b"touched" | b"pending"))
+                    || (table == b"retained_events"
+                        && !matches!(
+                            column,
+                            b"commit_ordinal" | b"id" | b"domain" | b"conversation"
+                        ))
+                    || (table == b"relay_federation_sessions" && column == b"session_epoch"))
+        } else {
+            matches!(
+                table,
+                b"relay_federation_entries" | b"relay_federation_local_entries"
+            )
+        };
+        if selected {
+            count.count.fetch_add(1, Ordering::Relaxed);
         }
     }
     rusqlite::ffi::SQLITE_OK
@@ -134,7 +174,7 @@ fn federation_row_work_compiles_constant_per_bounded_page() {
                 entry
             })
             .collect();
-        let compiles = StagingCompiles::install(profile.database());
+        let compiles = SqlCompiles::install(profile.database());
         lease.receive_page(&entries, true, 100).unwrap();
         let received = compiles.take();
         profile
@@ -192,6 +232,220 @@ fn federation_row_work_compiles_constant_per_bounded_page() {
         many.iter().zip(one).all(|(many, one)| *many <= one),
         "staging, selection, comparison and cleanup must compile per bounded operation, not per row: one={one:?}, many={many:?}"
     );
+}
+
+#[test]
+fn warmed_session_guards_and_network_reads_reuse_bounded_compilation() {
+    use crate::eventlog::sync::network::{ExportPageBudget, IdPageBudget};
+    use crate::postoffice::storage::role::inventory::preparation::DigestWorker;
+    let root = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let profile = profile(&root, &identity);
+    let role =
+        IndexedRelayState::from_profile(profile.clone(), RelayAdmission::LegacyCompatible).unwrap();
+    let events: Vec<_> = (1..=3).map(|key| event(&identity, key)).collect();
+    for event in &events {
+        role.record(event, 100, None).unwrap();
+    }
+    role.request_preparation_at(100).unwrap();
+    let mut worker = DigestWorker::default();
+    for _ in 0..100 {
+        if role.preparation_ready_at(100).unwrap() {
+            break;
+        }
+        worker.step_at(&role, 100).unwrap();
+    }
+    assert!(role.preparation_ready_at(100).unwrap());
+    // Installing an authorizer invalidates existing VMs; install before warming.
+    let compiles = SqlCompiles::install_for(profile.database(), true);
+    let measure = || {
+        let mut counts = Vec::new();
+        for round in 0..6 {
+            let owner =
+                SessionOwner::begin(profile.clone(), Direction::Outbound, 100, Instant::now())
+                    .unwrap();
+            let lease = owner.lease();
+            lease.receive_page(&[], true, 100).unwrap();
+            compiles.take();
+            assert!(!role.next_work_at(100).unwrap().has_work());
+            assert!(!role.digest_work_pending().unwrap());
+            assert!(role.preparation_ready_at(100).unwrap());
+            let inventory = role.inventory_view_at(100).unwrap();
+            let page = role
+                .selected_inventory_page_at(&inventory, &lease, None, 512, 100)
+                .unwrap();
+            assert_eq!(page.entries.len(), events.len());
+            role.finish_inventory_frame_at(&inventory, &lease, page.entries.len(), true, 100)
+                .unwrap();
+            for offset in 0..events.len() {
+                let event = &events[(round + offset) % events.len()];
+                let view = role
+                    .network_view_with_session_at(&event.conversation_id, 100, Some(&lease))
+                    .unwrap();
+                assert_eq!(role.network_metadata_at(&view, 100).unwrap().count, 1);
+                let have = role
+                    .network_have_at(
+                        &view,
+                        None,
+                        IdPageBudget {
+                            ids: 8,
+                            examined: 8,
+                        },
+                        100,
+                    )
+                    .unwrap();
+                assert_eq!(have.items, vec![event.id]);
+                assert!(have.next.is_none());
+                // Exercise the bounded header selector without hydrating a body.
+                assert!(matches!(
+                    role.network_export_at(
+                        &view,
+                        &std::collections::HashSet::new(),
+                        None,
+                        ExportPageBudget {
+                            examined: 8,
+                            events: 8,
+                            encoded_bytes: 1,
+                            allocated_bytes: 1
+                        },
+                        100
+                    ),
+                    Err(LogError::PageBudgetTooSmall { .. })
+                ));
+                role.network_validate_at(&view, 100).unwrap();
+            }
+            counts.push(compiles.take());
+            drop(owner);
+            while cleanup_step(&profile, 100).unwrap() {}
+        }
+        counts
+    };
+    let counts = measure();
+    let retained = profile
+        .database()
+        .read(|c| {
+            let mut count = 0;
+            let mut statement = std::ptr::null_mut();
+            loop {
+                // SAFETY: enumerate live SQLite-owned VMs while holding the connection
+                // lock; the pointers are never executed, mutated or freed here.
+                statement = unsafe { rusqlite::ffi::sqlite3_next_stmt(c.handle(), statement) };
+                if statement.is_null() {
+                    break;
+                }
+                count += 1;
+            }
+            Ok(count)
+        })
+        .unwrap();
+    eprintln!("warm read authorizations={counts:?}; retained statement VMs={retained}");
+    assert!(
+        retained <= 64,
+        "warm statement retention stays bounded: {retained}"
+    );
+    assert!(counts[0] > 0, "the observer must see cold SQL compilation");
+    assert!(
+        counts[1..].iter().all(|count| *count == 0),
+        "warm current-authority/network queries must not compile again across conversations and sessions: {counts:?}"
+    );
+    // Reproduce the former eviction pressure with the same queries and binds.
+    profile
+        .database()
+        .read(|c| {
+            c.set_prepared_statement_cache_capacity(16);
+            Ok(())
+        })
+        .unwrap();
+    let constrained = measure();
+    eprintln!("16-entry read authorizations={constrained:?}");
+    assert!(
+        constrained[1..].iter().all(|count| *count > 0),
+        "the workload must exercise the working set that displaced the old 16-entry cache: {constrained:?}"
+    );
+}
+
+#[test]
+fn warmed_session_guards_observe_live_authority_mutations() {
+    use crate::eventlog::sync::network::IdPageBudget;
+    for mutation in [
+        "readiness",
+        "cutoff",
+        "session",
+        "epoch",
+        "capability",
+        "cancel",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let profile = profile(&root, &identity);
+        let role =
+            IndexedRelayState::from_profile(profile.clone(), RelayAdmission::LegacyCompatible)
+                .unwrap();
+        let event = event(&identity, 1);
+        role.record(&event, 100, None).unwrap();
+        let mut owner = Some(
+            SessionOwner::begin(profile.clone(), Direction::Outbound, 100, Instant::now()).unwrap(),
+        );
+        let lease = owner.as_ref().unwrap().lease();
+        lease.receive_page(&[], true, 100).unwrap();
+        let view = role
+            .network_view_with_session_at(&event.conversation_id, 100, Some(&lease))
+            .unwrap();
+        for _ in 0..2 {
+            assert_eq!(role.network_metadata_at(&view, 100).unwrap().count, 1);
+            role.network_validate_at(&view, 100).unwrap();
+            assert_eq!(
+                role.network_have_at(
+                    &view,
+                    None,
+                    IdPageBudget {
+                        ids: 8,
+                        examined: 8
+                    },
+                    100
+                )
+                .unwrap()
+                .items,
+                vec![event.id]
+            );
+        }
+        if mutation == "cancel" {
+            drop(owner.take());
+        } else {
+            profile.database().transaction(|c| {
+                match mutation {
+                    "readiness" => { c.execute("UPDATE relay_runtime SET ready=0 WHERE singleton=1", [])?; }
+                    "cutoff" => { c.execute("UPDATE relay_runtime SET expired_cutoff=?1 WHERE singleton=1", [100u64.to_be_bytes().as_slice()])?; }
+                    "session" => { c.execute("UPDATE relay_federation_sessions SET session_epoch=session_epoch+1 WHERE session_id=?1", [lease.session_id])?; }
+                    "epoch" => { c.execute("UPDATE event_conversations SET destructive_epoch=destructive_epoch+1 WHERE domain=?1 AND conversation=?2", params![RELAY_EVENTS.0.as_slice(), event.conversation_id.as_bytes().as_slice()])?; }
+                    "capability" => { c.execute("UPDATE event_conversations SET v4_count=1 WHERE domain=?1 AND conversation=?2", params![RELAY_EVENTS.0.as_slice(), event.conversation_id.as_bytes().as_slice()])?; }
+                    _ => unreachable!(),
+                }
+                Ok(())
+            }).unwrap();
+        }
+        assert!(
+            role.network_metadata_at(&view, 100).is_err(),
+            "{mutation}: warmed metadata must recheck authority"
+        );
+        assert!(
+            role.network_validate_at(&view, 100).is_err(),
+            "{mutation}: warmed validation must recheck authority"
+        );
+        assert!(
+            role.network_have_at(
+                &view,
+                None,
+                IdPageBudget {
+                    ids: 8,
+                    examined: 8
+                },
+                100
+            )
+            .is_err(),
+            "{mutation}: warmed Have must not disclose IDs"
+        );
+    }
 }
 
 #[test]

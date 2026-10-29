@@ -74,7 +74,8 @@ impl IndexedRelayState {
     }
     pub(super) fn pending_on(&self, c: &Connection) -> Result<Option<ConversationId>, LogError> {
         Self::selected_id(
-            c.query_row(SELECT_PENDING, [RELAY_ARRIVALS.as_slice()], |r| r.get(0))
+            c.prepare_cached(SELECT_PENDING)?
+                .query_row([RELAY_ARRIVALS.as_slice()], |r| r.get(0))
                 .optional()?,
         )
     }
@@ -87,17 +88,18 @@ impl IndexedRelayState {
             return Ok(None);
         };
         Self::selected_id(
-            c.query_row(
-                SELECT_EXPIRED,
-                params![RELAY_ARRIVALS.as_slice(), cutoff.to_be_bytes().as_slice()],
-                |r| r.get(0),
-            )
-            .optional()?,
+            c.prepare_cached(SELECT_EXPIRED)?
+                .query_row(
+                    params![RELAY_ARRIVALS.as_slice(), cutoff.to_be_bytes().as_slice()],
+                    |r| r.get(0),
+                )
+                .optional()?,
         )
     }
     fn lru_on(&self, c: &Connection) -> Result<Option<ConversationId>, LogError> {
         Self::selected_id(
-            c.query_row(SELECT_LRU, [RELAY_ARRIVALS.as_slice()], |r| r.get(0))
+            c.prepare_cached(SELECT_LRU)?
+                .query_row([RELAY_ARRIVALS.as_slice()], |r| r.get(0))
                 .optional()?,
         )
     }

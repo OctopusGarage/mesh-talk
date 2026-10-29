@@ -47,11 +47,11 @@ impl EventRepository {
         &self,
         c: &Connection,
     ) -> Result<DomainChargeMetadata, LogError> {
-        let (count, bytes): (i64, i64) = c.query_row(
-            "SELECT event_count,estimated_bytes FROM event_domains WHERE domain=?1",
-            [self.domain.0.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (count, bytes): (i64, i64) = c
+            .prepare_cached(
+                "SELECT event_count,estimated_bytes FROM event_domains WHERE domain=?1",
+            )?
+            .query_row([self.domain.0.as_slice()], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(DomainChargeMetadata {
             event_count: nonnegative(count)? as u64,
             estimated_bytes: nonnegative(bytes)? as u64,
@@ -64,7 +64,7 @@ impl EventRepository {
         conv: &ConversationId,
     ) -> Result<Option<ConversationMetadata>, LogError> {
         self.require_active_on(c, conv)?;
-        let mut stmt = c.prepare(&format!(
+        let mut stmt = c.prepare_cached(&format!(
             "SELECT {METADATA_COLUMNS} FROM event_conversations WHERE domain=?1 AND conversation=?2"
         ))?;
         let mut rows = stmt.query(params![

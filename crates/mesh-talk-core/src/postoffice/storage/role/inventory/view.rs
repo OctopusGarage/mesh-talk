@@ -26,9 +26,9 @@ impl IndexedRelayState {
     pub(crate) fn inventory_view_at(&self, now: u64) -> Result<InventoryView, LogError> {
         self.derived_transaction(now,|c,cutoff|{
             self.start_preparation_on(c)?;
-            let commit=c.query_row("SELECT next_commit FROM event_domains WHERE domain=?1",[RELAY_EVENTS.0.as_slice()],|r|r.get(0))?;
-            let upper=c.query_row("SELECT conversation FROM relay_mailboxes WHERE domain=?1 ORDER BY conversation DESC LIMIT 1",[RELAY_ARRIVALS.as_slice()],|r|r.get(0)).optional()?;
-            let visibility=c.query_row("SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",[],|r|r.get(0))?;
+            let commit=c.prepare_cached("SELECT next_commit FROM event_domains WHERE domain=?1")?.query_row([RELAY_EVENTS.0.as_slice()],|r|r.get(0))?;
+            let upper=c.prepare_cached("SELECT conversation FROM relay_mailboxes WHERE domain=?1 ORDER BY conversation DESC LIMIT 1")?.query_row([RELAY_ARRIVALS.as_slice()],|r|r.get(0)).optional()?;
+            let visibility=c.prepare_cached("SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1")?.query_row([],|r|r.get(0))?;
             Ok(InventoryView{owner:self.profile.clone(),commit,upper,cutoff,visibility,token:Arc::new(())})
         })
     }

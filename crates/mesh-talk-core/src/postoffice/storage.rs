@@ -208,8 +208,7 @@ pub(crate) fn publish(
 }
 
 fn runtime_state(c: &Connection) -> Result<(bool, u64), LogError> {
-    let (version, ready, next, cutoff, drain): (i64, i64, Vec<u8>, Option<Vec<u8>>, i64) = c.query_row(
-        "SELECT version,ready,next_touch,expired_cutoff,drain_requested FROM relay_runtime WHERE singleton=1",
+    let (version, ready, next, cutoff, drain): (i64, i64, Vec<u8>, Option<Vec<u8>>, i64) = c.prepare_cached("SELECT version,ready,next_touch,expired_cutoff,drain_requested FROM relay_runtime WHERE singleton=1")?.query_row(
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;

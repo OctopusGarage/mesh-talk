@@ -121,7 +121,7 @@ impl SessionOwner {
         let mut reserved = None;
         let session_id=profile.database().transaction(|c| {
             super::require_ready(c)?;
-            let (actual,next,rows,bytes,inbound,outbound):(i64,i64,i64,i64,i64,i64)=c.query_row("SELECT owner_epoch,next_session,session_rows,staged_bytes,live_inbound,live_outbound FROM relay_federation_runtime WHERE singleton=1", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+            let (actual,next,rows,bytes,inbound,outbound):(i64,i64,i64,i64,i64,i64)=c.prepare_cached("SELECT owner_epoch,next_session,session_rows,staged_bytes,live_inbound,live_outbound FROM relay_federation_runtime WHERE singleton=1")?.query_row( [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
             if actual!=owner_epoch { return Err(LogError::StaleCursor); }
             let following=next.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?;
             let rows=rows.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?;
@@ -180,7 +180,7 @@ impl SessionLease {
     }
     pub(crate) fn validate_on(&self, c: &Connection, complete: bool) -> Result<(), LogError> {
         self.check_live()?;
-        let state:Option<(i64,i64,i64,i64,i64)>=c.query_row("SELECT r.owner_epoch,s.owner_epoch,s.session_epoch,s.live,s.complete FROM relay_federation_runtime r JOIN relay_federation_sessions s ON s.session_id=?1 WHERE r.singleton=1",[self.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+        let state:Option<(i64,i64,i64,i64,i64)>=c.prepare_cached("SELECT r.owner_epoch,s.owner_epoch,s.session_epoch,s.live,s.complete FROM relay_federation_runtime r JOIN relay_federation_sessions s ON s.session_id=?1 WHERE r.singleton=1")?.query_row([self.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
         if state.is_none_or(|(runtime, owner, epoch, live, done)| {
             runtime != self.owner_epoch
                 || owner != self.owner_epoch
@@ -231,7 +231,7 @@ impl SessionLease {
         now: u64,
     ) -> Result<Option<u64>, LogError> {
         self.validate_on(c, true)?;
-        let origin:Option<Vec<u8>>=c.query_row("SELECT first_seen FROM relay_federation_entries WHERE session_id=?1 AND conversation=?2",params![self.session_id,conversation.as_bytes().as_slice()],|r|r.get(0)).optional()?;
+        let origin:Option<Vec<u8>>=c.prepare_cached("SELECT first_seen FROM relay_federation_entries WHERE session_id=?1 AND conversation=?2")?.query_row(params![self.session_id,conversation.as_bytes().as_slice()],|r|r.get(0)).optional()?;
         let origin = origin.map(super::role::decode_time).transpose()?;
         if let Some(first) = origin {
             validate_origin(conversation, first, now)?;
@@ -257,7 +257,7 @@ impl SessionLease {
         }
         self.profile.database().transaction(|c| {
             self.validate_on(c,false)?;
-            let (pages,received,complete,rows,bytes):(i64,i64,i64,i64,i64)=c.query_row("SELECT receive_pages,receive_entries,complete,row_charge,byte_charge FROM relay_federation_sessions WHERE session_id=?1",[self.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+            let (pages,received,complete,rows,bytes):(i64,i64,i64,i64,i64)=c.prepare_cached("SELECT receive_pages,receive_entries,complete,row_charge,byte_charge FROM relay_federation_sessions WHERE session_id=?1")?.query_row([self.session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
             let pages=pages.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?;
             let received=received.checked_add(i64::try_from(entries.len()).map_err(|_|LogError::InvalidPageBudget)?).ok_or(LogError::RepositoryCounterExhausted)?;
             if complete!=0 || pages>MAX_PAGES || received>PAGE_SIZE as i64*MAX_PAGES || (!last && pages==MAX_PAGES) { return Err(LogError::AdmissionRejected("incomplete or oversized federation inventory".into())); }
@@ -282,7 +282,7 @@ impl SessionLease {
                 }
             }
             let cost=additional.checked_mul(ENTRY_BYTES).ok_or(LogError::RepositoryCounterExhausted)?;
-            let (global_rows,global_bytes):(i64,i64)=c.query_row("SELECT staged_rows,staged_bytes FROM relay_federation_runtime WHERE singleton=1",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            let (global_rows,global_bytes):(i64,i64)=c.prepare_cached("SELECT staged_rows,staged_bytes FROM relay_federation_runtime WHERE singleton=1")?.query_row([],|r|Ok((r.get(0)?,r.get(1)?)))?;
             let global_rows=global_rows.checked_add(additional).ok_or(LogError::RepositoryCounterExhausted)?;
             let global_bytes=global_bytes.checked_add(cost).ok_or(LogError::RepositoryCounterExhausted)?;
             let rows=rows.checked_add(additional).ok_or(LogError::RepositoryCounterExhausted)?;
@@ -314,7 +314,7 @@ fn validate_origin(conversation: &ConversationId, first: u64, now: u64) -> Resul
     Ok(())
 }
 fn invalidate_on(c: &Connection, id: i64, owner_epoch: i64) -> Result<(), LogError> {
-    let row:Option<(i64,i64,i64)>=c.query_row("SELECT live,direction,session_epoch FROM relay_federation_sessions WHERE session_id=?1 AND owner_epoch=?2",params![id,owner_epoch],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let row:Option<(i64,i64,i64)>=c.prepare_cached("SELECT live,direction,session_epoch FROM relay_federation_sessions WHERE session_id=?1 AND owner_epoch=?2")?.query_row(params![id,owner_epoch],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     if let Some((1, direction, epoch)) = row {
         let epoch = epoch
             .checked_add(1)
@@ -323,11 +323,9 @@ fn invalidate_on(c: &Connection, id: i64, owner_epoch: i64) -> Result<(), LogErr
             "UPDATE relay_federation_sessions SET live=0,session_epoch=?2 WHERE session_id=?1",
             params![id, epoch],
         )?;
-        let current: i64 = c.query_row(
-            "SELECT owner_epoch FROM relay_federation_runtime WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?;
+        let current: i64 = c
+            .prepare_cached("SELECT owner_epoch FROM relay_federation_runtime WHERE singleton=1")?
+            .query_row([], |r| r.get(0))?;
         if current == owner_epoch {
             let sql = if direction == 0 {
                 "UPDATE relay_federation_runtime SET live_inbound=live_inbound-1 WHERE singleton=1"
@@ -347,13 +345,13 @@ pub(crate) fn cleanup_step(profile: &ProfileStorage, now: u64) -> Result<bool, L
         .reclaim_candidate()
         .or_else(|| profile.federation_cancellations().peek());
     let (progress, consumed)=profile.database().transaction(|c| {
-        let hinted=if let Some((id,owner))=hint { c.query_row("SELECT session_id,owner_epoch FROM relay_federation_sessions WHERE session_id=?1 AND owner_epoch=?2",params![id,owner],|r|Ok((r.get(0)?,r.get(1)?))).optional()? } else {None};
+        let hinted=if let Some((id,owner))=hint { c.prepare_cached("SELECT session_id,owner_epoch FROM relay_federation_sessions WHERE session_id=?1 AND owner_epoch=?2")?.query_row(params![id,owner],|r|Ok((r.get(0)?,r.get(1)?))).optional()? } else {None};
         if hint.is_some() && hinted.is_none() { return Ok((true,hint)); }
         let epoch=profile.federation_owner_epoch()?;
-        let old:Option<(i64,i64)>=c.query_row("SELECT session_id,owner_epoch FROM relay_federation_sessions INDEXED BY relay_federation_sessions_owner WHERE owner_epoch<?1 ORDER BY owner_epoch,session_id LIMIT 1",[epoch],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let old:Option<(i64,i64)>=c.prepare_cached("SELECT session_id,owner_epoch FROM relay_federation_sessions INDEXED BY relay_federation_sessions_owner WHERE owner_epoch<?1 ORDER BY owner_epoch,session_id LIMIT 1")?.query_row([epoch],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         let selected=if hinted.is_some(){hinted}else if old.is_some(){old}else{
-            let cancelled=c.query_row("SELECT session_id,owner_epoch FROM relay_federation_sessions INDEXED BY relay_federation_sessions_deadline WHERE live=0 ORDER BY deadline,session_id LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            if cancelled.is_some(){cancelled}else{c.query_row("SELECT session_id,owner_epoch FROM relay_federation_sessions INDEXED BY relay_federation_sessions_deadline WHERE live=1 AND deadline<=?1 ORDER BY deadline,session_id LIMIT 1",[now.to_be_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?}
+            let cancelled=c.prepare_cached("SELECT session_id,owner_epoch FROM relay_federation_sessions INDEXED BY relay_federation_sessions_deadline WHERE live=0 ORDER BY deadline,session_id LIMIT 1")?.query_row([],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if cancelled.is_some(){cancelled}else{c.prepare_cached("SELECT session_id,owner_epoch FROM relay_federation_sessions INDEXED BY relay_federation_sessions_deadline WHERE live=1 AND deadline<=?1 ORDER BY deadline,session_id LIMIT 1")?.query_row([now.to_be_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?}
         };
         let Some((id,owner))=selected else{return Ok((false,None))};
         invalidate_on(c,id,owner)?;
@@ -373,7 +371,7 @@ pub(crate) fn cleanup_step(profile: &ProfileStorage, now: u64) -> Result<bool, L
         c.execute("UPDATE relay_federation_sessions SET row_charge=row_charge-?2,byte_charge=byte_charge-?3 WHERE session_id=?1",params![id,rows,bytes])?;
         c.execute("UPDATE relay_federation_runtime SET staged_rows=staged_rows-?1,staged_bytes=staged_bytes-?2 WHERE singleton=1",params![rows,bytes])?;
         if selected<PAGE_SIZE {
-            let charge:(i64,i64)=c.query_row("SELECT row_charge,byte_charge FROM relay_federation_sessions WHERE session_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            let charge:(i64,i64)=c.prepare_cached("SELECT row_charge,byte_charge FROM relay_federation_sessions WHERE session_id=?1")?.query_row([id],|r|Ok((r.get(0)?,r.get(1)?)))?;
             if charge!=(0,SESSION_BYTES){return Err(invalid("federation staging charge differs from retained rows"))}
             c.execute("DELETE FROM relay_federation_sessions WHERE session_id=?1",[id])?;
             c.execute("UPDATE relay_federation_runtime SET session_rows=session_rows-1,staged_bytes=staged_bytes-?1 WHERE singleton=1",[SESSION_BYTES])?;

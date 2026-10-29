@@ -71,11 +71,9 @@ impl IndexedRelayState {
         Ok(())
     }
     pub(super) fn drain_on(&self, c: &Connection) -> Result<bool, LogError> {
-        let value: i64 = c.query_row(
-            "SELECT drain_requested FROM relay_runtime WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?;
+        let value: i64 = c
+            .prepare_cached("SELECT drain_requested FROM relay_runtime WHERE singleton=1")?
+            .query_row([], |r| r.get(0))?;
         match value {
             0 => Ok(false),
             1 => Ok(true),

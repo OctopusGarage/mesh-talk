@@ -1094,7 +1094,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Indexed storage encrypts metadata and WAL; wrong keys, owners, versions or fatal transaction failures never become an empty successful history. Each shared connection retains at most 16 compiled SQL statements; warm relay metadata traversal reuses compilation without caching rows or skipping current authority checks, and returned statements clear bound values.",
+            "name": "Indexed storage encrypts metadata and WAL; wrong keys, owners, versions or fatal transaction failures never become an empty successful history. Each shared connection retains at most 64 compiled SQL statements; warm relay inventory, maintenance, session guards and network metadata reads reuse compilation across conversations and sessions without caching rows or skipping current authority checks, and returned statements clear bound values.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

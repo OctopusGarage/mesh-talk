@@ -4,11 +4,9 @@ pub(super) const SELECT_NEXT_AFTER: &str = "SELECT first_seen FROM relay_mailbox
 pub(super) const SELECT_NEXT_FIRST: &str = "SELECT first_seen FROM relay_mailboxes WHERE domain=?1 AND pending=0 ORDER BY first_seen,conversation LIMIT 1";
 impl IndexedRelayState {
     pub(super) fn cutoff_on(&self, c: &Connection) -> Result<Option<u64>, LogError> {
-        let value: Option<Vec<u8>> = c.query_row(
-            "SELECT expired_cutoff FROM relay_runtime WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?;
+        let value: Option<Vec<u8>> = c
+            .prepare_cached("SELECT expired_cutoff FROM relay_runtime WHERE singleton=1")?
+            .query_row([], |r| r.get(0))?;
         value.map(decode_time).transpose()
     }
     pub(super) fn next_arrival_on(
@@ -17,14 +15,15 @@ impl IndexedRelayState {
         cutoff: Option<u64>,
     ) -> Result<Option<u64>, LogError> {
         let value: Option<Vec<u8>> = if let Some(cutoff) = cutoff {
-            c.query_row(
-                SELECT_NEXT_AFTER,
-                params![RELAY_ARRIVALS.as_slice(), cutoff.to_be_bytes().as_slice()],
-                |r| r.get(0),
-            )
-            .optional()?
+            c.prepare_cached(SELECT_NEXT_AFTER)?
+                .query_row(
+                    params![RELAY_ARRIVALS.as_slice(), cutoff.to_be_bytes().as_slice()],
+                    |r| r.get(0),
+                )
+                .optional()?
         } else {
-            c.query_row(SELECT_NEXT_FIRST, [RELAY_ARRIVALS.as_slice()], |r| r.get(0))
+            c.prepare_cached(SELECT_NEXT_FIRST)?
+                .query_row([RELAY_ARRIVALS.as_slice()], |r| r.get(0))
                 .optional()?
         };
         value.map(decode_time).transpose()
@@ -123,11 +122,11 @@ impl IndexedRelayState {
         let (result, changed, visible_changed) = self.profile.database().transaction(|c| {
             require_ready(c)?;
             let before = c.total_changes();
-            let visibility: i64 = c.query_row(
-                "SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",
-                [],
-                |r| r.get(0),
-            )?;
+            let visibility: i64 = c
+                .prepare_cached(
+                    "SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",
+                )?
+                .query_row([], |r| r.get(0))?;
             let cutoff = self.advance_cutoff_on(c, now)?;
             let result = operation(c, cutoff);
             let result = match result {
@@ -142,11 +141,11 @@ impl IndexedRelayState {
                 Ok(value) => Ok(value),
             };
             fault_cut(c, "commit")?;
-            let after_visibility: i64 = c.query_row(
-                "SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",
-                [],
-                |r| r.get(0),
-            )?;
+            let after_visibility: i64 = c
+                .prepare_cached(
+                    "SELECT inventory_visibility_epoch FROM relay_runtime WHERE singleton=1",
+                )?
+                .query_row([], |r| r.get(0))?;
             Ok((
                 result,
                 c.total_changes() != before,

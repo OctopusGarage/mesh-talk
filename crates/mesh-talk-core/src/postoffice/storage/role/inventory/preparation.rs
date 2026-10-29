@@ -35,19 +35,19 @@ impl IndexedRelayState {
         if self.cached_digest_on(c, conv, binding)?.is_some() {
             return Ok(true);
         }
-        let present: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM relay_digest_demands WHERE conversation=?1)",
-            [conv.as_bytes().as_slice()],
-            |r| r.get(0),
-        )?;
+        let present: bool = c
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM relay_digest_demands WHERE conversation=?1)",
+            )?
+            .query_row([conv.as_bytes().as_slice()], |r| r.get(0))?;
         if present {
             return Ok(true);
         }
-        let (queued, ticket): (i64, i64) = c.query_row(
-            "SELECT queued,next_ticket FROM relay_digest_preparation WHERE singleton=1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let (queued, ticket): (i64, i64) = c
+            .prepare_cached(
+                "SELECT queued,next_ticket FROM relay_digest_preparation WHERE singleton=1",
+            )?
+            .query_row([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         if queued >= MAX_DEMANDS {
             // Scoped probes retry their optional cache demand after capacity
             // frees. Only an explicit federation request starts the global walk.
@@ -65,27 +65,23 @@ impl IndexedRelayState {
         Ok(true)
     }
     pub(super) fn start_preparation_on(&self, c: &Connection) -> Result<(), LogError> {
-        let phase: i64 = c.query_row(
-            "SELECT phase FROM relay_digest_preparation WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?;
+        let phase: i64 = c
+            .prepare_cached("SELECT phase FROM relay_digest_preparation WHERE singleton=1")?
+            .query_row([], |r| r.get(0))?;
         if phase != 0 {
             return Ok(());
         }
-        let upper:Option<Vec<u8>>=c.query_row("SELECT conversation FROM relay_mailboxes WHERE domain=?1 ORDER BY conversation DESC LIMIT 1",[RELAY_ARRIVALS.as_slice()],|r|r.get(0)).optional()?;
-        let commit: i64 = c.query_row(
-            "SELECT next_commit FROM event_domains WHERE domain=?1",
-            [RELAY_EVENTS.0.as_slice()],
-            |r| r.get(0),
-        )?;
+        let upper:Option<Vec<u8>>=c.prepare_cached("SELECT conversation FROM relay_mailboxes WHERE domain=?1 ORDER BY conversation DESC LIMIT 1")?.query_row([RELAY_ARRIVALS.as_slice()],|r|r.get(0)).optional()?;
+        let commit: i64 = c
+            .prepare_cached("SELECT next_commit FROM event_domains WHERE domain=?1")?
+            .query_row([RELAY_EVENTS.0.as_slice()], |r| r.get(0))?;
         c.execute("UPDATE relay_digest_preparation SET generation=1,phase=1,scan_upper=?1,tail_after=?2 WHERE singleton=1",params![upper,commit])?;
         Ok(())
     }
     /// Scalar readiness only: ordinary scoped demands do not start global work.
     pub(crate) fn digest_work_pending(&self) -> Result<bool, LogError> {
         self.profile.database().read(|c| {
-            Ok(c.query_row("SELECT p.queued>0 OR (p.phase<>0 AND (p.phase=1 OR p.tail_after<d.next_commit OR p.ready_generation<>p.generation)) FROM relay_digest_preparation p JOIN event_domains d ON d.domain=?1 WHERE p.singleton=1", [RELAY_EVENTS.0.as_slice()], |r| r.get(0))?)
+            Ok(c.prepare_cached("SELECT p.queued>0 OR (p.phase<>0 AND (p.phase=1 OR p.tail_after<d.next_commit OR p.ready_generation<>p.generation)) FROM relay_digest_preparation p JOIN event_domains d ON d.domain=?1 WHERE p.singleton=1")?.query_row( [RELAY_EVENTS.0.as_slice()], |r| r.get(0))?)
         })
     }
     /// Called by an actual inventory request. Constructor and ordinary idle never
@@ -95,7 +91,7 @@ impl IndexedRelayState {
     }
     pub(crate) fn preparation_ready_at(&self, now: u64) -> Result<bool, LogError> {
         self.policy_transaction(now,|c,_|{
-            Ok(c.query_row("SELECT p.phase=2 AND p.queued=0 AND p.ready_generation=p.generation AND p.tail_after=d.next_commit FROM relay_digest_preparation p JOIN event_domains d ON d.domain=?1 WHERE p.singleton=1",[RELAY_EVENTS.0.as_slice()],|r|r.get(0))?)
+            Ok(c.prepare_cached("SELECT p.phase=2 AND p.queued=0 AND p.ready_generation=p.generation AND p.tail_after=d.next_commit FROM relay_digest_preparation p JOIN event_domains d ON d.domain=?1 WHERE p.singleton=1")?.query_row([RELAY_EVENTS.0.as_slice()],|r|r.get(0))?)
         })
     }
     pub(super) fn produce_on(
@@ -105,33 +101,29 @@ impl IndexedRelayState {
         p: &mut PreparationProgress,
     ) -> Result<(), LogError> {
         type ProducerCursorRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, i64, i64, i64);
-        let (phase,after,upper,tail,generation,ready):ProducerCursorRow=c.query_row("SELECT phase,scan_after,scan_upper,tail_after,generation,ready_generation FROM relay_digest_preparation WHERE singleton=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+        let (phase,after,upper,tail,generation,ready):ProducerCursorRow=c.prepare_cached("SELECT phase,scan_after,scan_upper,tail_after,generation,ready_generation FROM relay_digest_preparation WHERE singleton=1")?.query_row([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
         if phase == 0 {
             return Ok(());
         }
-        let commit: i64 = c.query_row(
-            "SELECT next_commit FROM event_domains WHERE domain=?1",
-            [RELAY_EVENTS.0.as_slice()],
-            |r| r.get(0),
-        )?;
+        let commit: i64 = c
+            .prepare_cached("SELECT next_commit FROM event_domains WHERE domain=?1")?
+            .query_row([RELAY_EVENTS.0.as_slice()], |r| r.get(0))?;
         if phase == 2 && tail < commit && ready == generation {
             c.execute(
                 "UPDATE relay_digest_preparation SET generation=?1 WHERE singleton=1",
                 [next(generation)?],
             )?;
         }
-        let queued: i64 = c.query_row(
-            "SELECT queued FROM relay_digest_preparation WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?;
+        let queued: i64 = c
+            .prepare_cached("SELECT queued FROM relay_digest_preparation WHERE singleton=1")?
+            .query_row([], |r| r.get(0))?;
         let limit = (MAX_DEMANDS - queued).min(PAGE as i64);
         if limit == 0 {
             return Ok(());
         }
         if phase == 1 {
             let keys = {
-                let mut q=c.prepare("SELECT conversation FROM relay_mailboxes WHERE domain=?1 AND conversation>?2 AND conversation<=?3 ORDER BY conversation LIMIT ?4")?;
+                let mut q=c.prepare_cached("SELECT conversation FROM relay_mailboxes WHERE domain=?1 AND conversation>?2 AND conversation<=?3 ORDER BY conversation LIMIT ?4")?;
                 q.query_map(
                     params![
                         RELAY_ARRIVALS.as_slice(),
@@ -165,7 +157,7 @@ impl IndexedRelayState {
             // Raw commit rows are bounded BEFORE conversation dedup. The covering
             // index avoids body reads and no DISTINCT can hide an unbounded scan.
             let rows = {
-                let mut q=c.prepare("SELECT commit_ordinal,conversation FROM retained_events INDEXED BY retained_events_domain_commits WHERE domain=?1 AND commit_ordinal>=?2 AND commit_ordinal<?3 ORDER BY commit_ordinal LIMIT ?4")?;
+                let mut q=c.prepare_cached("SELECT commit_ordinal,conversation FROM retained_events INDEXED BY retained_events_domain_commits WHERE domain=?1 AND commit_ordinal>=?2 AND commit_ordinal<?3 ORDER BY commit_ordinal LIMIT ?4")?;
                 q.query_map(
                     params![RELAY_EVENTS.0.as_slice(), tail, commit, limit],
                     |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
@@ -216,10 +208,10 @@ impl DigestWorker {
             let mut p=PreparationProgress::default();
             state.produce_on(c,cutoff,&mut p)?;
             if let Some(job)=&active {
-                let demanded:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM relay_digest_demands WHERE conversation=?1)",[job.conversation.as_bytes().as_slice()],|r|r.get(0))?;
+                let demanded:bool=c.prepare_cached("SELECT EXISTS(SELECT 1 FROM relay_digest_demands WHERE conversation=?1)")?.query_row([job.conversation.as_bytes().as_slice()],|r|r.get(0))?;
                 if !demanded || state.digest_binding_on(c,&job.conversation,cutoff)?!=Some(job.binding) {
                     if demanded {
-                        let ticket:i64=c.query_row("SELECT next_ticket FROM relay_digest_preparation WHERE singleton=1",[],|r|r.get(0))?;
+                        let ticket:i64=c.prepare_cached("SELECT next_ticket FROM relay_digest_preparation WHERE singleton=1")?.query_row([],|r|r.get(0))?;
                         c.execute("UPDATE relay_digest_demands SET ticket=?2 WHERE conversation=?1",params![job.conversation.as_bytes().as_slice(),ticket])?;
                         c.execute("UPDATE relay_digest_preparation SET next_ticket=?1 WHERE singleton=1",[next(ticket)?])?;
                     }
@@ -227,7 +219,7 @@ impl DigestWorker {
                 }
             }
             if active.is_none(){
-                let conv:Option<Vec<u8>>=c.query_row("SELECT conversation FROM relay_digest_demands ORDER BY ticket LIMIT 1",[],|r|r.get(0)).optional()?;
+                let conv:Option<Vec<u8>>=c.prepare_cached("SELECT conversation FROM relay_digest_demands ORDER BY ticket LIMIT 1")?.query_row([],|r|r.get(0)).optional()?;
                 if let Some(conv)=conv {
                     let conv=id(conv)?;
                     match state.digest_binding_on(c,&conv,cutoff)? {
@@ -239,7 +231,7 @@ impl DigestWorker {
                 }
             }
             if let Some(job)=&mut active {
-                let ids={let mut q=c.prepare("SELECT id FROM retained_events INDEXED BY retained_events_ids WHERE domain=?1 AND conversation=?2 AND id>?3 ORDER BY id LIMIT 512")?;
+                let ids={let mut q=c.prepare_cached("SELECT id FROM retained_events INDEXED BY retained_events_ids WHERE domain=?1 AND conversation=?2 AND id>?3 ORDER BY id LIMIT 512")?;
                     q.query_map(params![RELAY_EVENTS.0.as_slice(),job.conversation.as_bytes().as_slice(),job.after.as_ref().map_or(&[][..],|v|v.as_slice())],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?};
                 for bytes in &ids {
                     let key:[u8;32]=bytes.as_slice().try_into().map_err(|_|invalid("invalid hashed event id"))?;
@@ -260,8 +252,8 @@ impl DigestWorker {
                     remove_demand_on(c,&job.conversation)?;active=None;p.published=true;
                 }
             }
-            let (phase,queued,tail,generation,ready):(i64,i64,i64,i64,i64)=c.query_row("SELECT phase,queued,tail_after,generation,ready_generation FROM relay_digest_preparation WHERE singleton=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
-            let commit:i64=c.query_row("SELECT next_commit FROM event_domains WHERE domain=?1",[RELAY_EVENTS.0.as_slice()],|r|r.get(0))?;
+            let (phase,queued,tail,generation,ready):(i64,i64,i64,i64,i64)=c.prepare_cached("SELECT phase,queued,tail_after,generation,ready_generation FROM relay_digest_preparation WHERE singleton=1")?.query_row([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+            let commit:i64=c.prepare_cached("SELECT next_commit FROM event_domains WHERE domain=?1")?.query_row([RELAY_EVENTS.0.as_slice()],|r|r.get(0))?;
             p.pending=queued>0 || (phase!=0 && (phase==1 || tail<commit));
             if phase==2 && queued==0 && tail==commit && ready!=generation {
                 c.execute("UPDATE relay_digest_preparation SET ready_generation=generation WHERE singleton=1",[])?;

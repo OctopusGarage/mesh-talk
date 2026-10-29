@@ -43,7 +43,7 @@ impl EventRepository {
         c: &Connection,
         conv: &ConversationId,
     ) -> Result<i64, LogError> {
-        let epoch: Option<i64> = c.query_row("SELECT destructive_epoch FROM event_conversations WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|r.get(0)).optional()?;
+        let epoch: Option<i64> = c.prepare_cached("SELECT destructive_epoch FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|r.get(0)).optional()?;
         nonnegative(epoch.unwrap_or(0))
     }
     pub(crate) fn validate_network_on(
@@ -84,7 +84,7 @@ impl EventRepository {
         #[cfg(test)]
         self.network_header_fetches
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut stmt = c.prepare(&format!(
+        let mut stmt = c.prepare_cached(&format!(
             "SELECT {HEADER_COLUMNS},length(body) FROM retained_events WHERE domain=?1 AND id=?2"
         ))?;
         let mut rows = stmt.query(params![self.domain.0.as_slice(), id.as_bytes().as_slice()])?;
@@ -104,7 +104,7 @@ impl EventRepository {
         conv: &ConversationId,
         revision: i64,
     ) -> Result<Option<[u8; 32]>, LogError> {
-        let cache:Option<(Option<i64>,Option<Vec<u8>>)>=c.query_row("SELECT fingerprint_revision,fingerprint FROM event_conversations WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let cache:Option<(Option<i64>,Option<Vec<u8>>)>=c.prepare_cached("SELECT fingerprint_revision,fingerprint FROM event_conversations WHERE domain=?1 AND conversation=?2")?.query_row(params![self.domain.0.as_slice(),conv.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         match cache {
             None | Some((None, None)) => Ok(None),
             Some((Some(cached), Some(bytes))) => {
@@ -127,11 +127,10 @@ impl EventRepository {
         c: &Connection,
         conv: &ConversationId,
     ) -> Result<NetworkView, LogError> {
-        let cutoff = nonnegative(c.query_row(
-            "SELECT next_commit FROM event_domains WHERE domain=?1",
-            [self.domain.0.as_slice()],
-            |r| r.get(0),
-        )?)?;
+        let cutoff = nonnegative(
+            c.prepare_cached("SELECT next_commit FROM event_domains WHERE domain=?1")?
+                .query_row([self.domain.0.as_slice()], |r| r.get(0))?,
+        )?;
         let metadata = self.metadata_on(c, conv)?;
         let mut captured = SyncMetadata::default();
         if let Some(m) = metadata {
@@ -170,7 +169,7 @@ impl EventRepository {
         }
         let limit = budget.ids.min(budget.examined);
         let (last, id) = after.map_or((-1, [0; 32]), |a| (a.after, a.id));
-        let mut stmt = c.prepare(SELECT_COMMIT_IDS)?;
+        let mut stmt = c.prepare_cached(SELECT_COMMIT_IDS)?;
         let mut rows = stmt.query(params![
             self.domain.0.as_slice(),
             view.binding.conversation.as_bytes().as_slice(),
@@ -233,7 +232,7 @@ impl EventRepository {
             encoded_bytes: 0,
             allocated_bytes: 0,
         };
-        let mut stmt = c.prepare(SELECT_COMMIT_IDS)?;
+        let mut stmt = c.prepare_cached(SELECT_COMMIT_IDS)?;
         let mut rows = stmt.query(params![
             self.domain.0.as_slice(),
             view.binding.conversation.as_bytes().as_slice(),

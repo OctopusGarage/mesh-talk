@@ -19,8 +19,10 @@ const APPLICATION_ID: i64 = 0x4d544442;
 const SCHEMA_VERSION: i64 = 1;
 // This is a per-connection page-cache budget, not a bound on process memory.
 const PAGE_CACHE_KIB: i64 = 4096;
-// Newly enabled VM reuse has a separate fixed bound from the page cache.
-const PREPARED_STATEMENTS: usize = 16;
+// Fixed VM bound separate from the page cache. Inventory, session authority,
+// maintenance and network selectors share this connection; 16 entries thrash
+// across a warmed exchange even when no retained data changes.
+const PREPARED_STATEMENTS: usize = 64;
 const WAL_CHECKPOINT_PAGES: i64 = 256;
 const JOURNAL_BYTES: i64 = 4 * 1024 * 1024;
 #[cfg(any(test, feature = "fast-test-kdf"))]

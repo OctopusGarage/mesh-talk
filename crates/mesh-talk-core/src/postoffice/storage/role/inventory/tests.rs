@@ -190,12 +190,12 @@ fn warmed_inventory_metadata_compilation_is_constant_across_mailboxes() {
     };
     let cached = database.read(|c| Ok(retained_statements(c))).unwrap();
     assert!(
-        (8..=16).contains(&cached),
+        (8..=64).contains(&cached),
         "hot metadata VM cache must be bounded: {cached}"
     );
     let saturated = database
         .read(|c| {
-            for value in 0..32i64 {
+            for value in 0..128i64 {
                 // Controlled constants intentionally create distinct cache keys.
                 // Each scoped statement drops before the next one is prepared.
                 let mut statement = c.prepare_cached(&format!("SELECT {value}"))?;
@@ -205,7 +205,7 @@ fn warmed_inventory_metadata_compilation_is_constant_across_mailboxes() {
         })
         .unwrap();
     assert_eq!(
-        saturated, 16,
+        saturated, 64,
         "distinct statements must evict older cached VMs"
     );
 }
