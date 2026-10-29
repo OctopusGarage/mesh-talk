@@ -332,7 +332,7 @@
     "invalidResponse": "온라인 상태 응답을 읽지 못했습니다.",
     "observedDevices": "최근 확인된 기기: {{count}}대",
     "source_local": "로컬 네트워크 검색",
-    "source_routed": "네트워크 간 검색",
+    "source_routed": "공개 범위 및 네트워크 간 검색",
     "source_directory": "우체국을 통해 발견됨",
     "source_authenticated": "인증된 관측 (네트워크 범위 미지정)",
     "source_self": "이 기기 실행 중",
@@ -618,15 +618,30 @@
     "attachmentOverrides": "각 대화의 첨부 파일 설정에서 이 기본 수신 설정을 따로 변경할 수 있습니다.",
     "refreshFailed": "변경 사항은 저장되었지만 현재 값을 다시 불러오지 못했습니다: {{error}}. 설정을 다시 불러와 확인하세요.",
     "reload": "설정 다시 불러오기",
+    "sections": {
+      "privacyPreset": "개인정보 사전 설정",
+      "lockAndLogin": "잠금 및 로그인",
+      "clipboard": "복사 및 클립보드",
+      "relatedPermissions": "관련 권한",
+      "deviceDiscovery": "기기 검색",
+      "crossNetwork": "네트워크 간 검색",
+      "offlineDelivery": "오프라인 배달"
+    },
+    "groups": {
+      "experience": "사용 환경",
+      "privacyData": "개인정보 및 데이터",
+      "connectionExtensions": "연결 및 확장"
+    },
     "categories": {
-      "general": "일반",
-      "appearance": "화면 모양",
+      "general": "앱 동작",
+      "appearance": "모양 및 언어",
       "notifications": "알림 및 통화",
-      "connection": "연결 및 전달",
-      "privacy": "개인정보 보호 및 보안",
-      "integrations": "연동",
-      "files": "파일 및 수신",
-      "history": "기록 및 백업"
+      "shortcuts": "단축키",
+      "privacy": "개인정보 및 보안",
+      "files": "파일 및 다운로드",
+      "history": "기록 및 백업",
+      "connection": "네트워크 및 배달",
+      "integrations": "Agent 접근"
     },
     "applyPreset": "프리셋 적용",
     "presetPending": "프리셋을 적용하면 아래의 다섯 가지 보호 설정이 변경됩니다. 개별적으로 변경하면 사용자 지정으로 전환됩니다.",

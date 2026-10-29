@@ -2,13 +2,14 @@ import type { Page } from "@playwright/test";
 import { expect } from "../tauri-mock";
 
 export const settingsCategories = {
-  general: "General",
-  appearance: "Appearance",
+  general: "App behavior",
+  appearance: "Appearance & language",
+  shortcuts: "Shortcuts",
   notifications: "Notifications & calls",
-  connection: "Connection & delivery",
+  connection: "Network & delivery",
   privacy: "Privacy & security",
-  integrations: "Integrations",
-  files: "Files & receiving",
+  integrations: "Agent access",
+  files: "Files & downloads",
   history: "History & backup",
 } as const;
 

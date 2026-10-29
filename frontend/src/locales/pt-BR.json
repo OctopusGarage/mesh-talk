@@ -332,7 +332,7 @@
     "invalidResponse": "Não foi possível ler a resposta de status online.",
     "observedDevices": "Dispositivos observados recentemente: {{count}}",
     "source_local": "Descoberta na rede local",
-    "source_routed": "Descoberta entre redes",
+    "source_routed": "Visibilidade e descoberta entre redes",
     "source_directory": "Descoberto por meio de um posto de correio",
     "source_authenticated": "Observação autenticada (escopo de rede não especificado)",
     "source_self": "Este dispositivo está em execução",
@@ -618,15 +618,30 @@
     "attachmentOverrides": "As configurações de anexos de cada conversa podem substituir este padrão de recebimento.",
     "refreshFailed": "A alteração foi salva, mas não foi possível recarregar o valor atual: {{error}}. Recarregue as configurações para confirmar.",
     "reload": "Recarregar configurações",
+    "sections": {
+      "privacyPreset": "Predefinição de privacidade",
+      "lockAndLogin": "Bloqueio e login",
+      "clipboard": "Cópia e área de transferência",
+      "relatedPermissions": "Permissões relacionadas",
+      "deviceDiscovery": "Descoberta de dispositivos",
+      "crossNetwork": "Descoberta entre redes",
+      "offlineDelivery": "Entrega offline"
+    },
+    "groups": {
+      "experience": "Experiência",
+      "privacyData": "Privacidade e dados",
+      "connectionExtensions": "Conexão e extensões"
+    },
     "categories": {
-      "general": "Geral",
-      "appearance": "Aparência",
+      "general": "Comportamento do app",
+      "appearance": "Aparência e idioma",
       "notifications": "Notificações e chamadas",
-      "connection": "Conexão e entrega",
+      "shortcuts": "Atalhos de teclado",
       "privacy": "Privacidade e segurança",
-      "integrations": "Integrações",
-      "files": "Arquivos e recebimento",
-      "history": "Histórico e backup"
+      "files": "Arquivos e downloads",
+      "history": "Histórico e backup",
+      "connection": "Rede e entrega",
+      "integrations": "Acesso de agentes"
     },
     "applyPreset": "Aplicar predefinição",
     "presetPending": "Aplicar uma predefinição altera as cinco proteções listadas abaixo. Alterações individuais usam a opção Personalizada.",

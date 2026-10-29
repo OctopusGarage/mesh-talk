@@ -706,6 +706,10 @@
     {
       "id": "frontend-settings-shell",
       "paths": [
+        "frontend/e2e/ui-audit-dialogs.spec.ts-snapshots/settings-dialog-dark-820x620.png",
+        "frontend/e2e/touch-targets.spec.ts",
+        "frontend/e2e/unrestricted-messages.spec.ts",
+        "frontend/e2e/window-controls.spec.ts",
         "frontend/src/features/chat/SettingsDialog.tsx",
         "frontend/src/features/chat/settings/GeneralSettings.tsx",
         "frontend/src/features/chat/settings/model.ts",
@@ -725,7 +729,11 @@
         "guide": "docs/settings.md",
         "invariants": [
           {
-            "name": "General contains routine app preferences; Integrations owns agent access, permissions and setup. Only the active category is mounted and all locales provide its navigation label.",
+            "name": "One settings model owns grouped navigation, category order and control routes. Language lives in Appearance & language, screenshot edits/save feedback live in Shortcuts, and Agent privacy links reach Agent access.",
+            "reference": "docs/settings.md#categories"
+          },
+          {
+            "name": "App behavior contains startup/window preferences; Agent access owns local permissions and setup. Only the active category is mounted and all locales provide its navigation label.",
             "reference": "docs/settings.md"
           }
         ]
@@ -767,7 +775,7 @@
             "reference": "docs/settings.md#local-agent-access"
           },
           {
-            "name": "Integrations owns local agent setup and save feedback; conversation selection stays collapsed by default with a selected count, searchable bounded results and selected-only review; filtering preserves grants and the 16-conversation limit.",
+            "name": "Agent access owns local agent setup and save feedback; conversation selection stays collapsed by default with a selected count, searchable bounded results and selected-only review; filtering preserves grants and the 16-conversation limit.",
             "reference": "docs/settings.md#local-agent-access"
           }
         ]

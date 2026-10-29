@@ -20,7 +20,7 @@ A channel member can supply retained attachments when both devices have accepted
 
 ## Control incoming transfers
 
-Open **More → Settings → Files & receiving** to choose the default receiving policy. Individual conversations can override it through their attachment receiving settings. Review the conversation's policy when its behavior differs from the default.
+Open **More → Settings → Files & downloads** to choose the default receiving policy. Individual conversations can override it through their attachment receiving settings. Review the conversation's policy when its behavior differs from the default.
 
 Receiving approval and the [download folder](download-location.md) are independent. Choosing a folder does not grant permission to receive a transfer.
 

@@ -618,15 +618,30 @@
     "attachmentOverrides": "Cada conversación puede cambiar este valor predeterminado desde sus ajustes de archivos adjuntos.",
     "refreshFailed": "El cambio se guardó, pero no se pudo volver a cargar su valor actual: {{error}}. Recarga los ajustes para confirmarlo.",
     "reload": "Recargar ajustes",
+    "sections": {
+      "privacyPreset": "Preajuste de privacidad",
+      "lockAndLogin": "Bloqueo e inicio de sesión",
+      "clipboard": "Copia y portapapeles",
+      "relatedPermissions": "Permisos relacionados",
+      "deviceDiscovery": "Detección de dispositivos",
+      "crossNetwork": "Visibilidad y detección entre redes",
+      "offlineDelivery": "Entrega sin conexión"
+    },
+    "groups": {
+      "experience": "Experiencia",
+      "privacyData": "Privacidad y datos",
+      "connectionExtensions": "Conexión y extensiones"
+    },
     "categories": {
-      "general": "General",
-      "appearance": "Apariencia",
+      "general": "Comportamiento de la app",
+      "appearance": "Apariencia e idioma",
       "notifications": "Notificaciones y llamadas",
-      "connection": "Conexión y entrega",
+      "shortcuts": "Atajos de teclado",
       "privacy": "Privacidad y seguridad",
-      "integrations": "Integraciones",
-      "files": "Archivos y recepción",
-      "history": "Historial y copias de seguridad"
+      "files": "Archivos y descargas",
+      "history": "Historial y copias de seguridad",
+      "connection": "Red y entrega",
+      "integrations": "Acceso de agentes"
     },
     "applyPreset": "Aplicar preajuste",
     "presetPending": "Al aplicar un preajuste se cambian las cinco protecciones que aparecen a continuación. Los cambios individuales usan Personalizado.",

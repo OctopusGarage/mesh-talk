@@ -621,15 +621,30 @@
     "attachmentOverrides": "各個對話可在其附件設定中覆寫此預設接收方式。",
     "refreshFailed": "變更已儲存，但無法重新載入目前值：{{error}}。請重新載入設定以確認。",
     "reload": "重新載入設定",
+    "sections": {
+      "privacyPreset": "隱私預設",
+      "lockAndLogin": "鎖定與登入",
+      "clipboard": "複製與剪貼簿",
+      "relatedPermissions": "相關權限",
+      "deviceDiscovery": "裝置探索",
+      "crossNetwork": "可見性與跨網路探索",
+      "offlineDelivery": "離線投遞"
+    },
+    "groups": {
+      "experience": "使用體驗",
+      "privacyData": "隱私與資料",
+      "connectionExtensions": "連線與擴充"
+    },
     "categories": {
-      "general": "一般",
-      "appearance": "外觀",
+      "general": "應用行為",
+      "appearance": "外觀與語言",
       "notifications": "通知與通話",
-      "connection": "連線與投遞",
+      "shortcuts": "快捷鍵",
       "privacy": "隱私與安全",
-      "integrations": "整合",
-      "files": "檔案與接收",
-      "history": "歷史記錄與備份"
+      "files": "檔案與下載",
+      "history": "歷史與備份",
+      "connection": "網路與投遞",
+      "integrations": "Agent 存取"
     },
     "applyPreset": "套用預設",
     "presetPending": "套用預設會變更下方列出的五項保護設定。個別調整後將使用「自訂」。",

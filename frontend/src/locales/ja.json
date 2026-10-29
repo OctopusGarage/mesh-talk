@@ -618,15 +618,30 @@
     "attachmentOverrides": "各会話の添付ファイル設定で、この受信の初期設定を変更できます。",
     "refreshFailed": "変更は保存されましたが、現在の値を再読み込みできませんでした：{{error}}。設定を再読み込みして確認してください。",
     "reload": "設定を再読み込み",
+    "sections": {
+      "privacyPreset": "プライバシープリセット",
+      "lockAndLogin": "ロックとサインイン",
+      "clipboard": "コピーとクリップボード",
+      "relatedPermissions": "関連する権限",
+      "deviceDiscovery": "デバイスの検出",
+      "crossNetwork": "公開範囲とネットワーク間の検出",
+      "offlineDelivery": "オフライン配信"
+    },
+    "groups": {
+      "experience": "使い心地",
+      "privacyData": "プライバシーとデータ",
+      "connectionExtensions": "接続と拡張"
+    },
     "categories": {
-      "general": "一般",
-      "appearance": "外観",
+      "general": "アプリの動作",
+      "appearance": "外観と言語",
       "notifications": "通知と通話",
-      "connection": "接続と配信",
+      "shortcuts": "ショートカット",
       "privacy": "プライバシーとセキュリティ",
-      "integrations": "連携",
-      "files": "ファイルと受信",
-      "history": "履歴とバックアップ"
+      "files": "ファイルとダウンロード",
+      "history": "履歴とバックアップ",
+      "connection": "ネットワークと配信",
+      "integrations": "Agent アクセス"
     },
     "applyPreset": "プリセットを適用",
     "presetPending": "プリセットを適用すると、以下の5つの保護設定が変更されます。個別に変更すると「カスタム」になります。",

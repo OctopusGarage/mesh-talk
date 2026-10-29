@@ -10,10 +10,15 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { SETTINGS_CATEGORIES, type SettingsCategory } from "./settings/model";
+import {
+  SETTINGS_GROUPS,
+  settingsCategoryForControl,
+  type SettingsCategory,
+} from "./settings/model";
 import { useSettingsController } from "./settings/useSettingsController";
 import { SettingsError } from "./settings/primitives";
 import { LocalAgentSettings } from "./settings/LocalAgentSettings";
+import { ScreenshotShortcutSettings } from "./settings/ScreenshotShortcutSettings";
 import { GeneralSettings } from "./settings/GeneralSettings";
 import { AppearanceSettings } from "./settings/AppearanceSettings";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -43,7 +48,10 @@ export function SettingsDialog({
   const panel = useRef<HTMLDivElement>(null);
   const focusTarget = useRef<string | null>(null);
   const controller = useSettingsController(open);
-  const initialCategory = initialTarget?.category ?? "general";
+  const initialCategory =
+    settingsCategoryForControl(initialTarget?.controlId) ??
+    initialTarget?.category ??
+    "general";
   const initialControlId = initialTarget?.controlId;
   useLayoutEffect(() => {
     if (!open) return;
@@ -65,9 +73,21 @@ export function SettingsDialog({
     else editor.focus();
     focusTarget.current = null;
   }, [open, category, controller.settings, controller.identity]);
+  const showControl = (controlId: string) => {
+    const destination = settingsCategoryForControl(controlId);
+    if (!destination) return;
+    focusTarget.current = `#${controlId}`;
+    setCategory(destination);
+  };
   const page = {
     general: <GeneralSettings controller={controller} />,
     appearance: <AppearanceSettings />,
+    shortcuts: (
+      <ScreenshotShortcutSettings
+        key={controller.identity ?? "loading"}
+        controller={controller}
+      />
+    ),
     notifications: <NotificationSettings controller={controller} />,
     connection: <NetworkSettings controller={controller} />,
     privacy: (
@@ -76,12 +96,11 @@ export function SettingsDialog({
         onDraftChange={setPresetDraft}
         onAgentSettings={() => {
           focusTarget.current = "#setting-local-agent-access";
-          setCategory("general");
+          setCategory(
+            settingsCategoryForControl("setting-local-agent-access")!,
+          );
         }}
-        onNotifications={() => {
-          focusTarget.current = "#setting-notification-preview";
-          setCategory("notifications");
-        }}
+        onNotifications={() => showControl("setting-notification-preview")}
       />
     ),
     integrations: controller.settings ? (
@@ -127,19 +146,34 @@ export function SettingsDialog({
             aria-label={t("redesign.settingsNav")}
             className="flex w-40 shrink-0 flex-col gap-1 overflow-y-auto border-r pr-3 max-[700px]:w-auto max-[700px]:flex-row max-[700px]:overflow-x-auto max-[700px]:border-b max-[700px]:border-r-0 max-[700px]:pb-2 max-[700px]:pr-0"
           >
-            {SETTINGS_CATEGORIES.map((id) => (
-              <button
-                key={id}
-                type="button"
-                id={`settings-nav-${id}`}
-                data-testid={`settings-nav-${id}`}
-                aria-current={category === id ? "page" : undefined}
-                aria-controls="settings-category-panel"
-                onClick={() => setCategory(id)}
-                className={`shrink-0 rounded-md px-2.5 py-2 text-left text-[13px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring ${category === id ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"}`}
+            {SETTINGS_GROUPS.map((group) => (
+              <div
+                key={group.id}
+                role="group"
+                aria-labelledby={`settings-group-${group.id}`}
+                className="mb-4 flex shrink-0 flex-col gap-1 last:mb-0 max-[700px]:mb-0 max-[700px]:flex-row max-[700px]:items-center max-[700px]:border-r max-[700px]:pr-3 max-[700px]:last:border-r-0 max-[700px]:last:pr-0"
               >
-                {t(`settings.categories.${id}`)}
-              </button>
+                <p
+                  id={`settings-group-${group.id}`}
+                  className="mb-1 px-2.5 text-[11px] font-medium text-muted-foreground max-[700px]:sr-only"
+                >
+                  {t(`settings.groups.${group.id}`)}
+                </p>
+                {group.categories.map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    id={`settings-nav-${id}`}
+                    data-testid={`settings-nav-${id}`}
+                    aria-current={category === id ? "page" : undefined}
+                    aria-controls="settings-category-panel"
+                    onClick={() => setCategory(id)}
+                    className={`shrink-0 rounded-md px-2.5 py-2 text-left text-[13px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring ${category === id ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"}`}
+                  >
+                    {t(`settings.categories.${id}`)}
+                  </button>
+                ))}
+              </div>
             ))}
           </nav>
           <div
@@ -161,7 +195,9 @@ export function SettingsDialog({
                 </h2>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                   {t(
-                    category === "general" || category === "appearance"
+                    category === "general" ||
+                      category === "appearance" ||
+                      category === "shortcuts"
                       ? "settings.scopeComputer"
                       : "settings.scopeAccount",
                   )}

@@ -32,7 +32,7 @@ settings/startup control and the single desktop service handle;
 `integrations/instructions.rs` owns only the marked user-level bootstrap file.
 Both transports share one integration service/registry and core sending path.
 `http.rs` owns public static discovery, request limits and fixed scoped routes;
-request schemas derive from the existing models. The Integrations settings UI uses
+request schemas derive from the existing models. The Agent access settings UI uses
 the shared save coordinator and an explicit-owner typed adapter. See
 [desktop local access](bot-integrations.md#desktop-local-agent-access).
 
@@ -504,7 +504,9 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
 - Settings categories now live in `features/chat/settings/`, composed by
   `SettingsDialog.tsx`. `useSettingsController.ts` shares acknowledged values and
   delegates owner/view validity to `settingsDialogSession.ts`; `model.ts` owns
-  dependency reasons and retention tightening. See [settings](settings.md).
+  navigation groups, category order, control destinations, dependency reasons and
+  retention tightening. Language belongs to Appearance & language; screenshot
+  recording and registration belong to Shortcuts. See [settings](settings.md).
   Future settings must extend the relevant category and shared rules rather than
   adding another independent save coordinator.
 - `ConversationView.tsx` delegates picker, drop, paste and screenshot intake to

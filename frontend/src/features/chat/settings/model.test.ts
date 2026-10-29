@@ -1,6 +1,8 @@
 import { expect, it } from "vitest";
 import {
   SETTINGS_CATEGORIES,
+  SETTINGS_GROUPS,
+  settingsCategoryForControl,
   retentionTightens,
   networkControlState,
 } from "./model";
@@ -10,12 +12,26 @@ it("provides one unique destination for every approved settings task", () => {
     "general",
     "appearance",
     "notifications",
-    "connection",
+    "shortcuts",
     "privacy",
-    "integrations",
     "files",
     "history",
+    "connection",
+    "integrations",
   ]);
+  expect(new Set(SETTINGS_CATEGORIES).size).toBe(SETTINGS_CATEGORIES.length);
+  expect(SETTINGS_GROUPS.map((group) => group.id)).toEqual([
+    "experience",
+    "privacyData",
+    "connectionExtensions",
+  ]);
+  expect(settingsCategoryForControl("setting-language")).toBe("appearance");
+  expect(settingsCategoryForControl("setting-screenshot-capture")).toBe(
+    "shortcuts",
+  );
+  expect(settingsCategoryForControl("setting-local-agent-access")).toBe(
+    "integrations",
+  );
 });
 it.each([
   [0, 7, true],
@@ -60,4 +76,10 @@ it("keeps relay directions separate from public discovery and explains overridin
     networkControlState({ ...input, relayEnabled: false, send: false })
       .partialReceive,
   ).toBe(false);
+});
+
+it("leaves unknown control destinations to the supplied category", () => {
+  expect(settingsCategoryForControl("unknown-control")).toBeUndefined();
+  expect(settingsCategoryForControl("constructor")).toBeUndefined();
+  expect(settingsCategoryForControl()).toBeUndefined();
 });

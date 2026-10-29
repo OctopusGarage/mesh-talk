@@ -332,7 +332,7 @@
     "invalidResponse": "无法读取返回的在线状态信息。",
     "observedDevices": "发现 {{count}} 台在线设备",
     "source_local": "本地网络发现",
-    "source_routed": "跨网络发现",
+    "source_routed": "可见性与跨网络发现",
     "source_directory": "经邮局发现",
     "source_authenticated": "已验证的通信记录（网络范围未确定）",
     "source_self": "本机节点运行中",
@@ -621,15 +621,30 @@
     "attachmentOverrides": "各个会话可在其附件设置中覆盖此默认接收方式。",
     "refreshFailed": "更改已保存，但无法重新加载当前值：{{error}}。请重新加载设置以确认。",
     "reload": "重新加载设置",
+    "sections": {
+      "privacyPreset": "隐私预设",
+      "lockAndLogin": "锁定与登录",
+      "clipboard": "复制与剪贴板",
+      "relatedPermissions": "相关权限",
+      "deviceDiscovery": "设备发现",
+      "crossNetwork": "跨网络发现",
+      "offlineDelivery": "离线投递"
+    },
+    "groups": {
+      "experience": "使用体验",
+      "privacyData": "隐私与数据",
+      "connectionExtensions": "连接与扩展"
+    },
     "categories": {
-      "general": "通用",
-      "appearance": "外观",
+      "general": "应用行为",
+      "appearance": "外观与语言",
       "notifications": "通知与通话",
-      "connection": "连接与投递",
+      "shortcuts": "快捷键",
       "privacy": "隐私与安全",
-      "integrations": "集成",
-      "files": "文件与接收",
-      "history": "历史记录与备份"
+      "files": "文件与下载",
+      "history": "历史与备份",
+      "connection": "网络与投递",
+      "integrations": "Agent 访问"
     },
     "applyPreset": "应用预设",
     "presetPending": "应用预设会更改下方列出的五项保护设置。单独调整后将使用“自定义”。",
