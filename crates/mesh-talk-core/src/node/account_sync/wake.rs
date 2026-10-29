@@ -50,12 +50,21 @@ pub(super) type WakeIdentity = ([u8; 32], [u8; 32]);
 pub(super) fn wake_identity(public: &PublicIdentity) -> WakeIdentity {
     (public.ed25519_pub, public.x25519_pub)
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(super) struct ControlWakeHint {
     pub public: PublicIdentity,
     epoch: [u8; 16],
     revision: u64,
+    pub received_at: Instant,
 }
+// Reception time orders recovery evidence; it never creates a new token or
+// another comparison credit for duplicate/status polling.
+impl PartialEq for ControlWakeHint {
+    fn eq(&self, other: &Self) -> bool {
+        self.public == other.public && self.epoch == other.epoch && self.revision == other.revision
+    }
+}
+impl Eq for ControlWakeHint {}
 #[cfg(test)]
 impl ControlWakeHint {
     pub(super) fn test_token(public: PublicIdentity, epoch: [u8; 16], revision: u64) -> Self {
@@ -63,6 +72,7 @@ impl ControlWakeHint {
             public,
             epoch,
             revision,
+            received_at: Instant::now(),
         }
     }
 }
@@ -99,6 +109,7 @@ impl ReceivedWakes {
             public,
             epoch,
             revision,
+            received_at: Instant::now(),
         };
         if let Some(old) = self
             .pending
@@ -435,6 +446,27 @@ fn wake_routes(peer: &PeerRecord) -> Vec<std::net::SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_wake_receipt_time_never_changes_token_identity() {
+        let peer = crate::identity::device::DeviceIdentity::generate().public();
+        let mut received = ReceivedWakes::default();
+        assert!(received.record(peer.clone(), [17; 16], 1));
+        let original = received.pending[0].clone();
+        let mut later = original.clone();
+        later.received_at += Duration::from_secs(1);
+        assert_eq!(
+            original, later,
+            "chronology never creates another comparison credit"
+        );
+        assert!(!received.record(peer, [17; 16], 1));
+        assert_eq!(received.pending[0].received_at, original.received_at);
+        received.consume(&later);
+        assert!(
+            received.pending.is_empty(),
+            "consume is based on the authenticated token only"
+        );
+    }
 
     #[test]
     fn local_capacity_retry_requires_a_new_publication_but_remote_failure_keeps_its_cooldown() {

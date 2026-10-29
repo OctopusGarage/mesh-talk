@@ -25,6 +25,28 @@ pub(in crate::node) type AccountClientTestHook =
     dyn Fn(crate::identity::device::PublicIdentity, String) + Send + Sync;
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::node) enum ClientTransportOutcome {
+    Ok,
+    NoiseTimeout,
+    Authorization,
+    Other,
+}
+#[cfg(test)]
+pub(in crate::node) fn client_transport_outcome<T>(
+    result: &Result<T, TransportError>,
+) -> ClientTransportOutcome {
+    match result {
+        Ok(_) => ClientTransportOutcome::Ok,
+        Err(TransportError::Noise(message)) if message == "dial timed out" => {
+            ClientTransportOutcome::NoiseTimeout
+        }
+        Err(TransportError::AdmissionDenied) => ClientTransportOutcome::Authorization,
+        Err(_) => ClientTransportOutcome::Other,
+    }
+}
+
+#[cfg(test)]
 pub(in crate::node) fn client_trace_outcome<T>(result: &Result<T, NodeError>) -> &'static str {
     match result {
         Ok(_) => "ok",
@@ -32,11 +54,22 @@ pub(in crate::node) fn client_trace_outcome<T>(result: &Result<T, NodeError>) ->
         Err(NodeError::Channel(message)) if message == "account session negotiation timed out" => {
             "negotiation_timeout"
         }
+        Err(NodeError::Session(super::session::SessionError::Transport(
+            TransportError::Noise(message),
+        ))) if message == "dial timed out" => "noise_timeout",
         Err(NodeError::Authorization(_)) => "authorization",
         Err(NodeError::Session(super::session::SessionError::Transport(_))) => "transport",
         Err(NodeError::Log(_)) => "storage",
         Err(_) => "invalid_or_interrupted",
     }
+}
+
+/// This transport deadline encloses TCP/Noise only after local permits were
+/// admitted. The outer negotiation deadline can include local waiting and must
+/// not qualify policy rejection, malformed responses or capacity backpressure.
+pub(in crate::node) fn account_dial_timed_out(error: &NodeError) -> bool {
+    matches!(error, NodeError::Session(super::session::SessionError::Transport(
+        TransportError::Noise(message))) if message == "dial timed out")
 }
 
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -473,6 +506,31 @@ impl Node {
                 }
                 _ => return,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn only_remote_dial_timeout_allows_wake_recovery() {
+        assert!(account_dial_timed_out(&transport(TransportError::Noise(
+            "dial timed out".into()
+        ))));
+        for error in [
+            NodeError::Channel("account session negotiation timed out".into()),
+            NodeError::Authorization("account session requires a certified sibling".into()),
+            transport(TransportError::AdmissionDenied),
+            transport(TransportError::Noise("TCP connection capacity busy".into())),
+            transport(TransportError::Noise("invalid handshake".into())),
+            NodeError::Channel("invalid account document exchange".into()),
+        ] {
+            assert!(
+                !account_dial_timed_out(&error),
+                "only the remote dial's own deadline establishes recovery eligibility: {error}"
+            );
         }
     }
 }

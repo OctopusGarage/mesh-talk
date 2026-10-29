@@ -1440,6 +1440,17 @@ executor is not restarted by repeated status polling. Terminal operations retire
 that priority, allowing unrelated sibling metadata to resume. Accepted mutations
 are never cancelled by this scheduling rule, and worker/TCP limits do not increase.
 
+An initial Control dial timeout owns no response bytes or continuation. If the
+original operation still selects that full device identity, a strictly newer
+authenticated Wake received after the timeout may restart that failed comparison
+once. This applies only without an active or parked comparison pair. Reception
+time orders this evidence but is excluded from Wake-token equality; duplicate
+notifications and status polling cannot renew the opportunity. Remote dial
+timeout is distinct from outer negotiation/local-admission waits, authentication
+rejection, malformed responses and partial-page failures, whose ordinary retry
+rules remain unchanged. The restart uses the existing Control slot and session
+admission; it adds no worker, comparison, wire format or authority.
+
 A read dispatched before a new operation selects that same executor cannot
 retroactively become its protected foreground comparison. After owned cancellation
 releases admission, the Control owner parks the exact original metadata checkpoint
@@ -1482,7 +1493,7 @@ operation or a reservation. The owned replacement foreground turn, its resumed
 background checkpoint and an active locally selected executor remain protected.
 One replacement comparison is followed by the interrupted background checkpoint
 before more sender hints; a hint storm cannot repeatedly cancel either turn.
-Retry deadlines remain in force,
+Partial-page and parked-comparison retry deadlines remain in force,
 and policy/identity changes retire stale tokens. Hints confer no read or mutation
 authority; every replacement exchange performs normal session admission.
 

@@ -278,6 +278,23 @@ impl DocumentCheckpoint {
     fn fresh_control_comparison(&self) -> Self {
         self.cursor.fresh_control_comparison().into()
     }
+    fn refresh_timed_out_control_for_requests(
+        &mut self,
+        peer: &PublicIdentity,
+        requests: Option<&ControlDemand>,
+        wake: Option<&wake::ControlWakeHint>,
+    ) -> bool {
+        let Some(wake) = wake.filter(|wake| wake.public == *peer) else {
+            return false;
+        };
+        if requests.is_none_or(|requests| requests.is_empty())
+            || !self.cursor.refresh_timed_out_control(wake.received_at)
+        {
+            return false;
+        }
+        self.control_start = None;
+        true
+    }
     fn predates_control_demand(
         &self,
         requests: &ControlDemand,
@@ -2798,6 +2815,25 @@ impl Node {
             let selected_requests = self.pending_account_operation_source_requests();
             let selected: HashSet<_> = selected_requests.keys().copied().collect();
             let hints = self.pending_control_wakes();
+            for (key, state) in &mut document_cursors {
+                if key.lane == DocumentLane::Control
+                    && !document_active.contains(key)
+                    && !control_pairs.contains_key(key)
+                    && state.refresh_timed_out_control_for_requests(
+                        &key.public(),
+                        selected_requests.get(&key.identity()),
+                        hints.iter().find(|hint| hint.public == key.public()),
+                    )
+                {
+                    // This failed initial negotiation has no parked page. The
+                    // original pending request and newer authenticated source
+                    // wake justify one fresh comparison, not a new retry owner.
+                    #[cfg(test)]
+                    self.trace_account_client(&key.public(), || {
+                        "control_timeout_wake_refresh".into()
+                    });
+                }
+            }
             let control_queue = &mut document_queues[DocumentLane::Control.index()];
             let ready = |key: &DocumentPeer| {
                 control_pairs
@@ -3643,6 +3679,40 @@ impl Node {
 mod tests {
     use super::*;
     use crate::identity::account::Account;
+
+    #[test]
+    fn timed_out_control_demand_requires_original_request_and_same_full_peer() {
+        use super::super::account_documents::sync::DocumentSyncCursor;
+        let peer = crate::identity::device::DeviceIdentity::generate().public();
+        let failed = std::time::Instant::now();
+        let original: DocumentCheckpoint = DocumentSyncCursor::control_test_timeout(failed).into();
+        let request =
+            super::super::AccountGroupOperationId::from_hex(&hex::encode([19; 32])).unwrap();
+        let demand = ControlDemand::from([request]);
+        let mut hint = wake::ControlWakeHint::test_token(peer.clone(), [17; 16], 1);
+        hint.received_at = failed + Duration::from_millis(1);
+        let mut cursor = original.clone();
+        assert!(!cursor.refresh_timed_out_control_for_requests(&peer, None, Some(&hint)));
+        assert!(!cursor.refresh_timed_out_control_for_requests(
+            &peer,
+            Some(&ControlDemand::new()),
+            Some(&hint)
+        ));
+        assert!(!cursor.refresh_timed_out_control_for_requests(&peer, Some(&demand), None));
+        let mut wrong_peer = peer.clone();
+        wrong_peer.x25519_pub[0] ^= 1;
+        assert!(!cursor.refresh_timed_out_control_for_requests(
+            &wrong_peer,
+            Some(&demand),
+            Some(&hint)
+        ));
+        assert_eq!(
+            cursor, original,
+            "polling, absent original demand and another full identity retain the cooldown"
+        );
+        assert!(cursor.refresh_timed_out_control_for_requests(&peer, Some(&demand), Some(&hint)));
+        assert!(!cursor.refresh_timed_out_control_for_requests(&peer, Some(&demand), Some(&hint)));
+    }
 
     #[test]
     fn control_checkpoint_preserves_comparison_start_across_partial_pages_and_rollback() {

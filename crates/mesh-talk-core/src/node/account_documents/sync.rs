@@ -132,6 +132,9 @@ pub(in crate::node) struct DocumentSyncCursor {
     admission_deferred: bool,
     page_completed: bool,
     last_failure_at: Option<Instant>,
+    // A failed initial Control negotiation owns no continuation or page bytes.
+    // Only a genuinely newer authenticated wake may retire this cooldown.
+    failed_control_negotiation_at: Option<Instant>,
     pub(in crate::node) error: Option<String>,
     error_domain: Option<AccountDocumentDomain>,
     pub(in crate::node) pending: bool,
@@ -167,6 +170,7 @@ impl Default for DocumentSyncCursor {
             admission_deferred: false,
             page_completed: false,
             last_failure_at: None,
+            failed_control_negotiation_at: None,
             error: None,
             error_domain: None,
             pending: false,
@@ -202,6 +206,18 @@ impl DocumentSyncCursor {
     }
 
     #[cfg(test)]
+    pub(in crate::node) fn control_test_timeout(failed_at: Instant) -> Self {
+        Self {
+            failed_control_negotiation_at: Some(failed_at),
+            last_failure_at: Some(failed_at),
+            error: Some("account document exchange interrupted".into()),
+            error_domain: Some(AccountDocumentDomain::GroupControl),
+            retry_at: Some(failed_at + Duration::from_secs(5)),
+            ..Self::control()
+        }
+    }
+
+    #[cfg(test)]
     fn client_trace_state(&self) -> String {
         format!(
             "domain={:?} pending={} after={} deferred={} retry_ms={}",
@@ -225,6 +241,28 @@ impl DocumentSyncCursor {
         self.settled = 0;
         self.up_to_date = false;
         true
+    }
+
+    pub(in crate::node) fn refresh_timed_out_control(&mut self, wake_received_at: Instant) -> bool {
+        if self.scope != DocumentSyncScope::Control
+            || self.domain != AccountDocumentDomain::GroupControl as usize
+            || self.after.is_some()
+            || self.pending
+            || self.admission_deferred
+            || self.group_retry_at.is_some()
+            || self.error_domain != Some(AccountDocumentDomain::GroupControl)
+            || self
+                .failed_control_negotiation_at
+                .is_none_or(|failed| wake_received_at <= failed)
+        {
+            return false;
+        }
+        self.failed_control_negotiation_at = None;
+        self.retry_at = None;
+        self.error = None;
+        self.error_domain = None;
+        self.page_completed = false;
+        self.begin_refresh()
     }
 
     /// Fork only the new comparison; the controller moves the original into
@@ -806,6 +844,7 @@ impl Node {
             return Ok(());
         }
         cursor.admission_deferred = false;
+        cursor.failed_control_negotiation_at = None;
         cursor.error = None;
         cursor.error_domain = None;
         if cursor
@@ -878,6 +917,7 @@ impl Node {
         }
         let attempted_domain = DOMAINS[cursor.domain];
         let operation_digest = cursor.operation_digest;
+        let had_continuation = cursor.after.is_some();
         let result = self.pull_document_exchange(peer, cursor).await;
         if result
             .as_ref()
@@ -893,7 +933,17 @@ impl Node {
             return result;
         }
         if result.is_err() {
-            cursor.last_failure_at = Some(Instant::now());
+            let failed_at = Instant::now();
+            cursor.last_failure_at = Some(failed_at);
+            if cursor.scope == DocumentSyncScope::Control
+                && attempted_domain == AccountDocumentDomain::GroupControl
+                && !had_continuation
+                && result
+                    .as_ref()
+                    .is_err_and(super::super::account_session::account_dial_timed_out)
+            {
+                cursor.failed_control_negotiation_at = Some(failed_at);
+            }
         }
         if attempted_domain == AccountDocumentDomain::GroupControl
             && result.as_ref().is_err_and(transport_closed)
@@ -1790,6 +1840,53 @@ mod control_policy_status_tests {
 #[cfg(test)]
 mod group_control_tests {
     use super::*;
+    #[test]
+    fn timed_out_control_refresh_requires_newer_wake_and_preserves_partial_failures() {
+        let failed = Instant::now();
+        let original = DocumentSyncCursor::control_test_timeout(failed);
+        let fresh = failed + Duration::from_millis(1);
+        let mut cursor = original.clone();
+        for _ in 0..64 {
+            assert!(!cursor.refresh_timed_out_control(failed));
+            assert_eq!(
+                cursor, original,
+                "old wake/polling cannot retire the cooldown"
+            );
+        }
+        assert!(cursor.refresh_timed_out_control(fresh));
+        assert!(cursor.retry_at.is_none() && cursor.error.is_none());
+        assert!(
+            !cursor.refresh_timed_out_control(fresh),
+            "one timeout owns at most one recovery"
+        );
+        for case in 0..7 {
+            let mut protected = original.clone();
+            match case {
+                0 => {
+                    protected.after = Some(AccountDocumentKey::GroupControl {
+                        channel: "1".repeat(64),
+                        source_device: "2".repeat(32),
+                    })
+                }
+                1 => protected.pending = true,
+                2 => protected.admission_deferred = true,
+                3 => protected.group_retry_at = Some(failed + Duration::from_secs(300)),
+                4 => protected.failed_control_negotiation_at = None,
+                5 => protected.scope = DocumentSyncScope::Directory,
+                _ => protected.error_domain = Some(AccountDocumentDomain::GroupInventory),
+            }
+            let before = protected.clone();
+            assert!(
+                !protected.refresh_timed_out_control(fresh),
+                "protected failure case {case}"
+            );
+            assert_eq!(
+                protected, before,
+                "partial/upgrade/admission/authentication failures retain their exact checkpoint"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn queued_operation_probe_retains_its_verified_digest() {
         let mut fixture = UpgradeFixture::new().await;

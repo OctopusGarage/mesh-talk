@@ -1366,7 +1366,11 @@ impl Node {
                     });
                     #[cfg(test)]
                     self.trace_account_client(expected, || {
-                        format!("dial_noise_end ok={}", result.is_ok())
+                        format!(
+                            "dial_noise_end ok={} outcome={:?}",
+                            result.is_ok(),
+                            super::account_session::client_transport_outcome(&result)
+                        )
                     });
                     if started.elapsed() >= Duration::from_secs(2) {
                         log::warn!(
