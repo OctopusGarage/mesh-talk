@@ -450,7 +450,7 @@ impl NodeRuntime {
     #[allow(clippy::too_many_arguments)]
     async fn start_profile_inner(
         config: RuntimeConfig<'_>,
-        events: RuntimeEvents,
+        events: Option<RuntimeEvents>,
         network: RuntimeNetworkOptions,
         network_cost: super::NetworkCost,
         supplied_lease: Option<crate::storage::profile::ProfileStorageLease>,
@@ -469,13 +469,6 @@ impl NodeRuntime {
             post_office_enabled,
             candidate_source,
         } = config;
-        let RuntimeEvents {
-            on_dm,
-            on_channel,
-            on_file,
-            on_profile,
-            on_call_signal,
-        } = events;
         let host_owner = account_id.to_owned();
         let dir = base_dir.join("accounts").join(account_id);
         std::fs::create_dir_all(&dir)?;
@@ -530,11 +523,21 @@ impl NodeRuntime {
         let tcp_port = listener.local_addr()?.port();
 
         let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
-        let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<ReceivedDm>();
-        let (channel_tx, mut channel_rx) =
-            mpsc::unbounded_channel::<crate::node::channel::ReceivedChannelMessage>();
-        let (file_tx, mut file_rx) =
-            mpsc::unbounded_channel::<crate::node::filebook::ReceivedFile>();
+        let (targets, receivers) = if events.is_some() {
+            let (incoming, incoming_rx) = mpsc::unbounded_channel();
+            let (channel_incoming, channel_rx) = mpsc::unbounded_channel();
+            let (file_incoming, file_rx) = mpsc::unbounded_channel();
+            (
+                Some(super::node::LegacyPayloadTargets {
+                    incoming,
+                    channel_incoming,
+                    file_incoming,
+                }),
+                Some((incoming_rx, channel_rx, file_rx)),
+            )
+        } else {
+            (None, None)
+        };
         // Opening the node runs several more password KDFs (one per durable store). Offload
         // to the blocking pool so it doesn't monopolize a tokio worker during cold start;
         // `open_with_account` internally parallelizes those KDFs across scoped threads, so
@@ -578,19 +581,17 @@ impl NodeRuntime {
                             )
                         });
                         let node = scope.spawn(|| {
-                            let node = Node::open_in_storage(
+                            let node = Node::open_in_storage_delivery(
                                 storage.clone(),
-                                super::NodeOpenRequest {
+                                super::BoundedNodeOpenRequest {
                                     identity,
                                     account,
                                     roster,
-                                    incoming: incoming_tx,
-                                    channel_incoming: channel_tx,
-                                    file_incoming: file_tx,
                                     log_path: &messages_log,
                                     sent_path: &sent_log,
                                     password: &password,
                                 },
+                                targets,
                             )?;
                             if node.account_profile(&node.account_id()).is_none()
                                 && node.linked_devices().len() == 1
@@ -675,41 +676,50 @@ impl NodeRuntime {
             };
             let mut participant = prepared.launch(current_name);
             let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-            tasks.push(tokio::spawn(async move {
-                while let Some(dm) = incoming_rx.recv().await {
-                    on_dm(dm);
+            if let Some(events) = events {
+                let RuntimeEvents {
+                    on_dm,
+                    on_channel,
+                    on_file,
+                    on_profile,
+                    on_call_signal,
+                } = events;
+                let (mut incoming_rx, mut channel_rx, mut file_rx) =
+                    receivers.expect("legacy delivery receivers");
+                tasks.push(tokio::spawn(async move {
+                    while let Some(dm) = incoming_rx.recv().await {
+                        on_dm(dm);
+                    }
+                }));
+                tasks.push(tokio::spawn(async move {
+                    while let Some(message) = channel_rx.recv().await {
+                        on_channel(message);
+                    }
+                }));
+                tasks.push(tokio::spawn(async move {
+                    while let Some(file) = file_rx.recv().await {
+                        on_file(file);
+                    }
+                }));
+                if let Some(mut receiver) = node.take_profile_receiver() {
+                    tasks.push(tokio::spawn(async move {
+                        while let Some(profile) = receiver.recv().await {
+                            on_profile(profile);
+                        }
+                    }));
                 }
-            }));
-            tasks.push(tokio::spawn(async move {
-                while let Some(msg) = channel_rx.recv().await {
-                    on_channel(msg);
+                if let Some(mut receiver) = node.take_call_signal_receiver() {
+                    tasks.push(tokio::spawn(async move {
+                        while let Some(signal) = receiver.recv().await {
+                            on_call_signal(signal);
+                        }
+                    }));
                 }
-            }));
-            tasks.push(tokio::spawn(async move {
-                while let Some(f) = file_rx.recv().await {
-                    on_file(f);
-                }
-            }));
+            }
             {
                 let node = node.clone();
                 tasks.push(tokio::spawn(async move {
                     node.run_account_access_loop().await;
-                }));
-            }
-            // Forward received peer profiles (avatar updates) to the host app.
-            if let Some(mut profile_rx) = node.take_profile_receiver() {
-                tasks.push(tokio::spawn(async move {
-                    while let Some(p) = profile_rx.recv().await {
-                        on_profile(p);
-                    }
-                }));
-            }
-            // Forward inbound call signals (WebRTC SDP/bye) to the host app — ephemeral, never logged.
-            if let Some(mut call_signal_rx) = node.take_call_signal_receiver() {
-                tasks.push(tokio::spawn(async move {
-                    while let Some(s) = call_signal_rx.recv().await {
-                        on_call_signal(s);
-                    }
                 }));
             }
             // Publish to new peers and retry failed or outdated profile publications.

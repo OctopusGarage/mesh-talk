@@ -646,7 +646,9 @@ impl Node {
             if !self.account_allowed(channel.peer_identity(), channel.peer_announcement()) {
                 return;
             }
-            self.serve_call_signal(&channel, signal);
+            if self.serve_call_signal(&channel, signal).is_err() {
+                log::warn!("call signal admission rejected: host inbox unavailable or full");
+            }
             return;
         }
         // The first frame may be a Request, which makes serve_wire_bytes await the peer's
