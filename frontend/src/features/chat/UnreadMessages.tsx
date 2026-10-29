@@ -19,7 +19,9 @@ import { useUnreadBadge } from "@/store/unreadBadge";
 import { unreadSources } from "./unreadSources";
 
 /** One review path for every app badge count, including sources outside the sidebar. */
-export function UnreadMessages() {
+export function UnreadMessages({
+  compact = false,
+}: { compact?: boolean } = {}) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -95,10 +97,17 @@ export function UnreadMessages() {
         <button
           type="button"
           data-testid="unread-review-trigger"
-          className="sidebar-tool flex min-h-11 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          title={t("unread.title")}
+          className="sidebar-tool flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <Inbox aria-hidden="true" className="h-4 w-4 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">{t("unread.title")}</span>
+          <span
+            className="min-w-0 flex-1 truncate"
+            aria-hidden={compact || undefined}
+          >
+            {t(compact ? "unread.shortLabel" : "unread.title")}
+          </span>
+          {compact && <span className="sr-only">{t("unread.title")}</span>}
           {total > 0 && (
             <Badge
               className="shrink-0 tabular-nums"

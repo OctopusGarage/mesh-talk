@@ -1,5 +1,6 @@
 {
   "unread": {
+    "shortLabel": "Não lidas",
     "title": "Mensagens não lidas",
     "description": "Confira a origem das mensagens ou marque-as como lidas. As mensagens serão mantidas.",
     "badgeFailed": "Não foi possível atualizar o indicador do aplicativo. A atualização será tentada novamente.",
@@ -681,6 +682,7 @@
     "noMatches": "Nenhum resultado nesta conversa."
   },
   "files": {
+    "shortLabel": "Arquivos",
     "received": "Arquivos recebidos",
     "nothingReceived": "Nada recebido ainda.",
     "couldntSave": "Não foi possível salvar o arquivo: {{error}}",

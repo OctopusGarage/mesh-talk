@@ -1945,6 +1945,9 @@
     {
       "id": "frontend-unread-recovery",
       "paths": [
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-1280x800.png",
+        "frontend/e2e/ui-visual-regression.spec.ts-snapshots/chat-shell-dark-760x620.png",
+        "frontend/e2e/sidebar-row-layout.spec.ts",
         "frontend/src/store/reception.ts",
         "frontend/src/store/reception.test.ts",
         "frontend/src/store/chat.ts",

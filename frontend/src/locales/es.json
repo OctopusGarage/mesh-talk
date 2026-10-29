@@ -1,5 +1,6 @@
 {
   "unread": {
+    "shortLabel": "No leídos",
     "title": "Mensajes sin leer",
     "description": "Revisa el origen de los mensajes o márcalos como leídos. Los mensajes se conservan.",
     "badgeFailed": "No se pudo actualizar la insignia de la aplicación. Se reintentará automáticamente.",
@@ -681,6 +682,7 @@
     "noMatches": "Sin resultados en esta conversación."
   },
   "files": {
+    "shortLabel": "Archivos",
     "received": "Archivos recibidos",
     "nothingReceived": "Todavía no se ha recibido nada.",
     "couldntSave": "No se pudo guardar el archivo: {{error}}",

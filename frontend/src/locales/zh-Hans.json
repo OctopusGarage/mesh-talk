@@ -1,5 +1,6 @@
 {
   "unread": {
+    "shortLabel": "未读",
     "title": "未读消息",
     "description": "查看未读来源或标记已读，消息内容会保留。",
     "badgeFailed": "应用角标更新失败，稍后会自动重试。",
@@ -681,6 +682,7 @@
     "noMatches": "本会话中没有匹配项。"
   },
   "files": {
+    "shortLabel": "文件",
     "received": "已接收的文件",
     "nothingReceived": "尚未接收到任何文件。",
     "couldntSave": "无法保存文件：{{error}}",

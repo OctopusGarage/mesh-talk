@@ -1,5 +1,6 @@
 {
   "unread": {
+    "shortLabel": "읽지 않음",
     "title": "읽지 않은 메시지",
     "description": "읽지 않은 메시지의 출처를 확인하거나 읽음으로 표시하세요. 메시지는 유지됩니다.",
     "badgeFailed": "앱 배지를 업데이트하지 못했습니다. 자동으로 다시 시도합니다.",
@@ -681,6 +682,7 @@
     "noMatches": "이 대화에 일치하는 결과가 없습니다."
   },
   "files": {
+    "shortLabel": "파일",
     "received": "받은 파일",
     "nothingReceived": "아직 받은 파일이 없습니다.",
     "couldntSave": "파일을 저장하지 못했습니다: {{error}}",

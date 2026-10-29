@@ -1,5 +1,6 @@
 {
   "unread": {
+    "shortLabel": "未読",
     "title": "未読メッセージ",
     "description": "未読の送信元を確認し、既読にできます。メッセージは保持されます。",
     "badgeFailed": "アプリのバッジを更新できませんでした。自動的に再試行します。",
@@ -681,6 +682,7 @@
     "noMatches": "この会話に一致するものがありません。"
   },
   "files": {
+    "shortLabel": "ファイル",
     "received": "受信したファイル",
     "nothingReceived": "まだ何も受信していません。",
     "couldntSave": "ファイルを保存できませんでした：{{error}}",

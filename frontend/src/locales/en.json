@@ -1,5 +1,6 @@
 {
   "unread": {
+    "shortLabel": "Unread",
     "title": "Unread messages",
     "description": "Review unread sources or mark them as read. Your messages stay in place.",
     "badgeFailed": "The app badge could not be updated. Updates will retry automatically.",
@@ -681,6 +682,7 @@
     "noMatches": "No matches in this conversation."
   },
   "files": {
+    "shortLabel": "Files",
     "received": "Received files",
     "nothingReceived": "Nothing received yet.",
     "couldntSave": "Couldn't save file: {{error}}",
