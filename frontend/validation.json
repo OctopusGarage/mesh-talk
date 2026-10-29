@@ -1835,6 +1835,42 @@
       "escalation": [
         "Run e2e/reply-preview.spec.ts and the reply-to scenario in e2e/chat.spec.ts to verify thumbnails, keyboard navigation and exact-source scrolling."
       ]
+    },
+    {
+      "id": "frontend-bounded-reception",
+      "paths": [
+        "frontend/src/store/receptionDelivery.ts",
+        "frontend/src/store/receptionDelivery.test.ts",
+        "frontend/src/lib/receptionSnapshot.ts",
+        "frontend/src/lib/receptionSnapshot.test.ts",
+        "frontend/src/lib/api/reception.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/lib/events.ts"
+      ],
+      "frontend": [
+        "src/store/receptionDelivery.test.ts",
+        "src/lib/receptionSnapshot.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/reception.test.ts"
+      ],
+      "capability": {
+        "summary": "Consume durable reception work through one scoped demand page and atomically persist existing unread state before acknowledgement.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "A stalled renderer retains one pull and one dirty wake; exact runtime/account/device scope rejects replaced replies.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Cursor and unread/mention/batch state persist atomically before ACK; quota failures retry without replaying applied effects.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise actual Tauri IPC with a stalled renderer, renderer reload, app lock and runtime/account replacement; mocked IPC does not certify the native queue boundary."
+      ]
     }
   ],
   "prScenarios": [
