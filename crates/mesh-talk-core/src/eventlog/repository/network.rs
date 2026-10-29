@@ -9,16 +9,16 @@ use crate::eventlog::sync::network::{
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Binding {
+pub(super) struct Binding {
     store_uuid: [u8; 16],
     domain: EventDomainId,
     conversation: ConversationId,
-    cutoff: i64,
+    pub(super) cutoff: i64,
     epoch: i64,
 }
 /// Retains the profile lease even while the owning store is unlocked/dropped.
 pub(crate) struct NetworkView {
-    binding: Binding,
+    pub(super) binding: Binding,
     metadata: SyncMetadata,
     _lease: RepositoryOwner,
 }
@@ -213,6 +213,17 @@ impl EventRepository {
         after: Option<&ExportCursor>,
         budget: ExportPageBudget,
     ) -> Result<ExportPage<ExportCursor>, LogError> {
+        self.network_export_selected_on(c, view, have, after, budget, None)
+    }
+    pub(super) fn network_export_selected_on(
+        &self,
+        c: &Connection,
+        view: &NetworkView,
+        have: &HashSet<EventId>,
+        after: Option<&ExportCursor>,
+        budget: ExportPageBudget,
+        selection: Option<&[u8; 16]>,
+    ) -> Result<ExportPage<ExportCursor>, LogError> {
         budget.validate()?;
 
         self.validate_network_on(c, view)?;
@@ -249,7 +260,11 @@ impl EventRepository {
             }
             let ordinal = nonnegative(row.get(0)?)?;
             let id = EventId::new(blob(row, 1)?);
-            if !have.contains(&id) {
+            let allowed = match selection {
+                Some(selection) => c.query_row("SELECT EXISTS(SELECT 1 FROM participant_sync_rows WHERE view=?1 AND id=?2 AND outgoing=1)", params![selection.as_slice(), id.as_bytes().as_slice()], |r| r.get::<_, bool>(0))?,
+                None => true,
+            };
+            if allowed && !have.contains(&id) {
                 let header = self.network_header_on(c, &id)?;
                 if header.conversation != view.binding.conversation {
                     return Err(corrupt("network header conversation differs"));

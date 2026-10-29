@@ -15,9 +15,12 @@ impl Node {
 
     /// This is only provisional Noise admission. No application frame is admitted
     /// until the complete, pinned transition has been persisted below.
-    pub(in crate::node) fn account_transition_admitted(&self, peer: &VerifiedPeer) -> bool {
+    pub(in crate::node) fn account_transition_admitted(
+        &self,
+        peer: &VerifiedPeer,
+    ) -> Result<bool, crate::eventlog::LogError> {
         let Some(announce) = peer.announcement() else {
-            return false;
+            return Ok(false);
         };
         let policy_allows = {
             let guard = self
@@ -26,19 +29,19 @@ impl Node {
                 .read()
                 .expect("privacy state lock not poisoned");
             let Some(state) = guard.as_ref() else {
-                return false;
+                return Ok(false);
             };
             let Some(previous) = state
                 .proofs
                 .transition_candidate(announce, peer.account_transitions())
             else {
-                return false;
+                return Ok(false);
             };
             !state.policy.snapshot().invisible || state.policy.allows(&previous)
         };
-        policy_allows
-            || self.group_member(peer.public_identity())
-            || self.group_departure_peer(peer.public_identity())
+        Ok(policy_allows
+            || self.group_member(peer.public_identity())?
+            || self.group_departure_peer(peer.public_identity()))
     }
 
     pub(super) fn account_binding_patches(&self) -> Vec<AccountBindingPatch> {
@@ -72,7 +75,9 @@ impl Node {
         patch: &AccountBindingPatch,
         channel: ConversationId,
     ) -> Result<bool, TransportError> {
-        let projection = self.account_group_projection(channel);
+        let projection = self
+            .account_group_projection(channel)
+            .map_err(|error| TransportError::Io(std::io::Error::other(error)))?;
         let Some(state) = projection
             .state
             .as_ref()
@@ -102,7 +107,9 @@ impl Node {
         let Some(announce) = peer.announcement() else {
             return Ok(());
         };
-        let group = self.group_member(peer.public_identity())
+        let group = self
+            .group_member(peer.public_identity())
+            .map_err(|error| TransportError::Io(std::io::Error::other(error)))?
             || self.group_departure_peer(peer.public_identity());
         self.apply_transition_announcement(announce, peer.account_transitions(), group)
             .map(|_| ())

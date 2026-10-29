@@ -1,6 +1,6 @@
-//! Domain-scoped encrypted event retention. This intermediate backend is not yet
-//! attached to runtime/profile ownership. Its production facade must retain the
-//! profile lease before cutover. Raw Lamport order never claims causal order.
+//! Domain-scoped encrypted event retention for participant and relay profiles.
+//! Runtime repositories retain the exclusive profile lease. Raw Lamport order
+//! never claims causal order.
 use super::{AppendOutcome, Author, ConversationId, Event, EventId, EventKind, LogError};
 use crate::storage::database::EncryptedDatabase;
 use bincode::Options;
@@ -9,19 +9,18 @@ use std::sync::Arc;
 
 mod decode;
 pub(crate) mod import;
-#[cfg(test)]
 pub(crate) mod maintenance;
 mod metadata;
+mod participant;
 mod policy;
+pub(crate) mod selection;
 #[cfg(test)]
 pub(crate) use policy::RepositoryPolicyView;
 pub(crate) mod network;
 pub(crate) mod order;
-#[cfg(test)]
 pub(crate) mod pages;
 pub(crate) mod retirement;
 mod schema;
-#[cfg(test)]
 pub(crate) use metadata::ConversationMetadata;
 pub(crate) use metadata::DomainChargeMetadata;
 pub(crate) use retirement::ConversationChargeMetadata;
@@ -62,7 +61,10 @@ pub(crate) enum GatedAppend<B> {
 pub(crate) struct EventRepository {
     database: RepositoryOwner,
     domain: EventDomainId,
+    #[cfg(test)]
+    before_mutation: std::sync::Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>,
     store_uuid: [u8; 16],
+    selection_owner: [u8; 16],
     #[cfg(test)]
     body_decodes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -114,6 +116,12 @@ impl EventRepository {
     ) -> Result<(), LogError> {
         database.transaction(|tx| schema::register(tx, domain))
     }
+    pub(crate) fn initialize_unpublished_on(
+        tx: &rusqlite::Transaction<'_>,
+        domain: EventDomainId,
+    ) -> Result<(), LogError> {
+        schema::register(tx, domain)
+    }
     pub(crate) fn validate_existing_domain(
         database: &EncryptedDatabase,
         domain: EventDomainId,
@@ -140,7 +148,10 @@ impl EventRepository {
         Ok(Self {
             database,
             domain,
+            #[cfg(test)]
+            before_mutation: std::sync::Mutex::new(None),
             store_uuid,
+            selection_owner: *uuid::Uuid::new_v4().as_bytes(),
             #[cfg(test)]
             body_decodes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -309,14 +320,12 @@ impl EventRepository {
             |r| r.get(0),
         )?)
     }
-    #[cfg(test)]
     pub(crate) fn has(&self, id: &EventId) -> Result<bool, LogError> {
         self.database.read(|c| self.has_on(c, id))
     }
 
     /// Inherent allocation bound: one complete signed Event, including arbitrarily
     /// many accepted parents. Use body pages when a caller needs a byte budget.
-    #[cfg(test)]
     pub(crate) fn get(&self, id: &EventId) -> Result<Option<Event>, LogError> {
         self.database.read(|c| self.get_on(c, id))
     }

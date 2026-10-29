@@ -268,7 +268,7 @@ async fn profile_publication_releases_store_before_channel_delivery() {
             let (finished, completion) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || {
                 node.publish_group_inventory(&mut None);
-                assert!(!node.list_channels().is_empty());
+                assert!(!node.list_channels().unwrap().is_empty());
                 node.enqueue_channel_message_reply_expiring_if(
                     channel,
                     b"Concurrent channel message",

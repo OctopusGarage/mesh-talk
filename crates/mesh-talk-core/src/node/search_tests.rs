@@ -1061,6 +1061,7 @@ fn bounded_history_with_authenticated_peer_recall_never_clones_retained_plaintex
     );
     assert!(
         node.recalled_targets_account(&account_id)
+            .unwrap()
             .contains(&EventId::new(target))
     );
     let mut neighbor = [2; 32];

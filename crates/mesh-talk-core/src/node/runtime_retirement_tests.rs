@@ -50,7 +50,7 @@ async fn retirement_waits_for_actual_profile_rewrite_before_reopening() {
             selected_tx.send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
         }));
-        log.request_profile_compaction(conv);
+        log.request_profile_compaction(conv).unwrap();
     }
     tokio::time::timeout(Duration::from_secs(6), selected_rx)
         .await

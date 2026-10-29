@@ -28,7 +28,7 @@ use std::{
     sync::Arc,
 };
 
-fn new_work(root: &Path, source: &Source) -> Result<PathBuf, LogError> {
+pub(super) fn new_work(root: &Path, source: &Source) -> Result<PathBuf, LogError> {
     let archive = artifact_path(
         root,
         source,

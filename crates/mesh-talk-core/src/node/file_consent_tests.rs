@@ -179,7 +179,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             .is_some_and(|seen| seen.contains(&malformed_outer.id)),
         "malformed reserved identity controls must be consumed, not retained in the deferred queue"
     );
-    assert!(!b.log.lock().unwrap().has(&malformed.id));
+    assert!(!b.log.lock().unwrap().has(&malformed.id).unwrap());
     b.decide_attachment(file, true).unwrap();
     let pending_controls = b.file_consent_events(&ap.public()).unwrap();
     assert!(!pending_controls.is_empty());
@@ -305,7 +305,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         Some(crate::eventlog::sync::FileConsentStatus::Accepted),
         "the exact recipient's consent must return through federation",
     );
-    assert!(!a.log.lock().unwrap().has(&control.id));
+    assert!(!a.log.lock().unwrap().has(&control.id).unwrap());
     assert!(!ps.lock().unwrap().has(&control.id));
     assert!(!qs.lock().unwrap().has(&control.id));
     b.decide_attachment(file, false).unwrap();
@@ -392,7 +392,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     assert!(
         received.is_ok(),
         "federated bytes did not converge: recipient={:?}, sender={:?}",
-        b.file_progress(file),
+        b.file_progress(file).unwrap(),
         a.outgoing_file_progress(card)
     );
     assert!(
@@ -406,7 +406,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         b.has_file_message_identity(host, binding),
         "source identity metadata must cross federation without a direct client route"
     );
-    assert!(!b.log.lock().unwrap().has(&identity.id));
+    assert!(!b.log.lock().unwrap().has(&identity.id).unwrap());
     assert!(!ps.lock().unwrap().has(&identity.id));
     assert!(!qs.lock().unwrap().has(&identity.id));
     assert!(super::file_consent::Decision::open(&identity).is_none());

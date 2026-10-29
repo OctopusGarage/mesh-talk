@@ -431,11 +431,11 @@ fn profile_maintenance_matches_legacy_signed_ids_across_snapshot_passes() {
             )
             .unwrap()
             .items;
-        let mut expected: Vec<_> = legacy.events(&conv).iter().map(|e| e.id).collect();
+        let mut expected: Vec<_> = legacy.events(&conv).unwrap().iter().map(|e| e.id).collect();
         expected.sort();
         assert_eq!(ids, expected);
-        assert_eq!(repo.heads(&conv).unwrap(), legacy.heads(&conv));
-        let (digest, count) = legacy.fingerprint_and_len(&conv);
+        assert_eq!(repo.heads(&conv).unwrap(), legacy.heads(&conv).unwrap());
+        let (digest, count) = legacy.fingerprint_and_len(&conv).unwrap();
         assert_eq!(
             repo.fingerprint_and_len(&conv).unwrap(),
             (digest, count as u64)

@@ -886,7 +886,7 @@ fn header_only_legacy_sources_are_valid_bootstrap_input() {
     )
     .unwrap();
     assert!(directory.path().join("profile.db").is_file());
-    assert!(node.log.lock().unwrap().conversations().is_empty());
+    assert!(node.log.lock().unwrap().conversations().unwrap().is_empty());
 }
 
 #[test]
@@ -1039,7 +1039,13 @@ fn retained_privacy_facade_prevents_checked_profile_close() {
 
 #[test]
 fn reaction_delivery_and_opaque_names_are_reserved_before_any_writer() {
-    for kind in ["case-reactions", "other-reactions", "delivery", "opaque"] {
+    for kind in [
+        "case-reactions",
+        "other-reactions",
+        "delivery",
+        "opaque",
+        "file-identities",
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let identity = DeviceIdentity::generate();
         let account = Account::generate();
@@ -1066,6 +1072,7 @@ fn reaction_delivery_and_opaque_names_are_reserved_before_any_writer() {
                 Account::generate().account_id()
             ),
             "delivery" => "MESSAGES.LOG.DELIVERY-OWNER".into(),
+            "file-identities" => "FILE-MESSAGE-IDENTITIES.LOG".into(),
             _ => "other.events.opaque-receive".into(),
         };
         let (dm, _) = mpsc::unbounded_channel();

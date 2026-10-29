@@ -8,7 +8,7 @@ use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 
 impl Node {
     /// Aggregated reactions in the DM with `peer` (derives the conversation id).
-    pub fn reactions_dm(&self, peer: &PublicIdentity) -> Vec<ReactionView> {
+    pub fn reactions_dm(&self, peer: &PublicIdentity) -> Result<Vec<ReactionView>, NodeError> {
         let conv = dm_conversation_id(&self.identity.public(), peer);
         self.reactions(conv)
     }
@@ -141,7 +141,7 @@ impl Node {
     /// `React` events across every device-pair conversation between us and that
     /// account's devices (and our own devices), opens each account reaction envelope,
     /// keys it by its logical target + reacting account, and merges our own.
-    pub fn account_reactions(&self, peer_account_id: &str) -> Vec<ReactionView> {
+    pub fn account_reactions(&self, peer_account_id: &str) -> Result<Vec<ReactionView>, NodeError> {
         let my_account = self.account.account_id();
         let me = self.identity.public().user_id();
         // The device-pair conversations whose React events can carry this account's
@@ -170,10 +170,9 @@ impl Node {
         for (conv, author, peer_account) in convs {
             let react_events: Vec<Event> = {
                 let log = self.log.lock().expect("log mutex not poisoned");
-                log.events(&conv)
+                log.events(&conv)?
                     .into_iter()
                     .filter(|e| e.kind == EventKind::React)
-                    .cloned()
                     .collect()
             };
             for event in &react_events {
@@ -222,7 +221,7 @@ impl Node {
         for (_, _, payload) in &mut decoded {
             payload.target = self.file_message_logical_id(acct_conv, payload.target);
         }
-        aggregate(&decoded)
+        Ok(aggregate(&decoded))
     }
 
     /// React to a message in a channel we hold the key for.
@@ -257,7 +256,7 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !self.channel_identity_is_current(state) {
+            if !self.channel_identity_is_current(state)? {
                 return Err(NodeError::Channel("not a channel member".into()));
             }
             (state.recipient_members(), state.epoch())
@@ -278,7 +277,7 @@ impl Node {
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-                if state.epoch() != epoch || !self.channel_identity_is_current(state) {
+                if state.epoch() != epoch || !self.channel_identity_is_current(state)? {
                     return Err(NodeError::Channel(
                         "channel membership changed; retry the operation".into(),
                     ));
@@ -294,18 +293,17 @@ impl Node {
     /// Aggregated reactions for a conversation (DM or channel). Opens each `React`
     /// event with the conversation crypto, merges our own (un-openable) DM reactions,
     /// and folds them per `(target, emoji)`.
-    pub fn reactions(&self, conv: ConversationId) -> Vec<ReactionView> {
+    pub fn reactions(&self, conv: ConversationId) -> Result<Vec<ReactionView>, NodeError> {
         let self_uid = self.identity.public().user_id();
-        let content_gate = self.channel_content_gate(conv);
+        let content_gate = self.channel_content_gate(conv)?;
         let react_events: Vec<Event> = {
             let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&conv)
+            log.events(&conv)?
                 .into_iter()
                 .filter(|e| {
                     e.kind == EventKind::React
                         && content_gate.as_ref().is_none_or(|ids| ids.contains(&e.id))
                 })
-                .cloned()
                 .collect()
         };
         let is_channel = {
@@ -360,7 +358,7 @@ impl Node {
                 }
             }
         }
-        aggregate(&decoded)
+        Ok(aggregate(&decoded))
     }
 
     /// Record one of OUR OWN reactions (sealed to the peer, so un-openable from our log)
@@ -441,6 +439,7 @@ mod acceptance_tests {
                     .lock()
                     .unwrap()
                     .events(&channel)
+                    .unwrap()
                     .iter()
                     .any(|event| { matches!(event.kind, EventKind::React | EventKind::Delete) }),
                 "a pre-change sealed control must never be committed after the authority changes"

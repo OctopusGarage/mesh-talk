@@ -235,171 +235,180 @@ impl Node {
 
     /// Rebuild a bounded slice from actual local state, never from borrowed rows.
     pub(in crate::node) fn publish_group_inventory(&self, after: &mut Option<ConversationId>) {
-        let own = self.user_id();
-        let prior: BTreeSet<_> = self
-            .account_documents
-            .lock()
-            .expect("documents mutex")
-            .inventory_rows()
-            .into_iter()
-            .filter_map(|meta| match meta.key {
-                AccountDocumentKey::GroupInventory {
-                    channel,
-                    source_device,
-                } if source_device == own => Some(channel),
-                _ => None,
-            })
-            .collect();
-        let book = self.channels.lock().expect("channels mutex");
-        let mut ids = book.channel_ids();
-        ids.sort_by_key(|id| *id.as_bytes());
-        let ids: Vec<_> = ids
-            .into_iter()
-            .filter(|id| after.is_none_or(|previous| id.as_bytes() > previous.as_bytes()))
-            .take(PUBLICATION_SLICE)
-            .collect();
-        let mut snapshots = Vec::new();
-        for id in &ids {
-            *after = Some(*id);
-            let Some(state) = book.state(id) else {
-                continue;
-            };
-            let channel_id = hex::encode(id.as_bytes());
-            let eligible =
-                self.channel_identity_matches_account(state) && state.is_accepted_member(&own);
-            if !eligible && !prior.contains(&channel_id) {
-                continue;
-            }
-            let mut members = state.members().to_vec();
-            members.sort_by_key(|member| {
-                (
-                    member.user_id() != state.owner() && member.user_id() != own,
-                    member.user_id(),
-                )
-            });
-            let members = members
+        let result = (|| -> Result<(), NodeError> {
+            let own = self.user_id();
+            let prior: BTreeSet<_> = self
+                .account_documents
+                .lock()
+                .expect("documents mutex")
+                .inventory_rows()
                 .into_iter()
-                .take(MAX_MEMBERS)
-                .map(|public| {
-                    let account_id = if state.owner_account_id().is_some() {
-                        state
-                            .member_account_id(&public.user_id())
-                            .map(str::to_owned)
-                    } else {
-                        None
-                    };
-                    GroupInventoryMember {
-                        post_office: false,
-                        account_id,
-                        name: None,
-                        pending: !state.is_accepted_member(&public.user_id()),
-                        public,
-                    }
+                .filter_map(|meta| match meta.key {
+                    AccountDocumentKey::GroupInventory {
+                        channel,
+                        source_device,
+                    } if source_device == own => Some(channel),
+                    _ => None,
                 })
                 .collect();
-            snapshots.push(GroupInventoryReference {
-                channel_id,
-                source_device: own.clone(),
-                name: inventory_display_name(state.name(), *id),
-                member_count: state.members().len(),
-                owner: state.owner().into(),
-                owner_account_id: state.owner_account_id().map(str::to_owned),
-                dissolved: state.is_dissolved(),
-                left: !self.channel_identity_matches_account(state),
-                pending_invite: state.pending_invite(),
-                legacy_membership: state.owner_account_id().is_none(),
-                members,
-                members_complete: state.members().len() <= MAX_MEMBERS,
-                observer: AccountDevice {
-                    public: self.identity.public(),
-                    certificate: self.account.certify(&self.identity.public().ed25519_pub),
-                },
-            });
-        }
-        drop(book);
-        // Profile publication may need the channel book. Resolve external display
-        // facts only after releasing it, so inventory cannot invert that lock order.
-        for reference in &mut snapshots {
-            for member in &mut reference.members {
-                if reference.legacy_membership {
-                    member.account_id = self.account_id_for_device(&member.public);
-                }
-                member.post_office = self.device_is_post_office(&member.public);
-                let public = &member.public;
-                let account_id = &member.account_id;
-                member.name = account_id
-                    .as_ref()
-                    .and_then(|account| self.account_profile(account))
-                    .map(|profile| profile.display_name)
-                    .or_else(|| {
-                        self.historical_author(&public.ed25519_pub)
-                            .filter(|proof| {
-                                proof.public() == *public
-                                    && proof.verify()
-                                    && (account_id.is_none()
-                                        || proof.account_id().as_ref() == account_id.as_ref())
-                            })
-                            .map(|proof| proof.name)
-                    })
-                    .filter(|name| {
-                        !name.is_empty() && name.len() <= 512 && !name.chars().any(char::is_control)
-                    });
-            }
-        }
-        if ids.len() < PUBLICATION_SLICE {
-            *after = None;
-        }
-        // Absence in a restored/partial local book is not evidence of departure.
-        // Keep the last durable source observation until a validated state changes it.
-        for mut reference in snapshots {
-            let id = hex::decode(&reference.channel_id)
-                .ok()
-                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
-                .map(ConversationId::new)
-                .expect("locally encoded channel id");
-            let (accounts, unbound) = self.channel_member_account_sets(id);
-            reference.member_count = accounts.len() + unbound.len();
-            let key = AccountDocumentKey::GroupInventory {
-                channel: reference.channel_id.clone(),
-                source_device: own.clone(),
-            };
-            let Some(payload) = reference.bounded_payload(key.limit()) else {
-                continue;
-            };
-            let changed = {
-                let mut store = self.account_documents.lock().expect("documents mutex");
-                let previous = store.meta(&key);
-                // Explicit source retractions are durable; periodic reconstruction
-                // must not silently resurrect them.
-                if previous.as_ref().is_some_and(|meta| meta.tombstone) {
+            let book = self.channels.lock().expect("channels mutex");
+            let mut ids = book.channel_ids();
+            ids.sort_by_key(|id| *id.as_bytes());
+            let ids: Vec<_> = ids
+                .into_iter()
+                .filter(|id| after.is_none_or(|previous| id.as_bytes() > previous.as_bytes()))
+                .take(PUBLICATION_SLICE)
+                .collect();
+            let mut snapshots = Vec::new();
+            for id in &ids {
+                *after = Some(*id);
+                let Some(state) = book.state(id) else {
+                    continue;
+                };
+                let channel_id = hex::encode(id.as_bytes());
+                let eligible =
+                    self.channel_identity_matches_account(state) && state.is_accepted_member(&own);
+                if !eligible && !prior.contains(&channel_id) {
                     continue;
                 }
-                let meta = if let Some(old) = previous
-                    .as_ref()
-                    .filter(|old| old.content_hash == content_hash(&payload))
-                {
-                    old.clone()
-                } else {
-                    let revision = previous
-                        .map_or(0, |meta| meta.revision)
-                        .saturating_add(1)
-                        .max(super::super::node::now_millis());
-                    AccountDocumentMeta::new(
-                        &self.account,
-                        own.clone(),
-                        key,
-                        revision,
-                        &payload,
-                        false,
+                let mut members = state.members().to_vec();
+                members.sort_by_key(|member| {
+                    (
+                        member.user_id() != state.owner() && member.user_id() != own,
+                        member.user_id(),
                     )
-                };
-                store.merge(meta, &payload)
-            };
-            match changed {
-                Ok(true) => self.documents_changed(),
-                Ok(false) => {}
-                Err(error) => log::debug!("group inventory publication deferred: {error}"),
+                });
+                let members = members
+                    .into_iter()
+                    .take(MAX_MEMBERS)
+                    .map(|public| {
+                        let account_id = if state.owner_account_id().is_some() {
+                            state
+                                .member_account_id(&public.user_id())
+                                .map(str::to_owned)
+                        } else {
+                            None
+                        };
+                        GroupInventoryMember {
+                            post_office: false,
+                            account_id,
+                            name: None,
+                            pending: !state.is_accepted_member(&public.user_id()),
+                            public,
+                        }
+                    })
+                    .collect();
+                snapshots.push(GroupInventoryReference {
+                    channel_id,
+                    source_device: own.clone(),
+                    name: inventory_display_name(state.name(), *id),
+                    member_count: state.members().len(),
+                    owner: state.owner().into(),
+                    owner_account_id: state.owner_account_id().map(str::to_owned),
+                    dissolved: state.is_dissolved(),
+                    left: !self.channel_identity_matches_account(state),
+                    pending_invite: state.pending_invite(),
+                    legacy_membership: state.owner_account_id().is_none(),
+                    members,
+                    members_complete: state.members().len() <= MAX_MEMBERS,
+                    observer: AccountDevice {
+                        public: self.identity.public(),
+                        certificate: self.account.certify(&self.identity.public().ed25519_pub),
+                    },
+                });
             }
+            drop(book);
+            // Profile publication may need the channel book. Resolve external display
+            // facts only after releasing it, so inventory cannot invert that lock order.
+            for reference in &mut snapshots {
+                for member in &mut reference.members {
+                    if reference.legacy_membership {
+                        member.account_id = self.account_id_for_device(&member.public);
+                    }
+                    member.post_office = self.device_is_post_office(&member.public);
+                    let public = &member.public;
+                    let account_id = &member.account_id;
+                    member.name = account_id
+                        .as_ref()
+                        .and_then(|account| self.account_profile(account))
+                        .map(|profile| profile.display_name)
+                        .or_else(|| {
+                            self.historical_author(&public.ed25519_pub)
+                                .filter(|proof| {
+                                    proof.public() == *public
+                                        && proof.verify()
+                                        && (account_id.is_none()
+                                            || proof.account_id().as_ref() == account_id.as_ref())
+                                })
+                                .map(|proof| proof.name)
+                        })
+                        .filter(|name| {
+                            !name.is_empty()
+                                && name.len() <= 512
+                                && !name.chars().any(char::is_control)
+                        });
+                }
+            }
+            if ids.len() < PUBLICATION_SLICE {
+                *after = None;
+            }
+            // Absence in a restored/partial local book is not evidence of departure.
+            // Keep the last durable source observation until a validated state changes it.
+            for mut reference in snapshots {
+                let id = hex::decode(&reference.channel_id)
+                    .ok()
+                    .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                    .map(ConversationId::new)
+                    .expect("locally encoded channel id");
+                let (accounts, unbound) = self.channel_member_account_sets(id)?;
+                reference.member_count = accounts.len() + unbound.len();
+                let key = AccountDocumentKey::GroupInventory {
+                    channel: reference.channel_id.clone(),
+                    source_device: own.clone(),
+                };
+                let Some(payload) = reference.bounded_payload(key.limit()) else {
+                    continue;
+                };
+                let changed = {
+                    let mut store = self.account_documents.lock().expect("documents mutex");
+                    let previous = store.meta(&key);
+                    // Explicit source retractions are durable; periodic reconstruction
+                    // must not silently resurrect them.
+                    if previous.as_ref().is_some_and(|meta| meta.tombstone) {
+                        continue;
+                    }
+                    let meta = if let Some(old) = previous
+                        .as_ref()
+                        .filter(|old| old.content_hash == content_hash(&payload))
+                    {
+                        old.clone()
+                    } else {
+                        let revision = previous
+                            .map_or(0, |meta| meta.revision)
+                            .saturating_add(1)
+                            .max(super::super::node::now_millis());
+                        AccountDocumentMeta::new(
+                            &self.account,
+                            own.clone(),
+                            key,
+                            revision,
+                            &payload,
+                            false,
+                        )
+                    };
+                    store.merge(meta, &payload)
+                };
+                match changed {
+                    Ok(true) => self.documents_changed(),
+                    Ok(false) => {}
+                    Err(error) => log::debug!("group inventory publication deferred: {error}"),
+                }
+            }
+
+            Ok(())
+        })();
+        if let Err(error) = result {
+            log::warn!("publish_group_inventory deferred after storage failure: {error}");
         }
     }
 }

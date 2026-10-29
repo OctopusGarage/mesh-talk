@@ -2,10 +2,11 @@
 //! Inheritance establishes device identity; encrypted receive snapshots never
 //! grant membership or install another device's sending chain.
 use super::channel_account_authority::AccountGrantId;
+use crate::node::NodeError;
 use crate::{
     channel::sender_key::SenderKeyDistribution,
     discovery::Announce,
-    eventlog::{ConversationId, Event, EventId},
+    eventlog::{ConversationId, Event, EventId, LogError},
     identity::device::PublicIdentity,
 };
 use serde::{Deserialize, Serialize};
@@ -402,26 +403,26 @@ impl super::Node {
         channel: ConversationId,
         peer: &PublicIdentity,
         proof: &Announce,
-    ) -> bool {
+    ) -> Result<bool, LogError> {
         if proof.public() != *peer || !proof.valid_presence() || proof.post_office {
-            return false;
+            return Ok(false);
         }
-        let projection = self.account_group_projection(channel);
+        let projection = self.account_group_projection(channel)?;
         let Some(state) = projection.state else {
-            return false;
+            return Ok(false);
         };
         let own = self.identity.public();
         let accepted = |public: &PublicIdentity| {
             state.is_accepted_member(&public.user_id()) && state.members().contains(public)
         };
-        !state.is_dissolved()
+        Ok(!state.is_dissolved()
             && accepted(peer)
             && accepted(&own)
             && (projection.authority.current_event().is_none()
                 || (projection.authority.is_member(peer, proof)
                     && projection
                         .authority
-                        .is_member(&own, &self.own_group_proof())))
+                        .is_member(&own, &self.own_group_proof()))))
     }
 
     fn binding_transition_page(
@@ -430,12 +431,14 @@ impl super::Node {
         peer: &PublicIdentity,
         proof: &Announce,
         after: Option<&str>,
-    ) -> Option<AccountGroupResponse> {
-        if !self.binding_transition_group_member(channel, peer, proof) {
-            return None;
+    ) -> Result<Option<AccountGroupResponse>, LogError> {
+        if !self.binding_transition_group_member(channel, peer, proof)? {
+            return Ok(None);
         }
-        let projection = self.account_group_projection(channel);
-        let state = projection.state?;
+        let projection = self.account_group_projection(channel)?;
+        let Some(state) = projection.state else {
+            return Ok(None);
+        };
         let mut candidates = self.account_binding_patches();
         candidates.retain(|patch| {
             let public = patch.announce.public();
@@ -470,15 +473,17 @@ impl super::Node {
             })
             .flatten();
         let response = AccountGroupResponse::BindingTransitions { patches, next };
-        (response.encode().len() <= MAX_CONTROL).then_some(response)
+        Ok((response.encode().len() <= MAX_CONTROL).then_some(response))
     }
     pub(super) fn account_group_projection(
         &self,
         channel: ConversationId,
-    ) -> super::channel::ChannelMembershipProjection {
+    ) -> Result<super::channel::ChannelMembershipProjection, LogError> {
         let log = self.log.lock().expect("log lock not poisoned");
-        let events = log.events(&channel);
-        super::channel::ChannelBook::project_membership(channel, &events)
+        let events = log.events(&channel)?;
+        Ok(super::channel::ChannelBook::project_membership(
+            channel, &events,
+        ))
     }
     pub(super) fn own_group_proof(&self) -> Announce {
         Announce::new_with_account(&self.identity, &self.account, "", 1)
@@ -527,69 +532,80 @@ impl super::Node {
         channel: &mut crate::transport::SecureChannel<tokio::net::TcpStream>,
         request: AccountGroupRequest,
     ) {
-        let _privacy = self.privacy.gate.read().await;
-        if !channel.io_admitted() {
-            return;
-        }
-        let response = match request {
-            AccountGroupRequest::Capability => AccountGroupResponse::Capability {
-                version: 1,
-                proof: Box::new(self.own_group_proof()),
-            },
-            AccountGroupRequest::Groups { account_id, after } => {
-                if account_id != self.account_id()
-                    || !self.certified_sibling(channel.peer_identity())
-                    || !self.account_allowed(channel.peer_identity(), channel.peer_announcement())
-                {
-                    return;
-                }
-                let own_account = self.account.public().ed25519_pub;
-                let mut channels: Vec<_> = self
-                    .list_channels()
-                    .into_iter()
-                    .filter(|row| after.is_none_or(|after| row.id.as_bytes() > after.as_bytes()))
-                    .filter_map(|row| {
-                        let projection = self.account_group_projection(row.id);
-                        (projection.authority.current_event().is_some()
+        let result: Result<(), NodeError> = async {
+            let _privacy = self.privacy.gate.read().await;
+            if !channel.io_admitted() {
+                return Ok(());
+            }
+            let response = match request {
+                AccountGroupRequest::Capability => AccountGroupResponse::Capability {
+                    version: 1,
+                    proof: Box::new(self.own_group_proof()),
+                },
+                AccountGroupRequest::Groups { account_id, after } => {
+                    if account_id != self.account_id()
+                        || !self.certified_sibling(channel.peer_identity())
+                        || !self
+                            .account_allowed(channel.peer_identity(), channel.peer_announcement())
+                    {
+                        return Ok(());
+                    }
+                    let own_account = self.account.public().ed25519_pub;
+                    let mut channels = Vec::new();
+                    for row in self.list_channels()? {
+                        if !after.is_none_or(|after| row.id.as_bytes() > after.as_bytes()) {
+                            continue;
+                        }
+                        let projection = self.account_group_projection(row.id)?;
+                        if projection.authority.current_event().is_some()
                             && (projection.authority.account_grant(&own_account).is_some()
                                 || projection
                                     .authority
                                     .revoked()
                                     .iter()
-                                    .any(|id| id.account_pub == own_account)))
-                        .then_some(row.id)
-                    })
-                    .collect();
-                channels.sort_unstable_by_key(|channel| *channel.as_bytes());
-                channels.truncate(MAX_GROUPS + 1);
-                let next = (channels.len() > MAX_GROUPS).then(|| channels[MAX_GROUPS - 1]);
-                channels.truncate(MAX_GROUPS);
-                AccountGroupResponse::Groups { channels, next }
-            }
-            AccountGroupRequest::BindingTransitions {
-                channel: group,
-                after,
-            } => {
-                let Some(proof) = channel.peer_announcement() else {
-                    return;
-                };
-                let Some(response) = self.binding_transition_page(
-                    group,
-                    channel.peer_identity(),
-                    proof,
-                    after.as_deref(),
-                ) else {
-                    return;
-                };
-                response
-            }
-        };
-        drop(_privacy);
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            channel.send(&response.encode()),
-        )
+                                    .any(|id| id.account_pub == own_account))
+                        {
+                            channels.push(row.id);
+                        }
+                    }
+                    channels.sort_unstable_by_key(|channel| *channel.as_bytes());
+                    channels.truncate(MAX_GROUPS + 1);
+                    let next = (channels.len() > MAX_GROUPS).then(|| channels[MAX_GROUPS - 1]);
+                    channels.truncate(MAX_GROUPS);
+                    AccountGroupResponse::Groups { channels, next }
+                }
+                AccountGroupRequest::BindingTransitions {
+                    channel: group,
+                    after,
+                } => {
+                    let Some(proof) = channel.peer_announcement() else {
+                        return Ok(());
+                    };
+                    let Some(response) = self.binding_transition_page(
+                        group,
+                        channel.peer_identity(),
+                        proof,
+                        after.as_deref(),
+                    )?
+                    else {
+                        return Ok(());
+                    };
+                    response
+                }
+            };
+            drop(_privacy);
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                channel.send(&response.encode()),
+            )
+            .await;
+
+            Ok(())
+        }
         .await;
+        if let Err(error) = result {
+            log::warn!("serve_account_group_request deferred after storage failure: {error}");
+        }
     }
 }
 

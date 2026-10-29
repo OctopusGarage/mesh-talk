@@ -1333,7 +1333,7 @@ impl NodeRuntime {
     }
 
     /// Channels this node is a member of.
-    pub fn list_channels(&self) -> Vec<crate::node::ChannelSummary> {
+    pub fn list_channels(&self) -> Result<Vec<crate::node::ChannelSummary>, NodeError> {
         self.node.list_channels()
     }
 
@@ -1343,11 +1343,17 @@ impl NodeRuntime {
     ) -> Option<String> {
         self.node.channel_owner_account_id(channel)
     }
-    pub fn channel_can_manage(&self, channel: crate::eventlog::event::ConversationId) -> bool {
+    pub fn channel_can_manage(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Result<bool, NodeError> {
         self.node.channel_can_manage(channel)
     }
 
-    pub fn channel_can_send(&self, channel: crate::eventlog::event::ConversationId) -> bool {
+    pub fn channel_can_send(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Result<bool, NodeError> {
         self.node.channel_can_send(channel)
     }
 
@@ -1487,7 +1493,10 @@ impl NodeRuntime {
     }
 
     /// Aggregated reactions in the DM with `peer`.
-    pub fn reactions_dm(&self, peer: &PublicIdentity) -> Vec<crate::node::reaction::ReactionView> {
+    pub fn reactions_dm(
+        &self,
+        peer: &PublicIdentity,
+    ) -> Result<Vec<crate::node::reaction::ReactionView>, NodeError> {
         self.node.reactions_dm(peer)
     }
 
@@ -1495,7 +1504,7 @@ impl NodeRuntime {
     pub fn channel_reactions(
         &self,
         channel: crate::eventlog::event::ConversationId,
-    ) -> Vec<crate::node::reaction::ReactionView> {
+    ) -> Result<Vec<crate::node::reaction::ReactionView>, NodeError> {
         self.node.reactions(channel)
     }
 
@@ -1503,7 +1512,7 @@ impl NodeRuntime {
     pub fn account_reactions(
         &self,
         peer_account_id: &str,
-    ) -> Vec<crate::node::reaction::ReactionView> {
+    ) -> Result<Vec<crate::node::reaction::ReactionView>, NodeError> {
         self.node.account_reactions(peer_account_id)
     }
 

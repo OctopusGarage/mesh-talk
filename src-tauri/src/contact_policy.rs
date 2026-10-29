@@ -671,7 +671,7 @@ mod tests {
             false,
         ))
         .unwrap();
-        let before = node.account_reactions(A);
+        let before = node.account_reactions(A).unwrap();
         assert_eq!(before.len(), 1);
         *node_state.0.blocking_write() = Some(runtime);
         let app = tauri::test::mock_builder()
@@ -714,7 +714,7 @@ mod tests {
                 "{cmd} must reject the replaced entry lease"
             );
             assert_eq!(
-                node.account_reactions(A),
+                node.account_reactions(A).unwrap(),
                 before,
                 "replacement session's durable data survives"
             );

@@ -53,7 +53,7 @@ pub(crate) fn encode(path: &Path) -> Vec<u8> {
         path.as_os_str().as_encoded_bytes().to_vec()
     }
 }
-fn decode(bytes: Vec<u8>) -> Result<PathBuf, LogError> {
+pub(super) fn decode(bytes: Vec<u8>) -> Result<PathBuf, LogError> {
     #[cfg(unix)]
     let value = {
         use std::os::unix::ffi::OsStringExt;

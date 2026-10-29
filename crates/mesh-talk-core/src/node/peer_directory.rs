@@ -72,6 +72,7 @@ pub(crate) struct PeerDirectory {
     key: EncryptionKey,
     records: Vec<Announce>,
     heads: Vec<TransitionHead>,
+    revision: u64,
     // Reconstructed from the durable local account-device registry at startup.
     linked_bindings: Vec<super::account_devices::AccountDevice>,
 }
@@ -85,6 +86,7 @@ impl PeerDirectory {
                 key: EncryptionKey::from_password(password, &salt).map_err(invalid_error)?,
                 records: Vec::new(),
                 heads: Vec::new(),
+                revision: 0,
                 linked_bindings: Vec::new(),
             };
             directory.save(&[])?;
@@ -167,6 +169,7 @@ impl PeerDirectory {
             key,
             records: snapshot.records,
             heads,
+            revision: 0,
             linked_bindings: Vec::new(),
         })
     }
@@ -286,9 +289,13 @@ impl PeerDirectory {
         });
         heads.sort_by_key(|h| h.public.user_id());
         self.save_with_heads(&records, &heads)?;
+        self.revision = self.revision.wrapping_add(1);
         self.records = records;
         self.heads = heads;
         Ok(())
+    }
+    pub(in crate::node) fn revision(&self) -> u64 {
+        self.revision
     }
     pub(crate) fn record(&mut self, announce: &Announce) -> io::Result<()> {
         self.record_bound(announce, false)
@@ -342,6 +349,7 @@ impl PeerDirectory {
                 Err(invalid())
             };
         }
+        self.revision = self.revision.wrapping_add(1);
         self.linked_bindings.push(device);
         Ok(())
     }
@@ -450,6 +458,7 @@ impl PeerDirectory {
         }
         self.save_with_heads(&next, &heads)
             .map_err(io::Error::other)?;
+        self.revision = self.revision.wrapping_add(1);
         self.records = next;
         self.heads = heads;
         Ok(())

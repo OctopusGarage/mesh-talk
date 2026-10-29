@@ -60,6 +60,7 @@ pub(super) const FIXED_SOURCE_NAMES: &[&str] = &[
     "account-profiles.log",
     "account-suppression.log",
     "account-file-proofs.log",
+    "file-message-identities.log",
     "account-access.log",
     "account-binding-transitions.log",
 ];

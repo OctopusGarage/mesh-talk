@@ -6,6 +6,7 @@ use super::queries::decode_account_entry;
 use super::{MessageBody, Node, SearchHit};
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
+use crate::node::NodeError;
 
 const RECENT_HISTORY_LIMIT: usize = 2000;
 
@@ -68,7 +69,7 @@ impl Node {
         const PER_CONV: usize = 2000;
         let mut hits: Vec<SearchHit> = Vec::new();
 
-        for conversation in self.search_conversations() {
+        for conversation in self.search_conversations()? {
             let scope = match &conversation.source {
                 SearchSource::Account(account) => SearchScope::Account(account),
                 SearchSource::Channel => SearchScope::Channel,
@@ -111,7 +112,7 @@ impl Node {
         if q.is_empty() || limit == 0 {
             return Ok(response);
         }
-        for conversation in self.search_conversations() {
+        for conversation in self.search_conversations()? {
             let history = match &conversation.source {
                 SearchSource::Account(account) => {
                     self.account_history(account, RECENT_HISTORY_LIMIT)?
@@ -312,7 +313,7 @@ impl Node {
             );
         }
         let conversation = self
-            .search_conversations()
+            .search_conversations()?
             .into_iter()
             .find(|conversation| match (reference, &conversation.source) {
                 (SearchReference::Account { account_id, .. }, SearchSource::Account(account)) => {
@@ -347,7 +348,7 @@ impl Node {
 
     // Candidate eligibility is shared; canonical projection and the legacy fast
     // scan retain their separate coverage/cost contracts.
-    fn search_conversations(&self) -> Vec<SearchConversation> {
+    fn search_conversations(&self) -> Result<Vec<SearchConversation>, NodeError> {
         let mut conversations = Vec::new();
         let peers = self
             .roster
@@ -440,7 +441,7 @@ impl Node {
                 source: SearchSource::Account(acct),
             });
         }
-        for ch in self.list_channels() {
+        for ch in self.list_channels()? {
             conversations.push(SearchConversation {
                 id: ch.id,
                 target: hex::encode(ch.id.as_bytes()),
@@ -449,7 +450,7 @@ impl Node {
                 source: SearchSource::Channel,
             });
         }
-        conversations
+        Ok(conversations)
     }
 
     /// Scan one conversation's sent + received plaintext for a lowercased substring `q`,
@@ -559,7 +560,7 @@ impl Node {
         }
         let recalled = match scope {
             SearchScope::LegacyDm => return Ok(matches),
-            SearchScope::Account(peer) => self.recalled_targets_account(peer),
+            SearchScope::Account(peer) => self.recalled_targets_account(peer)?,
             SearchScope::Channel => self.recalled_targets_channel(conv)?,
         };
         if recalled.is_empty() {
@@ -572,7 +573,7 @@ impl Node {
             if matches!(scope, SearchScope::Channel)
                 && matches.iter().any(|line| line.sent_seq.is_some())
             {
-                self.raw_sent_history(conv)
+                self.raw_sent_history(conv)?
                     .into_iter()
                     .filter_map(|(id, entry)| recalled.contains(&id).then_some(entry.seq))
                     .collect()

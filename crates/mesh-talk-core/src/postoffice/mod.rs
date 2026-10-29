@@ -13,7 +13,7 @@ pub(crate) mod storage;
 
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId};
-use crate::eventlog::persist::PersistentEventLog;
+use crate::eventlog::persist::legacy::LegacyEventLog as PersistentEventLog;
 use crate::eventlog::store::AppendOutcome;
 use crate::eventlog::sync::SyncStore;
 use crate::identity::device::{DeviceIdentity, PublicIdentity};

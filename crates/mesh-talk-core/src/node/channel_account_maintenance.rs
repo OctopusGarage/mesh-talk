@@ -7,6 +7,7 @@ use super::{
         inheritance_account_message,
     },
 };
+use crate::eventlog::LogError;
 use crate::{
     discovery::{Announce, PeerRecord},
     eventlog::{ConversationId, EventKind},
@@ -39,7 +40,6 @@ impl ChannelMigrationStore {
         account: [u8; 32],
         own: &PublicIdentity,
     ) -> Result<Self, crate::eventlog::LogError> {
-        use crate::eventlog::LogError;
         if path.try_exists()? && std::fs::metadata(path)?.len() > 512 * 1024 {
             return Err(LogError::CorruptFile(
                 "channel migration authorization exceeds limit".into(),
@@ -211,11 +211,15 @@ impl Node {
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
-            let roots = self
-                .list_channels()
-                .into_iter()
-                .filter_map(|row| self.legacy_owner_root(row.id).map(|root| (row.id, root)))
-                .collect();
+            let roots =
+                self.list_channels()?
+                    .into_iter()
+                    .try_fold(Vec::new(), |mut roots, row| {
+                        if let Some(root) = self.legacy_owner_root(row.id)? {
+                            roots.push((row.id, root));
+                        }
+                        Ok::<_, LogError>(roots)
+                    })?;
             self.channel_migration
                 .lock()
                 .expect("channel migration lock")
@@ -235,7 +239,7 @@ impl Node {
         &self,
         channel: ConversationId,
     ) -> Result<(), NodeError> {
-        if let Some(root) = self.legacy_owner_root(channel) {
+        if let Some(root) = self.legacy_owner_root(channel)? {
             self.channel_migration
                 .lock()
                 .expect("channel migration lock")
@@ -243,132 +247,152 @@ impl Node {
         }
         Ok(())
     }
-    fn legacy_owner_root(&self, channel: ConversationId) -> Option<crate::eventlog::EventId> {
-        let projection = self.account_group_projection(channel);
+    fn legacy_owner_root(
+        &self,
+        channel: ConversationId,
+    ) -> Result<Option<crate::eventlog::EventId>, LogError> {
+        let projection = self.account_group_projection(channel)?;
         if projection.authority.current_event().is_some()
             || projection
                 .state
                 .as_ref()
                 .is_none_or(|state| state.is_dissolved() || state.owner() != self.user_id())
         {
-            return None;
+            return Ok(None);
         }
-        projection
+        Ok(projection
             .accepted
             .iter()
             .find(|member| member.public == self.identity.public())
-            .map(|member| member.membership_event)
+            .map(|member| member.membership_event))
     }
     /// One peer turn and one local channel turn; the existing recovery task owns all state.
     pub(super) async fn maintain_account_channels(&self, work: &mut ChannelAccountMaintenance) {
-        let mut peers = self.routing_peers();
-        // Capability maintenance serves existing group relationships and siblings,
-        // not every discovery entry. Unrelated probes compete with ordinary DMs
-        // and must not initiate a pull connection before contact authorization.
-        peers.retain(|peer| {
-            !peer.post_office
-                && (peer.account_id.as_deref() == Some(self.account_id().as_str())
-                    || self.group_member(&peer.public)
-                    || self.group_departure_peer(&peer.public))
-        });
-        peers.sort_unstable_by_key(|peer| peer.public.user_id());
-        if !peers.is_empty() {
-            let peer = &peers[work.peer_cursor % peers.len()];
-            work.peer_cursor = work.peer_cursor.wrapping_add(1);
-            let value = work.capability(peer, self.privacy.generation.load(Ordering::Acquire));
-            if Instant::now() >= value.probe_at {
-                value.proof = self
-                    .query_account_groups_verified(peer, AccountGroupRequest::Capability)
-                    .await
-                    .and_then(|(response, proof)| {
-                        (matches!(
-                            response,
-                            AccountGroupResponse::Capability { version: 1, .. }
-                        ) && proof.public() == peer.public
-                            && proof.valid_presence()
-                            && proof.account_id().is_some()
-                            && proof.account_id() == peer.account_id
-                            && !proof.post_office)
-                            .then_some(proof)
-                    });
-                value.supported = value.proof.is_some();
-                value.probe_at = Instant::now() + if value.supported { REFRESH } else { RETRY };
-            } else if value.supported && self.pull_group_binding_page(peer, value).await {
-                // A relay page consumes this peer turn; sibling route recovery
-                // remains independent and resumes on its next selected turn.
-            } else if value.supported
-                && peer.account_id.as_deref() == Some(self.account_id().as_str())
-            {
-                if value.pending.is_empty() && Instant::now() >= value.poll_at {
-                    if let Some(AccountGroupResponse::Groups { channels, next }) = self
-                        .query_account_groups(
-                            peer,
-                            AccountGroupRequest::Groups {
-                                account_id: self.account_id(),
-                                after: value.after,
-                            },
-                        )
-                        .await
-                    {
-                        value.pending = channels.into();
-                        value.after = next;
-                        value.poll_at = Instant::now()
-                            + if next.is_some() {
-                                Duration::ZERO
-                            } else {
-                                Duration::from_secs(30)
-                            };
-                    } else {
-                        value.poll_at = Instant::now() + RETRY;
-                    }
-                }
-                if let Some(channel) = value.pending.pop_front() {
-                    let _ = tokio::time::timeout(Duration::from_secs(15), async {
-                        let mut connection =
-                            self.privacy_sync_dial(peer.addr, &peer.public).await.ok()?;
-                        let store = self.pull_sync_store(connection.peer_identity());
-                        super::session::request_round(&mut connection, &store, channel)
-                            .await
-                            .ok()?;
-                        self.recycle_sync_channel(connection);
-                        self.process_channel(channel);
-                        Some(())
-                    })
-                    .await;
-                    self.maintain_one_account_channel(channel, work).await;
+        let result: Result<(), NodeError> = async {
+            let mut peers = self.routing_peers();
+            // Capability maintenance serves existing group relationships and siblings,
+            // not every discovery entry. Unrelated probes compete with ordinary DMs
+            // and must not initiate a pull connection before contact authorization.
+            let mut selected = Vec::new();
+            for peer in peers {
+                if !peer.post_office
+                    && (peer.account_id.as_deref() == Some(self.account_id().as_str())
+                        || self.group_member(&peer.public)?
+                        || self.group_departure_peer(&peer.public))
+                {
+                    selected.push(peer);
                 }
             }
+            peers = selected;
+            peers.sort_unstable_by_key(|peer| peer.public.user_id());
+            if !peers.is_empty() {
+                let peer = &peers[work.peer_cursor % peers.len()];
+                work.peer_cursor = work.peer_cursor.wrapping_add(1);
+                let value = work.capability(peer, self.privacy.generation.load(Ordering::Acquire));
+                if Instant::now() >= value.probe_at {
+                    value.proof = self
+                        .query_account_groups_verified(peer, AccountGroupRequest::Capability)
+                        .await
+                        .and_then(|(response, proof)| {
+                            (matches!(
+                                response,
+                                AccountGroupResponse::Capability { version: 1, .. }
+                            ) && proof.public() == peer.public
+                                && proof.valid_presence()
+                                && proof.account_id().is_some()
+                                && proof.account_id() == peer.account_id
+                                && !proof.post_office)
+                                .then_some(proof)
+                        });
+                    value.supported = value.proof.is_some();
+                    value.probe_at = Instant::now() + if value.supported { REFRESH } else { RETRY };
+                } else if value.supported && self.pull_group_binding_page(peer, value).await? {
+                    // A relay page consumes this peer turn; sibling route recovery
+                    // remains independent and resumes on its next selected turn.
+                } else if value.supported
+                    && peer.account_id.as_deref() == Some(self.account_id().as_str())
+                {
+                    if value.pending.is_empty() && Instant::now() >= value.poll_at {
+                        if let Some(AccountGroupResponse::Groups { channels, next }) = self
+                            .query_account_groups(
+                                peer,
+                                AccountGroupRequest::Groups {
+                                    account_id: self.account_id(),
+                                    after: value.after,
+                                },
+                            )
+                            .await
+                        {
+                            value.pending = channels.into();
+                            value.after = next;
+                            value.poll_at = Instant::now()
+                                + if next.is_some() {
+                                    Duration::ZERO
+                                } else {
+                                    Duration::from_secs(30)
+                                };
+                        } else {
+                            value.poll_at = Instant::now() + RETRY;
+                        }
+                    }
+                    if let Some(channel) = value.pending.pop_front() {
+                        let _ = tokio::time::timeout(Duration::from_secs(15), async {
+                            let mut connection =
+                                self.privacy_sync_dial(peer.addr, &peer.public).await.ok()?;
+                            let store = self.pull_sync_store(connection.peer_identity());
+                            super::session::request_round_paged(&mut connection, &store, channel)
+                                .await
+                                .ok()?;
+                            self.recycle_sync_channel(connection);
+                            self.process_channel(channel);
+                            Some(())
+                        })
+                        .await;
+                        self.maintain_one_account_channel(channel, work).await;
+                    }
+                }
+            }
+            let channels = self.list_channels()?;
+            if !channels.is_empty() {
+                let channel = channels[work.channel_cursor % channels.len()].id;
+                work.channel_cursor = work.channel_cursor.wrapping_add(1);
+                self.maintain_one_account_channel(channel, work).await;
+            }
+
+            Ok(())
         }
-        let channels = self.list_channels();
-        if !channels.is_empty() {
-            let channel = channels[work.channel_cursor % channels.len()].id;
-            work.channel_cursor = work.channel_cursor.wrapping_add(1);
-            self.maintain_one_account_channel(channel, work).await;
+        .await;
+        if let Err(error) = result {
+            log::warn!("maintain_account_channels deferred after storage failure: {error}");
         }
     }
-    async fn pull_group_binding_page(&self, peer: &PeerRecord, work: &mut Capability) -> bool {
+    async fn pull_group_binding_page(
+        &self,
+        peer: &PeerRecord,
+        work: &mut Capability,
+    ) -> Result<bool, NodeError> {
         if !work.binding_turn {
             work.binding_turn = true;
-            return false;
+            return Ok(false);
         }
         if Instant::now() < work.binding_poll_at {
-            return false;
+            return Ok(false);
         }
         let Some(proof) = work.proof.as_ref() else {
-            return false;
+            return Ok(false);
         };
-        let mut groups: Vec<_> = self
-            .list_channels()
-            .into_iter()
-            .filter(|row| self.binding_transition_group_member(row.id, &peer.public, proof))
-            .map(|row| row.id)
-            .collect();
+        let mut groups = Vec::new();
+        for row in self.list_channels()? {
+            if self.binding_transition_group_member(row.id, &peer.public, proof)? {
+                groups.push(row.id);
+            }
+        }
         groups.sort_unstable_by_key(|id| *id.as_bytes());
         if groups.is_empty() {
             work.binding_poll_at = Instant::now() + Duration::from_secs(30);
             work.binding_channel = None;
             work.binding_after = None;
-            return false;
+            return Ok(false);
         }
         if work
             .binding_channel
@@ -415,7 +439,7 @@ impl Node {
                 work.binding_poll_at = Instant::now() + RETRY;
             }
         }
-        true
+        Ok(true)
     }
     async fn maintain_one_account_channel(
         &self,
@@ -444,7 +468,7 @@ impl Node {
     ) -> Result<Option<Vec<PublicIdentity>>, NodeError> {
         let own = self.own_group_proof();
         let me = self.identity.public();
-        let mut projection = self.account_group_projection(channel);
+        let mut projection = self.account_group_projection(channel)?;
         let Some(state) = projection.state.as_ref() else {
             return Ok(None);
         };
@@ -530,7 +554,7 @@ impl Node {
             }
             self.append_event(channel, EventKind::ChannelAccountAuthority, payload)?;
             self.process_channel(channel);
-            projection = self.account_group_projection(channel);
+            projection = self.account_group_projection(channel)?;
             changed = true;
         }
         let Some(authority) = projection.authority.current_event() else {
@@ -563,7 +587,7 @@ impl Node {
                 control.encode(),
             )?;
             self.process_channel(channel);
-            projection = self.account_group_projection(channel);
+            projection = self.account_group_projection(channel)?;
             let Some(state) = projection
                 .state
                 .as_ref()
@@ -582,13 +606,13 @@ impl Node {
             changed = true;
             self.process_channel(channel);
         }
-        Ok(changed
-            .then(|| {
-                self.account_group_projection(channel)
-                    .state
-                    .map(|state| state.members().to_vec())
-            })
-            .flatten())
+        Ok(if changed {
+            self.account_group_projection(channel)?
+                .state
+                .map(|state| state.members().to_vec())
+        } else {
+            None
+        })
     }
     fn share_account_receive_keys(
         &self,
@@ -637,7 +661,7 @@ impl Node {
                 .collect::<Vec<_>>()
         };
         let log = self.log.lock().expect("log lock");
-        let events = log.events(&channel);
+        let events = log.events(&channel)?;
         let mut examined = HashSet::new();
         let mut selected = None;
         for (inheritance, grant, proof) in events
@@ -907,6 +931,7 @@ mod tests {
         for _ in 0..40 {
             if receiver
                 .account_group_projection(channel)
+                .unwrap()
                 .state
                 .as_ref()
                 .is_some_and(|state| {
@@ -1023,42 +1048,54 @@ mod tests {
             "relayed historical proof cannot invent online presence"
         );
         assert!(
-            !relay.binding_transition_group_member(
-                channel,
-                &group.nodes[2].identity.public(),
-                &group.nodes[2].own_group_proof()
-            ),
+            !relay
+                .binding_transition_group_member(
+                    channel,
+                    &group.nodes[2].identity.public(),
+                    &group.nodes[2].own_group_proof()
+                )
+                .unwrap(),
             "a certified sibling without accepted device membership cannot query another device's group"
         );
         let wrong_x = DeviceIdentity::from_secret_bytes(
             receiver.identity.secret_bytes().0,
             DeviceIdentity::generate().secret_bytes().1,
         );
-        assert!(!relay.binding_transition_group_member(
-            channel,
-            &wrong_x.public(),
-            &Announce::new_with_account(&wrong_x, &receiver.account, "wrong X", 1234)
-        ));
-        assert!(!relay.binding_transition_group_member(
-            ConversationId::new([255; 32]),
-            &receiver.identity.public(),
-            &receiver.own_group_proof()
-        ));
+        assert!(
+            !relay
+                .binding_transition_group_member(
+                    channel,
+                    &wrong_x.public(),
+                    &Announce::new_with_account(&wrong_x, &receiver.account, "wrong X", 1234)
+                )
+                .unwrap()
+        );
+        assert!(
+            !relay
+                .binding_transition_group_member(
+                    ConversationId::new([255; 32]),
+                    &receiver.identity.public(),
+                    &receiver.own_group_proof()
+                )
+                .unwrap()
+        );
         group.servers[2].abort();
         relay
             .add_channel_member(channel, group.nodes[2].identity.public())
             .await
             .unwrap();
-        let projection = relay.account_group_projection(channel);
+        let projection = relay.account_group_projection(channel).unwrap();
         let state = projection.state.unwrap();
         assert!(state.is_member(&group.nodes[2].user_id()));
         assert!(!state.is_accepted_member(&group.nodes[2].user_id()));
         assert!(
-            !relay.binding_transition_group_member(
-                channel,
-                &group.nodes[2].identity.public(),
-                &group.nodes[2].own_group_proof()
-            ),
+            !relay
+                .binding_transition_group_member(
+                    channel,
+                    &group.nodes[2].identity.public(),
+                    &group.nodes[2].own_group_proof()
+                )
+                .unwrap(),
             "pending invitation cannot authorize relay access"
         );
         relay
@@ -1066,11 +1103,13 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !relay.binding_transition_group_member(
-                channel,
-                &receiver.identity.public(),
-                &receiver.own_group_proof()
-            ),
+            !relay
+                .binding_transition_group_member(
+                    channel,
+                    &receiver.identity.public(),
+                    &receiver.own_group_proof()
+                )
+                .unwrap(),
             "removed membership cannot retain relay access"
         );
     }
@@ -1096,6 +1135,7 @@ mod tests {
         assert!(
             owner
                 .account_group_projection(channel)
+                .unwrap()
                 .authority
                 .current_event()
                 .is_some(),
@@ -1117,16 +1157,21 @@ mod tests {
         }
         let state = target
             .account_group_projection(channel)
+            .unwrap()
             .state
             .expect("inherited group is visible without its owner online");
         assert!(state.is_accepted_member(&target.user_id()));
-        assert_eq!(target.channel_member_account_sets(channel).0.len(), 3);
+        assert_eq!(
+            target.channel_member_account_sets(channel).unwrap().0.len(),
+            3
+        );
         let shared_authors = || {
             source
                 .log
                 .lock()
                 .unwrap()
                 .events(&channel)
+                .unwrap()
                 .into_iter()
                 .filter(|event| event.author.ed25519_pub() == &source.identity.public().ed25519_pub)
                 .filter_map(|event| match DeviceControl::decode(&event.ciphertext) {
@@ -1236,6 +1281,7 @@ mod tests {
         assert!(
             owner
                 .account_group_projection(channel)
+                .unwrap()
                 .authority
                 .current_event()
                 .is_none()
@@ -1270,6 +1316,7 @@ mod tests {
         assert!(
             owner
                 .account_group_projection(channel)
+                .unwrap()
                 .authority
                 .current_event()
                 .is_none(),
@@ -1288,6 +1335,7 @@ mod tests {
         assert!(
             owner
                 .account_group_projection(pending)
+                .unwrap()
                 .authority
                 .current_event()
                 .is_none()
@@ -1373,6 +1421,7 @@ mod tests {
         );
         assert!(
             node.account_group_projection(channel)
+                .unwrap()
                 .authority
                 .current_event()
                 .is_some()
@@ -1457,6 +1506,7 @@ mod tests {
         assert!(
             owner
                 .account_group_projection(channel)
+                .unwrap()
                 .authority
                 .current_event()
                 .is_none(),
@@ -1485,7 +1535,7 @@ mod tests {
         for _ in 0..12 {
             owner.maintain_account_channels(&mut work).await;
         }
-        let projection = owner.account_group_projection(channel);
+        let projection = owner.account_group_projection(channel).unwrap();
         assert!(
             projection.authority.current_event().is_some(),
             "explicit owner/new-creation consent can choose a NEW authenticated current account binding"

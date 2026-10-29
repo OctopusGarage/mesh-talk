@@ -253,9 +253,10 @@ pub(in crate::node) struct ChannelReplay<'a> {
 }
 
 impl<'a> ChannelReplay<'a> {
-    pub(in crate::node) fn new(events: &[&'a Event]) -> Self {
+    pub(in crate::node) fn new<E: std::borrow::Borrow<Event>>(events: &'a [E]) -> Self {
+        let events: Vec<&Event> = events.iter().map(std::borrow::Borrow::borrow).collect();
         let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
-        let events = super::timeline::ordered_ids(events, &[], true)
+        let events = super::timeline::ordered_ids(&events, &[], true)
             .iter()
             .filter_map(|id| by_id.get(id).copied())
             .collect();
@@ -711,12 +712,13 @@ impl ChannelBook {
         }
     }
 
-    pub(super) fn project_membership(
+    pub(super) fn project_membership<E: std::borrow::Borrow<Event>>(
         channel_id: ConversationId,
-        events: &[&Event],
+        events: &[E],
     ) -> ChannelMembershipProjection {
+        let events: Vec<&Event> = events.iter().map(std::borrow::Borrow::borrow).collect();
         let by_id: HashMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
-        let order = super::timeline::ordered_ids(events, &[], true);
+        let order = super::timeline::ordered_ids(&events, &[], true);
         let ordered: Vec<_> = order
             .iter()
             .filter_map(|id| by_id.get(id).copied())
@@ -727,18 +729,18 @@ impl ChannelBook {
     /// Channel metadata from the validated event DAG. This intentionally creates
     /// no sender/receiver chains and can project a recovery archive for a device
     /// which is not itself a member.
-    pub(super) fn projected_metadata(
+    pub(super) fn projected_metadata<E: std::borrow::Borrow<Event>>(
         channel_id: ConversationId,
-        events: &[&Event],
+        events: &[E],
     ) -> Option<ChannelState> {
         Self::project_membership(channel_id, events).state
     }
 
     /// Current members from the validated event DAG, without decrypting or
     /// surfacing message content. Used for connection admission decisions.
-    pub fn projected_members(
+    pub fn projected_members<E: std::borrow::Borrow<Event>>(
         channel_id: ConversationId,
-        events: &[&Event],
+        events: &[E],
     ) -> Option<Vec<PublicIdentity>> {
         Self::projected_metadata(channel_id, events).map(|state| state.members().to_vec())
     }
@@ -837,11 +839,11 @@ impl ChannelBook {
     /// full-log replay, where the prerequisite is processed first. The caller dedups
     /// the returned messages across calls (the live node uses an emitted-id set).
     #[cfg(test)]
-    pub fn process(
+    pub fn process<E: std::borrow::Borrow<Event>>(
         &mut self,
         me: &DeviceIdentity,
         channel_id: ConversationId,
-        events: &[&Event],
+        events: &[E],
     ) -> Vec<ReceivedChannelMessage> {
         self.process_limited(me, channel_id, events, usize::MAX)
     }
@@ -849,11 +851,11 @@ impl ChannelBook {
     /// The node bounds decrypted plaintext awaiting durable projection. Replaying
     /// later skips emitted IDs and resumes messages left encrypted by this limit.
     #[cfg(test)]
-    pub(in crate::node) fn process_limited(
+    pub(in crate::node) fn process_limited<E: std::borrow::Borrow<Event>>(
         &mut self,
         me: &DeviceIdentity,
         channel_id: ConversationId,
-        events: &[&Event],
+        events: &[E],
         limit: usize,
     ) -> Vec<ReceivedChannelMessage> {
         self.process_bounded(me, channel_id, events, limit, CHANNEL_PENDING_BYTES)
@@ -861,11 +863,11 @@ impl ChannelBook {
     }
 
     #[cfg(test)]
-    pub(in crate::node) fn process_bounded(
+    pub(in crate::node) fn process_bounded<E: std::borrow::Borrow<Event>>(
         &mut self,
         me: &DeviceIdentity,
         channel_id: ConversationId,
-        events: &[&Event],
+        events: &[E],
         limit: usize,
         byte_budget: usize,
     ) -> (Vec<ReceivedChannelMessage>, bool) {

@@ -92,15 +92,19 @@ pub(super) async fn run(
                     let checking_node = node.clone();
                     if !work.spawn(&mut saves, move || {
                         let mut ready = false;
-                        let states = candidates.into_iter().map(|file| {
-                            let state = checking_node.file_progress(file).map(|mut progress| {
+                        let states = candidates.into_iter().filter_map(|file| {
+                            let progress = match checking_node.file_progress(file) {
+                                Ok(progress) => progress,
+                                Err(error) => { log::warn!("file progress unavailable; will retry: {error}"); return None; }
+                            };
+                            let state = progress.map(|mut progress| {
                                 let consent = match checking_node.attachment_consent_status(file) { Ok(consent) => consent, Err(error) => { log::warn!("file consent unavailable: {error}"); progress.done = 0; return progress; } };
                                 if matches!(consent, Some(ReceiveDecision::Pending | ReceiveDecision::Declined)) {
                                     progress.done = 0;
                                 } else if !ready && match checking_node.file_ready_to_save(file) { Ok(ready) => ready, Err(error) => { log::warn!("file readiness unavailable: {error}"); false } } { progress.done = progress.total; ready = true; }
                                 progress
                             });
-                            (file, state)
+                            Some((file, state))
                         }).collect();
                         SaveWork::Readiness(states)
                     }) { break; }
@@ -119,7 +123,11 @@ pub(super) async fn run(
                     }
                     Some(Ok(SaveWork::Saved(file, result))) => {
                         queue.finish(file.file_conv);
-                        if node.file_progress(file.file_conv).is_none() { continue; }
+                        match node.file_progress(file.file_conv) {
+                            Ok(None) => continue,
+                            Err(error) => emit(&format!("file progress unavailable: {error}")),
+                            Ok(Some(_)) => {},
+                        }
                         match result {
                             Ok(path) => emit(&format!("file from {}: {} ({} bytes) saved {}", file.from, file.name, file.size, path.display())),
                             Err(error) => emit(&format!("file from {}: {} ({} bytes) save failed: {error}", file.from, file.name, file.size)),
@@ -257,7 +265,7 @@ mod tests {
             loop {
                 b.pull_pending_files().await;
                 if b.read_media(file).as_ref() == Some(&bytes)
-                    && b.file_progress(file).is_some_and(|p| p.done == 0)
+                    && b.file_progress(file).unwrap().is_some_and(|p| p.done == 0)
                 {
                     break;
                 }
@@ -292,7 +300,7 @@ mod tests {
             std::fs::read(destination.join("channel.png")).unwrap(),
             bytes
         );
-        assert_eq!(b.file_progress(file).unwrap().done, 0);
+        assert_eq!(b.file_progress(file).unwrap().unwrap().done, 0);
         assert!(
             tokio::time::timeout(Duration::from_millis(250), printed.recv())
                 .await

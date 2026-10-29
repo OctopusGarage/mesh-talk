@@ -294,8 +294,8 @@ pub async fn get_presence(
             });
         }
     }
-    for channel in rt.list_channels() {
-        let (accounts, unbound) = node.channel_member_account_sets(channel.id);
+    for channel in rt.list_channels()? {
+        let (accounts, unbound) = node.channel_member_account_sets(channel.id)?;
         add_group(
             &mut out,
             hex::encode(channel.id.as_bytes()),

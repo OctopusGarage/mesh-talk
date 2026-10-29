@@ -14,6 +14,16 @@ pub(crate) struct RepositoryPolicyView {
     _lease: RepositoryOwner,
 }
 impl EventRepository {
+    pub(crate) fn event_conversation(
+        &self,
+        id: &EventId,
+    ) -> Result<Option<ConversationId>, LogError> {
+        self.database.read(|c| {
+            self.require_visible_id_on(c, id)?;
+            self.event_conversation_on(c, id)
+        })
+    }
+
     pub(crate) fn event_conversation_on(
         &self,
         c: &Connection,

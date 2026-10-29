@@ -330,7 +330,7 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !self.channel_identity_is_current(state) {
+            if !self.channel_identity_is_current(state)? {
                 return Err(NodeError::Channel("not a channel member".into()));
             }
             (state.recipient_members(), state.epoch())
@@ -349,7 +349,7 @@ impl Node {
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-                if state.epoch() != epoch || !self.channel_identity_is_current(state) {
+                if state.epoch() != epoch || !self.channel_identity_is_current(state)? {
                     return Err(NodeError::Channel(
                         "channel membership changed; retry the operation".into(),
                     ));
@@ -381,7 +381,7 @@ impl Node {
         &self,
         conv: ConversationId,
     ) -> Result<HashSet<EventId>, NodeError> {
-        let content_gate = self.channel_content_gate(conv);
+        let content_gate = self.channel_content_gate(conv)?;
         let mut out: HashSet<EventId> = self
             .recalls
             .lock()
@@ -392,13 +392,12 @@ impl Node {
 
         let delete_events: Vec<Event> = {
             let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&conv)
+            log.events(&conv)?
                 .into_iter()
                 .filter(|e| {
                     e.kind == EventKind::Delete
                         && content_gate.as_ref().is_none_or(|ids| ids.contains(&e.id))
                 })
-                .cloned()
                 .collect()
         };
         for event in &delete_events {
@@ -458,7 +457,7 @@ impl Node {
     pub(in crate::node) fn recalled_targets_account(
         &self,
         peer_account_id: &str,
-    ) -> HashSet<EventId> {
+    ) -> Result<HashSet<EventId>, NodeError> {
         let my_account = self.account.account_id();
         let me = self.identity.public().user_id();
         let acct_conv = account_conversation_id(&my_account, peer_account_id);
@@ -500,10 +499,9 @@ impl Node {
         for (conv, author_x, peer_account) in convs {
             let delete_events: Vec<Event> = {
                 let log = self.log.lock().expect("log mutex not poisoned");
-                log.events(&conv)
+                log.events(&conv)?
                     .into_iter()
                     .filter(|e| e.kind == EventKind::Delete)
-                    .cloned()
                     .collect()
             };
             for event in &delete_events {
@@ -528,7 +526,7 @@ impl Node {
             *target = self.file_message_logical_id(acct_conv, *target);
         }
         if claims.is_empty() {
-            return out;
+            return Ok(out);
         }
 
         // Who authored each logical message in this account conversation (to authorise
@@ -616,7 +614,7 @@ impl Node {
                 out.insert(target);
             }
         }
-        out
+        Ok(out)
     }
 }
 

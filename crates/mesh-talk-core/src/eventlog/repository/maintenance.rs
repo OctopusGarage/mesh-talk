@@ -32,6 +32,7 @@ pub(crate) struct MaintenanceApply {
 }
 
 impl EventRepository {
+    #[cfg(test)]
     pub(crate) fn estimated_bytes(&self) -> Result<u64, LogError> {
         self.database
             .read(|c| Ok(self.domain_maintenance_on(c)?.1 as u64))
@@ -101,7 +102,7 @@ impl EventRepository {
         self.database
             .transaction(|c| self.drop_conversation_on(c, conv))
     }
-    fn drop_conversation_on(
+    pub(super) fn drop_conversation_on(
         &self,
         c: &Connection,
         conv: &ConversationId,

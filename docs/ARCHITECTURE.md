@@ -391,7 +391,9 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   wire formats are unchanged.
   Individual durable lookups `PersistentEventLog::get` and `authored_event`
   return `Result<Option<Event>, LogError>` with an owned, complete event. The
-  in-memory `EventLog` keeps its borrowed API. Only `Ok(None)` permits an
+  in-memory `EventLog` keeps its borrowed API. Durable collection, membership,
+  conversation metadata and capability reads also return `Result`; `events`
+  returns owned events. Only `Ok(None)` permits an
   absence-based fallback; a failed read must stop authorization, media reclamation
   or the affected delivery/recovery attempt without advancing its progress.
 - **Sync** (`sync.rs`) — three-message id-set reconciliation: `Request(have)` →
@@ -1401,13 +1403,66 @@ can preserve its exact previous account ID through bootstrap without inventing
 an unavailable full public key. Old history retains its original provenance.
 Security rekey does not manufacture a signed linking-continuity proof.
 
-This participant context currently owns **control metadata only**. Participant
-events, transcripts, crypto and projection stores remain legacy and eager under
-its lease; it publishes no participant history-migration barrier. It does not
-establish demand-loaded participant startup or bounded historical memory.
+Participant events now use the same encrypted profile connection and a distinct
+event domain. The participant constructor authenticates its existing legacy
+owners before first SQL publication, then completes event-source publication
+before delivery-journal recovery. The journal keeps its established crypto,
+event, transcript, receipt and outbox recovery ordering while unrelated sources
+retain their legacy owners; no multi-domain atomic cutover is required.
+
+The event source has its own persisted publication manifest. Authentication uses
+a private copy and the streaming legacy visitor, preserving the original source
+on failure. A manifest-bound `MTSDB1` downgrade barrier freezes the source before
+verified staged events and published authority commit together. Interrupted
+preparation, freeze, import and publication resume under the held profile lease.
+Warm opens inspect only the manifest and exact small barrier; they do not hash
+or reopen legacy history. Archive removal follows destination checkpointing,
+and durable cleanup flags retain retry work for the runtime maintenance owner.
+A missing or changed barrier is an error, never an empty-store fallback.
+
+`PersistentEventLog::open_profile` is the production Node path. Its indexed
+backend retains no event-body cache; exact reads fetch complete owned events
+from SQLCipher, and ordinary appends leave the retired legacy source untouched.
+The explicit standalone `PersistentEventLog::open` remains the collecting legacy
+SDK owner and rejects a retired participant source. Transcripts, crypto and
+projections still have separate migration boundaries. Channel startup replay,
+history ordering and authorization retain explicit temporary collections, so
+this event cutover does not establish bounded participant startup or total
+historical memory.
 
 The separate `node/transcript_repository/` owner provides indexed sent, received,
 file-card and exact suppression storage on that same encrypted connection.
+
+`node/reception_effects/` provides the derived reception-work owner for bounded
+host integration. An effect references its existing transcript row and stores
+first-installation provenance, own-device and batch metadata without copying its
+body. Producers install it inside the same SQL transaction as plaintext and
+exact processing evidence, before completing the existing delivery journal or
+channel checkpoint. A separate terminal batch fact survives deletion of its
+former content template. Legacy historical-source migration creates no effects.
+
+Receipt cursors bind a persisted random epoch and local installation sequence;
+sender timestamps never order host work. A finite through-cursor prevents
+continuous intake from extending one drain indefinitely. Each demand page scans
+at most 128 pending slots and admits at most 8 MiB of transcript body/sender
+bytes, plus bounded metadata. Before fetching a body it also checks a separate
+JSON upper bound: six times the raw byte charge plus fixed per-row/envelope
+allowances, with a maximum 64 MiB response budget. A first row that does not fit
+fails explicitly. Deleted, suppressed and expired sources advance the cursor
+without returning their bodies; recall and final owner/session authority remain
+the materializing consumer's responsibility.
+
+Desktop, CLI output and CLI autosave have fixed consumer identities. A committed
+prefix ACK records host processing, not peer delivery or user read state. Pending
+metadata retires incrementally only through every enrolled consumer's ACK;
+no enrolled consumers means retaining work. Compact exact source-to-sequence
+evidence survives that retirement, preventing an accepted-journal retry from
+creating another unread event. The desktop must atomically persist its existing
+reception state and cursor before ACK. CLI autosave must retain durable save work
+before ACK, and a bounded in-memory queue does not satisfy that requirement.
+These repository APIs alone do not switch production runtimes away from their
+legacy unbounded callbacks or prove a bounded Tauri/WebView handoff.
+
 `SentStore`, `ReceivedStore` and `IndexedAccountSuppression` require completed
 participant authority; integration must retain `validate_participant_request`
 before invoking their constructors. These owners are not yet wired into Node's
@@ -1476,8 +1531,8 @@ decrypting archived history. Replaced or missing barriers cannot trigger empty
 creation or automatic legacy merging. Published migration archives are retired
 through durable cleanup intent after successful publication; a cleanup failure
 does not make them an alternate history source. The dedicated post-office CLI
-uses the indexed runtime described below. Legacy participant and collecting SDK
-stores retain their separate migration and bounded-consumer adoption boundary.
+uses the indexed runtime described below. Other participant domains and the
+explicit collecting SDK retain their separate migration boundaries.
 
 The domain-owned indexed event repository keeps immutable signed event bytes,
 parent edges, author sequences, frontier and conversation metadata in the same
@@ -1620,9 +1675,9 @@ profile lease into one `IndexedPostOffice` and shares one `IndexedRelayEndpoint`
 across plain, named bridge, gateway, pinned federation and approved-network
 modes. Normal reopen uses encrypted indexed state without hydrating the legacy
 history log. Initial authenticated legacy migration remains proportional to
-source data. Participant `Node` and legacy collecting SDK helpers retain their
-existing storage paths; relay adoption does not establish desktop startup or
-total process memory bounds.
+source data. Participant event publication is independently owned as described
+above; relay adoption does not establish desktop startup or total process memory
+bounds.
 
 Federation sessions persist bounded remote inventory and the exact local digest
 snapshot actually sent. Owner/session identities, monotonic deadlines and
@@ -1677,12 +1732,43 @@ force. Source changes invalidate an unfinished selection without losing pending
 requests. Applying a complete selection is atomic and updates metadata,
 fingerprints and ordering authority together; it may perform disk work
 proportional to the removed rows, without rewriting unrelated event bodies.
-These backend operations do not replace the runtime maintenance scheduler or
-its existing retry pacing before the persistence cutover.
+Participant runtime maintenance now drives these bounded repository steps and
+retries publication cleanup through the same admitted blocking-work owner.
 
-Owned individual event reads copy only the selected event from the current
-resident index. They establish the fallible ownership boundary needed for disk
-queries, but do not bound the existing index or whole-conversation replay.
+Participant network sync uses `NetworkSyncStore` directly: retained Have and
+export pages bind a finite commit cutoff and destructive generation. Ordinary
+new messages do not invalidate the captured membership. Authorization, sharing,
+network-cost restrictions, sibling status and device-policy revision are checked
+again before handing off prepared data. Pending invitations retain their existing
+8 MiB admission budget and remain in Have until admission completes. No full
+repository body or ID collection is retained in memory across transport awaits.
+`repository/selection.rs` stores disposable authorized IDs, causal ranks and
+outbound policy facts in the encrypted profile database. Have uses only identities;
+export tests selection before fetching payloads. Sibling category filtering and
+share-off ancestry use retained parent edges plus the peer's exact Have set.
+Source, roster, proof, receipt-control and channel-state revisions guard the selection, while
+privacy, sharing, cost and device-policy changes invalidate stale views. Unchanged
+Have pages and pre-send validation read no historical bodies; each export fetches
+only selected payloads once, including retransmissions. Receipt-control bindings
+and their process-local revision publish under one index lock, including complete
+cancellation replacements and individual delivery-recovery insertions; a privacy
+generation bump cannot hide a later control-map retirement. Ordinary source appends
+trigger one revalidation of the original cutoff without extending the view.
+
+Selection lifetimes use the existing eight-connection exchange limit and admitted
+remote-Have budget. Drop/cancellation retires a selection and deletes at most 512
+rows from each working table; warm open and admitted maintenance take the same
+bounded cleanup step. A new view drains previous retirement debt in bounded
+transactions before adding another selection, preventing cancellation buildup.
+An owner nonce identifies abandoned work after restart without replaying it.
+The initial authorization reducer and changed-source revalidation still build
+temporary metadata/control collections and scan historical body pages; replacing
+that reducer remains necessary for a complete history-independent memory and I/O
+bound.
+
+Owned individual participant event reads fetch only the selected body from the
+encrypted repository. Standalone legacy SDK reads copy from their resident index.
+Explicit whole-conversation collectors remain visible at their callers.
 Canonical history, search, protected-content, attachment availability and custody
 queries propagate these read failures through `Node` and affected `NodeRuntime`
 methods. Host IPC preserves its successful payload shapes and uses its existing
@@ -1745,8 +1831,8 @@ history operation cannot hold the roster-refresh coordinator indefinitely. This
 deadline reports incomplete history without clearing the pending invalidation,
 advancing its revision, or releasing native admission.
 
-Profile maintenance preserves referenced ancestors and the latest two safe
-profile leaves per author. Pending conversations share one atomic rewrite rather
+The standalone legacy SDK's profile maintenance preserves referenced ancestors
+and the latest two safe profile leaves per author. Pending conversations share one atomic rewrite rather
 than rewriting the entire log separately for each conversation. Maintenance
 requires at least eight removable leaves whose estimated event bytes reclaim at
 least one eighth of the retained log; smaller obsolete profiles wait for a later

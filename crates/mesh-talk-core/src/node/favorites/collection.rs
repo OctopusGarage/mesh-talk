@@ -224,7 +224,7 @@ impl Node {
             )
         } else {
             let conv = conversation(&source.target).ok_or_else(|| invalid("invalid channel"))?;
-            if !self.list_channels().iter().any(|c| c.id == conv) {
+            if !self.list_channels()?.iter().any(|c| c.id == conv) {
                 return Err(invalid("unknown channel"));
             }
             (conv, None)
@@ -289,7 +289,7 @@ impl Node {
         }
         source.message_ids = messages.iter().map(|m| m.id.clone()).collect();
         let source_label = if source.kind == "channel" {
-            self.list_channels()
+            self.list_channels()?
                 .into_iter()
                 .find(|c| hex::encode(c.id.as_bytes()) == source.target)
                 .map(|c| c.name)

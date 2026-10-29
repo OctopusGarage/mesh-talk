@@ -843,7 +843,7 @@ impl Node {
             .expect("recovered sent ids mutex not poisoned");
         let sent_conversations = sent.conversations();
         let received_conversations = received.conversations();
-        let event_conversations = log.conversations();
+        let event_conversations = log.conversations().map_err(|_| SnapshotError::Io)?;
         let file_conversations = received_files.conversations();
         let retained_file_ids: HashSet<_> = file_conversations
             .iter()
@@ -891,8 +891,10 @@ impl Node {
             .sum();
         let event_count: usize = event_conversations
             .iter()
-            .map(|conversation| log.events(conversation).len())
-            .sum();
+            .try_fold(0usize, |total, conversation| {
+                Ok::<_, LogError>(total + log.conversation_len(conversation)?)
+            })
+            .map_err(|_| SnapshotError::Io)?;
         let file_count: usize = file_conversations
             .iter()
             .map(|conversation| {
@@ -1024,6 +1026,7 @@ impl Node {
                 crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
             let signed_ids: HashMap<_, _> = log
                 .events(&conversation)
+                .map_err(|_| SnapshotError::Io)?
                 .into_iter()
                 .filter(|event| {
                     event.kind == crate::eventlog::EventKind::Message && event.author == own_author
@@ -1080,7 +1083,7 @@ impl Node {
             }
         }
         for conversation in event_conversations {
-            for event in log.events(&conversation) {
+            for event in log.events(&conversation).map_err(|_| SnapshotError::Io)? {
                 writer.push(&SnapshotRecordV1::SignedEvent {
                     event: event.clone(),
                 })?;

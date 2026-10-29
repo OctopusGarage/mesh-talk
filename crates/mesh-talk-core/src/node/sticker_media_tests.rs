@@ -459,7 +459,7 @@ async fn sticker_alias_after_chunk_reclamation_gets_exact_completion_control() {
     a.flush_file_delivery(first).await;
     assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
     assert!(
-        b.log.lock().unwrap().events(&file).is_empty(),
+        b.log.lock().unwrap().events(&file).unwrap().is_empty(),
         "first completion reclaims receiver chunks"
     );
     let prior = b.delivery.lock().unwrap().cards_for_file(file);
@@ -526,7 +526,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
     a.flush_file_delivery(first).await;
     assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
     assert!(
-        b.log.lock().unwrap().events(&file).is_empty(),
+        b.log.lock().unwrap().events(&file).unwrap().is_empty(),
         "first completion reclaims receiver chunks"
     );
     let prior = b.delivery.lock().unwrap().cards_for_file(file);
@@ -668,7 +668,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
         let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
         let destination = card.destinations.first().unwrap();
         let manifest = destination.binding.event_id;
-        let proofs = a.sticker_chunk_proof(file).unwrap();
+        let proofs = a.sticker_chunk_proof(file).unwrap().unwrap();
         assert_eq!(proofs.len(), chunk_count);
         assert!(proofs.iter().all(|event| event.ciphertext.is_empty()));
         assert!(b.read_media(file).is_none());
@@ -725,7 +725,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
                 .is_none()
         );
         assert!(b.read_media(file).is_none());
-        assert!(b.log.lock().unwrap().events(&file).is_empty());
+        assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
         let control = b
             .sync_store(&ap.public())
             .lock()
@@ -736,7 +736,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
         assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
         a.accept_file_consent_event(&control, &bp.public()).unwrap();
         assert!(a.recipient_completed_file(&card, destination));
-        assert!(b.log.lock().unwrap().events(&file).is_empty());
+        assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
         serving.abort();
         let _ = serving.await;
     }
@@ -877,7 +877,8 @@ fn sticker_wire_server(
                             return;
                         }
                     }
-                    match super::session::serve_wire_bytes(&mut channel, &store, &frame).await {
+                    match super::session::serve_wire_bytes_paged(&mut channel, &store, &frame).await
+                    {
                         Ok(super::session::Served::Handled(conversation)) => {
                             node.emit_new_messages(conversation);
                             node.process_file_events(conversation);
@@ -1044,10 +1045,10 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
         .append_durable(event.clone())
         .unwrap();
     receiver.process_file_events(event.conversation_id);
-    let headers = source.sticker_chunk_proof(file).unwrap();
+    let headers = source.sticker_chunk_proof(file).unwrap().unwrap();
     assert_eq!(headers.len(), 2);
     assert!(
-        receiver.sticker_chunk_proof(file).is_none(),
+        receiver.sticker_chunk_proof(file).unwrap().is_none(),
         "an offered manifest is not retained chunk evidence"
     );
     assert!(
@@ -1166,7 +1167,13 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
             "{case}"
         );
         assert!(
-            receiver.log.lock().unwrap().events(&file).is_empty(),
+            receiver
+                .log
+                .lock()
+                .unwrap()
+                .events(&file)
+                .unwrap()
+                .is_empty(),
             "rejected proof must not admit partial chunks"
         );
         assert!(
@@ -1183,15 +1190,21 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     assert_eq!(
         rebuilt, retained,
         "valid local bytes must reproduce the exact signed ciphertext events"
     );
     assert!(
-        receiver.log.lock().unwrap().events(&file).is_empty(),
+        receiver
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .is_empty(),
         "reconstruction alone is not durable admission"
     );
     assert!(receiver.read_media(file).is_none());
@@ -1244,8 +1257,9 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
             .lock()
             .unwrap()
             .events(&event.conversation_id)
+            .unwrap()
             .last()
-            .map(|event| (**event).clone())
+            .cloned()
             .unwrap();
         receiver
             .log
@@ -1314,6 +1328,7 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
         .record(AnyManifest::V4(FileManifestV4 { v3: unsupported }));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([71; 32]))
+            .unwrap()
             .is_none(),
         "unsupported proof format keeps ordinary transfer fallback"
     );
@@ -1322,6 +1337,7 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
     node.files.lock().unwrap().record(AnyManifest::V3(missing));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([72; 32]))
+            .unwrap()
             .is_none(),
         "a manifest cannot substitute for missing signed chunks"
     );
@@ -1331,13 +1347,14 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
     node.files.lock().unwrap().record(AnyManifest::V3(ordinary));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([73; 32]))
+            .unwrap()
             .is_none(),
         "ordinary file offers do not opt into sticker proof reuse"
     );
     let foreign = DeviceIdentity::generate();
     let mut copied = base;
     copied.v2.file_conv = ConversationId::new([74; 32]);
-    let ciphertext = node.log.lock().unwrap().events(&original)[0]
+    let ciphertext = node.log.lock().unwrap().events(&original).unwrap()[0]
         .ciphertext
         .clone();
     let event = Event::new(
@@ -1354,6 +1371,7 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
     node.files.lock().unwrap().record(AnyManifest::V3(copied));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([74; 32]))
+            .unwrap()
             .is_none(),
         "retaining another author's ciphertext does not let this node export it as its own signed proof"
     );

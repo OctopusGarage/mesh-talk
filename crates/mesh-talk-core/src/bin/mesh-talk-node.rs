@@ -884,8 +884,14 @@ fn handle_channel_msg(participant: &mut ParticipantRuntime, node: &Arc<Node>, re
         emit("usage: /channel-msg <chan-id-prefix> <text>");
         return;
     }
-    let matches: Vec<_> = node
-        .list_channels()
+    let channels = match node.list_channels() {
+        Ok(channels) => channels,
+        Err(error) => {
+            emit(&format!("channel list unavailable: {error}"));
+            return;
+        }
+    };
+    let matches: Vec<_> = channels
         .into_iter()
         .filter(|c| hex::encode(c.id.as_bytes()).starts_with(&prefix))
         .map(|c| c.id)
@@ -927,8 +933,14 @@ fn handle_channel_replica(participant: &mut ParticipantRuntime, node: &Arc<Node>
         emit("usage: /channel-replica <chan-id-prefix> on|off");
         return;
     };
-    let matches: Vec<_> = node
-        .list_channels()
+    let channels = match node.list_channels() {
+        Ok(channels) => channels,
+        Err(error) => {
+            emit(&format!("channel list unavailable: {error}"));
+            return;
+        }
+    };
+    let matches: Vec<_> = channels
         .into_iter()
         .filter(|channel| hex::encode(channel.id.as_bytes()).starts_with(prefix))
         .map(|channel| channel.id)

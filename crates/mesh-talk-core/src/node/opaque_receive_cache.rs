@@ -104,14 +104,14 @@ impl OpaqueReceiveCache {
     pub(super) fn restored(
         &self,
         log: &PersistentEventLog,
-    ) -> HashMap<ConversationId, HashSet<EventId>> {
+    ) -> Result<HashMap<ConversationId, HashSet<EventId>>, LogError> {
         let mut seen: HashMap<_, HashSet<_>> = HashMap::new();
         for ((mailbox, outer), inner) in &self.entries {
-            if log.has(inner) {
+            if log.has(inner)? {
                 seen.entry(*mailbox).or_default().insert(*outer);
             }
         }
-        seen
+        Ok(seen)
     }
 
     /// Caller supplies only opened wrappers with inner events retained in the
@@ -178,20 +178,22 @@ mod tests {
         cache.remember(mailbox, &[(outer, event.id)]);
         drop(cache);
         let cache = OpaqueReceiveCache::open(&path, "pw", &device, "account-a");
-        assert!(cache.restored(&log).is_empty());
+        assert!(cache.restored(&log).unwrap().is_empty());
         log.append_durable(event).unwrap();
-        assert!(cache.restored(&log)[&mailbox].contains(&outer));
+        assert!(cache.restored(&log).unwrap()[&mailbox].contains(&outer));
         drop(cache);
         for (owner, account) in [
             (device.clone(), "account-b"),
             (DeviceIdentity::generate().public(), "account-a"),
         ] {
             let foreign = OpaqueReceiveCache::open(&path, "pw", &owner, account);
-            assert!(foreign.restored(&log).is_empty());
+            assert!(foreign.restored(&log).unwrap().is_empty());
             assert!(foreign.writer.is_none());
         }
         assert!(
-            OpaqueReceiveCache::open(&path, "pw", &device, "account-a").restored(&log)[&mailbox]
+            OpaqueReceiveCache::open(&path, "pw", &device, "account-a")
+                .restored(&log)
+                .unwrap()[&mailbox]
                 .contains(&outer)
         );
     }

@@ -26,8 +26,8 @@ fn copy(from: &Node, to: &Node, channel: ConversationId) {
         .lock()
         .unwrap()
         .events(&channel)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect::<Vec<_>>();
     for event in events {
         to.log.lock().unwrap().append(event).unwrap();
@@ -46,7 +46,7 @@ async fn join_history_default_is_bounded_and_requires_acceptance() {
         .await
         .unwrap();
     assert_eq!(
-        alice.channel_history_policy(channel),
+        alice.channel_history_policy(channel).unwrap(),
         HistoryPolicy::LastTenWithinThreeDays
     );
     for i in 0..14 {
@@ -90,7 +90,10 @@ async fn join_history_policy_is_owner_only_and_old_groups_default_off() {
         .create_channel("legacy", vec![bob.identity.public()])
         .await
         .unwrap();
-    assert_eq!(alice.channel_history_policy(channel), HistoryPolicy::Off);
+    assert_eq!(
+        alice.channel_history_policy(channel).unwrap(),
+        HistoryPolicy::Off
+    );
     copy(&alice, &bob, channel);
     assert!(
         bob.set_channel_history_policy(channel, HistoryPolicy::LastTen)
@@ -102,7 +105,10 @@ async fn join_history_policy_is_owner_only_and_old_groups_default_off() {
         .await
         .unwrap();
     copy(&alice, &bob, channel);
-    assert_eq!(bob.channel_history_policy(channel), HistoryPolicy::LastTen);
+    assert_eq!(
+        bob.channel_history_policy(channel).unwrap(),
+        HistoryPolicy::LastTen
+    );
 }
 
 #[test]
@@ -225,6 +231,7 @@ async fn join_history_foreign_protected_offer_preserves_concealed_receiver_proje
         .lock()
         .unwrap()
         .events(&channel)
+        .unwrap()
         .into_iter()
         .find(|event| {
             event.kind == EventKind::MembershipChange
@@ -256,7 +263,11 @@ async fn join_history_foreign_protected_offer_preserves_concealed_receiver_proje
     alice.retry_join_history().unwrap();
     copy(&alice, &bob, channel);
     let log = bob.log.lock().unwrap();
-    let messages = received(&bob.identity, channel, &log.events(&channel));
+    let messages = received(
+        &bob.identity,
+        channel,
+        &log.events(&channel).unwrap().iter().collect::<Vec<_>>(),
+    );
     assert_eq!(messages.len(), 2);
     for message in messages {
         assert_eq!(
@@ -302,8 +313,8 @@ async fn join_history_acceptance_before_offer_arrives_is_recoverable() {
         .lock()
         .unwrap()
         .events(&channel)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect::<Vec<_>>();
     for event in events
         .into_iter()
@@ -394,11 +405,14 @@ async fn join_history_obsolete_offers_never_append_invalid_retry_releases() {
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
     alice.retry_join_history().unwrap();
-    let count = alice.log.lock().unwrap().events(&channel).len();
+    let count = alice.log.lock().unwrap().events(&channel).unwrap().len();
     for _ in 0..3 {
         alice.retry_join_history().unwrap();
     }
-    assert_eq!(alice.log.lock().unwrap().events(&channel).len(), count);
+    assert_eq!(
+        alice.log.lock().unwrap().events(&channel).unwrap().len(),
+        count
+    );
     copy(&alice, &bob, channel);
     assert_eq!(bob.channel_history(channel, 10).unwrap().len(), 1);
 }
@@ -506,8 +520,8 @@ async fn join_history_does_not_grant_existing_late_members_access_as_sources() {
         .unwrap();
     copy(&alice, &bob, channel);
     let log = bob.log.lock().unwrap();
-    let refs = log.events(&channel);
-    let view = View::new(&refs);
+    let refs = log.events(&channel).unwrap();
+    let view = View::new(&refs.iter().collect::<Vec<_>>());
     for (event, offer) in view.offers() {
         assert!(
             !offer
@@ -679,8 +693,8 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
         .unwrap();
     {
         let log = alice.log.lock().unwrap();
-        let events = log.events(&channel);
-        let view = View::new(&events);
+        let events = log.events(&channel).unwrap();
+        let view = View::new(&events.iter().collect::<Vec<_>>());
         let offers = view.offers();
         assert_eq!(offers.len(), 1);
         assert_eq!(
@@ -793,9 +807,12 @@ async fn join_history_leave_then_rejoin_off_closes_the_original_permission() {
     copy(&alice, &bob, channel);
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
-    let count = alice.log.lock().unwrap().events(&channel).len();
+    let count = alice.log.lock().unwrap().events(&channel).unwrap().len();
     alice.retry_join_history().unwrap();
-    assert_eq!(alice.log.lock().unwrap().events(&channel).len(), count);
+    assert_eq!(
+        alice.log.lock().unwrap().events(&channel).unwrap().len(),
+        count
+    );
     copy(&alice, &bob, channel);
     assert!(bob.channel_history(channel, 10).unwrap().is_empty());
 }
@@ -843,7 +860,10 @@ async fn join_history_signed_nonowner_policy_is_ignored_by_replay() {
     )
     .unwrap();
     copy(&bob, &alice, channel);
-    assert_eq!(alice.channel_history_policy(channel), HistoryPolicy::Off);
+    assert_eq!(
+        alice.channel_history_policy(channel).unwrap(),
+        HistoryPolicy::Off
+    );
     let mut malformed = encode(&HistoryPolicy::LastTen);
     malformed.push(0);
     assert!(decode::<HistoryPolicy>(&malformed).is_none());
@@ -952,7 +972,10 @@ async fn join_history_former_owner_fork_cannot_override_current_owner_policy() {
     drop(log);
     alice.process_channel(channel);
     assert_eq!(alice.channel_owner(channel), bob.user_id());
-    assert_eq!(alice.channel_history_policy(channel), HistoryPolicy::Off);
+    assert_eq!(
+        alice.channel_history_policy(channel).unwrap(),
+        HistoryPolicy::Off
+    );
 }
 
 #[tokio::test]
@@ -991,7 +1014,10 @@ async fn join_history_former_owner_cannot_backdate_a_policy_into_a_closed_owner_
     drop(log);
     alice.process_channel(channel);
     assert_eq!(alice.channel_owner(channel), bob.user_id());
-    assert_eq!(alice.channel_history_policy(channel), HistoryPolicy::Off);
+    assert_eq!(
+        alice.channel_history_policy(channel).unwrap(),
+        HistoryPolicy::Off
+    );
 }
 
 #[tokio::test]
@@ -1068,8 +1094,8 @@ async fn join_history_rejoined_source_cannot_use_old_ancestry_to_read_removal_pe
         .await
         .unwrap();
     let log = alice.log.lock().unwrap();
-    let refs = log.events(&channel);
-    let view = View::new(&refs);
+    let refs = log.events(&channel).unwrap();
+    let view = View::new(&refs.iter().collect::<Vec<_>>());
     assert_eq!(view.offers().len(), 1);
     assert!(view.offers().iter().all(|(_, offer)| {
         !offer
@@ -1120,6 +1146,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
         .lock()
         .unwrap()
         .events(&channel)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::MembershipChange)
         .unwrap()
@@ -1158,7 +1185,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
         .unwrap();
     copy(&owner, &sibling, channel);
     assert!(sibling.channel_history(channel, 100).unwrap().is_empty());
-    let projection = sibling.account_group_projection(channel);
+    let projection = sibling.account_group_projection(channel).unwrap();
     let authority = projection.authority.current_event().unwrap();
     let grant = projection
         .authority
@@ -1211,8 +1238,8 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
         .lock()
         .unwrap()
         .events(&channel)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect::<Vec<_>>();
     let graph = release_events
         .iter()
@@ -1225,7 +1252,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
                 .is_some_and(|release| release.recipient == sibling.identity.public())
         })
         .unwrap();
-    let projected = sibling.account_group_projection(channel);
+    let projected = sibling.account_group_projection(channel).unwrap();
     let state = projected.state.as_ref().unwrap();
     assert!(account_release_admitted(
         state,
@@ -1258,7 +1285,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
     owner
         .try_account_channel_remove(channel, &anchor.account_id())
         .unwrap();
-    let removed = owner.account_group_projection(channel);
+    let removed = owner.account_group_projection(channel).unwrap();
     assert!(!account_release_admitted(
         removed.state.as_ref().unwrap(),
         released,
@@ -1272,7 +1299,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
             &anchor.own_group_proof(),
         )
         .unwrap();
-    let reinvited = owner.account_group_projection(channel);
+    let reinvited = owner.account_group_projection(channel).unwrap();
     assert!(
         !account_release_admitted(
             reinvited.state.as_ref().unwrap(),
@@ -1308,6 +1335,7 @@ async fn account_invitation_three_event_wal_recovers_atomically_after_restart() 
         .lock()
         .unwrap()
         .events(&channel)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::MembershipChange)
         .unwrap()
@@ -1349,10 +1377,10 @@ async fn account_invitation_three_event_wal_recovers_atomically_after_restart() 
         .lock()
         .unwrap()
         .events(&channel)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect::<Vec<_>>();
-    let projection = owner.account_group_projection(channel);
+    let projection = owner.account_group_projection(channel).unwrap();
     let authority = all
         .iter()
         .find(|event| Some(event.id) == projection.authority.current_event())
@@ -1437,7 +1465,7 @@ async fn account_invitation_three_event_wal_recovers_atomically_after_restart() 
             .is_some()),
         "one pending WAL record recovers invitation, account grant and frozen offer together"
     );
-    let projection = recovered.account_group_projection(channel);
+    let projection = recovered.account_group_projection(channel).unwrap();
     let grant = projection
         .authority
         .account_grant(&target.account.public().ed25519_pub)

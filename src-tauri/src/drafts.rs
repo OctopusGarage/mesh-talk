@@ -345,7 +345,7 @@ fn seed_legacy_documents(
         let unambiguous = match &conversation {
             DocumentConversation::Account(id) => known_accounts.contains(id),
             DocumentConversation::Channel(id) => node
-                .list_channels()
+                .list_channels()?
                 .iter()
                 .any(|channel| hex::encode(channel.id.as_bytes()) == *id),
         };

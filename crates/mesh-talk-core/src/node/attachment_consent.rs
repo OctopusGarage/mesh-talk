@@ -182,30 +182,37 @@ impl AttachmentConsent {
 
 impl Node {
     pub(in crate::node) fn queue_approved_incomplete_files(&self) {
-        let files = self
-            .files
-            .lock()
-            .expect("files lock not poisoned")
-            .file_convs();
-        for file in files {
-            if match self.attachment_consent_status(file) {
-                Ok(status) => status,
-                Err(error) => {
-                    log::warn!("attachment consent lookup deferred: {error}");
-                    continue;
+        let result = (|| -> Result<(), NodeError> {
+            let files = self
+                .files
+                .lock()
+                .expect("files lock not poisoned")
+                .file_convs();
+            for file in files {
+                if match self.attachment_consent_status(file) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        log::warn!("attachment consent lookup deferred: {error}");
+                        continue;
+                    }
+                } == Some(ReceiveDecision::Accepted)
+                    && !(self.media.contains(file) && self.has_verified_file_completion(file))
+                    && matches!(self.file_progress(file)?, Some(progress) if progress.done < progress.total)
+                {
+                    self.pending_files
+                        .lock()
+                        .expect("pending files lock not poisoned")
+                        .insert(file);
                 }
-            } == Some(ReceiveDecision::Accepted)
-                && !(self.media.contains(file) && self.has_verified_file_completion(file))
-                && matches!(self.file_progress(file), Some(progress) if progress.done < progress.total)
-            {
-                self.pending_files
-                    .lock()
-                    .expect("pending files lock not poisoned")
-                    .insert(file);
             }
+            self.file_pull_notify.notify_one();
+            self.note_file_change();
+
+            Ok(())
+        })();
+        if let Err(error) = result {
+            log::warn!("queue_approved_incomplete_files deferred after storage failure: {error}");
         }
-        self.file_pull_notify.notify_one();
-        self.note_file_change();
     }
 
     pub(in crate::node) fn incoming_offer(

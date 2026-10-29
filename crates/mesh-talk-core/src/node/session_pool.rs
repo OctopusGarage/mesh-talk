@@ -552,7 +552,9 @@ impl Node {
                     && self.pooled_presence_current(&channel)
                 {
                     if !self.account_allowed(expected, channel.peer_announcement())
-                        && !self.group_member(expected)
+                        && !self
+                            .group_member(expected)
+                            .map_err(|error| TransportError::Io(std::io::Error::other(error)))?
                         && !self.group_departure_peer(expected)
                     {
                         return Err(TransportError::AdmissionDenied);
