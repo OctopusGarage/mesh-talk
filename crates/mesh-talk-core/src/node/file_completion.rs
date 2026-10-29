@@ -1,5 +1,5 @@
 //! Local verified completion survives reclamation, without extending the wire protocol.
-use super::{Node, delivery_store::FileCard};
+use super::{Node, NodeError, delivery_store::FileCard};
 use crate::{
     eventlog::{ConversationId, EventId, EventKind},
     identity::device::PublicIdentity,
@@ -213,15 +213,15 @@ impl Node {
     pub(in crate::node) fn completion_candidates(
         &self,
         conversation: ConversationId,
-    ) -> Vec<(FileCard, EventId)> {
+    ) -> Result<Vec<(FileCard, EventId)>, NodeError> {
         let cards = self
             .delivery
             .lock()
             .expect("delivery lock not poisoned")
             .cards_for_file(conversation);
         let log = self.log.lock().expect("log lock not poisoned");
-        let chunks = log.events(&conversation);
-        cards
+        let chunks = log.events(&conversation)?;
+        Ok(cards
             .into_iter()
             .filter_map(|card| {
                 let binding = card.completion_binding.as_ref()?;
@@ -249,7 +249,7 @@ impl Node {
                 let final_chunk = chunks.last()?.id;
                 Some((card, final_chunk))
             })
-            .collect()
+            .collect())
     }
 
     /// Called only after all chunk AEAD/hashes/checksum and saved-content synchronization.
@@ -390,45 +390,52 @@ impl Node {
     /// cannot orphan a message or another chunk. A peer may later download the file
     /// again from another source if its local replica has been evicted.
     fn prune_channel_file_replicas(&self) {
-        let file_convs = self
-            .files
-            .lock()
-            .expect("files lock not poisoned")
-            .file_convs();
-        let mut replicas = Vec::new();
-        for file in file_convs {
-            if !self.is_channel_file_replica(file) {
-                continue;
-            }
-            let rows = self.retained_file_rows(file);
-            if rows.is_empty() {
-                continue;
-            }
-            let Some(total) = self
+        let result = (|| -> Result<(), NodeError> {
+            let file_convs = self
                 .files
                 .lock()
                 .expect("files lock not poisoned")
-                .manifest(&file)
-                .map(|manifest| manifest.chunk_count() as usize)
-            else {
-                continue;
-            };
-            let log = self.log.lock().expect("log lock not poisoned");
-            let chunks = log.events(&file);
-            if chunks.len() != total {
-                continue;
+                .file_convs();
+            let mut replicas = Vec::new();
+            for file in file_convs {
+                if !self.is_channel_file_replica(file) {
+                    continue;
+                }
+                let rows = self.retained_file_rows(file);
+                if rows.is_empty() {
+                    continue;
+                }
+                let Some(total) = self
+                    .files
+                    .lock()
+                    .expect("files lock not poisoned")
+                    .manifest(&file)
+                    .map(|manifest| manifest.chunk_count() as usize)
+                else {
+                    continue;
+                };
+                let log = self.log.lock().expect("log lock not poisoned");
+                let chunks = log.events(&file)?;
+                if chunks.len() != total {
+                    continue;
+                }
+                let bytes = chunks
+                    .iter()
+                    .map(|event| event.ciphertext.len() + 256)
+                    .sum::<usize>();
+                let newest = rows.iter().map(|row| row.wall_clock).max().unwrap_or(0);
+                replicas.push((file, newest, bytes));
             }
-            let bytes = chunks
-                .iter()
-                .map(|event| event.ciphertext.len() + 256)
-                .sum::<usize>();
-            let newest = rows.iter().map(|row| row.wall_clock).max().unwrap_or(0);
-            replicas.push((file, newest, bytes));
-        }
-        let drop = channel_file_evictions(replicas, CHANNEL_FILE_REPLICA_BUDGET);
-        let mut log = self.log.lock().expect("log lock not poisoned");
-        for file in drop {
-            let _ = log.drop_conversation(&file);
+            let drop = channel_file_evictions(replicas, CHANNEL_FILE_REPLICA_BUDGET);
+            let mut log = self.log.lock().expect("log lock not poisoned");
+            for file in drop {
+                let _ = log.drop_conversation(&file);
+            }
+
+            Ok(())
+        })();
+        if let Err(error) = result {
+            log::warn!("prune_channel_file_replicas deferred after storage failure: {error}");
         }
     }
 
@@ -454,7 +461,7 @@ impl Node {
             .map(|row| (row.event_id, row.conversation))
             .collect();
         let log = self.log.lock().expect("log lock not poisoned");
-        let chunks = log.events(&conversation);
+        let chunks = log.events(&conversation)?;
         let Some(first) = chunks.first() else {
             return Ok(false);
         };

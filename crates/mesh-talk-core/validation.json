@@ -42,7 +42,8 @@
         "crates/mesh-talk-core/src/node/network_cost.rs",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
-        "crates/mesh-talk-core/src/node/runtime.rs"
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync/"
       ],
       "rust": [
         {
@@ -51,7 +52,9 @@
             "node::network_cost::tests::",
             "node::group_chain_tests::metered_group_file_replica_pauses_both_directions_without_losing_history_or_chunks",
             "node::group_chain_tests::metered_group_file_replica_preserves_explicit_attachment_consent",
-            "startup_network_options_precede_discovery_and_delivery_launch"
+            "startup_network_options_precede_discovery_and_delivery_launch",
+            "participant_event_growth_reads_owned_bodies_and_preserves_finite_network_view",
+            "participant_network_"
           ]
         }
       ],
@@ -64,7 +67,7 @@
             "reference": "docs/network-design-reference.md#cost-aware-group-attachment-sharing"
           },
           {
-            "name": "Cost-class changes expire session-local exceptions; manual share-off and conversation authorization remain authoritative.",
+            "name": "Cost-class changes expire session-local exceptions; manual share-off and conversation authorization remain authoritative. Finite participant selections preserve exact Have-dependent ancestry, fresh proof/source revocation, atomic receipt-control publication and pending invitations; unchanged paging reads no historical bodies, and cancellation cleanup is bounded.",
             "reference": "docs/help/topics/channels.md#network-data-protection"
           }
         ]
@@ -321,7 +324,8 @@
         "crates/mesh-talk-core/src/node/participant_storage_tests.rs",
         "crates/mesh-talk-core/src/storage/profile.rs",
         "crates/mesh-talk-core/src/storage/profile/context.rs",
-        "crates/mesh-talk-core/src/storage/profile/participant.rs"
+        "crates/mesh-talk-core/src/storage/profile/participant.rs",
+        "crates/mesh-talk-core/src/storage/profile/participant_events.rs"
       ],
       "rust": [
         {
@@ -331,7 +335,8 @@
             "startup_identity_rejection_stops_before_listener_and_durable_stores",
             "node::node::participant_storage_tests::",
             "node::runtime::retirement_tests::",
-            "node::runtime_work::"
+            "node::runtime_work::",
+            "node::node::tests::participant_event_"
           ]
         }
       ],
@@ -345,6 +350,10 @@
           },
           {
             "name": "Shared ownership precedes runtime keystore initialization; construction and admitted blocking captures plus undelivered outputs retain replacement admission until their actual destruction. Returned runtimes retain their consuming stop contract.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Participant event publication authenticates legacy owners before first authority, resumes under the held profile lease before journal recovery, rejects retired-source fallback, and warm-opens only persisted publication metadata and the exact downgrade barrier.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -528,7 +537,7 @@
             "account_authority_negotiates_v4_and_transfers_in_both_directions",
             "account_authority_rejects_events_in_older_followup_envelopes",
             "account_authority_requires_v4_for_fingerprint_and_event_transfer",
-            "eventlog::persist::tests::account_channel_version_index_rejects_invalid_events_and_survives_restart",
+            "eventlog::persist::legacy::tests::account_channel_version_index_rejects_invalid_events_and_survives_restart",
             "node::node::tests::group_summary_and_presence_count_accounts_while_unknown_devices_remain_distinct",
             "node::channel_account_controls::tests::",
             "channel_content_controls_recheck_membership_at_durable_acceptance",
@@ -823,7 +832,8 @@
         {
           "package": "mesh-talk-core",
           "filters": [
-            "eventlog::"
+            "eventlog::",
+            "node::node::tests::participant_event_"
           ]
         }
       ],
@@ -844,7 +854,7 @@
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
-            "name": "Profile maintenance batches eligible conversations, preserves required ancestors and latest leaves, checks reclaimed-byte cost before cloning, and globally paces successful or failed rewrite attempts without changing the encrypted format",
+            "name": "Legacy profile maintenance preserves required ancestors, latest leaves and paced rewrites; indexed participant maintenance uses bounded metadata selection and atomic SQL application with the same reclamation thresholds.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -889,6 +899,10 @@
           },
           {
             "name": "A same-transaction new-growth gate runs only after existing event and permanent counter validation and before allocating the stored-event encoding; signed duplicates bypass reservation, and blocked growth leaves graph rows, ordinals and charge unchanged.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Production participant Nodes retain one indexed profile event owner without a body cache; owned fallible reads preserve storage errors, bounded network pages tolerate ordinary appends and revalidate policy, and delivery-journal recovery remains authoritative across independent source publication.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -1042,7 +1056,7 @@
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
-            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms–5 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
             "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
           },
           {
@@ -1119,6 +1133,7 @@
       "paths": [
         "crates/mesh-talk-core/src/node/sent_store.rs",
         "crates/mesh-talk-core/src/node/received_store.rs",
+        "crates/mesh-talk-core/src/node/recovered_sent_ids.rs",
         "crates/mesh-talk-core/src/node/transcript_repository/",
         "crates/mesh-talk-core/src/node/account_suppression.rs"
       ],
@@ -1127,6 +1142,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::transcript_repository::tests::",
+            "node::recovered_sent_ids::tests::",
             "node::account_suppression::tests::"
           ]
         }

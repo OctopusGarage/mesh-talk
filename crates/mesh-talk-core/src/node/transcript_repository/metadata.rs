@@ -1,6 +1,31 @@
 //! Authenticated indexed facts used without fetching plaintext at startup.
 use super::*;
 impl TranscriptRepository {
+    pub(crate) fn conversation_revision(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<u64, LogError> {
+        self.profile.database().read(|c| {
+            let revision: i64 = c.query_row("SELECT revision FROM transcript_conversations WHERE kind=?1 AND conversation=?2", params![self.kind,conversation.as_bytes().as_slice()], |r|r.get(0)).optional()?.unwrap_or(0);
+            u64::try_from(revision).map_err(|_|invalid("invalid conversation revision"))
+        })
+    }
+    pub(in crate::node) fn row_by_ordinal(
+        &self,
+        ordinal: i64,
+    ) -> Result<Option<StoredRow>, LogError> {
+        self.profile.database().read(|c| {
+            let mut statement = c.prepare(&format!(
+                "SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND ordinal=?2"
+            ))?;
+            let mut rows = statement.query(params![self.kind, ordinal])?;
+            rows.next()?
+                .map(header)
+                .transpose()?
+                .map(|h| self.load_on(c, h))
+                .transpose()
+        })
+    }
     pub(in crate::node) fn contains(
         &self,
         conversation: Option<&ConversationId>,
@@ -36,7 +61,7 @@ impl TranscriptRepository {
         self.profile.database().read(|c| {
             let upper=if before.is_some(){" AND deadline<=?2"}else{""};
             let seek=if after.is_some(){" AND (deadline,ordinal)>(?3,?4)"}else{""};
-            let query=format!("SELECT {HEADER_COLUMNS},deadline,logical_id FROM transcript_rows WHERE kind=?1 AND deadline IS NOT NULL{upper}{seek} ORDER BY deadline,ordinal LIMIT ?5");
+            let query=format!("SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND deadline IS NOT NULL{upper}{seek} ORDER BY deadline,ordinal LIMIT ?5");
             let mut statement=c.prepare(&query)?;
             let upper=before.map(u64::to_be_bytes);
             let cursor=after.map(|v|(v.deadline.to_be_bytes(),v.ordinal));
@@ -50,8 +75,8 @@ impl TranscriptRepository {
                     break;
                 }
                 bytes+=charge;
-                let deadline=u64::from_be_bytes(blob(row,7)?);
-                let logical_id=match row.get_ref(8)? {rusqlite::types::ValueRef::Null=>None,_=>Some(EventId::new(blob(row,8)?))};
+                let deadline=h.deadline.ok_or_else(||invalid("missing selected deadline"))?;
+                let logical_id=h.logical_id;
                 selected.push((h,deadline,logical_id));
             }
             selected.into_iter().map(|(h,deadline,logical_id)| {

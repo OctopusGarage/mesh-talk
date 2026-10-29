@@ -122,7 +122,14 @@ async fn durable_dm_retries_a_reused_socket_closed_after_checkout() {
         held,
         "stale pooled socket must recover in this delivery attempt"
     );
-    assert!(recipient.log.lock().unwrap().has(&destination.event.id));
+    assert!(
+        recipient
+            .log
+            .lock()
+            .unwrap()
+            .has(&destination.event.id)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -297,7 +304,7 @@ async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
     let disk_unchanged = persisted() == before_disk;
     let work_unchanged = producer_files() == before_work;
     let staged = progress.load(Ordering::SeqCst);
-    let log_empty = node.log.lock().unwrap().conversations().is_empty();
+    let log_empty = node.log.lock().unwrap().conversations().unwrap().is_empty();
     assert!(matches!(result, Err(NodeError::Authorization(_))));
     assert!(
         node.delivery
@@ -362,7 +369,16 @@ async fn owner_invalidated_while_waiting_for_local_grant(kind: &str) {
         staged, 0,
         "file staging must not start after owner loss before the grant"
     );
-    assert!(log_empty && reopened.log.lock().unwrap().conversations().is_empty());
+    assert!(
+        log_empty
+            && reopened
+                .log
+                .lock()
+                .unwrap()
+                .conversations()
+                .unwrap()
+                .is_empty()
+    );
     assert!(reopened.files.lock().unwrap().file_convs().is_empty());
     assert!(
         reopened
@@ -506,7 +522,7 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     assert_eq!(checks, 3);
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     assert!(a.sentlog.lock().unwrap().conversations().is_empty());
-    assert!(a.log.lock().unwrap().conversations().is_empty());
+    assert!(a.log.lock().unwrap().conversations().unwrap().is_empty());
     assert_eq!(
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         before_sessions
@@ -540,7 +556,7 @@ async fn host_enqueue_authorizes_before_privacy_and_inside_final_wal_acceptance(
     );
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     // Chunk staging was real, but no local file card/WAL transaction was accepted.
-    assert!(!a.log.lock().unwrap().conversations().is_empty());
+    assert!(!a.log.lock().unwrap().conversations().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -599,8 +615,8 @@ async fn certified_account_rekey_bounds_unadvertised_receipt_sync_without_claimi
         super::delivery_receipt::open_receipt(&a.identity, &a.account_id(), &new_proof, &receipt)
             .is_none()
     );
-    assert!(a.log.lock().unwrap().has(&receipt.id));
-    assert!(b.log.lock().unwrap().has(&receipt.id));
+    assert!(a.log.lock().unwrap().has(&receipt.id).unwrap());
+    assert!(b.log.lock().unwrap().has(&receipt.id).unwrap());
     assert_eq!(
         a.sync_store(&new_proof.public())
             .lock()
@@ -731,7 +747,7 @@ async fn account_file_own_copy_first_stays_canonical_and_never_confirms_target()
     let at = tokio::spawn(a.clone().run_accept_loop(al));
     let ct = tokio::spawn(c.clone().run_accept_loop(cl));
     let own_received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while c.file_progress(file).is_none() || c.read_file(file).is_err() {
+        while c.file_progress(file).unwrap().is_none() || c.read_file(file).is_err() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
@@ -1218,7 +1234,7 @@ async fn retained_file_transfer_rechecks_permission_and_exact_account_binding() 
             transfers.is_empty(),
             "stale channels cannot advance a later phase"
         );
-        assert!(b.log.lock().unwrap().events(&file).is_empty());
+        assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
         assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
         workers.shutdown().await;
     }
@@ -1362,6 +1378,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .iter()
         .map(|e| e.id)
         .collect::<Vec<_>>();
@@ -1411,6 +1428,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                 .lock()
                 .unwrap()
                 .events(&file)
+                .unwrap()
                 .iter()
                 .map(|e| e.id)
                 .collect();
@@ -1503,6 +1521,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .lock()
             .unwrap()
             .events(&file)
+            .unwrap()
             .iter()
             .map(|e| e.id)
             .collect::<Vec<_>>(),
@@ -1543,10 +1562,11 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     }
     let first_progress = if count > 1 {
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            while !originals
-                .iter()
-                .any(|(_, file, _)| b.file_progress(*file).is_some_and(|p| p.done == p.total))
-            {
+            while !originals.iter().any(|(_, file, _)| {
+                b.file_progress(*file)
+                    .unwrap()
+                    .is_some_and(|p| p.done == p.total)
+            }) {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
@@ -1582,7 +1602,9 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                         // Repeated debug AEAD/checksum reads across 24 files
                         // measured 534ms and blocked this single-thread
                         // executor. Verify all original bytes once below.
-                        b.file_progress(*file).is_some_and(|p| p.done == p.total)
+                        b.file_progress(*file)
+                            .unwrap()
+                            .is_some_and(|p| p.done == p.total)
                     }
                 });
                 slowest_poll = slowest_poll.max(started.elapsed());
@@ -1620,7 +1642,10 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             slowest_poll.as_millis(),
             originals
                 .iter()
-                .filter(|(_, file, _)| b.file_progress(*file).is_some_and(|p| p.done == p.total))
+                .filter(|(_, file, _)| b
+                    .file_progress(*file)
+                    .unwrap()
+                    .is_some_and(|p| p.done == p.total))
                 .count(),
             count,
             observation
@@ -1635,7 +1660,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .read_file(file)
             .as_ref()
             .is_ok_and(|actual| actual == &bytes);
-        let counts = b.file_progress(file).map(|p| (p.done, p.total));
+        let counts = b.file_progress(file).unwrap().map(|p| (p.done, p.total));
         let held = b
             .sync_store(&ap.public())
             .lock()
@@ -1653,6 +1678,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
             .lock()
             .unwrap()
             .events(&file)
+            .unwrap()
             .iter()
             .map(|e| e.id)
             .collect::<Vec<_>>()
@@ -1708,6 +1734,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                 .lock()
                 .unwrap()
                 .events(file)
+                .unwrap()
                 .iter()
                 .map(|e| e.id)
                 .collect::<Vec<_>>(),
@@ -1809,7 +1836,7 @@ async fn delayed_private_file_peer(
                     });
                     if file_channel.is_none()
                         && super::session::round_request_conversation(&bytes)
-                            .is_some_and(|conv| node.file_progress(conv).is_some())
+                            .is_some_and(|conv| node.file_progress(conv).unwrap().is_some())
                     {
                         let active = observation
                             .active_file_channels
@@ -1834,6 +1861,7 @@ async fn delayed_private_file_peer(
                         && super::session::is_followup(&bytes, file)
                         && node
                             .file_progress(file)
+                            .unwrap()
                             .is_some_and(|progress| progress.done == 1)
                         && !observation
                             .interrupted
@@ -1865,7 +1893,10 @@ async fn delayed_private_file_peer(
                                     != observation
                                         .interrupted_connection
                                         .load(std::sync::atomic::Ordering::SeqCst)
-                                && node.file_progress(file).is_some_and(|p| p.done == p.total)
+                                && node
+                                    .file_progress(file)
+                                    .unwrap()
+                                    .is_some_and(|p| p.done == p.total)
                             {
                                 observation
                                     .fresh_completion
@@ -2195,6 +2226,7 @@ async fn accepted_channel_file_sidecar_failure_recovers_same_identity_and_protec
             let log = node.log.lock().unwrap();
             let manifests: Vec<_> = log
                 .events(&channel)
+                .unwrap()
                 .into_iter()
                 .filter(|event| event.kind == crate::eventlog::EventKind::FileManifest)
                 .collect();
@@ -2236,7 +2268,7 @@ async fn channel_file_authorization_rejects_before_staging_or_wal_acceptance() {
             &proof,
         );
         let channel = node.create_channel("images", vec![]).await.unwrap();
-        let before = node.log.lock().unwrap().conversations().len();
+        let before = node.log.lock().unwrap().conversations().unwrap().len();
         let path = dir.path().join("image.png");
         std::fs::write(&path, b"\x89PNG\r\n\x1a\nchannel image").unwrap();
         let mut checks = 0;
@@ -2273,11 +2305,15 @@ async fn channel_file_authorization_rejects_before_staging_or_wal_acceptance() {
                 .lock()
                 .unwrap()
                 .events(&channel)
+                .unwrap()
                 .iter()
                 .all(|event| event.kind != crate::eventlog::EventKind::FileManifest)
         );
         if reject_at == 1 {
-            assert_eq!(node.log.lock().unwrap().conversations().len(), before);
+            assert_eq!(
+                node.log.lock().unwrap().conversations().unwrap().len(),
+                before
+            );
         }
     }
 }
@@ -2373,7 +2409,7 @@ async fn oversized_text_is_rejected_before_acceptance_and_ratchet_install() {
     );
     assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
     assert!(a.sentlog.lock().unwrap().conversations().is_empty());
-    assert!(a.log.lock().unwrap().conversations().is_empty());
+    assert!(a.log.lock().unwrap().conversations().unwrap().is_empty());
     assert_eq!(
         std::fs::read(dir.path().join("ratchet.sessions")).unwrap(),
         sessions
@@ -3308,7 +3344,7 @@ fn large_manifest_uses_compact_wire_format_before_staging_chunks() {
         },
         kind: crate::file::FileKind::File,
     };
-    let before = a.log.lock().unwrap().conversations();
+    let before = a.log.lock().unwrap().conversations().unwrap();
     assert!(super::files::compact_manifest_needed(&a.identity, &prospective).unwrap());
     assert!(
         super::files::compact_manifest_needed(
@@ -3324,7 +3360,7 @@ fn large_manifest_uses_compact_wire_format_before_staging_chunks() {
         )
         .is_ok_and(|compact| !compact)
     );
-    assert_eq!(a.log.lock().unwrap().conversations(), before);
+    assert_eq!(a.log.lock().unwrap().conversations().unwrap(), before);
 }
 
 #[tokio::test]
@@ -3445,6 +3481,7 @@ fn pending_accepted_intent_precedes_own_event(backfill: bool) {
                 .lock()
                 .unwrap()
                 .events(&conv)
+                .unwrap()
                 .iter()
                 .any(|e| e.id == original.id)
         );
@@ -4417,7 +4454,7 @@ async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
     assert!(brx.try_recv().is_err());
     let control =
         super::delivery_receipt::delivery_conversation_id(&b.identity.public(), &ap.public());
-    let ack = b.log.lock().unwrap().events(&control)[0].clone();
+    let ack = b.log.lock().unwrap().events(&control).unwrap()[0].clone();
     if evict {
         let mut po = relay.lock().unwrap();
         po.set_retention_cap(0, 0);
@@ -4473,7 +4510,10 @@ async fn automatic_offline_roundtrip(evict: bool, bridge_enabled: bool) {
     assert_eq!(a.account_history(&target, 10).unwrap().len(), 1);
     assert!(arx.try_recv().is_err());
     if let Some(b) = b {
-        assert_eq!(b.log.lock().unwrap().events(&control), vec![&ack]);
+        assert_eq!(
+            b.log.lock().unwrap().events(&control).unwrap(),
+            vec![ack.clone()]
+        );
     }
     assert!(brx.try_recv().is_err());
     at.abort();
@@ -5031,7 +5071,7 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
     bt.abort();
     let _ = bt.await;
     assert!(!b.file_ready_to_save(file).unwrap());
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
 
     // Confirm every encrypted chunk at the relay before removing the only sender.
     // A best-effort flush turn alone is not a complete-upload barrier.
@@ -5054,8 +5094,9 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .map(|event| mailbox.wrap(event).unwrap().id)
+        .map(|event| mailbox.wrap(&event).unwrap().id)
         .collect::<Vec<_>>();
     assert!(!outer_chunks.is_empty());
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -5091,7 +5132,7 @@ async fn installed_post_office_delivers_file_bytes_after_both_peers_go_offline(
         "relay custody must not claim recipient completion"
     );
     assert!(!b.file_ready_to_save(file).unwrap());
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     drop(a);
 
     // The relay is restarted while it alone holds the bytes, then the recipient
@@ -5201,9 +5242,9 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
     assert!(b.read_file(file).is_err());
     b.pull_pending_files().await;
     assert_eq!(b.read_media(file).unwrap(), bytes);
-    assert_eq!(b.file_progress(file).unwrap().done, 0);
+    assert_eq!(b.file_progress(file).unwrap().unwrap().done, 0);
     assert!(b.file_ready_to_save(file).unwrap());
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     assert!(
         a.delivery
             .lock()
@@ -5260,7 +5301,7 @@ async fn media_prune_before_final_probe_does_not_force_chunk_retransmission_or_r
             .is_none()
     );
     assert!(
-        b.log.lock().unwrap().events(&file).is_empty(),
+        b.log.lock().unwrap().events(&file).unwrap().is_empty(),
         "completed/pruned media must not be retransmitted and retained merely to satisfy exact final custody"
     );
     std::fs::remove_file(b.media.path(file).unwrap()).unwrap();
@@ -5310,8 +5351,8 @@ async fn completed_file_fixture(
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     let final_chunk = chunks.last().unwrap().id;
     for chunk in chunks {
@@ -5330,10 +5371,10 @@ async fn generic_save_completion_prunes_and_retires_without_second_transfer_but_
     let source_copy = ad.path().join("source-export.bin");
     a.save_file(file, &source_copy).unwrap();
     assert_eq!(std::fs::read(source_copy).unwrap(), bytes);
-    assert!(!a.log.lock().unwrap().events(&file).is_empty());
+    assert!(!a.log.lock().unwrap().events(&file).unwrap().is_empty());
     let exported = b.save_file_into_dir(file, bd.path()).unwrap();
     assert_eq!(std::fs::read(exported).unwrap(), bytes);
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     assert!(
         b.historical_file_completion(file, final_chunk, &ap.public())
             .unwrap()
@@ -5365,15 +5406,15 @@ async fn generic_save_completion_prunes_and_retires_without_second_transfer_but_
             .next_file_destination(None)
             .is_none()
     );
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
-    assert_eq!(b.file_progress(file).unwrap().done, 0);
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
+    assert_eq!(b.file_progress(file).unwrap().unwrap().done, 0);
     assert!(!b.file_ready_to_save(file).unwrap());
     // Local file-save proofs have no status authority: the queued card ACK is separate.
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     a.save_file(file, &ad.path().join("source-after-retirement.bin"))
         .unwrap();
     assert!(
-        a.log.lock().unwrap().events(&file).is_empty(),
+        a.log.lock().unwrap().events(&file).unwrap().is_empty(),
         "source chunks become reclaimable once all immutable fanout retires"
     );
 }
@@ -5423,8 +5464,8 @@ async fn same_ciphertext_signed_by_wrong_chunk_author_cannot_create_completion_o
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     b.log.lock().unwrap().drop_conversation(&file).unwrap();
     let stranger = DeviceIdentity::generate();
@@ -5451,7 +5492,7 @@ async fn same_ciphertext_signed_by_wrong_chunk_author_cannot_create_completion_o
         !b.historical_file_completion(file, final_chunk, &ap.public())
             .unwrap()
     );
-    assert!(!b.log.lock().unwrap().events(&file).is_empty());
+    assert!(!b.log.lock().unwrap().events(&file).unwrap().is_empty());
 }
 
 fn size_mismatch_file_fixture(
@@ -5529,7 +5570,7 @@ fn size_mismatch_file_fixture(
     );
     let final_chunk = chunk.id;
     receiver.log.lock().unwrap().append_durable(chunk).unwrap();
-    assert_eq!(receiver.completion_candidates(file).len(), 1);
+    assert_eq!(receiver.completion_candidates(file).unwrap().len(), 1);
     (receiver, proof, file, final_chunk)
 }
 
@@ -5555,7 +5596,7 @@ fn initial_file_save_rejects_signed_content_shorter_or_longer_than_declared_size
                     .historical_file_completion(file, final_chunk, &proof.public())
                     .unwrap()
             );
-            assert_eq!(receiver.log.lock().unwrap().events(&file).len(), 1);
+            assert_eq!(receiver.log.lock().unwrap().events(&file).unwrap().len(), 1);
         }
     }
 }
@@ -5580,7 +5621,7 @@ fn initial_media_completion_rejects_signed_content_shorter_or_longer_than_declar
                     .historical_file_completion(file, final_chunk, &proof.public())
                     .unwrap()
             );
-            assert_eq!(receiver.log.lock().unwrap().events(&file).len(), 1);
+            assert_eq!(receiver.log.lock().unwrap().events(&file).unwrap().len(), 1);
         }
     }
 }
@@ -5744,8 +5785,8 @@ async fn legacy_device_only_media_completion_qualifies_exact_origin_without_acco
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect();
     let final_chunk = chunks.last().unwrap().id;
     for chunk in chunks {
@@ -5783,7 +5824,7 @@ async fn legacy_device_only_media_completion_qualifies_exact_origin_without_acco
             .next_file_destination(None)
             .is_none()
     );
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     let rebound = Announce::new_with_account(&a.identity, &Account::generate(), "Alice", 9);
     b.roster
@@ -5843,7 +5884,7 @@ async fn channel_media_source_keeps_signed_chunks_when_local_preview_completes()
         sender.process_file_events(file);
         assert_eq!(sender.read_media(file).unwrap(), bytes);
         assert_eq!(
-            sender.file_progress(file).unwrap().done,
+            sender.file_progress(file).unwrap().unwrap().done,
             crate::file::chunk_count_for(bytes.len() as u64),
             "a local preview must not reclaim the source's signed channel photo before members fetch it; sharing={sharing}"
         );
@@ -5870,8 +5911,8 @@ async fn untracked_channel_media_local_export_verifies_retained_row_and_managed_
         .await
         .unwrap();
     assert!(a.persist_media_if_complete(file));
-    assert!(a.log.lock().unwrap().events(&file).is_empty());
-    assert_eq!(a.file_progress(file).unwrap().done, 0);
+    assert!(a.log.lock().unwrap().events(&file).unwrap().is_empty());
+    assert_eq!(a.file_progress(file).unwrap().unwrap().done, 0);
     assert!(a.file_ready_to_save(file).unwrap());
     assert!(!a.has_verified_file_completion(file));
     let exported = a.save_file_into_dir(file, dir.path()).unwrap();
@@ -5978,7 +6019,7 @@ async fn actual_durable_receive_sends_control_receipt_without_chat_callback() {
     );
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Delivered));
     let control = super::delivery_receipt::delivery_conversation_id(&ap.public(), &bp.public());
-    assert!(!a.log.lock().unwrap().events(&control).is_empty());
+    assert!(!a.log.lock().unwrap().events(&control).unwrap().is_empty());
     a.emit_new_messages(control);
     assert!(rx.try_recv().is_err());
 }
@@ -6031,6 +6072,7 @@ async fn malformed_routes_and_control_scopes_never_advance_live_ratchet_or_emit(
             .lock()
             .unwrap()
             .events(&scope)
+            .unwrap()
             .into_iter()
             .find(|e| e.seq == event)
             .unwrap()
@@ -6080,12 +6122,15 @@ async fn accepted_install_failure_keeps_stable_history_and_blocks_later_ratchets
     );
     let sessions = std::fs::read(dir.path().join("ratchet.sessions")).unwrap();
     let conv = super::conversation::dm_conversation_id(&a.identity.public(), &bob.public());
-    let versions = a.log.lock().unwrap().version_vector(&conv);
+    let versions = a.log.lock().unwrap().version_vector(&conv).unwrap();
     assert!(
         a.append_event(conv, crate::eventlog::EventKind::React, vec![2])
             .is_err()
     );
-    assert_eq!(a.log.lock().unwrap().version_vector(&conv), versions);
+    assert_eq!(
+        a.log.lock().unwrap().version_vector(&conv).unwrap(),
+        versions
+    );
     assert!(
         a.enqueue_to_account(&target, b"must wait", None)
             .await
@@ -6576,7 +6621,7 @@ async fn queued_private_file_work_stops_on_permission_revoke_and_exact_account_r
     a.flush_delivery(id).await;
     a.flush_file_delivery(id).await;
     assert!(files.try_recv().is_err());
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     a.initiate_contact_locally(&b.account_id()).await.unwrap();
     let new_account = Account::generate();
@@ -6596,7 +6641,7 @@ async fn queued_private_file_work_stops_on_permission_revoke_and_exact_account_r
     a.flush_delivery(id).await;
     a.flush_file_delivery(id).await;
     assert!(files.try_recv().is_err());
-    assert!(b.log.lock().unwrap().events(&file).is_empty());
+    assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
     assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
     assert!(
         a.delivery
@@ -7053,7 +7098,7 @@ async fn retained_relay_file_worker(slow: bool, count: u8) {
         assert!(
             files.iter().all(|(_, file, _, b)| {
                 !b.file_ready_to_save(*file).unwrap()
-                    && b.log.lock().unwrap().events(file).is_empty()
+                    && b.log.lock().unwrap().events(file).unwrap().is_empty()
             }),
             "recipient must remain without chunks until all relay custody is confirmed"
         );
@@ -7350,6 +7395,7 @@ async fn outgoing_channel_request_is_guarded_and_shared_with_ordinary_sends() {
             .lock()
             .unwrap()
             .events(&channel)
+            .unwrap()
             .iter()
             .filter(|e| e.kind == crate::eventlog::EventKind::Message)
             .count(),
@@ -7382,10 +7428,10 @@ async fn outgoing_request_concurrent_retry_and_revocation_do_not_advance_ratchet
     let (one, two) = (one.unwrap(), two.unwrap());
     assert_eq!(one.message_id, two.message_id);
     assert_ne!(one.duplicate, two.duplicate);
-    let conversations = sender.log.lock().unwrap().conversations();
+    let conversations = sender.log.lock().unwrap().conversations().unwrap();
     let before = conversations
         .iter()
-        .map(|conv| sender.log.lock().unwrap().events(conv).len())
+        .map(|conv| sender.log.lock().unwrap().events(conv).unwrap().len())
         .sum::<usize>();
     let mut denied = request.clone();
     denied.request_id = [45; 32];
@@ -7406,10 +7452,10 @@ async fn outgoing_request_concurrent_retry_and_revocation_do_not_advance_ratchet
             .unwrap()
             .is_none()
     );
-    let conversations = sender.log.lock().unwrap().conversations();
+    let conversations = sender.log.lock().unwrap().conversations().unwrap();
     let after = conversations
         .iter()
-        .map(|conv| sender.log.lock().unwrap().events(conv).len())
+        .map(|conv| sender.log.lock().unwrap().events(conv).unwrap().len())
         .sum::<usize>();
     assert_eq!(before, after);
 }
@@ -7488,6 +7534,7 @@ async fn outgoing_channel_request_recovers_after_durable_acceptance_and_sidecar_
     let log = sender.log.lock().unwrap();
     let messages: Vec<_> = log
         .events(&channel)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == crate::eventlog::EventKind::Message)
         .collect();
@@ -9587,7 +9634,7 @@ async fn tracked_completion_and_active_fanout_skip_untracked_history_validation(
     let (sender, receiver, _, _, _, file, _, _) =
         completed_file_fixture(ad.path(), bd.path(), crate::file::FileKind::File).await;
     let sender_checks = sender.untracked_chunk_validations.load(Ordering::Relaxed);
-    let chunks = sender.log.lock().unwrap().events(&file).len();
+    let chunks = sender.log.lock().unwrap().events(&file).unwrap().len();
     let sender_result =
         sender.save_file_progress(file, &ad.path().join("active-fanout.bin"), |progress| {
             if progress.done == progress.total {
@@ -9600,7 +9647,10 @@ async fn tracked_completion_and_active_fanout_skip_untracked_history_validation(
         "active fanout must not scan untracked chunk ancestry"
     );
     sender_result.expect("active fanout retains chunks without an untracked/share-policy lookup");
-    assert_eq!(sender.log.lock().unwrap().events(&file).len(), chunks);
+    assert_eq!(
+        sender.log.lock().unwrap().events(&file).unwrap().len(),
+        chunks
+    );
 
     let receiver_checks = receiver.untracked_chunk_validations.load(Ordering::Relaxed);
     receiver

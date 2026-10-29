@@ -145,15 +145,21 @@ impl Node {
     }
 
     /// Transport only original-author metadata; never disclose candidate hashes.
-    pub(super) fn sticker_chunk_proof(&self, file: ConversationId) -> Option<Vec<Event>> {
-        let manifest = self
+    pub(super) fn sticker_chunk_proof(
+        &self,
+        file: ConversationId,
+    ) -> Result<Option<Vec<Event>>, crate::eventlog::LogError> {
+        let Some(manifest) = self
             .files
             .lock()
             .expect("files lock")
-            .manifest(&file)?
-            .clone();
+            .manifest(&file)
+            .cloned()
+        else {
+            return Ok(None);
+        };
         let AnyManifest::V3(manifest) = manifest else {
-            return None;
+            return Ok(None);
         };
         if manifest.kind != FileKind::Media
             || !sticker::is_sticker_name(&manifest.v2.name)
@@ -161,12 +167,12 @@ impl Node {
             || manifest.v2.size > sticker::MAX_STICKER_BYTES as u64
             || manifest.v2.chunk_count > 64
         {
-            return None;
+            return Ok(None);
         }
         let log = self.log.lock().expect("log lock");
-        let chunks = log.events(&file);
+        let chunks = log.events(&file)?;
         if chunks.len() != manifest.v2.chunk_count as usize {
-            return None;
+            return Ok(None);
         }
         let own = self.identity.public();
         let mut headers = Vec::with_capacity(chunks.len());
@@ -183,13 +189,13 @@ impl Node {
                         vec![chunks[index - 1].id]
                     }
             {
-                return None;
+                return Ok(None);
             }
             let mut header = (*chunk).clone();
             header.ciphertext.clear();
             headers.push(header);
         }
-        Some(headers)
+        Ok(Some(headers))
     }
 
     pub(super) fn sticker_recovery_offer(

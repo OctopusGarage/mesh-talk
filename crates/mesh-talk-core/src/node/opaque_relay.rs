@@ -507,7 +507,7 @@ impl Node {
                 .log
                 .lock()
                 .expect("log mutex not poisoned")
-                .has(&event.id)
+                .has(&event.id)?
             {
                 processed.push(outer_id);
                 retained.push((outer_id, event.id));
@@ -533,7 +533,7 @@ impl Node {
                     .log
                     .lock()
                     .expect("log lock not poisoned")
-                    .has(&inner_id)
+                    .has(&inner_id)?
                 {
                     retained.push((outer_id, inner_id));
                 }
@@ -769,7 +769,7 @@ mod permission_tests {
                 node.opaque_mailbox_round(&mut channel, &remote.public(), None, receiving_mailbox)
                     .await
                     .unwrap();
-                if pass >= 2 && !node.log.lock().unwrap().has(&newer.id) {
+                if pass >= 2 && !node.log.lock().unwrap().has(&newer.id).unwrap() {
                     // Outer IDs do not encode the inner DAG. If a child arrives
                     // on an earlier page, a fresh operation retries it after its
                     // parent has been admitted; rejected hints never persist.
@@ -786,9 +786,9 @@ mod permission_tests {
                 drop(channel);
                 task.await.unwrap();
                 let after = relay_log.lock().unwrap().exported.get();
-                assert!(node.log.lock().unwrap().has(&inner.id));
+                assert!(node.log.lock().unwrap().has(&inner.id).unwrap());
                 if pass >= 2 {
-                    assert!(node.log.lock().unwrap().has(&newer.id));
+                    assert!(node.log.lock().unwrap().has(&newer.id).unwrap());
                 }
                 let transferred = after - before;
                 if pass <= 2 {
@@ -962,8 +962,8 @@ mod permission_tests {
             completed,
             "a rejected inner event must not be downloaded every round"
         );
-        assert!(node.log.lock().unwrap().has(&accepted.id));
-        assert!(!node.log.lock().unwrap().has(&rejected.id));
+        assert!(node.log.lock().unwrap().has(&accepted.id).unwrap());
+        assert!(!node.log.lock().unwrap().has(&rejected.id).unwrap());
         assert!(
             !node.opaque_seen.lock().unwrap()[&progress.mailbox.id()].contains(&rejected_id),
             "rejected data must remain retryable after policy or storage recovery"
@@ -1085,11 +1085,11 @@ mod permission_tests {
                     send
                 );
                 assert!(
-                    node.log.lock().unwrap().has(&outgoing.id),
+                    node.log.lock().unwrap().has(&outgoing.id).unwrap(),
                     "disabling upload retains accepted local work"
                 );
                 assert_eq!(
-                    node.log.lock().unwrap().has(&incoming.id),
+                    node.log.lock().unwrap().has(&incoming.id).unwrap(),
                     receive,
                     "receive permission gates durable inner-event admission"
                 );

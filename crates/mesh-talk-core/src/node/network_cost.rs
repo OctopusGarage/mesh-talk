@@ -129,8 +129,8 @@ impl Node {
             let log = self.log.lock().expect("log lock not poisoned");
             let mut parents = Vec::new();
             for id in &manifests {
-                if let Some(event) = log.get(id)? {
-                    parents.push(event.conversation_id);
+                if let Some(conversation) = log.event_conversation(id)? {
+                    parents.push(conversation);
                 }
             }
             parents

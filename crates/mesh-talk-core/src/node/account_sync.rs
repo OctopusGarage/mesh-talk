@@ -321,7 +321,7 @@ impl Node {
                 .log
                 .lock()
                 .expect("log mutex not poisoned")
-                .conversations();
+                .conversations()?;
             for conversation in conversations {
                 self.emit_new_messages(conversation);
             }
@@ -332,7 +332,7 @@ impl Node {
                 .log
                 .lock()
                 .expect("log mutex not poisoned")
-                .conversations();
+                .conversations()?;
             for conversation in conversations {
                 self.process_profile_events(conversation);
             }
@@ -770,7 +770,7 @@ impl Node {
         file_conv: ConversationId,
         requester: &PublicIdentity,
     ) -> Result<Option<crate::file::AnyManifest>, NodeError> {
-        let (recalled, _) = self.account_archive_recalls();
+        let (recalled, _) = self.account_archive_recalls()?;
         let own = self.account_id();
         let me = self.user_id();
         let requester_id = requester.user_id();
@@ -828,8 +828,8 @@ impl Node {
         Ok(None)
     }
 
-    fn account_recalled_files(&self) -> HashSet<ConversationId> {
-        let (recalled, _) = self.account_archive_recalls();
+    fn account_recalled_files(&self) -> Result<HashSet<ConversationId>, NodeError> {
+        let (recalled, _) = self.account_archive_recalls()?;
         let rows = self.received_files.lock().expect("files mutex");
         let mut files = HashSet::new();
         for (host, targets) in recalled {
@@ -841,7 +841,7 @@ impl Node {
                 }
             }
         }
-        files
+        Ok(files)
     }
 
     pub(in crate::node) async fn serve_account_attachment_checked(
@@ -871,10 +871,14 @@ impl Node {
         // An admitted sibling gets one uniform negative for absent, erased,
         // unshared, or unavailable copies. It learns no existence distinction.
         let available = if let Some(manifest) = manifest.as_ref() {
-            if self
-                .file_progress(file_conv)
-                .is_some_and(|progress| progress.done == progress.total)
-            {
+            let progress = match self.file_progress(file_conv) {
+                Ok(progress) => progress,
+                Err(error) => {
+                    log::warn!("account attachment storage failure: {error}");
+                    return false;
+                }
+            };
+            if progress.is_some_and(|progress| progress.done == progress.total) {
                 true
             } else {
                 match self.managed_media_for_export(file_conv, manifest) {
@@ -1228,7 +1232,7 @@ impl Node {
             .lock()
             .expect("account sync commit mutex not poisoned");
         if self.private_dm_control_revision() != controls
-            || self.account_recalled_files().contains(&file_conv)
+            || self.account_recalled_files()?.contains(&file_conv)
         {
             return Err(NodeError::Authorization(
                 "attachment recall state changed".into(),
@@ -1269,7 +1273,7 @@ impl Node {
         }
         if !self.has_live_local_file_card(file_conv)
             || self
-                .file_progress(file_conv)
+                .file_progress(file_conv)?
                 .is_none_or(|progress| progress.done != progress.total)
         {
             return Ok(false);
@@ -1927,7 +1931,7 @@ impl Node {
                                 attachment_unsupported.retain(|_, until| *until > tokio::time::Instant::now());
                                 let favorites_supported=state.favorites_supported;
                                 let missing = self.account_blocking(move |node| {
-                                    let recalled = node.account_recalled_files();
+                                    let recalled = node.account_recalled_files()?;
                                     let mut missing = node.files.lock().expect("files mutex not poisoned").file_convs();
                                     missing.sort_by_key(|id| *id.as_bytes());
                                     missing.retain(|file| !node.media.contains(*file) && !recalled.contains(file));

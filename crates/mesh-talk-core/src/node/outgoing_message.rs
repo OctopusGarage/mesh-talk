@@ -289,7 +289,7 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-            if !self.channel_identity_is_current(state)
+            if !self.channel_identity_is_current(state)?
                 || state.pending_invite()
                 || state.is_dissolved()
             {
@@ -495,8 +495,8 @@ mod tests {
             before_senders,
         );
         let log = node.log.lock().unwrap();
-        assert_eq!(log.heads(&channel), vec![genesis.id]);
-        assert_eq!(log.events(&channel).len(), 1);
+        assert_eq!(log.heads(&channel).unwrap(), vec![genesis.id]);
+        assert_eq!(log.events(&channel).unwrap().len(), 1);
         assert_eq!(log.prepare(&channel).unwrap().1, u64::MAX);
     }
 }

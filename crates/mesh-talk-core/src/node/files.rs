@@ -1060,7 +1060,7 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-            if !self.channel_identity_is_current(state) {
+            if !self.channel_identity_is_current(state)? {
                 return Err(NodeError::Channel("not an accepted channel member".into()));
             }
         }
@@ -1325,7 +1325,7 @@ impl Node {
                 "protected media must be a supported raster image within 16 MiB".into(),
             ));
         }
-        let chunks = self.collect_chunks(manifest.file_conv());
+        let chunks = self.collect_chunks(manifest.file_conv())?;
         let first = chunks
             .first()
             .ok_or_else(|| NodeError::File("staged image unavailable".into()))?;
@@ -1426,7 +1426,13 @@ impl Node {
                 return false; // every retained offer is already complete
             }
         }
-        let candidates = self.completion_candidates(file_conv);
+        let candidates = match self.completion_candidates(file_conv) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                log::warn!("media completion lookup deferred: {error}");
+                return false;
+            }
+        };
         // Need all chunks present; `read_file` enforces completeness + verifies integrity.
         match self.read_file_internal(file_conv) {
             Ok(bytes) => {
@@ -1453,27 +1459,33 @@ impl Node {
 
     /// How many chunks of `file_conv` we hold vs. how many the manifest expects.
     /// `None` if the manifest hasn't synced yet. Drives resume + progress in the UI.
-    pub fn file_progress(&self, file_conv: ConversationId) -> Option<FileProgress> {
+    pub fn file_progress(
+        &self,
+        file_conv: ConversationId,
+    ) -> Result<Option<FileProgress>, NodeError> {
         if self.expired_received_file(file_conv) {
-            return None;
+            return Ok(None);
         }
         let total = self
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)?
-            .chunk_count();
+            .manifest(&file_conv)
+            .map(|manifest| manifest.chunk_count());
+        let Some(total) = total else {
+            return Ok(None);
+        };
         let have = {
             let log = self.log.lock().expect("log mutex not poisoned");
-            log.events(&file_conv)
+            log.events(&file_conv)?
                 .into_iter()
                 .filter(|e| e.kind == EventKind::Message)
                 .count() as u32
         };
-        Some(FileProgress {
+        Ok(Some(FileProgress {
             done: have.min(total),
             total,
-        })
+        }))
     }
 
     /// Whether a save can attempt current chunks or a retained managed-media copy.
@@ -1484,7 +1496,7 @@ impl Node {
         if self.file_is_protected(file_conv) {
             return Ok(false);
         }
-        let Some(progress) = self.file_progress(file_conv) else {
+        let Some(progress) = self.file_progress(file_conv)? else {
             return Ok(false);
         };
         if progress.done == progress.total {
@@ -1527,7 +1539,7 @@ impl Node {
             .manifest(&file_conv)
             .cloned()
             .ok_or_else(|| NodeError::File("unknown file".into()))?;
-        let chunks: Vec<Vec<u8>> = self.collect_chunks(file_conv);
+        let chunks: Vec<Vec<u8>> = self.collect_chunks(file_conv)?;
         if chunks.len() as u32 != manifest.chunk_count() {
             return Err(NodeError::File(format!(
                 "file incomplete: {}/{} chunks",
@@ -1636,7 +1648,7 @@ impl Node {
         &self,
         file_conv: ConversationId,
     ) -> Result<(), NodeError> {
-        let candidates = self.completion_candidates(file_conv);
+        let candidates = self.completion_candidates(file_conv)?;
         self.commit_file_completion(file_conv, &candidates)?;
         Ok(())
     }
@@ -1656,8 +1668,8 @@ impl Node {
             .cloned()
             .ok_or_else(|| NodeError::File("unknown file".into()))?;
         let total = manifest.chunk_count();
-        let candidates = self.completion_candidates(file_conv);
-        let chunk_ids = self.chunk_ids(file_conv);
+        let candidates = self.completion_candidates(file_conv)?;
+        let chunk_ids = self.chunk_ids(file_conv)?;
         if chunk_ids.len() as u32 != total {
             if self
                 .managed_media_for_export(file_conv, &manifest)?
@@ -1790,22 +1802,24 @@ impl Node {
     }
 
     /// The chunk-event ciphertexts of a per-file conversation, in log order.
-    fn collect_chunks(&self, file_conv: ConversationId) -> Vec<Vec<u8>> {
+    fn collect_chunks(&self, file_conv: ConversationId) -> Result<Vec<Vec<u8>>, NodeError> {
         let log = self.log.lock().expect("log mutex not poisoned");
-        log.events(&file_conv)
+        Ok(log
+            .events(&file_conv)?
             .into_iter()
             .filter(|e| e.kind == EventKind::Message)
             .map(|e| e.ciphertext.clone())
-            .collect()
+            .collect())
     }
 
-    fn chunk_ids(&self, file_conv: ConversationId) -> Vec<EventId> {
+    fn chunk_ids(&self, file_conv: ConversationId) -> Result<Vec<EventId>, NodeError> {
         let log = self.log.lock().expect("log mutex not poisoned");
-        log.events(&file_conv)
+        Ok(log
+            .events(&file_conv)?
             .into_iter()
             .filter(|event| event.kind == EventKind::Message)
             .map(|event| event.id)
-            .collect()
+            .collect())
     }
 
     fn chunk_ciphertext(&self, id: EventId) -> Result<Vec<u8>, NodeError> {

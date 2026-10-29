@@ -126,6 +126,33 @@ impl ProfileStorage {
         }
         Ok(())
     }
+    pub(crate) fn validate_legacy_events(&self, password: &str) -> Result<(), LogError> {
+        if self.database.get().is_none() {
+            let owner = self
+                .participant
+                .as_ref()
+                .ok_or_else(|| manifest::invalid("not a participant context"))?;
+            super::participant_events::authenticate_legacy(
+                self.root(),
+                &owner.paths.events,
+                password,
+            )?;
+        }
+        Ok(())
+    }
+    pub(crate) fn maintain_participant_events(&self) -> Result<(), LogError> {
+        super::participant_events::maintenance(self)
+    }
+    pub(crate) fn participant_events(
+        self: &Arc<Self>,
+        password: &str,
+    ) -> Result<EventRepository, LogError> {
+        let owner = self
+            .participant
+            .as_ref()
+            .ok_or_else(|| manifest::invalid("not a participant context"))?;
+        super::participant_events::open(self, &owner.paths.events, password)
+    }
     pub(crate) fn open_relay(
         lease: ProfileStorageLease,
         identity: &PublicIdentity,

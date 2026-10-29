@@ -23,10 +23,11 @@ CREATE TABLE relay_import_edges(child BLOB NOT NULL CHECK(length(child)=32), par
 CREATE INDEX relay_import_children ON relay_import_edges(parent,child);
 ";
 pub(crate) fn initialize(db: &EncryptedDatabase) -> Result<(), LogError> {
-    db.transaction(|tx| {
-        tx.execute_batch(SCHEMA)?;
-        Ok(())
-    })
+    db.transaction(initialize_on)
+}
+pub(crate) fn initialize_on(tx: &rusqlite::Transaction<'_>) -> Result<(), LogError> {
+    tx.execute_batch(SCHEMA)?;
+    Ok(())
 }
 pub(crate) fn validate(db: &EncryptedDatabase) -> Result<(), LogError> {
     db.read(|c| validate_ddl(c, SCHEMA))
@@ -179,7 +180,7 @@ pub(crate) fn stage(db: &EncryptedDatabase, path: &Path, password: &str) -> Resu
     flush(db, &mut batch)?;
     Ok(records)
 }
-pub(crate) fn rank(db: &EncryptedDatabase) -> Result<(), LogError> {
+pub(crate) fn rank_count(db: &EncryptedDatabase) -> Result<i64, LogError> {
     db.read(|c| {
         let missing:Option<Vec<u8>>=c.query_row("SELECT e.parent FROM relay_import_edges e JOIN relay_import_events child ON child.id=e.child LEFT JOIN relay_import_events parent ON parent.id=e.parent AND parent.conversation=child.conversation WHERE parent.id IS NULL LIMIT 1",[],|r|r.get(0)).optional()?;
         if let Some(id)=missing {return Err(LogError::MissingParents(vec![EventId::new(id.try_into().map_err(|_|invalid("invalid staged parent"))?)]));} Ok(())
@@ -269,6 +270,12 @@ pub(crate) fn rank(db: &EncryptedDatabase) -> Result<(), LogError> {
         if count != rank {
             return Err(invalid("staged event graph contains a cycle"));
         }
+        Ok(count)
+    })
+}
+pub(crate) fn rank(db: &EncryptedDatabase) -> Result<(), LogError> {
+    let count = rank_count(db)?;
+    db.transaction(|tx| {
         tx.execute(
             "UPDATE relay_sources SET unique_records=?1 WHERE source=0",
             [count],
@@ -282,6 +289,13 @@ pub(crate) fn publish(repository: &EventRepository, c: &Connection) -> Result<()
         [],
         |r| r.get(0),
     )?;
+    publish_count(repository, c, expected)
+}
+pub(crate) fn publish_count(
+    repository: &EventRepository,
+    c: &Connection,
+    expected: i64,
+) -> Result<(), LogError> {
     let mut rank = 0i64;
     while rank < expected {
         // Each SELECT completes before mutating retained tables. No live SQL

@@ -324,10 +324,17 @@ thread_local! {
 
 /// Traverse the complete retained DAG before policy or requester-have filtering.
 /// Preserves compatibility with accepted signed events whose clocks are inverted.
-pub(crate) fn causal_events(events: Vec<&Event>) -> Vec<&Event> {
-    let order = super::order::ordered_ids(&events, &[], true);
-    let by_id: HashMap<_, _> = events.into_iter().map(|event| (event.id, event)).collect();
-    order.into_iter().map(|id| by_id[&id]).collect()
+pub(crate) fn causal_events<E: std::borrow::Borrow<Event>>(events: Vec<E>) -> Vec<E> {
+    let refs: Vec<_> = events.iter().map(std::borrow::Borrow::borrow).collect();
+    let order = super::order::ordered_ids(&refs, &[], true);
+    let mut by_id: HashMap<_, _> = events
+        .into_iter()
+        .map(|event| (event.borrow().id, event))
+        .collect();
+    order
+        .into_iter()
+        .map(|id| by_id.remove(&id).expect("ordered event exists"))
+        .collect()
 }
 
 /// The fixint-bincode encoded size of one event (matches `node::session::encode`).
@@ -749,8 +756,8 @@ mod tests {
         assert!(matches!(result, Err(LogError::Io(_))));
         drop(store);
         let reopened = PersistentEventLog::open(&path, "pw").unwrap();
-        assert!(reopened.has(&first.id));
-        assert!(!reopened.has(&second.id));
+        assert!(reopened.has(&first.id).unwrap());
+        assert!(!reopened.has(&second.id).unwrap());
     }
 
     #[test]

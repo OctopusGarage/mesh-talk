@@ -17,10 +17,13 @@ impl Default for PageBudget {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PageOrder {
+    #[cfg(test)]
     Headers,
     Bodies,
     Ids,
+    #[cfg(test)]
     Parents(EventId),
+    #[cfg(test)]
     Heads,
     Conversations,
     Authors,
@@ -166,6 +169,7 @@ impl EventRepository {
             },
         })
     }
+    #[cfg(test)]
     pub(crate) fn headers_page(
         &self,
         conv: &ConversationId,
@@ -223,6 +227,8 @@ impl EventRepository {
         while let Some(row) = rows.next()? {
             let header = read_header(row)?;
             let cost = match order {
+                #[cfg(test)]
+                #[cfg(test)]
                 PageOrder::Headers => std::mem::size_of::<EventHeader>(),
                 PageOrder::Bodies => header
                     .stored_bytes
@@ -254,6 +260,7 @@ impl EventRepository {
         self.database
             .read(|c| self.ids_on(c, *conv, PageOrder::Ids, cursor, budget))
     }
+    #[cfg(test)]
     pub(crate) fn heads_page(
         &self,
         conv: &ConversationId,
@@ -263,6 +270,7 @@ impl EventRepository {
         self.database
             .read(|c| self.ids_on(c, *conv, PageOrder::Heads, cursor, budget))
     }
+    #[cfg(test)]
     pub(crate) fn parent_ids_page(
         &self,
         event: &EventId,
@@ -304,12 +312,14 @@ impl EventRepository {
                 "conversation",
                 conv.as_bytes().as_slice(),
             ),
+            #[cfg(test)]
             PageOrder::Heads => (
                 "event_heads",
                 "id",
                 "conversation",
                 conv.as_bytes().as_slice(),
             ),
+            #[cfg(test)]
             PageOrder::Parents(ref event) => (
                 "retained_event_parents",
                 "parent",

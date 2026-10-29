@@ -147,7 +147,7 @@ impl Node {
                 .collect::<Vec<_>>()
         };
         for conv in due_conversations {
-            for (event_id, row) in self.raw_sent_history(conv) {
+            for (event_id, row) in self.raw_sent_history(conv)? {
                 if plaintext_deadline(&row.plaintext)
                     .is_some_and(|deadline| deadline <= self.expiry_now())
                 {

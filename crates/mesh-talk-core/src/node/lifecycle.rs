@@ -49,7 +49,7 @@ impl Node {
         let target = self.file_message_logical_id(conv, target);
         let suppress = account
             || self
-                .list_channels()
+                .list_channels()?
                 .iter()
                 .any(|channel| channel.id == conv);
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
@@ -88,10 +88,10 @@ impl Node {
                 .generation
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        *self
-            .delivery_control_ids
+        self.delivery_control_ids
             .lock()
-            .expect("control ids lock not poisoned") = delivery.control_ids();
+            .expect("control ids lock not poisoned")
+            .replace(delivery.control_ids());
         let mut removed = 0;
 
         // Received plaintext sidecar: match by logical id.
@@ -134,10 +134,10 @@ impl Node {
                     self.privacy
                         .generation
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    *self
-                        .delivery_control_ids
+                    self.delivery_control_ids
                         .lock()
-                        .expect("control ids lock not poisoned") = delivery.control_ids();
+                        .expect("control ids lock not poisoned")
+                        .replace(delivery.control_ids());
                 }
             }
             Ok(())
@@ -162,7 +162,7 @@ impl Node {
             let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
             let log = self.log.lock().expect("log mutex not poisoned");
             let mut m = HashMap::new();
-            for event in log.events(&conv) {
+            for event in log.events(&conv)? {
                 if event.kind == EventKind::Message && event.author == self_author {
                     m.insert(event.seq, event.id);
                 }
@@ -218,14 +218,14 @@ impl Node {
         should_remove: impl Fn(ConversationId, u64) -> bool,
     ) -> Result<usize, NodeError> {
         let channels: std::collections::HashSet<_> = self
-            .list_channels()
+            .list_channels()?
             .into_iter()
             .map(|channel| channel.id)
             .collect();
         // raw_sent_history acquires delivery itself; collect only its IDs first.
         let mut suppressed = Vec::new();
         for channel in &channels {
-            for (id, entry) in self.raw_sent_history(*channel) {
+            for (id, entry) in self.raw_sent_history(*channel)? {
                 if should_remove(*channel, entry.wall_clock) {
                     suppressed.push((*channel, id));
                 }
@@ -285,7 +285,7 @@ impl Node {
             // undo a local clear or retention prune. No pending-queue lock is needed.
             {
                 let log = self.log.lock().expect("log lock not poisoned");
-                for event in log.events(&channel) {
+                for event in log.events(&channel)? {
                     if matches!(event.kind, EventKind::Message | EventKind::FileManifest)
                         && should_remove(channel, event.wall_clock)
                     {
@@ -335,10 +335,10 @@ impl Node {
             }
             Ok(())
         })();
-        *self
-            .delivery_control_ids
+        self.delivery_control_ids
             .lock()
-            .expect("control ids lock not poisoned") = delivery.control_ids();
+            .expect("control ids lock not poisoned")
+            .replace(delivery.control_ids());
         cancelled?;
         let media_to_remove: Vec<_> = file_rows
             .iter()
@@ -356,10 +356,10 @@ impl Node {
                     self.privacy
                         .generation
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    *self
-                        .delivery_control_ids
+                    self.delivery_control_ids
                         .lock()
-                        .expect("control ids lock not poisoned") = delivery.control_ids();
+                        .expect("control ids lock not poisoned")
+                        .replace(delivery.control_ids());
                 }
             }
             Ok(())

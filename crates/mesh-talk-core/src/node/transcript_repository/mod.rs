@@ -4,14 +4,12 @@ use crate::eventlog::event::EventId;
 use crate::eventlog::{LogError, event::ConversationId};
 use crate::storage::profile::{context::ProfileStorage, manifest};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use sha2::{Digest, Sha256};
+use std::{path::Path, sync::Arc};
 
 mod metadata;
 mod pages;
-pub(super) mod publication;
+pub(crate) mod publication;
 #[cfg(test)]
 mod tests;
 
@@ -19,12 +17,15 @@ pub(crate) const SENT: i64 = 1;
 pub(crate) const RECEIVED: i64 = 2;
 pub(crate) const FILES: i64 = 3;
 pub(crate) const SUPPRESSION: i64 = 4;
+pub(crate) const RECOVERED_IDS: i64 = 5;
+pub(crate) const FILE_PROOFS: i64 = 6;
+pub(crate) const FILE_IDENTITIES: i64 = 7;
 pub(crate) const MAX_PAGE_ROWS: usize = 128;
 pub(crate) const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
 const SCHEMA: &str = "
-CREATE TABLE transcript_sources(kind INTEGER PRIMARY KEY CHECK(kind BETWEEN 1 AND 4), locator BLOB NOT NULL UNIQUE, stub BLOB NOT NULL CHECK(length(stub)=54), raw_size INTEGER NOT NULL CHECK(raw_size>=0), raw_hash BLOB NOT NULL CHECK(length(raw_hash)=32), published INTEGER NOT NULL CHECK(published IN (0,1)), record_count INTEGER NOT NULL DEFAULT 0 CHECK(record_count>=0), body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(body_bytes>=0));
-CREATE TABLE transcript_rows(ordinal INTEGER PRIMARY KEY AUTOINCREMENT, kind INTEGER NOT NULL REFERENCES transcript_sources(kind), conversation BLOB NOT NULL CHECK(length(conversation)=32), row_key BLOB NOT NULL CHECK(length(row_key) BETWEEN 9 AND 33), clock BLOB NOT NULL CHECK(length(clock)=8), sequence BLOB NOT NULL CHECK(length(sequence)=8), sender_bytes INTEGER NOT NULL CHECK(sender_bytes>=0), body_bytes INTEGER NOT NULL CHECK(body_bytes>=0), sender TEXT NOT NULL, deadline BLOB CHECK(deadline IS NULL OR length(deadline)=8), logical_id BLOB CHECK(logical_id IS NULL OR length(logical_id)=32), UNIQUE(kind,conversation,row_key));
+CREATE TABLE transcript_sources(kind INTEGER PRIMARY KEY CHECK(kind BETWEEN 1 AND 7), locator BLOB NOT NULL UNIQUE, stub BLOB NOT NULL CHECK(length(stub)=54), raw_size INTEGER NOT NULL CHECK(raw_size>=0), raw_hash BLOB NOT NULL CHECK(length(raw_hash)=32), published INTEGER NOT NULL CHECK(published IN (0,1)), record_count INTEGER NOT NULL DEFAULT 0 CHECK(record_count>=0), body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(body_bytes>=0), revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(revision)='integer' AND revision>=0), rewrite_revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(rewrite_revision)='integer' AND rewrite_revision>=0));
+CREATE TABLE transcript_rows(ordinal INTEGER PRIMARY KEY AUTOINCREMENT, kind INTEGER NOT NULL REFERENCES transcript_sources(kind), conversation BLOB NOT NULL CHECK(length(conversation)=32), row_key BLOB NOT NULL CHECK(length(row_key) BETWEEN 9 AND 33), clock BLOB NOT NULL CHECK(length(clock)=8), sequence BLOB NOT NULL CHECK(length(sequence)=8), sender_bytes INTEGER NOT NULL CHECK(sender_bytes>=0), body_bytes INTEGER NOT NULL CHECK(body_bytes>=0), sender TEXT NOT NULL, deadline BLOB CHECK(deadline IS NULL OR length(deadline)=8), logical_id BLOB CHECK(logical_id IS NULL OR length(logical_id)=32), plaintext_sha256 BLOB NOT NULL CHECK(length(plaintext_sha256)=32), file_conversation BLOB CHECK(file_conversation IS NULL OR (kind=3 AND length(file_conversation)=32)), UNIQUE(kind,conversation,row_key));
 CREATE INDEX transcript_row_keys ON transcript_rows(kind,row_key,ordinal);
 CREATE INDEX transcript_history ON transcript_rows(kind,conversation,clock,sequence,ordinal);
 CREATE INDEX transcript_all_history ON transcript_rows(kind,clock,sequence,ordinal);
@@ -32,8 +33,9 @@ CREATE INDEX transcript_scan ON transcript_rows(kind,ordinal);
 CREATE INDEX transcript_conversation_scan ON transcript_rows(kind,conversation,ordinal);
 CREATE INDEX transcript_deadlines ON transcript_rows(kind,deadline,ordinal) WHERE deadline IS NOT NULL;
 CREATE INDEX transcript_logical ON transcript_rows(kind,conversation,logical_id,ordinal) WHERE logical_id IS NOT NULL;
+CREATE INDEX transcript_file_conversations ON transcript_rows(kind,file_conversation,ordinal) WHERE file_conversation IS NOT NULL;
 CREATE TABLE transcript_bodies(ordinal INTEGER PRIMARY KEY REFERENCES transcript_rows(ordinal) ON DELETE CASCADE, sender TEXT NOT NULL, plaintext BLOB NOT NULL);
-CREATE TABLE transcript_conversations(kind INTEGER NOT NULL REFERENCES transcript_sources(kind), conversation BLOB NOT NULL CHECK(length(conversation)=32), record_count INTEGER NOT NULL CHECK(record_count>0), body_bytes INTEGER NOT NULL CHECK(body_bytes>=0), PRIMARY KEY(kind,conversation)) WITHOUT ROWID;
+CREATE TABLE transcript_conversations(kind INTEGER NOT NULL REFERENCES transcript_sources(kind), conversation BLOB NOT NULL CHECK(length(conversation)=32), record_count INTEGER NOT NULL CHECK(record_count>=0), body_bytes INTEGER NOT NULL CHECK(body_bytes>=0), revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>0), PRIMARY KEY(kind,conversation)) WITHOUT ROWID;
 CREATE TABLE transcript_suppression(conversation BLOB NOT NULL CHECK(length(conversation)=32), id BLOB NOT NULL CHECK(length(id)=32), PRIMARY KEY(conversation,id)) WITHOUT ROWID;
 ";
 
@@ -102,8 +104,7 @@ pub(crate) struct TranscriptScanPage<T> {
 pub(crate) struct TranscriptRepository {
     pub(super) profile: Arc<ProfileStorage>,
     pub(super) kind: i64,
-    source: PathBuf,
-    stub: Vec<u8>,
+    source: publication::PublishedHistorySource,
     revision: u64,
     rewrite_revision: u64,
     #[cfg(test)]
@@ -114,22 +115,28 @@ pub(crate) struct TranscriptRepository {
     body_reads: std::sync::atomic::AtomicUsize,
 }
 
-#[derive(Clone)]
-pub(super) struct Header {
-    pub(super) ordinal: i64,
-    pub(super) conversation: ConversationId,
-    pub(super) key: Vec<u8>,
-    pub(super) wall_clock: u64,
-    pub(super) sequence: u64,
-    pub(super) sender_bytes: usize,
-    pub(super) body_bytes: usize,
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptHeader {
+    pub ordinal: i64,
+    pub conversation: ConversationId,
+    pub key: Vec<u8>,
+    pub wall_clock: u64,
+    pub sequence: u64,
+    pub sender_bytes: usize,
+    pub body_bytes: usize,
+    pub deadline: Option<u64>,
+    pub logical_id: Option<EventId>,
+    pub plaintext_sha256: [u8; 32],
+    /// Selector only; it carries no manifest authorization.
+    pub file_conversation: Option<ConversationId>,
 }
+type Header = TranscriptHeader;
 pub(super) struct StoredRow {
     pub header: Header,
     pub sender: String,
     pub plaintext: Vec<u8>,
 }
-const HEADER_COLUMNS: &str = "ordinal,conversation,row_key,clock,sequence,sender_bytes,body_bytes";
+const HEADER_COLUMNS: &str = "ordinal,conversation,row_key,clock,sequence,sender_bytes,body_bytes,deadline,logical_id,plaintext_sha256,file_conversation";
 
 pub(super) fn invalid(message: &str) -> LogError {
     LogError::CorruptFile(message.into())
@@ -164,11 +171,42 @@ fn header(row: &rusqlite::Row<'_>) -> Result<Header, LogError> {
         sequence: u64::from_be_bytes(blob(row, 4)?),
         sender_bytes: read_size(5)?,
         body_bytes: read_size(6)?,
+        deadline: optional_blob::<8>(row, 7)?.map(u64::from_be_bytes),
+        logical_id: optional_blob::<32>(row, 8)?.map(EventId::new),
+        plaintext_sha256: blob(row, 9)?,
+        file_conversation: optional_blob::<32>(row, 10)?.map(ConversationId::new),
     };
     if result.ordinal <= 0 {
         return Err(invalid("invalid transcript ordinal"));
     }
     Ok(result)
+}
+
+fn optional_blob<const N: usize>(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> Result<Option<[u8; N]>, LogError> {
+    match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        _ => blob(row, index).map(Some),
+    }
+}
+
+fn initialize(profile: &ProfileStorage) -> Result<(), LogError> {
+    let database = profile
+        .participant_database()
+        .ok_or_else(|| invalid("transcript profile is not initialized"))?;
+    database.transaction(|c| {
+        let present: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='transcript_sources')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !present {
+            c.execute_batch(SCHEMA)?;
+        }
+        manifest::validate_ddl(c, SCHEMA)
+    })
 }
 
 impl TranscriptRepository {
@@ -179,28 +217,30 @@ impl TranscriptRepository {
         kind: i64,
         import: impl FnOnce(&Connection, &Path, &str) -> Result<(), LogError>,
     ) -> Result<Self, LogError> {
-        let database = profile
-            .participant_database()
-            .ok_or_else(|| invalid("transcript profile is not initialized"))?;
-        database.transaction(|c| {
-            let present: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='transcript_sources')",
-                [],
-                |r| r.get(0),
+        let source = publication::PublishedHistorySource::open(
+            profile.clone(),
+            source,
+            password,
+            kind,
+            import,
+        )?;
+        let (revision, rewrite_revision) = profile.database().read(|c| {
+            let (revision, rewrite): (i64, i64) = c.query_row(
+                "SELECT revision,rewrite_revision FROM transcript_sources WHERE kind=?1",
+                [kind],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            if !present {
-                c.execute_batch(SCHEMA)?;
-            }
-            manifest::validate_ddl(c, SCHEMA)
+            Ok((
+                u64::try_from(revision).map_err(|_| invalid("invalid source revision"))?,
+                u64::try_from(rewrite).map_err(|_| invalid("invalid source revision"))?,
+            ))
         })?;
-        let (source, stub) = publication::publish(&profile, source, password, kind, import)?;
         Ok(Self {
             profile,
             kind,
             source,
-            stub,
-            revision: 0,
-            rewrite_revision: 0,
+            revision,
+            rewrite_revision,
             #[cfg(test)]
             fail_writes: false,
             #[cfg(test)]
@@ -214,10 +254,7 @@ impl TranscriptRepository {
         if self.fail_writes || self.fail_next.replace(false) {
             return Err(std::io::Error::other("injected transcript write failure").into());
         }
-        if !crate::storage::profile::publication_files::matches_stub(&self.source, &self.stub)? {
-            return Err(invalid("transcript source barrier changed"));
-        }
-        crate::storage::profile::publication_files::sync_parent(&self.source)
+        self.source.check_write()
     }
     pub(crate) fn revision(&self) -> u64 {
         self.revision
@@ -267,7 +304,7 @@ impl TranscriptRepository {
         }
         self.profile.database().read(|c| {
             let cursor = if after.is_some() { " AND conversation>?2" } else { " AND ?2 IS NULL" };
-            let mut statement=c.prepare(&format!("SELECT conversation FROM transcript_conversations WHERE kind=?1{cursor} ORDER BY conversation LIMIT ?3"))?;
+            let mut statement=c.prepare(&format!("SELECT conversation FROM transcript_conversations WHERE kind=?1 AND record_count>0{cursor} ORDER BY conversation LIMIT ?3"))?;
             let mut rows=statement.query(params![self.kind,after.as_ref().map(|id|id.as_bytes().as_slice()),size(limit)?])?;
             let mut selected=Vec::new(); while let Some(row)=rows.next()? {selected.push(ConversationId::new(blob(row,0)?));} Ok(selected)
         })
@@ -407,13 +444,18 @@ impl TranscriptRepository {
         let deadline = crate::expiry::deadline(envelope.as_ref().map_or(plaintext, |env| env.body))
             .map(u64::to_be_bytes);
         let logical_id = envelope.as_ref().map(|env| env.msg_id);
-        c.execute("INSERT INTO transcript_rows(kind,conversation,row_key,clock,sequence,sender_bytes,body_bytes,sender,deadline,logical_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![kind,conversation.as_bytes().as_slice(),key,clock.to_be_bytes().as_slice(),sequence.to_be_bytes().as_slice(),size(sender.len())?,size(plaintext.len())?,sender,deadline.as_ref().map(|id|id.as_slice()),logical_id.as_ref().map(|id|id.as_slice())])?;
+        let fingerprint: [u8; 32] = Sha256::digest(plaintext).into();
+        let file_conversation = (kind == FILES)
+            .then(|| super::files::validated_manifest(plaintext))
+            .flatten()
+            .map(|manifest| manifest.file_conv());
+        c.execute("INSERT INTO transcript_rows(kind,conversation,row_key,clock,sequence,sender_bytes,body_bytes,sender,deadline,logical_id,plaintext_sha256,file_conversation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![kind,conversation.as_bytes().as_slice(),key,clock.to_be_bytes().as_slice(),sequence.to_be_bytes().as_slice(),size(sender.len())?,size(plaintext.len())?,sender,deadline.as_ref().map(|id|id.as_slice()),logical_id.as_ref().map(|id|id.as_slice()),fingerprint.as_slice(),file_conversation.as_ref().map(|id|id.as_bytes().as_slice())])?;
         c.execute(
             "INSERT INTO transcript_bodies VALUES(?1,?2,?3)",
             params![c.last_insert_rowid(), sender, plaintext],
         )?;
-        c.execute("UPDATE transcript_sources SET record_count=record_count+1,body_bytes=body_bytes+?2 WHERE kind=?1",params![kind,size(plaintext.len())?])?;
-        c.execute("INSERT INTO transcript_conversations VALUES(?1,?2,1,?3) ON CONFLICT(kind,conversation) DO UPDATE SET record_count=record_count+1,body_bytes=body_bytes+excluded.body_bytes",params![kind,conversation.as_bytes().as_slice(),size(plaintext.len())?])?;
+        c.execute("UPDATE transcript_sources SET record_count=record_count+1,body_bytes=body_bytes+?2,revision=revision+1 WHERE kind=?1",params![kind,size(plaintext.len())?])?;
+        c.execute("INSERT INTO transcript_conversations VALUES(?1,?2,1,?3,1) ON CONFLICT(kind,conversation) DO UPDATE SET record_count=record_count+1,body_bytes=body_bytes+excluded.body_bytes,revision=revision+1",params![kind,conversation.as_bytes().as_slice(),size(plaintext.len())?])?;
         Ok(true)
     }
     #[allow(clippy::too_many_arguments)]
@@ -464,13 +506,13 @@ impl TranscriptRepository {
                     if should_remove(self.load_on(c,h)?)? {
                         c.execute("DELETE FROM transcript_rows WHERE ordinal=?1 AND kind=?2",params![ordinal,self.kind])?;
                         c.execute("UPDATE transcript_sources SET record_count=record_count-1,body_bytes=body_bytes-?2 WHERE kind=?1",params![self.kind,size(bytes)?])?;
-                        c.execute("DELETE FROM transcript_conversations WHERE kind=?1 AND conversation=?2 AND record_count=1",params![self.kind,conversation.as_bytes().as_slice()])?;
-                        c.execute("UPDATE transcript_conversations SET record_count=record_count-1,body_bytes=body_bytes-?3 WHERE kind=?1 AND conversation=?2",params![self.kind,conversation.as_bytes().as_slice(),size(bytes)?])?;
+                        c.execute("UPDATE transcript_conversations SET record_count=record_count-1,body_bytes=body_bytes-?3,revision=revision+1 WHERE kind=?1 AND conversation=?2",params![self.kind,conversation.as_bytes().as_slice(),size(bytes)?])?;
                         removed+=1;
                     }
                 }
                 if !more {break;}
             }
+            if removed>0 { c.execute("UPDATE transcript_sources SET revision=revision+1,rewrite_revision=rewrite_revision+1 WHERE kind=?1",[self.kind])?; }
             Ok(removed)
         })?;
         if removed > 0 {

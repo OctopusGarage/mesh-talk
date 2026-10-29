@@ -2,6 +2,7 @@
 use super::peer_directory::PeerDirectory;
 use super::*;
 use crate::discovery::{Announce, visibility::DiscoveryVisibility};
+use crate::eventlog::LogError;
 use crate::identity::device::PublicIdentity;
 use crate::transport::{SecureChannel, TransportError, VerifiedPeer};
 use std::{
@@ -53,6 +54,7 @@ pub(in crate::node) struct PrivacyControl {
     pub state: RwLock<Option<PrivacyState>>,
     pub gate: Arc<tokio::sync::RwLock<()>>,
     pub generation: AtomicU64,
+    pub projection_revision: AtomicU64,
     pub route_probe_cursor: AtomicU64,
     // Last: legacy privacy files and admission captures drop before storage.
     _storage: Option<Arc<crate::storage::profile::context::ProfileStorage>>,
@@ -180,17 +182,14 @@ impl Node {
                 .lock()
                 .expect("received files lock not poisoned");
             let log = self.log.lock().expect("log lock not poisoned");
-            let events: std::collections::HashMap<_, _> = log
-                .conversations()
-                .into_iter()
-                .flat_map(|c| {
-                    log.events(&c)
-                        .into_iter()
-                        .filter(|e| e.kind == crate::eventlog::EventKind::FileManifest)
-                        .map(|e| (e.id, e.clone()))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
+            let mut events = std::collections::HashMap::new();
+            for conversation in log.conversations().map_err(io::Error::other)? {
+                for event in log.events(&conversation).map_err(io::Error::other)? {
+                    if event.kind == crate::eventlog::EventKind::FileManifest {
+                        events.insert(event.id, event);
+                    }
+                }
+            }
             for scope in stored_scopes {
                 if scope.file != scope.parent
                     && events.get(&scope.event).is_some_and(|event| {
@@ -781,7 +780,7 @@ impl Node {
         });
         account.is_some_and(|a| a == self.account_id() || state.policy.allows(&a))
     }
-    pub(in crate::node) fn group_member(&self, public: &PublicIdentity) -> bool {
+    pub(in crate::node) fn group_member(&self, public: &PublicIdentity) -> Result<bool, LogError> {
         let channel_ids = {
             let book = self.channels.lock().expect("channels lock not poisoned");
             book.channel_ids()
@@ -789,12 +788,15 @@ impl Node {
         // Admission must use the durable, signed membership controls, including
         // leaves and transfers that the live book has not processed yet.
         let log = self.log.lock().expect("log lock not poisoned");
-        channel_ids.into_iter().any(|id| {
-            let events = log.events(&id);
-            crate::node::channel::ChannelBook::projected_members(id, &events).is_some_and(
+        for id in channel_ids {
+            let events = log.events(&id)?;
+            if crate::node::channel::ChannelBook::projected_members(id, &events).is_some_and(
                 |members| members.contains(public) && members.contains(&self.identity.public()),
-            )
-        })
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(in crate::node) fn group_departure_peer(&self, public: &PublicIdentity) -> bool {
@@ -834,6 +836,9 @@ impl Node {
             };
             if !scopes.contains(&scope) {
                 scopes.push(scope);
+                self.privacy
+                    .projection_revision
+                    .fetch_add(1, Ordering::SeqCst);
             }
         }
     }
@@ -898,6 +903,9 @@ impl Node {
                 }
                 state.legacy_scope_ids.insert(event);
                 state.file_scopes.entry(file).or_default().push(scope);
+                self.privacy
+                    .projection_revision
+                    .fetch_add(1, Ordering::SeqCst);
             }
         }
         Ok(())
@@ -953,7 +961,7 @@ impl Node {
                     .any(|a| a.id == id && a.source == PermissionSource::Manual)
         })
     }
-    fn admitted(&self, peer: &VerifiedPeer) -> bool {
+    fn admitted(&self, peer: &VerifiedPeer) -> Result<bool, LogError> {
         let binding_conflicts = {
             let guard = self
                 .privacy
@@ -968,9 +976,11 @@ impl Node {
         if binding_conflicts {
             return self.account_transition_admitted(peer);
         }
-        self.account_allowed(peer.public_identity(), peer.announcement())
-            || self.group_member(peer.public_identity())
-            || self.group_departure_peer(peer.public_identity())
+        Ok(
+            self.account_allowed(peer.public_identity(), peer.announcement())
+                || self.group_member(peer.public_identity())?
+                || self.group_departure_peer(peer.public_identity()),
+        )
     }
     // This bit describes disclosure on this connection. Physical-LAN-only
     // peers stay visible to their actual LAN neighbors while overlay contacts
@@ -1022,7 +1032,10 @@ impl Node {
         if announce.public() != *public || !announce.verify() {
             return Err(TransportError::IdentityMismatch);
         }
-        let group_member = self.group_member(public) || self.group_departure_peer(public);
+        let group_member = self
+            .group_member(public)
+            .map_err(|error| TransportError::Io(io::Error::other(error)))?
+            || self.group_departure_peer(public);
         #[cfg(test)]
         if let Some(hook) = self.remember_peer_hook.lock().unwrap().take() {
             hook();
@@ -1278,7 +1291,9 @@ impl Node {
             .announcement(expected)
             .cloned();
         if !self.account_allowed(expected, announce.as_ref())
-            && !self.group_member(expected)
+            && !self
+                .group_member(expected)
+                .map_err(|error| TransportError::Io(io::Error::other(error)))?
             && !self.group_departure_peer(expected)
         {
             return Err(TransportError::AdmissionDenied);
@@ -1428,7 +1443,8 @@ impl Node {
         let publicly_visible = self.publicly_visible_at(endpoint);
         #[cfg(test)]
         timing.phase("accept-noise-presence");
-        let mut channel = tokio::time::timeout(
+        let admission_error = std::sync::Mutex::new(None);
+        let channel_result = tokio::time::timeout(
             super::route_timing::MAX_AUTHENTICATION_DEADLINE,
             SecureChannel::accept_with_transitions(
                 stream,
@@ -1436,14 +1452,25 @@ impl Node {
                 own.as_ref(),
                 publicly_visible,
                 &transitions,
-                |peer| {
-                    self.admitted(peer)
-                        || self.pairing_retry_allowed(peer.public_identity(), peer.announcement())
+                |peer| match self.admitted(peer) {
+                    Ok(allowed) => {
+                        allowed
+                            || self
+                                .pairing_retry_allowed(peer.public_identity(), peer.announcement())
+                    }
+                    Err(error) => {
+                        *admission_error.lock().expect("admission error lock") = Some(error);
+                        false
+                    }
                 },
             ),
         )
         .await
-        .map_err(|_| TransportError::Noise("accept timed out".into()))??;
+        .map_err(|_| TransportError::Noise("accept timed out".into()));
+        if let Some(error) = admission_error.into_inner().expect("admission error lock") {
+            return Err(TransportError::Io(io::Error::other(error)));
+        }
+        let mut channel = channel_result??;
         #[cfg(test)]
         timing.phase("accept-remember-peer");
         channel.retain_connection_permits(permits);

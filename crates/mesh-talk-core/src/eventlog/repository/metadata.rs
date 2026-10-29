@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,18 +72,15 @@ impl EventRepository {
         ])?;
         rows.next()?.map(read_metadata).transpose()
     }
-    #[cfg(test)]
     pub(crate) fn metadata(
         &self,
         conv: &ConversationId,
     ) -> Result<Option<ConversationMetadata>, LogError> {
         self.database.read(|c| self.metadata_on(c, conv))
     }
-    #[cfg(test)]
     pub(crate) fn count(&self, conv: &ConversationId) -> Result<u64, LogError> {
         Ok(self.metadata(conv)?.map_or(0, |m| m.count))
     }
-    #[cfg(test)]
     pub(crate) fn author_max(
         &self,
         conv: &ConversationId,
@@ -97,7 +93,6 @@ impl EventRepository {
             rows.next()?.map(|row|Ok(u64::from_be_bytes(blob(row,0)?))).transpose()
         })
     }
-    #[cfg(test)]
     pub(crate) fn next_sequence(
         &self,
         conv: &ConversationId,
@@ -108,7 +103,6 @@ impl EventRepository {
             .checked_add(1)
             .ok_or(LogError::SequenceExhausted)
     }
-    #[cfg(test)]
     pub(crate) fn authored_event(
         &self,
         conv: &ConversationId,
@@ -125,11 +119,9 @@ impl EventRepository {
     }
     /// Collecting compatibility operation: memory is proportional to frontier
     /// cardinality. Bounded consumers use heads_page instead.
-    #[cfg(test)]
     pub(crate) fn heads(&self, conv: &ConversationId) -> Result<Vec<EventId>, LogError> {
         self.database.read(|c| self.heads_on(c, conv))
     }
-    #[cfg(test)]
     fn heads_on(&self, c: &Connection, conv: &ConversationId) -> Result<Vec<EventId>, LogError> {
         self.require_active_on(c, conv)?;
         let mut stmt = c.prepare(
@@ -147,7 +139,6 @@ impl EventRepository {
     }
     /// Complete signed parents inherently allocate the complete current frontier.
     /// A caller preparing a local event must account for that single-event cost.
-    #[cfg(test)]
     pub(crate) fn prepare(&self, conv: &ConversationId) -> Result<(Vec<EventId>, u64), LogError> {
         self.database.read(|c| {
             let next = self
@@ -161,7 +152,6 @@ impl EventRepository {
     /// SHA256(countLE || IDs sorted by ID), unchanged from the wire owner.
     /// First call after mutation scans O(N) indexed IDs; unchanged reopen uses
     /// the persisted revision cache. Neither path reads any event body.
-    #[cfg(test)]
     pub(crate) fn fingerprint_and_len(
         &self,
         conv: &ConversationId,
@@ -197,7 +187,6 @@ impl EventRepository {
     }
     /// One already caller-bounded batch for a new conversation. No all-history
     /// validator or shadow log: earlier inserts are visible inside this SQL tx.
-    #[cfg(test)]
     pub(crate) fn append_channel_batch_atomic(&self, events: &[Event]) -> Result<(), LogError> {
         let Some(first) = events.first() else {
             return Ok(());
