@@ -2,9 +2,7 @@
 //! transcript roots require a future combined source and revision owner.
 use super::*;
 
-#[cfg(test)]
 mod engine;
-#[cfg(test)]
 mod read;
 #[cfg(test)]
 mod tests;
@@ -37,19 +35,16 @@ impl CausalOrder {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
 pub(crate) enum OrderReadiness {
     Pending,
     Ready,
 }
 #[derive(Debug)]
-#[cfg(test)]
 pub(crate) enum OrderReadState<T> {
     Pending,
     Ready(OrderPage<T>),
 }
 #[derive(Clone, Debug)]
-#[cfg(test)]
 pub(crate) struct OrderCursor {
     store_uuid: [u8; 16],
     domain: EventDomainId,
@@ -61,23 +56,28 @@ pub(crate) struct OrderCursor {
     rank: i64,
 }
 #[derive(Debug)]
-#[cfg(test)]
 pub(crate) struct OrderPage<T> {
     pub items: Vec<T>,
     pub next: Option<OrderCursor>,
     pub charged_bytes: usize,
 }
+/// The published prefix identity survives appends whose priority is above every
+/// retained vertex. A replacement generation invalidates every prior rank.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OrderGeneration {
+    pub job: [u8; 16],
+    pub source_revision: i64,
+    pub count: u64,
+}
 /// Work is charged for each seeded/ranked/cleaned vertex and each examined edge,
 /// including rows that produce no output. Fixed metadata scratch is separate from
 /// SQLite's connection cache. A step never fetches or decodes a body.
 #[derive(Clone, Copy, Debug)]
-#[cfg(test)]
 pub(crate) struct OrderWorkBudget {
     pub vertices: usize,
     pub edges: usize,
     pub bytes: usize,
 }
-#[cfg(test)]
 impl Default for OrderWorkBudget {
     fn default() -> Self {
         Self {
@@ -88,7 +88,6 @@ impl Default for OrderWorkBudget {
     }
 }
 #[derive(Debug)]
-#[cfg(test)]
 pub(crate) struct OrderStep {
     pub readiness: OrderReadiness,
     pub seeded: usize,
@@ -97,7 +96,6 @@ pub(crate) struct OrderStep {
     pub edges: usize,
     pub charged_bytes: usize,
 }
-#[cfg(test)]
 impl OrderStep {
     fn new() -> Self {
         Self {
@@ -117,13 +115,10 @@ impl OrderStep {
         self.edges < b.edges && b.bytes - self.charged_bytes >= EDGE_BYTES
     }
 }
-#[cfg(test)]
 const VERTEX_BYTES: usize = 128;
-#[cfg(test)]
 const EDGE_BYTES: usize = 64;
 const SEED: i64 = 0;
 const RUN: i64 = 1;
-#[cfg(test)]
 const TAIL: i64 = 2;
 const READY: i64 = 3;
 const OBSOLETE: i64 = 4;
@@ -191,7 +186,6 @@ impl EventRepository {
     }
     /// Starts a private immutable base. Repeated ensures do not restart an active
     /// job. Obsolete work must be removed by bounded steps before replacement.
-    #[cfg(test)]
     pub(crate) fn ensure_order(
         &self,
         conv: &ConversationId,
@@ -200,7 +194,6 @@ impl EventRepository {
         self.database
             .transaction(|c| self.ensure_order_on(c, conv, kind))
     }
-    #[cfg(test)]
     fn ensure_order_on(
         &self,
         c: &Connection,

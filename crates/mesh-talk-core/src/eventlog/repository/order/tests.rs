@@ -983,3 +983,126 @@ fn obsolete_job_cleanup_and_foreign_key_checks_do_not_scan_current_generations()
     })
     .unwrap();
 }
+
+#[test]
+fn durable_rank_resume_accepts_only_the_same_published_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let first = event(&identity, 1, vec![], 100, EventKind::Message);
+    let conv = first.conversation_id;
+    repo.append(&first).unwrap();
+    finish(&repo, &conv, CausalOrder::Logical);
+    let before = repo
+        .order_generation(&conv, CausalOrder::Logical)
+        .unwrap()
+        .unwrap();
+    let tail = event(&identity, 2, vec![first.id], 101, EventKind::Message);
+    repo.append(&tail).unwrap();
+    let after = repo
+        .order_generation(&conv, CausalOrder::Logical)
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.job, after.job);
+    assert!(after.source_revision > before.source_revision);
+    let OrderReadState::Ready(page) = repo
+        .causal_headers_after_rank(
+            &conv,
+            CausalOrder::Logical,
+            before.job,
+            0,
+            pages::PageBudget::default(),
+        )
+        .unwrap()
+    else {
+        panic!("safe tail should remain ready")
+    };
+    assert_eq!(
+        page.items.iter().map(|h| h.id).collect::<Vec<_>>(),
+        vec![tail.id]
+    );
+    let OrderReadState::Ready(empty) = repo
+        .causal_headers_after_rank(
+            &conv,
+            CausalOrder::Logical,
+            before.job,
+            1,
+            pages::PageBudget::default(),
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(empty.items.is_empty());
+    let late = event(&identity, 3, vec![], 1, EventKind::Message);
+    repo.append(&late).unwrap();
+    assert!(
+        repo.order_generation(&conv, CausalOrder::Logical)
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        repo.causal_headers_after_rank(
+            &conv,
+            CausalOrder::Logical,
+            before.job,
+            1,
+            pages::PageBudget::default()
+        ),
+        Err(LogError::StaleCursor)
+    ));
+    finish(&repo, &conv, CausalOrder::Logical);
+    assert_ne!(
+        before.job,
+        repo.order_generation(&conv, CausalOrder::Logical)
+            .unwrap()
+            .unwrap()
+            .job
+    );
+    assert!(matches!(
+        repo.causal_headers_after_rank(
+            &conv,
+            CausalOrder::Logical,
+            before.job,
+            1,
+            pages::PageBudget::default()
+        ),
+        Err(LogError::StaleCursor)
+    ));
+    assert_eq!(
+        repo.body_decodes.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
+#[test]
+fn commit_discovery_is_bounded_metadata_and_advances_across_retirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    for n in 1..=140 {
+        repo.append(&event(&identity, n, vec![], n, EventKind::Profile))
+            .unwrap();
+    }
+    let page = repo.committed_headers_page(None, 128).unwrap();
+    assert_eq!(page.len(), 128);
+    assert!(page.iter().all(|h| h.active));
+    let last = page.last().unwrap().ordinal;
+    let conv = page[0].header.conversation;
+    repo.begin_retirement(&conv).unwrap();
+    let tail = repo.committed_headers_page(Some(last), 128).unwrap();
+    assert_eq!(tail.len(), 12);
+    assert!(tail.iter().all(|h| !h.active && h.ordinal > last));
+    assert!(
+        repo.committed_headers_page(Some(tail.last().unwrap().ordinal), 128)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        repo.committed_headers_page(None, 129),
+        Err(LogError::InvalidPageBudget)
+    ));
+    assert_eq!(
+        repo.body_decodes.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}
