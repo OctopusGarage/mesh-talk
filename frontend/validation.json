@@ -1898,6 +1898,7 @@
         ]
       },
       "escalation": [
+        "Run e2e/media-recovery.spec.ts in Chromium and WebKit. Preserve the real gesture-triggered clipboard write and verify its completed PNG dimensions in both engines; request automated clipboard-read/write permissions and read back system clipboard pixels only in Chromium.",
         "Run e2e/media-recovery.spec.ts and e2e/protected-messages.spec.ts. Verify real macOS WKWebView blob-image recognition, drag selection and Command-C/context-menu copy with copy confirmation and clipboard clearing. Browser mocks prove wiring, not native recognition or system menu behavior. Test supported OS/languages and image sizes without globally enabling selection on protected content."
       ]
     },

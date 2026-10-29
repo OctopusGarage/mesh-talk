@@ -8,6 +8,8 @@ type Diagnostic = {
   historyCalls: number;
   png: ArrayBuffer;
   actions: Array<{ cmd: string; args: Record<string, unknown> }>;
+  copiedImage: number[] | null;
+  copyError: string | null;
 };
 type MediaWindow = Window & {
   __mediaDiagnostic: Diagnostic;
@@ -18,6 +20,7 @@ type MediaWindow = Window & {
 
 test("received media recovers when bytes become available with stable fileConv", async ({
   page,
+  browserName,
 }) => {
   // Chromium exercises the Mac integration wiring, not Apple's recognition engine.
   await page.addInitScript(() => {
@@ -25,7 +28,10 @@ test("received media recovers when bytes become available with stable fileConv",
       get: () => "Macintosh; Mac OS X",
     });
   });
-  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  if (browserName === "chromium")
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"]);
   await enterChat(page);
   await page.evaluate(() => {
     const w = window as unknown as MediaWindow;
@@ -36,6 +42,26 @@ test("received media recovers when bytes become available with stable fileConv",
       historyCalls: 0,
       png: new ArrayBuffer(0),
       actions: [],
+      copiedImage: null,
+      copyError: null,
+    };
+    // Preserve the real gesture-triggered OS write. WebKit does not expose
+    // Chromium's automated clipboard permissions, so also observe its result
+    // and decode the exact ClipboardItem submitted to the native writer.
+    const write = navigator.clipboard.write.bind(navigator.clipboard);
+    navigator.clipboard.write = (items) => {
+      const written = write(items);
+      void written
+        .then(async () => {
+          const png = await items[0].getType("image/png");
+          const bitmap = await createImageBitmap(png);
+          w.__mediaDiagnostic.copiedImage = [bitmap.width, bitmap.height];
+          bitmap.close();
+        })
+        .catch((error) => {
+          w.__mediaDiagnostic.copyError = String(error);
+        });
+      return written;
     };
     const original = w.__TAURI_INTERNALS__.invoke;
     w.__TAURI_INTERNALS__.invoke = async (
@@ -181,33 +207,34 @@ test("received media recovers when bytes become available with stable fileConv",
     ).toBeVisible();
     await expect(menu.getByText("Open Image in New Window")).toHaveCount(0);
     await expect(menu.getByText("Copy Subject")).toHaveCount(0);
-    await page.evaluate(() =>
-      navigator.clipboard.writeText("before image copy"),
-    );
+    if (browserName === "chromium")
+      await page.evaluate(() =>
+        navigator.clipboard.writeText("before image copy"),
+      );
     await menu
       .getByRole("menuitem", { name: "Copy image", exact: true })
       .click();
-    // The click starts asynchronous PNG encoding and the OS clipboard write.
-    // Wait for that write before reading its pixels, rather than the old value.
     await expect
-      .poll(async () =>
-        page.evaluate(async () => {
-          const items = await navigator.clipboard.read();
-          return items.some((item) => item.types.includes("image/png"));
+      .poll(() =>
+        page.evaluate(() => {
+          const d = (window as unknown as MediaWindow).__mediaDiagnostic;
+          return { size: d.copiedImage, error: d.copyError };
         }),
       )
-      .toBe(true);
-    const copied = await page.evaluate(async () => {
-      const items = await navigator.clipboard.read();
-      const png = await items
-        .find((item) => item.types.includes("image/png"))!
-        .getType("image/png");
-      const bitmap = await createImageBitmap(png);
-      const size = [bitmap.width, bitmap.height];
-      bitmap.close();
-      return size;
-    });
-    expect(copied).toEqual([1200, 900]);
+      .toEqual({ size: [1200, 900], error: null });
+    if (browserName === "chromium") {
+      const copied = await page.evaluate(async () => {
+        const items = await navigator.clipboard.read();
+        const png = await items
+          .find((item) => item.types.includes("image/png"))!
+          .getType("image/png");
+        const bitmap = await createImageBitmap(png);
+        const size = [bitmap.width, bitmap.height];
+        bitmap.close();
+        return size;
+      });
+      expect(copied).toEqual([1200, 900]);
+    }
     await enlargedImage.click({ button: "right" });
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
