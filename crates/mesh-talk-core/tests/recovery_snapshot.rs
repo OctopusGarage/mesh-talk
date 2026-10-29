@@ -975,10 +975,10 @@ const LEGACY_FOUR_PROFILES: &str = concat!(
 );
 
 #[test]
-fn unified_schema_five_preserves_every_record_discriminant() {
+fn schema_six_appends_suppression_without_changing_existing_discriminants() {
     use mesh_talk_core::eventlog::event::{ConversationId, Event, EventKind};
     use mesh_talk_core::identity::device::DeviceIdentity;
-    assert_eq!(SNAPSHOT_SCHEMA_VERSION, 5);
+    assert_eq!(SNAPSHOT_SCHEMA_VERSION, 6);
     let account = Account::from_secret_bytes([0x7f; 32]);
     let event = Event::new(
         &DeviceIdentity::generate(),
@@ -1063,6 +1063,10 @@ fn unified_schema_five_preserves_every_record_discriminant() {
             created_at_ms: None,
         },
         profile.unwrap(),
+        SnapshotRecordV1::LocalSuppression {
+            conversation: [3; 32],
+            message_id: [4; 32],
+        },
     ];
     for (tag, record) in records.into_iter().enumerate() {
         assert_eq!(
@@ -1070,6 +1074,45 @@ fn unified_schema_five_preserves_every_record_discriminant() {
             &(tag as u32).to_le_bytes()
         );
     }
+}
+
+#[test]
+fn suppression_records_require_schema_six_and_duplicate_facts_are_idempotent() {
+    let marker = SnapshotRecordV1::LocalSuppression {
+        conversation: [3; 32],
+        message_id: [4; 32],
+    };
+    for version in 1..=5 {
+        let mut header = header();
+        header.schema_version = version;
+        let mut writer = SnapshotWriter::new(Vec::new(), &header).unwrap();
+        assert_eq!(writer.push(&marker), Err(SnapshotError::UnsupportedVersion));
+    }
+    let mut header = header();
+    header.schema_version = 6;
+    header.record_count = 3;
+    let mut bytes = Vec::new();
+    write_snapshot(
+        &mut bytes,
+        &header,
+        [
+            marker.clone(),
+            marker.clone(),
+            SnapshotRecordV1::AccountCreation {
+                created_at_ms: None,
+            },
+        ],
+    )
+    .unwrap();
+    let mut count = 0;
+    read_snapshot(Cursor::new(bytes), |record| {
+        if record == marker {
+            count += 1;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(count, 2);
 }
 
 #[test]

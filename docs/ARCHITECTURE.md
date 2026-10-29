@@ -1742,8 +1742,12 @@ Snapshots include visible plaintext history, signed event provenance, file cards
 managed media referenced by visible cards, received peer avatars, signed public
 account profiles, immutable account creation metadata, legacy compatibility records,
 recall marks, and account-owned Favorites with their metadata, notes and independently
-retained attachment bytes. Schema 5 combines these records without changing the
-released positional tags. Readers preserve schemas 1–3 and strictly distinguish the
+retained attachment bytes. Schema 6 adds exact conversation/message local suppression
+facts after the schema-5 records, without changing earlier positional tags. Restore
+streams a suppression pass before installing any history, so record order cannot
+resurrect known erased content. Suppression is local to its recorded host; signed
+ancestry and independent Favorites remain separate. Readers preserve schemas 1–5
+and strictly distinguish the
 two draft schema-4 extension families; mixed or malformed extensions are rejected.
 The Favorites owner applies one eligible record projection to archive count, record
 encoding and retained-file authorization. Expired and canonical protected Favorite

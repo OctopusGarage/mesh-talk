@@ -400,6 +400,29 @@ impl Node {
                 },
             )
             .map_err(|_| SnapshotError::Io)?;
+            // A marker may follow its body in a valid archive. Install every
+            // exact local erasure before any history or signed replay source.
+            // Stream the pass instead of collecting another set of markers.
+            let suppression_header = read_snapshot(&mut source, |record| {
+                if let SnapshotRecordV1::LocalSuppression {
+                    conversation,
+                    message_id,
+                } = record
+                {
+                    node.account_suppression
+                        .lock()
+                        .expect("account suppression mutex not poisoned")
+                        .suppress(ConversationId::new(conversation), EventId::new(message_id))
+                        .map_err(|_| SnapshotError::Io)?;
+                }
+                Ok(())
+            })?;
+            if suppression_header != header {
+                return Err(SnapshotError::InvalidAccount);
+            }
+            source
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| SnapshotError::Io)?;
             // Keep staged paths, not open handles: a valid archive can retain
             // thousands of independently referenced Favorites attachments.
             let mut media_temp: HashMap<(bool, [u8; 32]), PathBuf> = HashMap::new();
@@ -417,6 +440,14 @@ impl Node {
                         wall_clock,
                         plaintext,
                     } => {
+                        if node
+                            .account_suppression
+                            .lock()
+                            .expect("account suppression mutex not poisoned")
+                            .contains(ConversationId::new(conversation), EventId::new(message_id))
+                        {
+                            return Ok(());
+                        }
                         let local_seq = if super::DmEnvelope::decode(&plaintext).is_none() {
                             let value = next_restored_legacy_seq;
                             next_restored_legacy_seq = next_restored_legacy_seq
@@ -456,18 +487,43 @@ impl Node {
                         from,
                         wall_clock,
                         plaintext,
-                    } => node
-                        .received
-                        .lock()
-                        .expect("received mutex not poisoned")
-                        .record(
-                            ConversationId::new(conversation),
-                            from,
-                            wall_clock,
-                            &plaintext,
-                            EventId::new(event_id),
-                        )
-                        .map_err(|_| SnapshotError::Io)?,
+                    } => {
+                        let host = ConversationId::new(conversation);
+                        // Ordinary account receives retain the signed transport
+                        // ID, while local deletion uses the envelope's logical
+                        // ID. Only an envelope belonging to this exact account
+                        // host supplies that additional identity; legacy and
+                        // channel rows keep their original event-ID semantics.
+                        let logical = super::DmEnvelope::decode(&plaintext)
+                            .filter(|envelope| {
+                                super::conversation::account_conversation_id(
+                                    &envelope.route.sender_account,
+                                    &envelope.route.recipient_account,
+                                ) == host
+                            })
+                            .map(|envelope| EventId::new(envelope.msg_id));
+                        let suppression = node
+                            .account_suppression
+                            .lock()
+                            .expect("account suppression mutex not poisoned");
+                        let erased = suppression.contains(host, EventId::new(event_id))
+                            || logical.is_some_and(|id| suppression.contains(host, id));
+                        drop(suppression);
+                        if erased {
+                            return Ok(());
+                        }
+                        node.received
+                            .lock()
+                            .expect("received mutex not poisoned")
+                            .record(
+                                ConversationId::new(conversation),
+                                from,
+                                wall_clock,
+                                &plaintext,
+                                EventId::new(event_id),
+                            )
+                            .map_err(|_| SnapshotError::Io)?;
+                    }
                     SnapshotRecordV1::Recall {
                         conversation,
                         target,
@@ -485,7 +541,8 @@ impl Node {
                     // Preserve old snapshot tags without restoring retired filtering state.
                     SnapshotRecordV1::DmLanguageProfile { .. }
                     | SnapshotRecordV1::DmLanguageDecision { .. } => {}
-                    SnapshotRecordV1::AccountCreation { .. } => {}
+                    SnapshotRecordV1::AccountCreation { .. }
+                    | SnapshotRecordV1::LocalSuppression { .. } => {}
                     SnapshotRecordV1::AccountProfile { profile } => {
                         node.receive_account_profile(&profile)
                             .map_err(|_| SnapshotError::InvalidEncoding)?;
@@ -558,18 +615,27 @@ impl Node {
                         from,
                         wall_clock,
                         manifest,
-                    } => node
-                        .received_files
-                        .lock()
-                        .expect("received_files mutex not poisoned")
-                        .record(
-                            ConversationId::new(conversation),
-                            from,
-                            wall_clock,
-                            &manifest,
-                            EventId::new(event_id),
-                        )
-                        .map_err(|_| SnapshotError::Io)?,
+                    } => {
+                        if node
+                            .account_suppression
+                            .lock()
+                            .expect("account suppression mutex not poisoned")
+                            .contains(ConversationId::new(conversation), EventId::new(event_id))
+                        {
+                            return Ok(());
+                        }
+                        node.received_files
+                            .lock()
+                            .expect("received_files mutex not poisoned")
+                            .record(
+                                ConversationId::new(conversation),
+                                from,
+                                wall_clock,
+                                &manifest,
+                                EventId::new(event_id),
+                            )
+                            .map_err(|_| SnapshotError::Io)?;
+                    }
                     SnapshotRecordV1::AccountContact { account_id } => {
                         contacts_log
                             .append_durable(&account_id)
@@ -793,6 +859,10 @@ impl Node {
             .lock()
             .expect("trust cards mutex not poisoned")
             .all();
+        let suppression = self
+            .account_suppression
+            .lock()
+            .expect("account suppression mutex not poisoned");
         let mut record_count = u64::try_from(
             sent_count
                 .checked_add(received_count)
@@ -805,6 +875,7 @@ impl Node {
                 .and_then(|count| count.checked_add(file_count))
                 .and_then(|count| count.checked_add(file_contacts.len()))
                 .and_then(|count| count.checked_add(portable_favorites.len()))
+                .and_then(|count| count.checked_add(suppression.len()))
                 .ok_or(SnapshotError::SizeLimit)?,
         )
         .map_err(|_| SnapshotError::SizeLimit)?;
@@ -865,6 +936,13 @@ impl Node {
             record_count,
         };
         let mut writer = SnapshotWriter::new(destination, &header)?;
+        for (conversation, id) in suppression.records() {
+            writer.push(&SnapshotRecordV1::LocalSuppression {
+                conversation: *conversation.as_bytes(),
+                message_id: *id.as_bytes(),
+            })?;
+        }
+        drop(suppression);
         for conversation in sent_conversations {
             let own_author =
                 crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
@@ -1075,6 +1153,259 @@ fn preview_snapshot<R: Read>(source: R) -> Result<BackupPreview, SnapshotError> 
         favorite_files: favorite_media.len() as u64,
         missing_favorite_files: favorite_references.difference(&favorite_media).count() as u64,
     })
+}
+
+#[cfg(test)]
+mod suppression_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn restore_suppresses_account_logical_id_when_transport_event_id_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::from_secret_bytes([71; 32]);
+        let peer = Account::from_secret_bytes([72; 32]).account_id();
+        let host =
+            super::super::conversation::account_conversation_id(&account.account_id(), &peer);
+        let logical = [76; 32];
+        let wire = [77; 32];
+        let body = super::super::DmEnvelope::new(
+            peer.clone(),
+            account.account_id(),
+            logical,
+            b"deleted account message".to_vec(),
+        )
+        .encode();
+        let records = [
+            SnapshotRecordV1::AccountCreation {
+                created_at_ms: None,
+            },
+            SnapshotRecordV1::ReceivedDm {
+                conversation: *host.as_bytes(),
+                event_id: wire,
+                from: peer,
+                wall_clock: 100,
+                plaintext: body,
+            },
+            SnapshotRecordV1::LocalSuppression {
+                conversation: *host.as_bytes(),
+                message_id: logical,
+            },
+        ];
+        let header = SnapshotHeaderV1 {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            account_secret: account.secret_bytes(),
+            account_id: account.account_id(),
+            source_device_ed25519_pubs: vec![DeviceIdentity::generate().public().ed25519_pub],
+            created_at_ms: 200,
+            record_count: records.len() as u64,
+        };
+        let mut bytes = Vec::new();
+        crate::recovery::snapshot::write_snapshot(&mut bytes, &header, records).unwrap();
+        let restored = Node::install_recovery_snapshot(
+            std::io::Cursor::new(bytes),
+            &dir.path().join("restored"),
+            "pw",
+        )
+        .unwrap();
+        assert!(
+            restored
+                .received
+                .lock()
+                .unwrap()
+                .entry(EventId::new(wire))
+                .is_none(),
+            "a logical account erasure must hide every transport copy before installation"
+        );
+    }
+
+    #[test]
+    fn restore_installs_late_markers_before_bodies_and_preserves_other_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::from_secret_bytes([71; 32]);
+        let a = [72; 32];
+        let b = [73; 32];
+        let id = [74; 32];
+        let received_id = [75; 32];
+        let records = [
+            SnapshotRecordV1::AccountCreation {
+                created_at_ms: None,
+            },
+            SnapshotRecordV1::SentDm {
+                conversation: a,
+                message_id: id,
+                seq: 1,
+                wall_clock: 100,
+                plaintext: b"erased source".to_vec(),
+            },
+            SnapshotRecordV1::SentDm {
+                conversation: b,
+                message_id: id,
+                seq: 1,
+                wall_clock: 100,
+                plaintext: b"independent host".to_vec(),
+            },
+            SnapshotRecordV1::ReceivedDm {
+                conversation: a,
+                event_id: received_id,
+                from: "peer".into(),
+                wall_clock: 100,
+                plaintext: b"erased received source".to_vec(),
+            },
+            SnapshotRecordV1::LocalSuppression {
+                conversation: a,
+                message_id: id,
+            },
+            SnapshotRecordV1::LocalSuppression {
+                conversation: a,
+                message_id: received_id,
+            },
+            SnapshotRecordV1::LocalSuppression {
+                conversation: a,
+                message_id: id,
+            },
+        ];
+        let header = SnapshotHeaderV1 {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            account_secret: account.secret_bytes(),
+            account_id: account.account_id(),
+            source_device_ed25519_pubs: vec![DeviceIdentity::generate().public().ed25519_pub],
+            created_at_ms: 200,
+            record_count: records.len() as u64,
+        };
+        let mut bytes = Vec::new();
+        crate::recovery::snapshot::write_snapshot(&mut bytes, &header, records).unwrap();
+        let restored = Node::install_recovery_snapshot(
+            std::io::Cursor::new(bytes),
+            &dir.path().join("restored"),
+            "pw",
+        )
+        .unwrap();
+        let sent = restored.sentlog.lock().unwrap();
+        assert!(sent.entries_ref(&ConversationId::new(a)).is_empty());
+        let kept = sent.entries_ref(&ConversationId::new(b));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].plaintext, b"independent host");
+        assert_eq!(
+            restored
+                .recovered_sent_ids
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .id_for(&kept[0]),
+            Some(EventId::new(id))
+        );
+        assert!(
+            restored
+                .received
+                .lock()
+                .unwrap()
+                .entry(EventId::new(received_id))
+                .is_none()
+        );
+        assert_eq!(restored.account_suppression.lock().unwrap().len(), 2);
+    }
+
+    fn open(root: &Path) -> Arc<Node> {
+        let (d, _) = mpsc::unbounded_channel();
+        let (c, _) = mpsc::unbounded_channel();
+        let (f, _) = mpsc::unbounded_channel();
+        Node::open_with_account(
+            DeviceIdentity::generate(),
+            Account::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            d,
+            c,
+            f,
+            &root.join("messages.log"),
+            &root.join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    }
+
+    fn backfill(node: &Node, peer: &str, id: u8) -> super::super::pairing::BackfillRecord {
+        let conversation =
+            super::super::conversation::account_conversation_id(&node.account_id(), peer);
+        super::super::pairing::BackfillRecord {
+            conv: *conversation.as_bytes(),
+            event_id: [id; 32],
+            from: peer.into(),
+            wall_clock: 100,
+            plaintext: super::super::DmEnvelope::new(
+                peer.into(),
+                node.account_id(),
+                [id; 32],
+                b"retained text".to_vec(),
+            )
+            .encode(),
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_erasure_against_stale_account_backfill() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = open(dir.path());
+        let peer = Account::generate().account_id();
+        let erased = backfill(&node, &peer, 41);
+        let retained = backfill(&node, &peer, 42);
+        node.import_account_backfill(&[erased.clone(), retained.clone()])
+            .unwrap();
+        assert_eq!(
+            node.delete_account_message(&peer, EventId::new(erased.event_id))
+                .unwrap(),
+            1
+        );
+        let mut bytes = Vec::new();
+        node.write_recovery_snapshot(&mut bytes, 200).unwrap();
+        let restored = Node::install_recovery_snapshot(
+            std::io::Cursor::new(bytes),
+            &dir.path().join("restored"),
+            "new-password",
+        )
+        .unwrap();
+        assert_ne!(restored.identity.user_id(), node.identity.user_id());
+        assert_eq!(restored.account_id(), node.account_id());
+        restored
+            .import_account_backfill(&[erased.clone(), retained.clone()])
+            .unwrap();
+        let rows = restored.received.lock().unwrap();
+        assert!(
+            rows.entry(EventId::new(erased.event_id)).is_none(),
+            "restoring an archive must preserve exact erasure evidence before sibling catch-up"
+        );
+        assert!(rows.entry(EventId::new(retained.event_id)).is_some());
+        drop(rows);
+        let new_row = backfill(&restored, &peer, 43);
+        restored
+            .import_account_backfill(std::slice::from_ref(&new_row))
+            .unwrap();
+        assert!(
+            restored
+                .received
+                .lock()
+                .unwrap()
+                .entry(EventId::new(new_row.event_id))
+                .is_some()
+        );
+        let mut second = Vec::new();
+        restored.write_recovery_snapshot(&mut second, 300).unwrap();
+        let again = Node::install_recovery_snapshot(
+            std::io::Cursor::new(second),
+            &dir.path().join("restored-again"),
+            "newer-password",
+        )
+        .unwrap();
+        again.import_account_backfill(&[erased]).unwrap();
+        assert!(
+            again
+                .received
+                .lock()
+                .unwrap()
+                .entry(EventId::new([41; 32]))
+                .is_none()
+        );
+    }
 }
 
 #[cfg(test)]

@@ -21,6 +21,15 @@ pub(super) struct AccountSuppression {
 }
 
 impl AccountSuppression {
+    pub(super) fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Export exact local facts without cloning a second historical ID set.
+    pub(super) fn records(&self) -> impl Iterator<Item = (ConversationId, EventId)> + '_ {
+        self.ids.iter().map(|row| (row.conversation, row.id))
+    }
+
     pub(super) fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::open(path, password, MAGIC)?;
         Ok(Self {
