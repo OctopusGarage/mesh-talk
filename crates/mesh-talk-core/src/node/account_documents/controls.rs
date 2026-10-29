@@ -255,6 +255,30 @@ impl Node {
             })
             .collect()
     }
+    pub(in crate::node) fn private_dm_recall_selected(
+        &self,
+        peer: &str,
+        target: EventId,
+        author_account: &str,
+    ) -> Result<bool, crate::eventlog::LogError> {
+        if author_account != self.account_id() && author_account != peer {
+            return Ok(false);
+        }
+        let key = AccountDocumentKey::DmRecall {
+            peer_account: peer.into(),
+            target: target.to_hex(),
+            actor_account: author_account.into(),
+        };
+        let store = self.account_documents.lock().expect("documents mutex");
+        let Some(document) = store.get(&key)? else {
+            return Ok(false);
+        };
+        let value: Control = serde_json::from_slice(document.payload()).map_err(|_| {
+            crate::eventlog::LogError::CorruptFile("invalid selected recall control".into())
+        })?;
+        Ok(value.remove)
+    }
+
     pub(in crate::node) fn private_dm_control_revision(&self) -> (u64, [u8; 32]) {
         let local = { self.recalls.lock().expect("recalls mutex").revision() };
         let canonical = {

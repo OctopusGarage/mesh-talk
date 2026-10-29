@@ -126,6 +126,17 @@ impl RecallLog {
         self.revision
     }
 
+    pub(crate) fn contains(
+        &self,
+        conversation: ConversationId,
+        target: EventId,
+    ) -> Result<bool, LogError> {
+        Ok(self
+            .by_conversation
+            .get(&conversation)
+            .is_some_and(|marks| marks.iter().any(|mark| mark.target == target)))
+    }
+
     /// The targets we ourselves recalled in `conversation`.
     pub fn targets(&self, conversation: &ConversationId) -> Vec<EventId> {
         self.by_conversation
@@ -373,6 +384,55 @@ impl Node {
             .expect("recalls mutex not poisoned")
             .record(conv, target, wall_clock)
             .map_err(NodeError::Log)
+    }
+
+    /// Selected-row visibility. The caller supplies the author from its already
+    /// authenticated transcript/manifest. Producers persist verified peer recall
+    /// marks; account-private claims are read by their exact certified key.
+    pub(crate) fn message_recalled_selected(
+        &self,
+        conversation: ConversationId,
+        id: EventId,
+        account: Option<&str>,
+        author_account: Option<&str>,
+    ) -> Result<bool, NodeError> {
+        if account
+            .is_some_and(|peer| account_conversation_id(&self.account_id(), peer) != conversation)
+        {
+            return Ok(false);
+        }
+        let (logical, mut aliases) = {
+            let identities = self
+                .file_message_identities
+                .lock()
+                .expect("file identity mutex");
+            (
+                identities.logical(conversation, id),
+                identities.aliases(conversation, id),
+            )
+        };
+        if !aliases.contains(&logical) {
+            aliases.push(logical);
+        }
+        if !aliases.contains(&id) {
+            aliases.push(id);
+        }
+        for target in aliases {
+            if self
+                .recalls
+                .lock()
+                .expect("recalls mutex")
+                .contains(conversation, target)?
+            {
+                return Ok(true);
+            }
+            if let (Some(peer), Some(author)) = (account, author_account)
+                && self.private_dm_recall_selected(peer, target, author)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The set of recalled message ids for a CHANNEL: our own recalls (durable) plus peer
@@ -707,5 +767,85 @@ mod acceptance_tests {
             Err(NodeError::Log(LogError::ClockExhausted))
         ));
         assert!(node.recalls.lock().unwrap().targets(&channel).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod selected_lookup_tests {
+    use super::*;
+    use crate::{
+        discovery::Announce,
+        identity::{account::Account, device::DeviceIdentity},
+    };
+    #[test]
+    fn selected_recall_lookup_binds_scope_and_authenticated_author() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = Account::generate();
+        let peer = Account::generate();
+        let proof = Announce::new_with_account(&DeviceIdentity::generate(), &peer, "peer", 9);
+        let (node, _, _) = crate::node::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::from_secret_bytes(own.secret_bytes()),
+            &proof,
+        );
+        let host = account_conversation_id(&own.account_id(), &peer.account_id());
+        let selected = EventId::new([19; 32]);
+        assert!(
+            !node
+                .message_recalled_selected(
+                    host,
+                    selected,
+                    Some(&peer.account_id()),
+                    Some(&own.account_id())
+                )
+                .unwrap()
+        );
+        node.publish_own_account_recall(&peer.account_id(), selected, 100)
+            .unwrap();
+        assert!(
+            node.message_recalled_selected(
+                host,
+                selected,
+                Some(&peer.account_id()),
+                Some(&own.account_id())
+            )
+            .unwrap()
+        );
+        assert!(
+            !node
+                .message_recalled_selected(
+                    host,
+                    selected,
+                    Some(&peer.account_id()),
+                    Some(&peer.account_id())
+                )
+                .unwrap()
+        );
+        assert!(
+            !node
+                .message_recalled_selected(host, selected, Some(&peer.account_id()), None)
+                .unwrap()
+        );
+        assert!(
+            !node
+                .message_recalled_selected(
+                    ConversationId::new([42; 32]),
+                    selected,
+                    Some(&peer.account_id()),
+                    Some(&own.account_id())
+                )
+                .unwrap()
+        );
+        node.record_my_recall(host, selected, 100).unwrap();
+        assert!(
+            node.message_recalled_selected(host, selected, None, None)
+                .unwrap()
+        );
+        assert!(
+            !node
+                .message_recalled_selected(ConversationId::new([42; 32]), selected, None, None)
+                .unwrap()
+        );
     }
 }
