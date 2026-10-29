@@ -1466,8 +1466,17 @@ evidence survives that retirement, preventing an accepted-journal retry from
 creating another unread event. The desktop must atomically persist its existing
 reception state and cursor before ACK. CLI autosave must retain durable save work
 before ACK, and a bounded in-memory queue does not satisfy that requirement.
-These repository APIs alone do not switch production runtimes away from their
-legacy unbounded callbacks or prove a bounded Tauri/WebView handoff.
+The frontend demand pump uses a single in-flight page and a dirty wake bit. The
+existing reception owner still decides unread, mention, own-device, history-sync
+and batch-terminal behavior. A single local-storage replacement commits its
+bounded ledger, unread counts, undiscovered senders, overflow, history coverage,
+batch state and exact decimal-string cursor. A persistence failure leaves that
+page pending without replaying its already-applied effects; an ambiguous ACK
+retries the same token. The snapshot is scoped to local user, account and device;
+current runtime authority fences every page and ACK. Replacing a runtime stops
+old pulls, and a new WebView may replace a lost unacknowledged page. A missing or
+corrupt previously committed snapshot is an explicit recovery failure, never an
+implicit advance past unread work.
 
 `RuntimeStartup::bounded` and `Node::open_bounded_with_profile_lease` select the
 additive production delivery mode. They allocate no DM, channel, file or profile

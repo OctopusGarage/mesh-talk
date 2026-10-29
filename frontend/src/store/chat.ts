@@ -1,3 +1,16 @@
+import {
+  reception as receptionApi,
+  type HostReception,
+} from "@/lib/api/reception";
+import {
+  createReceptionDelivery,
+  type ReceptionCursor,
+  type ReceptionScope,
+} from "./receptionDelivery";
+import {
+  loadReceptionSnapshot,
+  saveReceptionSnapshot,
+} from "@/lib/receptionSnapshot";
 import { usePacks } from "./packs";
 import { stickerById } from "@/lib/stickerPacks";
 import { snapshotSticker } from "@/lib/stickerMedia";
@@ -138,16 +151,28 @@ function applyVerifiedIdentity(
     account_id: string;
     device_id: string;
     history_revision?: number;
+    supports_bounded_delivery?: boolean;
+    runtime_id?: string;
   },
   ready: boolean,
 ) {
   const owner = identity.owner;
   const acct = identity.account_id;
-  const persistedUnread = loadUnread(owner, acct);
-  const persistedPendingUnread = loadPendingUnread(owner, acct);
+  const committed =
+    identity.supports_bounded_delivery && identity.runtime_id
+      ? loadReceptionSnapshot({
+          owner,
+          account_id: acct,
+          device_id: identity.device_id,
+          runtime_id: identity.runtime_id,
+        })
+      : null;
+  const persistedUnread = committed?.unread ?? loadUnread(owner, acct);
+  const persistedPendingUnread =
+    committed?.pendingUnknownUnread ?? loadPendingUnread(owner, acct);
   const persistedReception = emptyReception(
-    loadReceptionLedger(owner, acct),
-    loadUnreadOverflow(owner, acct),
+    committed?.ledger ?? loadReceptionLedger(owner, acct),
+    committed?.overflowUnread ?? loadUnreadOverflow(owner, acct),
   );
   set((state) => {
     const sameScope = state.unreadOwner === owner && state.myAccountId === acct;
@@ -178,7 +203,10 @@ function applyVerifiedIdentity(
             ...reception,
             accountSeen: reception.accountSeen,
             historyBaselines: Object.keys(persistedReception.ledger),
-            historyFullBaselines: loadFullHistoryBaselines(owner, acct),
+            historyFullBaselines:
+              committed?.historyFullBaselines ??
+              loadFullHistoryBaselines(owner, acct),
+            ...(committed ? { reception: committed.reception } : {}),
           }
         : {}),
       identityEpoch: invalidateScope
@@ -190,6 +218,9 @@ function applyVerifiedIdentity(
       unread,
       pendingUnknownUnread,
       unreadOwner: owner,
+      deliveryRuntime: identity.supports_bounded_delivery
+        ? (identity.runtime_id ?? null)
+        : null,
       ready,
       bootFailed: false,
     };
@@ -345,6 +376,7 @@ export interface ChatState
   bootRequest: number;
   /** Native startup ticket; distinct from the frontend run and account identity. */
   startupId: string | null;
+  deliveryRuntime: string | null;
   rosterRequest: number;
   favoritesRequest: number;
   ready: boolean;
@@ -459,6 +491,7 @@ function emptySessionData() {
     bootBusy: false,
     bootRequest: 0,
     startupId: null,
+    deliveryRuntime: null,
     statusBusy: false,
     rosterRequest: 0,
     favoritesRequest: 0,
@@ -522,7 +555,9 @@ async function refreshRosterSnapshot(
     if (!lease.current() || get().rosterRequest !== request) return;
     if (
       identity.device_id !== get().myId ||
-      identity.account_id !== get().myAccountId
+      identity.account_id !== get().myAccountId ||
+      (identity.runtime_id !== undefined &&
+        identity.runtime_id !== get().deliveryRuntime)
     ) {
       // Runtime/account replacement can happen without a host logout. Invalidate
       // old in-flight conversation work; the run's owned ticker performs fresh boot.
@@ -822,6 +857,139 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         set({ bootFailed: true });
     })();
 
+    let delivery: ReturnType<
+      typeof createReceptionDelivery<HostReception>
+    > | null = null;
+    let deliveryRuntime: string | null = null;
+    let receiptCursor: ReceptionCursor | null = null;
+    let receiptScope: ReceptionScope | null = null;
+    let receiptPending = false;
+    const snapshot = (cursor: ReceptionCursor) => {
+      const state = get();
+      return {
+        cursor,
+        ledger: state.ledger,
+        overflowUnread: state.overflowUnread,
+        unread: state.unread,
+        pendingUnknownUnread: state.pendingUnknownUnread,
+        historyFullBaselines: state.historyFullBaselines,
+        reception: state.reception,
+      };
+    };
+    const failReception = (error: unknown) => {
+      const message = `Couldn't save received messages: ${errorMessage(error)}`;
+      if (lease.current() && get().error !== message) set({ error: message });
+    };
+    const synchronizeDelivery = () => {
+      const state = get();
+      const runtime = state.ready ? state.deliveryRuntime : null;
+      if (runtime === deliveryRuntime) return;
+      delivery?.stop();
+      delivery = null;
+      deliveryRuntime = runtime;
+      receiptCursor = null;
+      receiptScope = null;
+      receiptPending = false;
+      if (!runtime || !lease.current() || !lease.owner) return;
+      const scope: ReceptionScope = {
+        owner: lease.owner,
+        account_id: state.myAccountId,
+        device_id: state.myId,
+        runtime_id: runtime,
+      };
+      try {
+        receiptCursor = loadReceptionSnapshot(scope)?.cursor ?? null;
+        receiptScope = scope;
+        let firstPull = true;
+        delivery = createReceptionDelivery({
+          scope,
+          cursor: receiptCursor,
+          current: () =>
+            lease.current() &&
+            get().ready &&
+            get().deliveryRuntime === runtime &&
+            get().myAccountId === scope.account_id &&
+            get().myId === scope.device_id,
+          pull: async (after, through) => {
+            const page = await receptionApi.pull(
+              scope,
+              after,
+              through,
+              firstPull,
+            );
+            firstPull = false;
+            return page;
+          },
+          apply: (page) => {
+            receiptPending = true;
+            for (const receipt of page.receipts) {
+              switch (receipt.kind) {
+                case "dm":
+                  get_handleDm(set, get, receipt.event);
+                  break;
+                case "channel":
+                  get_handleChannel(set, get, receipt.event);
+                  break;
+                case "file":
+                  get_handleFile(set, get, receipt.event);
+                  break;
+                case "profile":
+                  applyChatProfile(receipt.event);
+                  break;
+                case "call":
+                  applyChatCallSignal(receipt.event);
+                  break;
+                case "progress":
+                  applyChatFileProgress(receipt.event);
+                  break;
+                case "state":
+                  void get().refreshRoster();
+                  void get().refreshChannels();
+                  void get().refreshStatuses(undefined, true);
+                  notifySyncInvalidation({ owner: scope.owner, kind: "state" });
+                  break;
+              }
+            }
+          },
+          persist: (cursor) => {
+            saveReceptionSnapshot(scope, snapshot(cursor));
+            receiptCursor = cursor;
+            receiptPending = false;
+          },
+          acknowledge: (page) => receptionApi.acknowledge(scope, page),
+          failed: failReception,
+        });
+        void delivery.wake();
+      } catch (error) {
+        failReception(error);
+      }
+    };
+    const stopReceptionObservation = useChat.subscribe((state, previous) => {
+      synchronizeDelivery();
+      if (
+        receiptScope &&
+        receiptCursor &&
+        !receiptPending &&
+        lease.current() &&
+        (state.ledger !== previous.ledger ||
+          state.overflowUnread !== previous.overflowUnread ||
+          state.unread !== previous.unread ||
+          state.pendingUnknownUnread !== previous.pendingUnknownUnread ||
+          state.historyFullBaselines !== previous.historyFullBaselines ||
+          state.reception !== previous.reception)
+      ) {
+        try {
+          saveReceptionSnapshot(receiptScope, snapshot(receiptCursor));
+        } catch (error) {
+          failReception(error);
+        }
+      }
+    });
+    const wakeReception = () => {
+      synchronizeDelivery();
+      void delivery?.wake();
+    };
+    synchronizeDelivery();
     const expiryWallStart = Date.now();
     const expiryMonotonicStart = performance.now();
     const expire = () => {
@@ -845,9 +1013,21 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         notifyIncomingFileDismissed(file.fileConv);
     };
     const expiry = setInterval(expire, 1000);
-    if (typeof window !== "undefined") window.addEventListener("focus", expire);
-    if (typeof document !== "undefined")
+    const resumeReception = () => {
+      if (
+        typeof document === "undefined" ||
+        document.visibilityState !== "hidden"
+      )
+        wakeReception();
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("focus", expire);
+      window.addEventListener("focus", resumeReception);
+    }
+    if (typeof document !== "undefined") {
       document.addEventListener?.("visibilitychange", expire);
+      document.addEventListener?.("visibilitychange", resumeReception);
+    }
 
     let rosterBusy = false;
     let rosterDirty = false;
@@ -876,6 +1056,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         const now = performance.now();
         if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
           nextRosterFallback = now + 30000;
+          wakeReception();
           void refreshRoster();
         }
         if (!supportsPushState(lease.owner) || now >= nextStatusFallback) {
@@ -899,6 +1080,16 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
+      onReceptionWake: (scope) => {
+        if (
+          lease.current() &&
+          scope.owner === lease.owner &&
+          scope.account_id === get().myAccountId &&
+          scope.device_id === get().myId &&
+          scope.runtime_id === get().deliveryRuntime
+        )
+          wakeReception();
+      },
       onStateChanged: (e) => {
         const state = get();
         if (
@@ -980,12 +1171,18 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
     return () => {
       cancelled = true;
+      delivery?.stop();
+      stopReceptionObservation();
       clearInterval(roster);
       clearInterval(expiry);
-      if (typeof window !== "undefined")
+      if (typeof window !== "undefined") {
         window.removeEventListener("focus", expire);
-      if (typeof document !== "undefined")
+        window.removeEventListener("focus", resumeReception);
+      }
+      if (typeof document !== "undefined") {
         document.removeEventListener?.("visibilitychange", expire);
+        document.removeEventListener?.("visibilitychange", resumeReception);
+      }
       unlisten();
       if (get().runEpoch === lease.run) {
         stopChatCalls();

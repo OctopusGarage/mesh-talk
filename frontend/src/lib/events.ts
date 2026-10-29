@@ -15,6 +15,9 @@ import type {
 
 /** Subscribe to the node's inbound events. Returns a single unlisten function. */
 export function subscribeNodeEvents(handlers: {
+  onReceptionWake?: (
+    scope: import("@/store/receptionDelivery").ReceptionScope,
+  ) => void;
   onIntegrationMessageAccepted?: (e: IntegrationMessageAcceptedEvent) => void;
   onStateChanged?: (e: NodeStateChangedEvent) => void;
   onDm?: (e: DmReceivedEvent) => void;
@@ -32,6 +35,13 @@ export function subscribeNodeEvents(handlers: {
   onCallSignal?: (e: CallSignalEvent) => void;
 }): () => void {
   const unlisteners: Promise<UnlistenFn>[] = [];
+  if (handlers.onReceptionWake)
+    unlisteners.push(
+      listen<import("@/store/receptionDelivery").ReceptionScope>(
+        "node-reception-wake",
+        (e) => handlers.onReceptionWake!(e.payload),
+      ),
+    );
   if (handlers.onIntegrationMessageAccepted) {
     unlisteners.push(
       listen<IntegrationMessageAcceptedEvent>(
