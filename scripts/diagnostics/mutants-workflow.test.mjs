@@ -72,7 +72,7 @@ test("deep mutation samples use process-isolated tests with bounded execution", 
   assert.match(wrapper, /const shard = mutationShard\(Number\(process\.env\.GITHUB_RUN_NUMBER/);
   assert.match(wrapper, /"--shard", shard/);
   assert.match(wrapper, /"--sharding", "round-robin"/);
-  assert.match(wrapper, /"--timeout", "900"/);
+  assert.match(wrapper, /"--timeout", "360"/);
 });
 
 test("mutation report upload includes the workspace-root output directory", () => {
@@ -95,13 +95,21 @@ test("mutation builds reuse one incremental tree per matrix runner", () => {
   assert.match(workflow, /name: mutants-report-\$\{\{ matrix.worker \}\}/);
 });
 
-test("mutation job budget fits the observed workspace sample without relaxing test deadlines", () => {
+test("mutation job budget covers the full workspace sample with isolated hang detection", () => {
   // Run 40187525604 selected 17 mutants in a shard. Builds reached 130s;
-  // A healthy growing baseline exceeded 240s; preserve per-test isolation while
-  // allowing 900s for the complete workspace, including every consumer.
+  // budget the full workspace, not just the smaller package baseline.
   const selected = 17;
   const buildSeconds = 130;
   const suiteSeconds = Number(wrapper.match(/"--timeout", "(\d+)"/)[1]);
+  // Run 40922461468: core work alone occupied 888.73 process-seconds;
+  // completed host tests add 75 seconds before the remaining workspace tests.
+  // This lower bound already exceeds the old 240s limit at four processes.
+  const observedWorkSeconds = 888.73 + 75;
+  assert.ok(suiteSeconds >= observedWorkSeconds / 4 * 1.25,
+    "suite budget must include the actual workspace inventory and runner variance");
+  const nextest = readFileSync(new URL("../../.config/nextest.toml", import.meta.url), "utf8");
+  assert.match(nextest, /period = "60s", terminate-after = 1, grace-period = "5s"/);
+  assert.match(nextest, /test-threads = 4/);
   const setupSeconds = 6 * 60;
   const jobMinutes = Number(workflow.split("  mutants:\n")[1].match(/timeout-minutes: (\d+)/)[1]);
   assert.ok(jobMinutes * 60 >= setupSeconds + (selected + 1) * (buildSeconds + suiteSeconds),

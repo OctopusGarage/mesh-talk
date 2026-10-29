@@ -60,9 +60,17 @@ content or permission to publish it.
 3. Choose **Create** and inspect any error before trying again.
 4. Open the new channel from the sidebar to send messages.
 
+Each account appears once in the invitation picker, regardless of its number of
+devices. Your own linked devices are not separate people to invite. A new group
+assigns ownership to your account immediately. Invited accounts accept once;
+their certified linked devices inherit that membership and role through the
+existing authenticated group-state and key exchange. Both people need a reachable,
+updated client when creating an account invitation. If its account binding or
+format support cannot be verified, creation fails before a group is written.
+
 ## Review membership
 
-Open the channel's members control in the conversation header. Member profiles show known account and device identities. A known endpoint can belong to a relay; it is not proof of the person's physical location.
+Open the channel's members control in the conversation header. Each account appears once, with its nickname, avatar, presence and role. Select a person to view their profile or start a private conversation. Device totals, device identities and other members' sharing preferences are not shown in this list. Open **Group settings** for your preferences and the group history policy.
 
 Membership belongs to your account. Linking another device does not require the
 group owner to invite or approve that device again. An accepted, reachable device
@@ -81,6 +89,9 @@ Your linked devices share the group directory and known member details even
 when a legacy group has not completed its format upgrade. Group names are labels:
 two groups with similar names remain separate when their IDs differ.
 
+An automatic group-format update preserves completed departures. Rejoining
+requires a fresh invitation and acceptance.
+
 A shared reference makes the group visible while its verified group state is
 being obtained. It does not grant membership or copy sending keys. The app keeps
 that reference read-only and explains the group-format requirement; it must not
@@ -90,6 +101,12 @@ device. The original device keeps its existing group access.
 Group-directory metadata is account topology. Turning off optional message
 history does not hide the groups already held by your account's devices. It also
 does not enable message-history transfer or change any other synchronization choice.
+
+**Previous account groups** contains local history whose account-authorized
+membership still belongs to the account used before linking. You can expand this
+section to read retained messages. These rows are separate from your current
+account's group directory and do not offer joining or sending actions. Linking
+devices does not merge two separate accounts' group memberships or ownership.
 
 ## Understand message copy status
 
@@ -110,15 +127,15 @@ availability guarantee.
 
 ## History for new members
 
-The owner can open the channel's member controls and change **History for new members**.
+The owner can open **Members → Group settings** and change **History for new members**.
 Other members can view this setting. Pending invitees and closed channels cannot change it.
 
-| Setting | Earlier text messages included |
-| --- | --- |
-| Off | None |
-| Last 10 messages | Up to 10 retained text messages |
-| Last 3 days | Text messages authored in the preceding 3 days, within transfer limits |
-| Last 10 messages within 3 days | Up to 10 text messages from the preceding 3 days |
+| Setting                        | Earlier text messages included                                         |
+| ------------------------------ | ---------------------------------------------------------------------- |
+| Off                            | None                                                                   |
+| Last 10 messages               | Up to 10 retained text messages                                        |
+| Last 3 days                    | Text messages authored in the preceding 3 days, within transfer limits |
+| Last 10 messages within 3 days | Up to 10 text messages from the preceding 3 days                       |
 
 New invitation-based groups default to **Last 10 messages within 3 days**. Existing
 channels without a signed policy remain **Off**. The policy and selection are frozen
@@ -170,7 +187,7 @@ updated file behavior; post-office storage and retention limits still apply.
 
 ## Share retained history
 
-Open the members control and find your own accepted membership. **Stop sharing** disables this device's **Share a copy** participation; **Resume sharing** enables it again. Sharing lets authorized members obtain retained channel history and available attachments from this device. Turning it off does not stop incoming messages or recovery of your own authorized history. Upgrade all members before using these controls with older clients.
+Open **Members → Group settings → Your preferences**. **Stop sharing** disables this device's **Share a copy** participation; **Resume sharing** enables it again. Sharing lets authorized members obtain retained channel history and available attachments from this device. Turning it off does not stop incoming messages or recovery of your own authorized history. Upgrade all members before using these controls with older clients.
 
 A reachable member must retain the needed events and keys and permit sharing for member recovery to work. An opaque post office can hold encrypted copies but cannot grant membership or recover missing endpoint identity keys. A retained message or file card does not guarantee that attachment contents remain available.
 
@@ -182,7 +199,7 @@ network cost. Messages and your original file sends continue. **Share a copy**
 stays enabled and cached files remain subject to their normal retention rules.
 Sharing resumes automatically when the network is reported unrestricted.
 
-The members dialog shows the pause on this device. **Allow temporarily** permits
+Your group preferences show the pause on this device. **Allow temporarily** permits
 file assistance across all groups on this device until the reported cost status
 changes or you sign out. **Resume data protection** revokes the exception sooner.
 An exception never overrides **Stop sharing** or group access permissions.

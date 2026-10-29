@@ -36,6 +36,10 @@ jobs:
         run: |
           sudo route -n add -host 224.0.0.167 -interface 127.0.0.1
           node scripts/diagnostics/native-multicast-probe.mjs --require
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
       - name: Linux native webview dependencies
         if: runner.os == 'Linux'
         run: |

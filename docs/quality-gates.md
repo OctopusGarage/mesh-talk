@@ -72,12 +72,13 @@ symbol-free `mutants` Cargo profile, and the workspace-root build cache. Every
 mutant still runs the workspace tests through pinned cargo-nextest 0.9.148. Its
 `mutants` profile isolates each test in a process and fails tests exceeding 60
 seconds (with a five-second termination grace period). This catches injected busy
-loops even when they prevent an async timeout from being polled. The 900-second
+loops even when they prevent an async timeout from being polled. The 360-second
 whole-suite deadline remains a hard failure. Reports are uploaded as `mutants-report-0`
 through `mutants-report-3`; assess all four reports for the complete sample.
 
-The mutation tool runs a hard unmutated workspace baseline for each nonempty
-selection; no separate workspace test duplicates that baseline. Empty selections
+The pinned mutation tool runs an unmutated baseline for the packages containing
+the selected mutations; each mutation runs the complete workspace. Record the
+actual commands and inventories, and retain the separate workspace CI gate. Empty selections
 only validate selection/tooling and do not constitute baseline evidence. Tiny
 dependency-free fixture crates check the actual pinned CLI, caught/advisory outcomes,
 baseline failure, empty selection, and hanging mutations via

@@ -217,6 +217,28 @@ fn add_group(
     );
 }
 
+fn add_reference_group(
+    out: &mut HashMap<String, PresenceInfo>,
+    id: String,
+    members: &[mesh_talk_core::node::GroupInventoryMember],
+    complete: bool,
+) {
+    if !complete {
+        out.insert(id, PresenceInfo::default());
+        return;
+    }
+    let mut accounts = HashSet::new();
+    let mut unbound = HashSet::new();
+    for member in members.iter().filter(|m| !m.pending && !m.post_office) {
+        if let Some(account) = &member.account_id {
+            accounts.insert(account.clone());
+        } else {
+            unbound.insert(member.public.user_id());
+        }
+    }
+    add_group(out, id, accounts, unbound);
+}
+
 fn add_self(out: &mut HashMap<String, PresenceInfo>, account_id: String, user_id: String) {
     let lease = mesh_talk_core::discovery::roster::PUBLIC_PRESENCE_TTL.as_secs();
     let own = out.entry(account_id).or_default();
@@ -295,6 +317,16 @@ pub async fn get_presence(
         }
     }
     for channel in rt.list_channels() {
+        if let Some(reference) = node.channel_shared_reference(channel.id) {
+            // Account-shared display facts do not create a device membership.
+            add_reference_group(
+                &mut out,
+                hex::encode(channel.id.as_bytes()),
+                &reference.members,
+                reference.members_complete,
+            );
+            continue;
+        }
         let (accounts, unbound) = node.channel_member_account_sets(channel.id);
         add_group(
             &mut out,
@@ -308,6 +340,38 @@ pub async fn get_presence(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_reference_presence_counts_accounts_and_keeps_incomplete_rosters_unknown() {
+        use super::*;
+        use mesh_talk_core::{identity::device::DeviceIdentity, node::GroupInventoryMember};
+        let member = |account: Option<&str>, pending, post_office| GroupInventoryMember {
+            public: DeviceIdentity::generate().public(),
+            account_id: account.map(str::to_owned),
+            name: None,
+            pending,
+            post_office,
+        };
+        let members = vec![
+            member(Some("alice"), false, false),
+            member(Some("alice"), false, false),
+            member(Some("bob"), false, false),
+            member(Some("pending"), true, false),
+            member(Some("infrastructure"), false, true),
+            member(None, false, false),
+        ];
+        let mut out = HashMap::new();
+        add_self(&mut out, "alice".into(), "self".into());
+        add_reference_group(&mut out, "complete".into(), &members, true);
+        assert_eq!(out["complete"].member_count, Some(2));
+        assert_eq!(out["complete"].unbound_member_count, Some(1));
+        assert_eq!(out["complete"].online_count, Some(1));
+        add_reference_group(&mut out, "partial".into(), &members, false);
+        assert_eq!(out["partial"].member_count, None);
+        assert_eq!(out["partial"].online_count, None);
+        add_reference_group(&mut out, "empty".into(), &[], true);
+        assert_eq!(out["empty"].member_count, Some(0));
+    }
+
     use super::*;
     use mesh_talk_core::{
         discovery::{Announce, Roster},

@@ -22,8 +22,10 @@ export function EmptyState() {
   const policyError = useContactPolicy((s) => s.error);
   const owner = useAuth((s) => s.user?.id);
   const visibleCount =
-    channels.filter((channel) => !favorites[channel.channel_id]?.hidden)
-      .length +
+    channels.filter(
+      (channel) =>
+        !channel.previous_account && !favorites[channel.channel_id]?.hidden,
+    ).length +
     (policyLoaded
       ? accounts.filter((account) => !hidden[account.account_id]).length
       : 0);

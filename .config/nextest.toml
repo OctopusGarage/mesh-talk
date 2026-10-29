@@ -3,3 +3,9 @@
 [profile.mutants]
 slow-timeout = { period = "60s", terminate-after = 1, grace-period = "5s" }
 test-threads = 4
+
+# This real UDP proof-withdrawal fixture needs three existing five-second
+# refreshes. Start it early so its final refresh does not become a suite tail.
+[[profile.mutants.overrides]]
+filter = 'package(=mesh-talk-core) & test(=postoffice::gateway::tests::gateway_withdraws_stale_proof_after_repeated_invalid_replies)'
+priority = 100

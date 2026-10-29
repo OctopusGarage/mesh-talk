@@ -36,7 +36,7 @@ validation contract. Discovery checks do not replace executed browser evidence.
 
 PR Chromium portable core acceptance reuses the complete full-suite execution on
 each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritative
-76 scenario paths from each of four shards, copies and validates screenshots,
+core scenario paths from each of four shards, copies and validates screenshots,
 success traces and raw scenario metadata, then validates the exact once-only
 union using the current source/run/attempt/platform identity. Missing, failed,
 flaky or skipped portable scenarios fail acceptance. Windows uses the same
@@ -90,7 +90,7 @@ lifetimes; other platforms use one. Each shard writes a unique nested evidence
 root and must exit successfully. The runner merges every outcome and validates
 the unchanged full scenario inventory before the existing screenshot/trace
 validator runs. Missing, duplicate, skipped, flaky or failed cases remain failures.
-The current 76-case core and 77-case extended inventories keep each Windows
+The current 79-case core and 80-case extended inventories keep each Windows
 process to at most 20 scenarios; discovery regressions verify this bound and the
 exact once-only union. Two 38-case processes exceeded the 20-minute hosted job
 deadline after 75 of 76 scenarios passed, with later page loads slowing down.
@@ -199,6 +199,81 @@ selection omissions. Missing data stays unknown. Investigate newly slow or flaky
 checks before adding retries or global obligations. A policy change needs an
 explicit rationale and review; this process does not automatically rewrite rules,
 relax thresholds or infer a speedup or zero omissions from a small sample.
+
+Private account-action fixtures follow the [account/device ownership contract](module-boundaries.md#account-and-device-ownership): source commit, durable requester adoption and public member receipt are separate observations. The generic History-off/signed-provenance functional fixture uses a thirty-second watchdog around source and requester commitment, exact effect IDs and durable private projections. This is a functional completion bound, not an eight-second business latency guarantee. Dedicated request/result and held-traffic performance fixtures retain their independent eight-second assertions. Verify public receipt afterward through the existing authenticated sync owner, retaining original signature, author, sealed payload and reduction assertions. Never install an event or decrypted body directly to make receipt pass. Dedicated automatic-fanout fixtures retain coverage for scheduling, backpressure, delayed work and real member delivery.
+
+When a reference-device fixture requires a synchronous capability-cache override
+and admission on one current-thread runtime, keep that requester and its watchers
+there. Run the other simulated devices' complete accept/background owners on
+independent owned current-thread runtimes. Transfer listeners through standard
+sockets before registering them on the owning reactor; release all server start
+gates together without warmup traffic. Preserve each explicitly scoped functional
+or performance deadline, resource budgets and signed-provenance assertions. Post-commit public network observations
+run on the observing device's runtime. Shutdown closes admission, cancels and joins
+producers, clears idle sessions, drains admitted writers and joins every owned
+thread, including panic cleanup. A same-source topology comparison diagnoses a
+fixture constraint; it does not establish the cause of every CI timing failure.
+
+Modern self-control fixtures allow thirty seconds for cold, bidirectional
+capability and role readiness before admission, matching the existing owner-rename
+setup boundary. This is a bounded setup watchdog, not an operation latency claim:
+retain every full-identity capability and signed-provenance predicate, record
+setup duration and complete/capacity diagnostics, and keep the independent
+admitted-action deadline at eight seconds. The archive-marker setup and dedicated
+held-traffic latency assertions also retain their existing eight-second bounds.
+Cold authentication and control exchanges keep their production network limits.
+
+Role-bootstrap helpers bind readiness to the requested group, the exact full source identity and a signed head floor captured when invoked. If none exists yet, pin the first non-tombstone source head observed within the same setup deadline. Accept that exact metadata or a strictly newer signed revision for the same key and full source; reject older, tombstoned or same-revision conflicting records. A later concurrent publication must not move an already satisfied snapshot barrier. Helpers may observe that durable role through the existing local document watch while an unrelated page tail remains in flight. A prior completed capability response for the exact full source identity is required before cancelling that redundant read. Preserve the setup deadline, current-binding validation and completed protocol-error checks; an incomplete first capability page cannot establish readiness.
+
+Pagination fixtures distinguish a completed comparison sweep from a settled full
+scope. A selected signed row can advance after its completion digest was captured;
+`pending == false` alone does not prove `up_to_date`. Start a fresh comparison
+through the existing cursor owner after a completed mismatch, retain partial
+continuations and the original total pull bound, and require both full settlement
+and the complete exact source metadata set. Failure diagnostics should report
+body-free cursor flags and metadata-class differences rather than message bodies.
+
+Explicit custody-page fixtures follow the production cursor's local-admission
+contract. A typed local-capacity rejection exchanges no bytes: preserve the same
+cursor and continuation, wait for its existing retry time, and retry within the
+functional fixture's thirty-second watchdog. Two typed local-admission failures
+can legitimately require two five-second deferrals before a signed page completes;
+retain real admission and authenticated-page checks rather than clearing cooldowns. An early successful no-op while admission is still
+deferred does not prove a completed exchange. Other errors fail immediately;
+History-off, exact signed negative versions and repaired-positive assertions stay
+unchanged. Do not clear cooldowns, create a new cursor or warm the connection to
+avoid this boundary.
+
+File retry fixtures that require the initial best-effort attempt to fail can
+accept the real privacy handshake and immediately close before any application
+frame. Keep the original sending API, durable pending work, relay custody,
+consent and complete-byte assertions. Borrow the fixture listener only during
+that setup call; drop its responder before starting the normal production accept
+owner. This models an actual authenticated transport failure without spending
+unrelated handshake deadlines at an unserviced listening socket.
+
+For manifest frame boundaries, binary search a monotonic encoded-size predicate
+within the original range. Check the immediately preceding fitting case, the
+first protected overflow and ordinary-frame compatibility, then pass the original
+prospective manifest shape to the production selector. Keep real serialization,
+proof/expiry overhead and frame limits.
+
+Mutation timing comparisons must retain the actual package/workspace command,
+test inventory and process count. A package-only baseline does not establish
+that a larger workspace mutation run fits the same deadline. Improve measured
+fixture overhead without narrowing test scope. Budget the full inventory from
+observed work and runner variance; retain process isolation and per-test hang
+detection when correcting a whole-suite budget.
+A resource-bound argument may explain an equivalent surviving guard mutation;
+it cannot turn an interrupted or timed-out run into a completed advisory survivor.
+
+The development profile gives the protocol core optimization level 1 because
+its callers instantiate generic authenticated-encryption loops. Dependency-only
+crypto optimization does not optimize all of those loops. Tests and mutations
+inherit this setting while retaining debug assertions, overflow checks, complete
+inventories and existing worker/deadline limits. Release settings are independent.
+Compare execution time separately from initial and incremental compilation cost
+when assessing this tradeoff; a focused speedup does not certify a full baseline.
 
 ## Change-aware development plans
 
@@ -346,6 +421,39 @@ using the boundary table above. Existing PR preflight, full-health, protected CI
 and release obligations remain unchanged. Compare median/p95 feedback latency,
 compile time, resource queue time, first-attempt failures and defects caught only
 by broader tests before claiming a speedup.
+
+### Cold fixture preparation versus measured progress
+
+Account-group Noise latency fixtures share the existing test owner's bounded
+30-second `cold_account_setup` for reciprocal capability establishment and the
+first authenticated response that creates a controlled hold. These waits happen
+before operation admission or before the external custody source starts. They
+establish the fixture's real connection state; they are not an eight-second
+operation or custody latency assertion, and they do not drive extra RPCs, warm
+session pools, retry submissions or suppress background workers.
+
+Modern self-control fixtures observe validated Directory and Control scope
+completions in both directions for the selected full peer identities. These
+observations reset before final requester enrollment. The aggregate device sync
+phase includes unrelated lanes and is not a prerequisite for group admission.
+Keep the original role, capability and retained-membership proofs alongside these
+scope completions; the observations neither issue requests nor stop workers.
+
+Once the original operation is admitted, or the external possession proof starts,
+the existing eight-second progress assertions remain unchanged. The same applies
+to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
+Wake five/eight-second deadlines, three-second role-page bootstrap and five-second
+work drains. The overall nextest per-test 60-second and mutation 360-second
+limits remain authoritative; stage bounds do not add together into a larger test
+budget. Only waits with this specific pre-admission/controlled-hold purpose use
+the cold helper; do not replace unrelated eight-second waits by matching their
+numeric duration.
+
+Projection-work regressions distinguish root membership-control reconstruction
+from nested legacy parent-cut proof validation. Keep the original root-control
+counts and observe nested work separately. Content-only additions, including
+content after a real departure, must leave both counts unchanged; do not pin a
+particular nested count or hide nested work from total-work assertions.
 
 ## Structured development feedback
 
@@ -545,6 +653,18 @@ running all scenarios. Portable/native scenarios and snapshot assertions remain
 in place. Sharding trades more concurrent runner slots and setup work for shorter
 elapsed time; account concurrency limits can reduce the gain.
 
+Disposable GitHub-hosted Ubuntu CI, mutation, browser and native UI runners
+prepare their APT sources before dependency installation.
+`scripts/ci/ubuntu-apt-source.mjs` replaces only the exact Azure Ubuntu archive URI
+with the official HTTPS Ubuntu archive, including URI entries in the referenced
+`/etc/apt/apt-mirrors.txt` runner mirror list. It preserves suites, components,
+signing keys, security repositories, other origins and mirror priorities. The
+helper rejects other host environments, unsupported Azure URIs, unrecognized
+mirror-list references and symlinks. It validates all candidate files before
+writing and preserves file ownership and permissions. This avoids a slow
+runner-image mirror consuming the existing job budget; browser workers, retries,
+test inventories and deadlines are unchanged.
+
 Windows full-regression runners expand the IPv4 TCP client port pool to
 10000–65534 before browser execution. Repeated fresh contexts load Vite's module
 graph over loopback; the default 16K pool can exhaust while closed connections
@@ -601,19 +721,56 @@ selections still execute their own unmodified baseline and strict outcome valida
 The preflight does not narrow the sample or certify any test result. Pinned-tool
 smoke tests cover empty and nonempty selections without compiling a failing fixture.
 
-Daily/manual mutation testing retains one rotating workspace sample across four runners. Its
-360-minute job ceiling covers setup, the unmutated baseline and the complete sample.
-The per-test nextest deadline remains 60 seconds. The full-workspace ceiling is
-900 seconds: a complete local 2,340-test nextest baseline passed in 552 seconds,
-and historical baselines hit the previous 240-second limit with hundreds
-of tests still pending. This is a harness resource budget, not a product deadline;
-completed suites return immediately, and timeouts still fail strict validation.
-The in-place runner cannot use cargo-mutants timeout multipliers, so keep this
-bound explicit and reassess it from baseline measurements as the suite grows. The
-October 25 sample selected 16–17 mutants per runner, with builds up to 130 seconds
-and successful suites around 180–217 seconds. A 60-minute job canceled unfinished
-shards despite passing baselines. Reassess this budget from selected counts and
-build/test timings as the workspace grows; incomplete reports still fail the gate.
+Daily/manual mutation testing retains one rotating workspace sample across four runners and
+four isolated test processes per runner. The 180-minute job budget covers setup,
+the baseline and the observed sample of up to 17 mutants. Each complete workspace
+suite has a 360-second bound; individual tests retain the 60-second hang detector
+and five-second termination grace. Failed or interrupted reports still fail the gate.
+
+Run 40922461468 exposed a budget mismatch: the package baseline ran 2,228 tests
+and took 223 seconds on the slower runner, while every mutation ran 2,829 tests.
+The baseline core work plus observed host work already exceeds a 240-second
+four-process budget, even before the remaining workspace tests.
+At cancellation, the active tests were only milliseconds to ten seconds old;
+none had reached the individual hang limit. Other shards completed the same full
+inventory in 183–209 seconds, confirming runner variance rather than a universal
+hang. The six-minute suite budget includes the larger inventory and variance;
+it does not reclassify those interrupted runs as successes or change test scope.
+Reassess budgets using actual commands, inventories and build/test timings as the
+workspace grows, rather than comparing a package baseline with a workspace run.
+
+The pinned cargo-mutants 27.1.0 baseline selects only packages containing the
+selected mutations, even with `--workspace --test-workspace true`; individual
+mutations still run the complete workspace. Record both actual commands and test
+inventories. A package-only baseline is not a measured workspace baseline, and
+its wall time must not be compared directly with a larger mutation run. Acceptance
+also requires the separate complete workspace CI gate; no mutation baseline is
+skipped or reported as broader than it ran.
+
+The mutation runner explicitly sets `CARGO_INCREMENTAL=1` for both tool child
+processes because rust-cache exports `0` through the job environment. The real-tool
+smoke regression starts from that disabled parent environment and checks actual
+Rust incremental query-cache output. The existing fifteen-second UDP gateway
+proof-withdrawal fixture has higher scheduling priority only in the mutation
+profile, so its three refreshes can overlap other tests. The in-memory stalled
+policy-write fixture completes its original Noise handshake before pausing Tokio
+time, proves the real send owns the guard, and checks it remains pending at
+9.999 seconds, then the unchanged ten-second production timer must complete before
+the original twelve-second outer bound and release that guard. Paused time
+auto-drives the awaited timer, including Tokio's millisecond tick rounding. No real
+UDP clock is accelerated. Test inventory, four
+processes and the sixty-second per-test limit remain unchanged; the complete
+workspace uses the 360-second suite budget described above.
+Scheduling estimates are not completed-run evidence; validate the full unchanged
+workspace inventory on the current candidate before claiming a timing improvement.
+
+The real Cargo retention fixture compiles its disarmed build script before
+starting the lock probe. An explicit `rerun-if-env-changed` input then arms that
+compiled script inside a new Cargo process, preserving actual Cargo/cleanup lock
+interoperability in both directions. Cold compilation has a separate five-minute
+setup bound; probe readiness and reverse lock contention each use a fifteen-second
+bound. No cleanup assertion is skipped when Windows linking is slow.
+
 Loopback UDP reply fixtures connect their receiving socket to their own listener
 so concurrent discovery traffic cannot masquerade as a reply. Tests must still
 reject extra replies from that listener after a refresh.
@@ -698,8 +855,10 @@ summary from their saved log. A renamed filter that selects zero tests cannot
 silently pass; unrelated library tests may be filtered out.
 
 Measure fixture preparation, protocol phases and teardown before changing a
-network deadline. HTTP regressions use the owner's private deadline policy while
-asserting the unchanged 30-second production default. Search limit regressions
+network deadline. HTTP expiry regressions establish real TCP admission and observe
+shutdown readiness before advancing Tokio's unchanged 30-second production clock.
+They retain structured timeout responses and connection/handler slot release.
+Search limit regressions
 prepare most events through the real signing/persistence/indexing owner and keep
 registered send/search wiring. Delivery timing spans distinguish card preparation
 from restart fairness and transfer completion. These changes must retain timeout,
@@ -1109,6 +1268,20 @@ actionable failure and runner minutes per merged PR. Classify failures as code,
 scenario/fixture, platform/environment or external service before deciding
 whether an earlier check or a harness correction is appropriate. Retain the
 existing cancellation, sharding and comprehensive CI gates.
+
+## Production frontend startup
+
+React hooks and the renderer must resolve to one production runtime. The
+`react-singleton.test.mjs` diagnostic builds with the real Vite configuration
+and deliberately duplicated dependency trees; both React and React DOM must
+remain singletons. The diagnostic runs with the existing Node diagnostics gate.
+Development-server browser checks do not exercise production module resolution.
+
+Install deployment dependencies with `npm ci`, reusing the package manager's
+download cache rather than copying or merging `node_modules`. Matching lockfiles
+alone do not prove an installed dependency tree is intact. Native installation
+acceptance must verify the production frontend renders its expected screen
+without the display-error boundary; a process and visible window are insufficient.
 
 ## Explicit physical network acceptance
 

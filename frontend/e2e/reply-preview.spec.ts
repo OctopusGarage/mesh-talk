@@ -11,13 +11,13 @@ for (const theme of ["light", "dark"] as const) {
       ({ account, theme }) => {
         document.documentElement.classList.toggle("dark", theme === "dark");
         const canvas = document.createElement("canvas");
-        canvas.width = 160;
-        canvas.height = 100;
+        canvas.width = 1600;
+        canvas.height = 200;
         const ctx = canvas.getContext("2d")!;
         ctx.fillStyle = "#197c87";
-        ctx.fillRect(0, 0, 80, 100);
+        ctx.fillRect(0, 0, 800, 200);
         ctx.fillStyle = "#e7b46f";
-        ctx.fillRect(80, 0, 80, 100);
+        ctx.fillRect(800, 0, 800, 200);
         const png = Uint8Array.from(
           atob(canvas.toDataURL().split(",")[1]),
           (c) => c.charCodeAt(0),
@@ -100,7 +100,42 @@ for (const theme of ["light", "dark"] as const) {
           .locator("img")
           .evaluate((img: HTMLImageElement) => img.naturalWidth),
       )
-      .toBe(160);
+      .toBe(1600);
+    const measurement = {
+      current: null as {
+        thumbnail: { width: number; height: number };
+        thumbnailFrame: { height: number };
+      } | null,
+    };
+    await expect
+      .poll(async () => {
+        // Virtualization hides rows while measuring. Read both rectangles from
+        // one visible, decoded instance rather than across separate remounts.
+        measurement.current = await quote
+          .locator("img")
+          .evaluate((img: HTMLImageElement) => {
+            const thumbnail = img.getBoundingClientRect();
+            const thumbnailFrame = img.parentElement!.getBoundingClientRect();
+            if (
+              getComputedStyle(img).visibility !== "visible" ||
+              img.naturalWidth !== 1600 ||
+              thumbnail.width === 0 ||
+              thumbnail.height === 0 ||
+              thumbnailFrame.height === 0
+            )
+              return null;
+            return {
+              thumbnail: { width: thumbnail.width, height: thumbnail.height },
+              thumbnailFrame: { height: thumbnailFrame.height },
+            };
+          });
+        return measurement.current;
+      })
+      .not.toBeNull();
+    const { thumbnail, thumbnailFrame } = measurement.current!;
+    expect(thumbnail.width / thumbnail.height).toBeCloseTo(8, 1);
+    expect(thumbnail.width).toBeLessThanOrEqual(64);
+    expect(thumbnailFrame.height).toBeCloseTo(thumbnail.height, 0);
     await expect(
       page.locator('[data-message-id="photo-original"]'),
     ).toHaveCount(0);

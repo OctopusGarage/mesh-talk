@@ -9,9 +9,17 @@
 mod enrollment;
 pub use enrollment::{DeviceEnrollment, EnrolledDevice, EnrollmentSource};
 mod account_access;
+mod account_group;
 pub use account_access::{
     AccountAccessSnapshot, AccountAccessSyncFailure, AccountAccessSyncPhase,
     AccountAccessSyncStatus,
+};
+pub use account_group::{
+    AccountGroupAccess, AccountGroupExecution, AccountGroupOperation,
+    AccountGroupOperationExecution, AccountGroupOperationId, AccountGroupOperationKind,
+    AccountGroupOperationPhase, AccountGroupOperationQuery, AccountGroupOperationRejection,
+    AccountGroupOperationStatus, AccountGroupRole, AccountGroupSource, AccountGroupStickerInput,
+    AccountGroupTextInput, AuthorityExpectation, MembershipLifetime, PreparedAccountGroupMessage,
 };
 pub(crate) mod account_devices;
 mod account_documents;
@@ -22,8 +30,8 @@ mod account_session;
 pub(crate) mod file_message_identity;
 pub use account_documents::{
     AccountDocument, AccountDocumentDomain, AccountDocumentKey, AccountDocumentMeta,
-    AccountDocumentPage, DocumentConversation, DocumentVersion, GroupInventoryMember,
-    GroupInventoryReference,
+    AccountDocumentPage, ConversationPersonalState, DocumentConversation, DocumentVersion,
+    GroupInventoryMember, GroupInventoryReference,
 };
 pub(crate) mod account_suppression;
 pub(crate) mod account_sync;
@@ -82,6 +90,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod linking;
 pub(crate) mod media_store;
 pub(crate) mod message;
+mod message_actions;
 pub(crate) mod name_directory;
 mod network_cost;
 pub use network_cost::{GroupFileSharingStatus, NetworkCost};

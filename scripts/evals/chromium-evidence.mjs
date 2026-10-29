@@ -79,7 +79,7 @@ export async function collectShards(input, expectedIdentity) {
   for (const [index, root] of roots.entries()) {
     await validateBrowserEvidence(resolve(root, "results.json"), { ...expectedIdentity, expectedPaths: manifests[index].paths });
   }
-  console.log(`Validated all 76 ${expectedIdentity.platform} Chromium portable scenarios from four full-suite shards`);
+  console.log(`Validated all ${requiredBrowserPaths("core").length} ${expectedIdentity.platform} Chromium portable scenarios from four full-suite shards`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

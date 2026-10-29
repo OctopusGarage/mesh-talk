@@ -51,6 +51,21 @@ _Avoid_: running instance, account, physical computer.
 An account-signed binding of a device's public identity to that account.
 _Avoid_: discovery record, membership grant.
 
+**Account group role**:
+The account's accepted member or owner role in a channel. Certified devices
+present the same account role. The public membership state and verified account
+bindings establish that role; device reachability determines execution
+availability, not a different role. Legacy public controls retain their existing
+signer requirements.
+_Avoid_: online status, device approval, shared group reference.
+
+**Account group operation**:
+An account-authorized intent to change channel state or send channel content.
+Its pending identity is distinct from the public events that commit its effects.
+Execution may use an authorized device without changing the account's role or
+reattributing existing public events.
+_Avoid_: committed event before acceptance, device-specific permission.
+
 **Peer**:
 Another known network device, including an infrastructure device when the role
 permits it. A peer is not necessarily a person or a channel member.
@@ -77,6 +92,14 @@ for permitted destinations within its validity period.
 _Avoid_: channel membership, device certificate, session token.
 
 ## Conversations and history
+
+**Personal conversation removal**:
+An account-private decision to remove a chat, optionally erasing its history on
+certified linked devices. Durable deletion floors prevent stale private replay;
+each device confirms its own cleanup separately. It is distinct from leaving or
+dissolving a group, recalling a message and blocking a contact.
+_Avoid_: global deletion, completed cleanup based only on a committed group Leave.
+See [removal semantics](docs/network-design-reference.md#personal-conversation-removal).
 
 **Conversation**:
 A direct or channel conversation whose authorized content can be retained and

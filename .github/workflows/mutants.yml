@@ -44,8 +44,8 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Cover setup plus 18 builds/suites (baseline and 17 mutants) at the
-    # observed 130s build and bounded 900s suite budgets, without truncation.
-    timeout-minutes: 360
+    # observed 130s build and bounded 360s suite budgets, without truncation.
+    timeout-minutes: 180
     strategy:
       fail-fast: false # Keep other reports if one runner has a baseline/tool failure.
       matrix:
@@ -77,6 +77,11 @@ jobs:
         id: selection
         working-directory: src-tauri
         run: node ../scripts/release/run-mutants.mjs --list-only
+
+      - name: Prepare Ubuntu archive source
+        if: steps.selection.outputs.selected != '0'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" scripts/ci/ubuntu-apt-source.mjs
 
       - name: Install Tauri system dependencies
         if: steps.selection.outputs.selected != '0'

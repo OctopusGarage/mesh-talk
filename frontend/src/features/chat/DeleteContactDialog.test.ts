@@ -58,12 +58,10 @@ afterEach(async () => {
 it("focuses cancel and only deletes after explicit confirmation", async () => {
   await render();
   expect(document.activeElement).toBe(button("delete-contact-cancel"));
-  expect(document.body.textContent).toContain(
-    "permanently deletes its message history",
-  );
+  expect(document.body.textContent).toContain("linked devices");
   expect(state.deleteContact).not.toHaveBeenCalled();
   await act(async () => button("delete-contact-confirm").click());
-  expect(state.deleteContact).toHaveBeenCalledWith("account");
+  expect(state.deleteContact).toHaveBeenCalledWith("account", false);
   expect(onClose).toHaveBeenCalledOnce();
 });
 it("cancels without deleting", async () => {
@@ -72,16 +70,29 @@ it("cancels without deleting", async () => {
   expect(state.deleteContact).not.toHaveBeenCalled();
   expect(onClose).toHaveBeenCalledOnce();
 });
-it("disables deletion when the contact comes online", async () => {
-  await render();
+it("allows deleting an online contact and keeps history by default", async () => {
   state.online = true;
   await render();
-  expect(button("delete-contact-confirm").disabled).toBe(true);
-  expect(document.querySelector('[role="alert"]')?.textContent).toContain(
-    "online",
+  expect(button("delete-contact-confirm").disabled).toBe(false);
+  expect(
+    document.querySelector<HTMLInputElement>(
+      '[data-testid="delete-contact-history"]',
+    )?.checked,
+  ).toBe(false);
+  await act(async () => button("delete-contact-confirm").click());
+  expect(state.deleteContact).toHaveBeenCalledWith("account", false);
+});
+it("deletes history only when the checkbox is selected", async () => {
+  await render();
+  await act(async () =>
+    document
+      .querySelector<HTMLInputElement>(
+        '[data-testid="delete-contact-history"]',
+      )!
+      .click(),
   );
   await act(async () => button("delete-contact-confirm").click());
-  expect(state.deleteContact).not.toHaveBeenCalled();
+  expect(state.deleteContact).toHaveBeenCalledWith("account", true);
 });
 it("keeps the dialog open and offers retry when deletion fails", async () => {
   state.deleteContact.mockResolvedValue(false);
@@ -89,7 +100,7 @@ it("keeps the dialog open and offers retry when deletion fails", async () => {
   await act(async () => button("delete-contact-confirm").click());
   expect(onClose).not.toHaveBeenCalled();
   expect(document.querySelector('[role="alert"]')?.textContent).toContain(
-    "try again",
+    "Try again",
   );
   expect(button("delete-contact-confirm").disabled).toBe(false);
 });

@@ -46,6 +46,7 @@ export function createChannelRefresh(context: Context) {
     promise?: Promise<void>;
     nextFallback: number;
     fullInFlight: boolean;
+    publication: number;
   };
   let run: Run | undefined;
 
@@ -57,6 +58,7 @@ export function createChannelRefresh(context: Context) {
         all: false,
         nextFallback: 0,
         fullInFlight: false,
+        publication: 0,
       };
     }
     return run;
@@ -64,6 +66,7 @@ export function createChannelRefresh(context: Context) {
 
   async function drain(work: Run) {
     while (work.current() && (work.all || work.dirty.size)) {
+      const publication = work.publication;
       const all = work.all;
       work.fullInFlight = all;
       const dirty = work.dirty;
@@ -76,6 +79,7 @@ export function createChannelRefresh(context: Context) {
           context.commands.listChannels(),
         );
         if (!work.current()) return;
+        if (publication !== work.publication) continue;
         const previous = context.read();
         const wanted = channels.filter(
           (channel) =>
@@ -85,6 +89,7 @@ export function createChannelRefresh(context: Context) {
         );
         const members = new Map<string, ChannelMembersInfo>();
         const publish = () => {
+          if (!work.current() || publication !== work.publication) return;
           context.write((state) => {
             const byId: Record<string, ChannelMemberInfo[]> = {};
             for (const channel of channels) {
@@ -126,7 +131,11 @@ export function createChannelRefresh(context: Context) {
           Array.from(
             { length: Math.min(MEMBER_CONCURRENCY, wanted.length) },
             async () => {
-              while (work.current() && index < wanted.length) {
+              while (
+                work.current() &&
+                publication === work.publication &&
+                index < wanted.length
+              ) {
                 const id = wanted[index++].channel_id;
                 try {
                   members.set(
@@ -195,6 +204,12 @@ export function createChannelRefresh(context: Context) {
 
   return {
     request,
+    /** Personal deletion supersedes any older list/member response in this lane. */
+    invalidate(): Promise<void> {
+      const work = currentRun();
+      work.publication++;
+      return request();
+    },
     ifDue(): Promise<void> {
       const work = currentRun();
       if (!work.current() || now() < work.nextFallback)

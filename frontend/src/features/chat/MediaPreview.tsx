@@ -4,6 +4,8 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
+  type SyntheticEvent,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -48,6 +50,10 @@ import {
   withinInlineCap,
 } from "./mediaFile";
 
+// Geometry follows the live Blob URL, so retirement cannot reuse another file's size.
+// Bound numeric metadata just like ordinary media reuse; no plaintext bytes are retained.
+const imageGeometry = new Map<string, { width: number; height: number }>();
+
 /** Inline preview for a received image or small video. Both are clickable to open a
  * full-size lightbox — an image shows large, a video autoplays with controls. Renders
  * nothing while the bytes are still loading. Bytes are fetched only when under the
@@ -82,8 +88,6 @@ export function MediaPreview({
   const status = useFileStatus(savedPath ? undefined : fileConv);
   const available = !!savedPath || !!status?.ready;
   const video = isVideo(name);
-  // Keep the same responsive box through IPC reads, decode, failures and remounts.
-  const frameClass = `relative mb-1.5 w-80 max-w-full overflow-hidden rounded-lg bg-muted/40 ${video ? "aspect-video" : "aspect-[4/3]"}`;
   const withinCap = withinInlineCap(name, size);
   const url = useFileObjectUrl(
     fileConv,
@@ -91,6 +95,39 @@ export function MediaPreview({
     blobMime(name, mime),
     { reuse: true },
   );
+  const [decoded, setDecoded] = useState<{
+    url: string;
+    width: number;
+    height: number;
+  } | null>(null);
+  const geometry = url
+    ? decoded?.url === url
+      ? decoded
+      : imageGeometry.get(url)
+    : undefined;
+  const frameClass = `relative w-80 max-w-full overflow-hidden rounded-lg bg-muted/40 ${video ? "aspect-video" : "aspect-[4/3]"}`;
+  const imageFrameClass =
+    "relative block max-w-full overflow-hidden rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  // A provisional 4:3 frame becomes the actual aspect ratio on the first decode.
+  // Reused URLs reserve the decoded geometry immediately on virtualized remounts.
+  const imageStyle: CSSProperties | undefined = geometry
+    ? {
+        width: Math.min(
+          geometry.width,
+          320,
+          (320 * geometry.width) / geometry.height,
+        ),
+        aspectRatio: `${geometry.width} / ${geometry.height}`,
+      }
+    : undefined;
+  const rememberImage = (event: SyntheticEvent<HTMLImageElement>) => {
+    const { naturalWidth: width, naturalHeight: height } = event.currentTarget;
+    if (!url || !width || !height) return;
+    if (imageGeometry.size >= 64 && !imageGeometry.has(url))
+      imageGeometry.delete(imageGeometry.keys().next().value!);
+    imageGeometry.set(url, { width, height });
+    setDecoded({ url, width, height });
+  };
   const [lightbox, setLightbox] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -253,7 +290,8 @@ export function MediaPreview({
         setError(t("files.shareFailed"));
     }
   };
-  const layoutId = motionOK ? `media-${fileConv}` : undefined;
+  const layoutId =
+    motionOK && (video || geometry) ? `media-${fileConv}` : undefined;
   const layoutTransition = { duration: 0.22, ease };
   const backdropTransition = { duration: motionOK ? 0.16 : 0.08, ease };
   // An inline image whose codec the webview can't decode (e.g. HEIC outside Safari) fires
@@ -504,11 +542,15 @@ export function MediaPreview({
   // Read-only (history viewer): the image as-is, no click-to-enlarge, no lightbox.
   if (readOnly) {
     return (
-      <div className={frameClass}>
+      <div
+        className={geometry ? imageFrameClass : frameClass}
+        style={imageStyle}
+      >
         <img
           src={url}
           alt={displayName}
           data-testid="file-image"
+          onLoad={rememberImage}
           onError={() => setImgFailed(true)}
           className="h-full w-full select-none object-contain"
         />
@@ -524,7 +566,8 @@ export function MediaPreview({
         onClick={() => setLightbox(true)}
         title={t("files.viewFullSize")}
         aria-label={t("files.viewFullSize")}
-        className={`${frameClass} block`}
+        className={geometry ? imageFrameClass : `${frameClass} block`}
+        style={imageStyle}
       >
         <motion.img
           src={url}
@@ -532,6 +575,7 @@ export function MediaPreview({
           layoutId={layoutId}
           transition={layoutTransition}
           data-testid="file-image"
+          onLoad={rememberImage}
           onError={() => setImgFailed(true)}
           className="h-full w-full select-none object-contain"
         />

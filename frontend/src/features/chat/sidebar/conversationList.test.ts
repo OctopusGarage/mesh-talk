@@ -19,6 +19,36 @@ const channel = (
   ...state,
 });
 
+it("keeps previous-account history outside the current account's group count and pins", () => {
+  const current = channel("current");
+  const mac = conversationList([], [current], {}, i18n.getFixedT("en"));
+  const windows = conversationList(
+    [],
+    [
+      current,
+      channel("old", {
+        previous_account: "previous",
+        left: true,
+        pending_invite: true,
+      }),
+      channel("actual-departure", { left: true }),
+    ],
+    { old: { pinned: true, custom_alias: null, hidden: false } },
+    i18n.getFixedT("en"),
+  );
+  expect(windows.pinnedRows).toHaveLength(0);
+  expect(windows.channelRows.map((row) => row.id)).toEqual([
+    "current",
+    "actual-departure",
+  ]);
+  expect(mac.channelRows.map((row) => row.id)).toEqual(["current"]);
+  expect(windows.listSize).toBe(2);
+  expect(windows.previousAccountRows.map((row) => row.id)).toEqual(["old"]);
+  expect(windows.previousAccountRows[0].subtitle).toBe(
+    i18n.t("conversation.previousAccountChannel"),
+  );
+});
+
 it("keeps source order inside sections, aliases and original rename names, excluding hidden channels from navigation", () => {
   const list = conversationList(
     [account("bob"), account("alice"), account("eve")],
@@ -133,5 +163,64 @@ it.each([false, true])(
     );
     expect(actual.channelRows).toHaveLength(1);
     expect(actual.channelRows[0].subtitle).toBe("3 members");
+  },
+);
+
+it.each(["owner", "member"] as const)(
+  "preserves verified %s participation while its execution is reconciling",
+  (role) => {
+    const list = conversationList(
+      [],
+      [
+        channel("shared", {
+          shared_reference: true,
+          dissolved: true,
+          archived: true,
+          left: true,
+          pending_invite: true,
+          account_access: {
+            account_id: "my-account",
+            role,
+            execution: { kind: "reconciling" },
+          },
+        }),
+      ],
+      {},
+      i18n.getFixedT("en"),
+    );
+    expect(list.channelRows[0]).toMatchObject({
+      subtitle: "3 members",
+      prioritizeSubtitle: false,
+    });
+  },
+);
+it.each([
+  ["invited", "Invitation pending"],
+  ["left", "Left channel"],
+  ["dissolved", "Dissolved channel"],
+  ["unknown", "Updating group access…"],
+] as const)(
+  "uses the authoritative account %s state over physical group flags",
+  (role, subtitle) => {
+    const list = conversationList(
+      [],
+      [
+        channel("shared", {
+          shared_reference: true,
+          archived: true,
+          account_access: {
+            account_id: "my-account",
+            role,
+            execution: { kind: "reconciling" },
+          },
+        }),
+      ],
+      {},
+      i18n.getFixedT("en"),
+    );
+    expect(list.channelRows[0]).toMatchObject({
+      subtitle,
+      prioritizeSubtitle: true,
+    });
   },
 );

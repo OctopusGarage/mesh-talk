@@ -317,8 +317,8 @@
         ".github/workflows/ci.yml",
         ".github/workflows/check-health.yml",
         ".github/workflows/e2e-ui.yml",
-        ".github/workflows/e2e-backend.yml",
         ".github/workflows/hidden-contacts-native.yml",
+        ".github/workflows/e2e-backend.yml",
         ".github/workflows/sanitizers.yml",
         ".github/workflows/mutants.yml",
         ".config/nextest.toml",
@@ -330,6 +330,8 @@
         ".github/workflows/dependency-review.yml",
         "scripts/ci/collect-ui-coverage.mjs",
         "scripts/ci/unit-coverage-artifact.mjs",
+        "scripts/ci/ubuntu-apt-source.mjs",
+        "scripts/ci/ubuntu-apt-source.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs",
         ".gitleaks.toml",
         ".github/workflows/ai-eval.yml",
@@ -349,6 +351,7 @@
         "scripts/diagnostics/ui-shard-orchestration.test.mjs"
       ],
       "node": [
+        "scripts/ci/ubuntu-apt-source.test.mjs",
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/test-ai-eval.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
@@ -364,7 +367,7 @@
         "scripts/diagnostics/ui-shard-orchestration.test.mjs"
       ],
       "escalation": [
-        "Run actionlint and affected workflow regressions. Mutation runner changes also require scripts/release/run-mutants.test.mjs with the pinned cargo-mutants and cargo-nextest tools; verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration.",
+        "Run actionlint and affected workflow regressions. Mutation runner changes also require scripts/release/run-mutants.test.mjs with the pinned cargo-mutants and cargo-nextest tools; verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the whole-suite budget from actual workspace inventory and runner variance while retaining per-test hang detection; size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration.",
         "Direct check migration requires successful current-source app-bound replacement evidence before editing branch protection; preserve strictness and unrelated checks. Windows archive changes require official pinned-tool archive/list/receipt/coverage proof, all default Cargo targets, exhaustive disjoint partitions, source/run/compiler/config/archive identity, hermetic offline consumers and actual hosted Windows execution. Producer lint, ordinary production builds and doctests remain directly required. Linux CI owns instrumented backend scenario evidence, while macOS/Windows retain their dedicated backend jobs.",
         "Coverage accumulation changes require scripts/ci/backend-coverage.test.mjs with real cargo-llvm-cov and matching LLVM tools. It must preserve the earlier default workspace report plus later ignored execution; --no-report and --no-clean are mutually exclusive. The owning native CI installs the tools before this regression.",
         "The Windows archive CLI fixture requires pinned cargo-nextest0.9.148/cargo-llvm-cov0.8.7 and LLVM tools matching rustc. It creates only an isolated local Git fixture and runs both exact partitions from the archive with empty consumers; no real product full suite is replaced by this contract test.",
@@ -440,7 +443,7 @@
         "scripts/diagnostics/trace-evidence.test.mjs"
       ],
       "escalation": [
-        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete 76-case inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Dedicated WebKit and extended/Firefox acceptance remain separate. Standalone Windows portable-runner batches remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
+        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete authoritative core inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Dedicated WebKit and extended/Firefox acceptance remain separate. Standalone Windows portable-runner batches remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
       ]
     },
     {

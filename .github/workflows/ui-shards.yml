@@ -35,6 +35,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
       # Fresh browser contexts repeatedly load Vite's module graph. Windows'

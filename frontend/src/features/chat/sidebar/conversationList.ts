@@ -1,3 +1,7 @@
+import {
+  canParticipateChannel,
+  isChannelInvitation,
+} from "../channelPermissions";
 import type { TFunction } from "i18next";
 import type {
   AccountInfo,
@@ -19,6 +23,7 @@ export interface ConversationListRow {
   subtitle: string;
   prioritizeSubtitle: boolean;
   personal?: boolean;
+  deletable?: boolean;
   /** Rename edits the announced name, not the displayed personal alias. */
   renameName: string;
 }
@@ -40,6 +45,7 @@ export function conversationList(
   const accountRows: ConversationListRow[] = [];
   const channelRows: ConversationListRow[] = [];
   const hiddenChannels: ConversationListRow[] = [];
+  const previousAccountRows: ConversationListRow[] = [];
   if (ownAccount && personalReady) {
     accountRows.push({
       id: ownAccount,
@@ -74,35 +80,53 @@ export function conversationList(
   }
   for (const c of channels) {
     const id = c.channel_id;
+    const participant = canParticipateChannel(c);
+    const access = c.account_access;
+    const roleKnown = access !== undefined;
+    const accessPending = roleKnown && (!access || access.role === "unknown");
+    const referenceOnly = c.shared_reference && !roleKnown;
+    const dissolved = roleKnown ? access?.role === "dissolved" : c.dissolved;
+    const archived = !roleKnown && c.archived;
+    const left = roleKnown ? access?.role === "left" : c.left;
+    const lifecycleCaption = c.previous_account
+      ? t("conversation.previousAccountChannel")
+      : participant
+        ? null
+        : accessPending
+          ? t("conversation.groupAccessPending", {
+              defaultValue: "Updating group access…",
+            })
+          : referenceOnly
+            ? t("conversation.sharedReference")
+            : dissolved
+              ? t("conversation.dissolvedChannel")
+              : archived
+                ? t("conversation.archivedChannel")
+                : left
+                  ? t("conversation.leftChannel")
+                  : isChannelInvitation(c)
+                    ? t("conversation.pendingInvite")
+                    : null;
     const row: ConversationListRow = {
       id,
       channel: true,
       renameName: c.name,
+      deletable: !c.previous_account && (left || dissolved),
       conv: {
         kind: "channel",
         id,
         name: favorites[id]?.custom_alias || c.name,
       },
-      pinned: favorites[id]?.pinned ?? false,
-      subtitle: c.shared_reference
-        ? t("conversation.sharedReference")
-        : c.dissolved
-          ? t("conversation.dissolvedChannel")
-          : c.archived
-            ? t("conversation.archivedChannel")
-            : c.left
-              ? t("conversation.leftChannel")
-              : c.pending_invite
-                ? t("conversation.pendingInvite")
-                : t("conversation.members", { count: c.member_count }),
-      prioritizeSubtitle: !!(
-        c.shared_reference ||
-        c.dissolved ||
-        c.archived ||
-        c.left ||
-        c.pending_invite
-      ),
+      pinned: !c.previous_account && (favorites[id]?.pinned ?? false),
+      subtitle:
+        lifecycleCaption ??
+        t("conversation.members", { count: c.member_count }),
+      prioritizeSubtitle: lifecycleCaption !== null,
     };
+    if (c.previous_account && !favorites[id]?.hidden) {
+      previousAccountRows.push(row);
+      continue;
+    }
     (favorites[id]?.hidden
       ? hiddenChannels
       : row.pinned
@@ -115,6 +139,7 @@ export function conversationList(
     accountRows,
     channelRows,
     hiddenChannels,
+    previousAccountRows,
     listSize: pinnedRows.length + accountRows.length + channelRows.length,
   };
 }
