@@ -1106,3 +1106,34 @@ fn runtime_metadata_suppressed_receive_installs_exact_evidence_without_a_body() 
     assert_eq!(rows.revision(), 0);
     assert_eq!(rows.body_reads(), 0);
 }
+
+#[test]
+fn channel_consumed_evidence_is_atomic_and_survives_restart_without_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let path = dir.path().join("received.log");
+    let store = ReceivedStore::from_profile(owner.clone(), &path, "pw").unwrap();
+    let id = EventId::new([91; 32]);
+    let host = conv(9);
+    let result: Result<(), LogError> = owner.database().transaction(|c| {
+        ReceivedStore::install_evidence_on(c, host, id)?;
+        Err(invalid("injected receiver rollback"))
+    });
+    assert!(result.is_err());
+    assert!(!store.processed(id).unwrap());
+    owner
+        .database()
+        .transaction(|c| ReceivedStore::install_evidence_on(c, host, id))
+        .unwrap();
+    assert!(store.processed(id).unwrap());
+    assert_eq!(store.usage().unwrap().records, 0);
+    drop(store);
+    drop(owner);
+    let store =
+        ReceivedStore::from_profile(profile(dir.path(), &identity, &account), &path, "pw").unwrap();
+    assert!(store.processed(id).unwrap());
+    assert_eq!(store.usage().unwrap().records, 0);
+    assert_eq!(store.body_reads(), 0);
+}

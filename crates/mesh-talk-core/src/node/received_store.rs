@@ -116,6 +116,23 @@ impl ReceivedStore {
     pub(crate) fn check_write(&self) -> Result<(), LogError> {
         self.repository.check_write()
     }
+    /// Body-free processing evidence for a consumed channel message. The caller
+    /// checks this store's publication barrier and commits its receiver state in
+    /// the same transaction. This does not change the transcript revision.
+    pub(crate) fn install_evidence_on(
+        c: &rusqlite::Connection,
+        conversation: ConversationId,
+        event_id: EventId,
+    ) -> Result<(), LogError> {
+        c.execute(
+            "INSERT OR IGNORE INTO transcript_received_evidence VALUES(?1,?2)",
+            rusqlite::params![
+                event_id.as_bytes().as_slice(),
+                conversation.as_bytes().as_slice()
+            ],
+        )?;
+        Ok(())
+    }
     /// The channel owner holds this store and the profile transaction. Check the
     /// source barrier before entering it; update the cache only after COMMIT.
     pub(crate) fn install_channel_on(
@@ -146,13 +163,7 @@ impl ReceivedStore {
             .map(|env| env.msg_id);
         let suppressed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM transcript_suppression WHERE conversation=?1 AND (id=?2 OR id=?3))",rusqlite::params![entry.conversation.as_bytes().as_slice(),entry.event_id.as_bytes().as_slice(),logical.as_ref().map(|id|id.as_slice())],|r|r.get(0))?;
         if suppressed {
-            c.execute(
-                "INSERT OR IGNORE INTO transcript_received_evidence VALUES(?1,?2)",
-                rusqlite::params![
-                    entry.event_id.as_bytes().as_slice(),
-                    entry.conversation.as_bytes().as_slice()
-                ],
-            )?;
+            Self::install_evidence_on(c, entry.conversation, entry.event_id)?;
             return Ok(false);
         }
         let inserted = TranscriptRepository::put_on(
