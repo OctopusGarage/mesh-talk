@@ -2,6 +2,7 @@
 //! transcript roots require a future combined source and revision owner.
 use super::*;
 
+pub(crate) mod combined;
 mod engine;
 mod read;
 #[cfg(test)]

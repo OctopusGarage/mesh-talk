@@ -1489,3 +1489,166 @@ fn validated_growth_gate_blocks_without_mutation_and_never_runs_for_duplicates_o
         Err(LogError::AuthorEquivocation { .. })
     ));
 }
+
+#[test]
+fn runtime_metadata_received_work_retries_fairly_and_reopens_without_body_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = database(&dir);
+    database.transaction(|c|{c.execute_batch("CREATE TABLE transcript_received_evidence(id BLOB PRIMARY KEY,conversation BLOB NOT NULL) WITHOUT ROWID;")?;Ok(())}).unwrap();
+    let domain = EventDomainId([9; 16]);
+    let repo = EventRepository::new(database.clone(), domain).unwrap();
+    let local = DeviceIdentity::generate();
+    let peer = DeviceIdentity::generate();
+    let mut events = Vec::new();
+    for n in 0..257 {
+        let item = event(&peer, n + 1, vec![], n, EventKind::Message);
+        repo.append(&item).unwrap();
+        events.push(item);
+    }
+    let conv = events[0].conversation_id;
+    repo.initialize_receiving(Author::from_ed25519(local.public().ed25519_pub))
+        .unwrap();
+    let first = repo
+        .pending_receive_ids(conv, 128, 8 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(first.len(), 128);
+    let second = repo
+        .pending_receive_ids(conv, 128, 8 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(second.len(), 128);
+    assert!(!second.iter().any(|id| first.contains(id)));
+    let third = repo
+        .pending_receive_ids(conv, 128, 8 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(
+        third[0], events[256].id,
+        "an old unknown key cannot starve a later processable event"
+    );
+    database
+        .transaction(|c| {
+            c.execute(
+                "INSERT INTO transcript_received_evidence VALUES(?1,?2)",
+                params![
+                    events[256].id.as_bytes().as_slice(),
+                    conv.as_bytes().as_slice()
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(repo.body_read_counts(), (0, 0));
+    drop(repo);
+    let reopened = EventRepository::new(database.clone(), domain).unwrap();
+    reopened
+        .initialize_receiving(Author::from_ed25519(local.public().ed25519_pub))
+        .unwrap();
+    for _ in 0..4 {
+        assert!(
+            !reopened
+                .pending_receive_ids(conv, 128, 8 * 1024 * 1024)
+                .unwrap()
+                .contains(&events[256].id)
+        );
+    }
+    assert_eq!(reopened.body_read_counts(), (0, 0));
+    assert!(matches!(
+        reopened.pending_receive_ids(conv, usize::MAX, 1),
+        Err(LogError::InvalidPageBudget)
+    ));
+    assert_eq!(reopened.body_read_counts(), (0, 0));
+}
+
+#[test]
+fn runtime_metadata_receive_bootstrap_resumes_and_keeps_control_work_separate() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = database(&dir);
+    database.transaction(|c|{c.execute_batch("CREATE TABLE transcript_received_evidence(id BLOB PRIMARY KEY,conversation BLOB NOT NULL) WITHOUT ROWID;")?;Ok(())}).unwrap();
+    let domain = EventDomainId([9; 16]);
+    let repo = EventRepository::new(database.clone(), domain).unwrap();
+    let local = DeviceIdentity::generate();
+    let peer = DeviceIdentity::generate();
+    let author = Author::from_ed25519(local.public().ed25519_pub);
+    repo.initialize_receiving(author).unwrap();
+    for n in 0..257 {
+        repo.append(&event(&peer, n + 1, vec![], n, EventKind::Message))
+            .unwrap();
+    }
+    let control = event(&peer, 258, vec![], 258, EventKind::Delete);
+    repo.append(&control).unwrap();
+    assert!(repo.discover_receives().unwrap());
+    // A crash after a committed migration page must resume the unfinished scan.
+    database
+        .transaction(|c| {
+            c.execute(
+                "UPDATE participant_receive_scan SET initialized=0 WHERE domain=?1",
+                [domain.0.as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drop(repo);
+    let repo = EventRepository::new(database.clone(), domain).unwrap();
+    repo.initialize_receiving(author).unwrap();
+    let (after, through) = repo.bootstrap_control_position().unwrap();
+    assert_eq!(after, -1);
+    assert!(through >= 257);
+    assert_eq!(
+        repo.pending_control_ids(control.conversation_id, 1, 4096)
+            .unwrap(),
+        vec![control.id]
+    );
+    assert_eq!(
+        repo.pending_receive_ids(control.conversation_id, 128, 8 * 1024 * 1024)
+            .unwrap()
+            .len(),
+        128
+    );
+    repo.advance_control_bootstrap(through).unwrap();
+    repo.complete_control(control.id).unwrap();
+    let late = event(&peer, 259, vec![], 259, EventKind::Delete);
+    repo.append(&late).unwrap();
+    drop(repo);
+    let repo = EventRepository::new(database, domain).unwrap();
+    repo.initialize_receiving(author).unwrap();
+    assert_eq!(
+        repo.bootstrap_control_position().unwrap(),
+        (through, through)
+    );
+    assert_eq!(
+        repo.pending_control_ids(control.conversation_id, 1, 4096)
+            .unwrap(),
+        vec![late.id]
+    );
+    assert_eq!(repo.body_read_counts(), (0, 0));
+}
+
+#[test]
+fn runtime_metadata_oversized_receive_cannot_starve_later_valid_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = database(&dir);
+    database.transaction(|c|{c.execute_batch("CREATE TABLE transcript_received_evidence(id BLOB PRIMARY KEY,conversation BLOB NOT NULL) WITHOUT ROWID;")?;Ok(())}).unwrap();
+    let repo = EventRepository::new(database, EventDomainId([9; 16])).unwrap();
+    let local = DeviceIdentity::generate();
+    let peer = DeviceIdentity::generate();
+    let oversized = Event::new(
+        &peer,
+        ConversationId::new([1; 32]),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::Message,
+        vec![1; 262_145],
+    );
+    let later = event(&peer, 2, vec![], 2, EventKind::Message);
+    repo.append(&oversized).unwrap();
+    repo.append(&later).unwrap();
+    repo.initialize_receiving(Author::from_ed25519(local.public().ed25519_pub))
+        .unwrap();
+    assert_eq!(
+        repo.pending_receive_ids(later.conversation_id, 2, 4096)
+            .unwrap(),
+        vec![later.id]
+    );
+    assert_eq!(repo.body_read_counts(), (0, 0));
+}

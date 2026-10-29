@@ -170,6 +170,15 @@ impl TranscriptRepository {
             .database()
             .read(|c| self.select_history_on(c, conversation, after, limit, descending, false))
     }
+    pub(crate) fn header_reverse_scan_page(
+        &self,
+        conversation: &ConversationId,
+        before: Option<i64>,
+        limit: TranscriptPageLimit,
+    ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
+        let sql_limit = limit.sql_limit()?;
+        self.profile.database().read(|c|{let mut statement=c.prepare(&format!("SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND conversation=?2 AND ordinal<?3 ORDER BY ordinal DESC LIMIT ?4"))?;let mut rows=statement.query(params![self.kind,conversation.as_bytes().as_slice(),before.unwrap_or(i64::MAX),sql_limit])?;let(rows,more)=admit(&mut rows,limit,false)?;let next=if more{rows.last().map(|h|h.ordinal)}else{None};Ok(TranscriptScanPage{rows,next})})
+    }
     pub(crate) fn header_scan_page(
         &self,
         conversation: Option<&ConversationId>,

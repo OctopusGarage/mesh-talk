@@ -13,6 +13,7 @@ pub(crate) mod maintenance;
 mod metadata;
 mod participant;
 mod policy;
+mod receiving;
 pub(crate) mod selection;
 #[cfg(test)]
 pub(crate) use policy::RepositoryPolicyView;
@@ -391,7 +392,6 @@ impl EventRepository {
         }
         Ok(Some(event))
     }
-    #[cfg(test)]
     pub(crate) fn header(&self, id: &EventId) -> Result<Option<EventHeader>, LogError> {
         self.database.read(|c| {
             self.require_visible_id_on(c, id)?;

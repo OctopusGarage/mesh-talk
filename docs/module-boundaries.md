@@ -141,7 +141,14 @@ connection. `sent_store.rs`, `received_store.rs` and the indexed owner in
 `account_suppression.rs` expose owned lookups, bounded pages and exact local
 deletion markers. Their constructors require validated participant authority;
 the existing Node consumers remain on the legacy stores until their coordinated
-integration. See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
+integration. `eventlog/repository/order/combined.rs` extends the existing causal
+order owner with disk ranks for signed events and isolated archive roots.
+`eventlog/repository/receiving.rs` owns resumable metadata discovery and bounded,
+fair retry selection; exact transcript evidence survives body erasure and commits
+with body/effect installation. These derived selectors do not replace the delivery
+journal. Account-route selectors retain the first envelope per conversation and
+advance transactionally when its row is erased.
+See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
 
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary
