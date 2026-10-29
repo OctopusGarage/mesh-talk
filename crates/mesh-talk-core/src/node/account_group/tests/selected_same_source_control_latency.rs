@@ -342,7 +342,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                 required.extend([(other, &reference), (&reference, other)]);
             }
             let ready = required.into_iter().all(|(node, peer)| {
-                node.group_operation_versions
+                let capabilities = node.group_operation_versions
                     .lock()
                     .unwrap()
                     .get(&peer.user_id())
@@ -350,7 +350,12 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                         support.public == peer.identity.public()
                             && support.kinds & AccountGroupOperationKind::Rename.capability_bit()
                                 != 0
-                    })
+                    });
+                let documents_settled = node.device_sync_status().into_iter().any(|status| {
+                    status.device_id == peer.user_id()
+                        && status.document_phase == crate::node::SyncPhase::UpToDate
+                });
+                capabilities && documents_settled
             });
             if ready {
                 break;
@@ -359,7 +364,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         }
     })
     .await
-    .expect("both real certified operation capabilities must precede admission");
+    .expect("real capabilities and cold document comparisons must settle before the natural-read fault is installed");
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner
@@ -376,6 +381,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     let active_a_page = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let classes = Arc::new(Mutex::new(Vec::new()));
     let aborts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let held_pages = Arc::new(Mutex::new(Vec::<(tokio::task::Id, usize)>::new()));
     // The exact preemption contract begins at the authenticated held read,
     // not earlier natural publication/cold setup traffic.
     let abort_window = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -383,6 +389,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let classes = classes.clone();
         let aborts = aborts.clone();
+        let held_pages = held_pages.clone();
         let abort_window = abort_window.clone();
         let retired = retired.clone();
         let exact_owner = owner.identity.public();
@@ -457,7 +464,16 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
             } else if phase.starts_with("control_owned_abort reason=")
                 && abort_window.load(std::sync::atomic::Ordering::Acquire)
             {
-                aborts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let active = *active_a_page.lock().unwrap();
+                if let Some((_, count)) = held_pages
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|(task, _)| Some(*task) == active)
+                {
+                    *count += 1;
+                    aborts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
     }));
@@ -537,6 +553,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         let abort_trace = abort_trace.clone();
         let active_a_page = active_a_page.clone();
         let abort_window = abort_window.clone();
+        let held_pages = held_pages.clone();
         move |peer, frame| {
             let owner_id = owner_id.clone();
             let source = source.clone();
@@ -549,6 +566,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
             let abort_trace = abort_trace.clone();
             let active_a_page = active_a_page.clone();
             let abort_window = abort_window.clone();
+            let held_pages = held_pages.clone();
             let release = release.clone();
             let arrived = arrived.clone();
             let checkpoints = checkpoints.clone();
@@ -575,15 +593,20 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                         result_snapshot(&source, group, *active_operation.lock().unwrap()),
                     );
                 }
-                // A request already dispatched before the observer was installed
-                // is allowed to finish; hold only a positively observed natural turn.
-                if !classes
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|phase| phase.starts_with("control_dispatch protected=false"))
-                {
-                    return;
+                // Historical natural turns do not qualify a current protected
+                // resume/replacement. Let cold work finish; fault only the
+                // currently observed natural page before accepting the operation.
+                if arrived.lock().unwrap().is_some() {
+                    let current = classes.lock().unwrap();
+                    let natural = current
+                        .last()
+                        .is_some_and(|phase| phase.starts_with("control_dispatch protected=false"))
+                        && current.iter().rev().take(2).any(|phase| {
+                            phase == "control_turn_origin resumed=false replacement=false"
+                        });
+                    if !natural {
+                        return;
+                    }
                 }
                 let effective_after = request.operation.as_ref().and_then(|probe| probe.after.as_ref()).map(|after| {
                     if after.legacy_leave {
@@ -678,6 +701,10 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                             "the original case captures a fresh background comparison"
                         );
                     }
+                    let task = active_a_page.lock().unwrap().expect(
+                        "held natural request must belong to the observed current Control task",
+                    );
+                    held_pages.lock().unwrap().push((task, 0));
                     abort_window.store(true, std::sync::atomic::Ordering::Release);
                     record_b_trace(
                         &abort_trace,
@@ -714,6 +741,17 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                             ),
                             "the paired background page must be protected from publication hints"
                         );
+                        let task = active_a_page.lock().unwrap().expect(
+                            "held paired resume must belong to the observed current Control task",
+                        );
+                        {
+                            let mut pages = held_pages.lock().unwrap();
+                            assert!(
+                                pages.len() == 1 && pages[0].0 != task,
+                                "the second held read owns a separate bounded page task"
+                            );
+                            pages.push((task, 0));
+                        }
                         record_b_trace(
                             &abort_trace,
                             b_clock,
@@ -966,6 +1004,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         );
     }
     let aborts_before_release = aborts.load(std::sync::atomic::Ordering::Relaxed);
+    let held_abort_counts = held_pages.lock().unwrap().clone();
     let effects = owner
         .log
         .lock()
@@ -1071,10 +1110,16 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         abort_trace.lock().unwrap()
     );
     let (requester, source) = receipt.unwrap_or_else(|_| panic!("same-source pre-operation background read blocked its new private receipt: requester={:?} source={:?} abort_trace={:?}", before_release_requester.map(|status| status.phase), before_release_source.map(|status| status.phase), abort_trace.lock().unwrap()));
+    assert_eq!(held_abort_counts.len(), if other_selected { 2 } else { 1 });
+    assert!(
+        held_abort_counts.iter().all(|(_, count)| *count == 1),
+        "each exact held page must be preempted once: held={held_abort_counts:?}; all_aborts={:?}",
+        abort_trace.lock().unwrap()
+    );
     assert_eq!(
         aborts_before_release,
         if other_selected { 2 } else { 1 },
-        "the authenticated held-read interval yields exactly once per required preemption despite repeated status polling; abort_trace={:?}",
+        "the captured held tasks yield exactly once each despite repeated status polling; unrelated metadata preemptions remain visible in abort_trace={:?}",
         abort_trace.lock().unwrap()
     );
     assert!(
