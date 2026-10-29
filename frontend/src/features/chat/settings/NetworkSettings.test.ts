@@ -181,3 +181,28 @@ it("allows withdrawing origin sharing when discovery dependencies are off", asyn
     "connection",
   );
 });
+
+it("groups discovery, network visibility and delivery without duplicating controls", async () => {
+  await render();
+  const section = (key: string) =>
+    [...host.querySelectorAll("section")].find(
+      (node) =>
+        node.querySelector("h3")?.textContent === `settings.sections.${key}`,
+    )!;
+  expect(
+    section("deviceDiscovery").querySelector("#setting-discovery-scope"),
+  ).not.toBeNull();
+  expect(
+    section("crossNetwork").querySelector("#setting-bridge-discovery"),
+  ).not.toBeNull();
+  expect(
+    section("crossNetwork").querySelector("#setting-origin-sharing"),
+  ).not.toBeNull();
+  expect(
+    section("offlineDelivery").querySelector("#setting-post-office"),
+  ).not.toBeNull();
+  expect(
+    section("offlineDelivery").querySelector("#setting-post-office-send"),
+  ).not.toBeNull();
+  expect(host.querySelectorAll("#setting-post-office")).toHaveLength(1);
+});

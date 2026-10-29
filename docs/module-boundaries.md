@@ -32,7 +32,7 @@ settings/startup control and the single desktop service handle;
 `integrations/instructions.rs` owns only the marked user-level bootstrap file.
 Both transports share one integration service/registry and core sending path.
 `http.rs` owns public static discovery, request limits and fixed scoped routes;
-request schemas derive from the existing models. The Integrations settings UI uses
+request schemas derive from the existing models. The Agent access settings UI uses
 the shared save coordinator and an explicit-owner typed adapter. See
 [desktop local access](bot-integrations.md#desktop-local-agent-access).
 
@@ -85,7 +85,7 @@ Paths below are relative to the repository root. `core/` abbreviates
 | Files/folders                                  | `core/file/`, `core/node/files.rs`, `sticker_media.rs`, `filebook.rs`, `file_consent.rs`, `file_completion.rs`, `file_message_identity.rs`, `group_file_delivery.rs`                                                                                      | Consent, chunk integrity and recipient completion remain distinct transitions. Presentation intake belongs to `ui/features/chat/attachments/useAttachmentIntake.ts`; the store retains intent acceptance/retry.                        |
 | History/search/recall/reactions                | `core/node/queries.rs`, `search.rs`, `recall.rs`, `reactions.rs`                                                                                                                | Query through core; [recent-search references](ARCHITECTURE.md#recent-search-references) reuse canonical history identity and coverage. Frontend uses verified account bindings and centralized contact visibility.                                                                                                                                        |
 | Linking and sibling replay                     | `core/node/pairing.rs`, `linking.rs`, `enrollment.rs`, `account_sync*.rs`, `account_preferences.rs`, `account_access.rs`                                                                           | Pairing authority and replay policy stay separate from the dialog. Host adoption belongs to `src-tauri/src/linked_account.rs`; signed-out enrollment belongs to `device_enrollment.rs` and reuses the recovery publication journal; private login application belongs to `shared_account_login.rs`.                                                                                            |
-| Calls                                          | `core/node/call.rs`, `ui/store/calls.ts`, `ui/features/chat/WebRtcTestDialog.tsx`                                                                                               | Core owns authenticated signaling; the call store owns call lifecycle and WebRTC media; the test dialog owns local media diagnostics. Do not reuse mailbox custody as live signaling.                                                  |
+| Calls                                          | `core/node/call.rs`, `ui/store/calls.ts`, `ui/lib/mediaDeviceCheck.ts`, `ui/features/chat/settings/MediaDeviceCheck.tsx`                                                                                               | Core owns authenticated signaling; the call store owns call lifecycle and WebRTC media; the settings device-check runner owns local media diagnostics. Do not reuse mailbox custody as live signaling.                                                  |
 | Auth/runtime ownership                         | `src-tauri/src/state.rs`, `chat_commands/state.rs`, `runtime_bootstrap.rs`, `runtime_admission.rs`, `linked_account.rs`, `owner_commands.rs`, `owner_commands/search.rs`                                    | Reuse session leases and runtime installation checks; commands adapt inputs and errors. Frontend work uses `ui/store/ownership.ts`.                                                                                                    |
 | Message UI transitions                         | `ui/store/chat.ts`, `outgoingIntent.ts`, `conversationState.ts`, `chatRuntimeEffects.ts`                                                                                        | Intents own acceptance, conversation state owns cache transitions, effects bridge feature stores. Do not settle messages independently in components.                                                                                  |
 | Settings/privacy                               | `src-tauri/src/settings.rs`, `privacy_commands.rs`, `ui/store/settings.ts`, `privacy.ts`                                                                                        | `ui/lib/privacySettings.ts` owns presentation defaults/projection; `settingsDialogSession.ts` owns load/save generations. Network admission remains in core.                                                                           |
@@ -107,6 +107,19 @@ Receiving, loading, decoded and unsupported states share a responsive frame
 (up to 320 pixels wide, 4:3 for images and 16:9 for video); artwork is contained
 without cropping, and the lightbox retains full-size access. Transfer readiness
 must not swap an ordinary preview from a compact file card to an image row.
+The ordinary-image lightbox owns pointer-anchored wheel zoom (1–8 times the
+window-fit size), double-click zoom, bounded pointer dragging, fit reset and
+keyboard zoom (+/−/0). Resize clamps the current position; reopening resets it.
+Controls remain outside the clipped image stage. Escape restores trigger focus.
+On macOS, unzoomed images retain native text selection; Option/Alt-drag bypasses
+panning when zoomed. Actual recognition and selection require WKWebView evidence.
+Ordinary-image context actions use the shared accessible menu, suppress WebKit
+browser defaults and reuse the attachment save/reveal owners. `ui/lib/imageClipboard.ts`
+exports the entire decoded image as PNG, starts the write within user activation,
+and guards delayed encoding with current-session authority. Image copying honors
+confirmation and best-effort unchanged-content clearing. File sharing is exposed
+only after a platform capability check; native subject extraction is not exposed.
+Escape dismisses the action menu before dismissing the preview.
 Attachment consent remains owned by `FileBubble` and the existing file policy.
 
 `mediaFile.tsx` owns durable-first reads and explicitly opts ordinary previews
@@ -486,14 +499,30 @@ layout changes require browser evidence. Full-suite and physical multi-machine
 runs remain CI/pre-PR/release or explicit-request gates, as described in the
 [testing feedback loop](testing-feedback-loop.md).
 
+### Local call-device checks
+
+`ui/lib/mediaDeviceCheck.ts` owns independent capture sessions, abort/deadline
+handling and same-WebView receive-statistics diagnostics. The settings panel
+`ui/features/chat/settings/MediaDeviceCheck.tsx` owns explicit start/stop, muted
+preview, microphone analysis and runtime/view retirement. Checks do not send call
+signaling or grant network authority. The call store remains the owner of actual
+call negotiation and termination. See [device checks](settings.md#microphone-and-camera-check).
+
 ## 6. Remaining opportunities and limits
 
 - Settings categories now live in `features/chat/settings/`, composed by
   `SettingsDialog.tsx`. `useSettingsController.ts` shares acknowledged values and
   delegates owner/view validity to `settingsDialogSession.ts`; `model.ts` owns
-  dependency reasons and retention tightening. See [settings](settings.md).
+  navigation groups, category order, control destinations, dependency reasons and
+  retention tightening. Language belongs to Appearance & language; screenshot
+  recording and registration belong to Shortcuts. See [settings](settings.md).
   Future settings must extend the relevant category and shared rules rather than
   adding another independent save coordinator.
+- `CameraCaptureDialog.tsx` owns camera stream acquisition, still capture and preview
+  cleanup. `useAttachmentIntake.ts` owns its conversation/runtime lease and stages
+  confirmed photos through the existing composer queue; only Send submits them.
+  Late camera permission and encoding results cannot outlive their dialog. See
+  [taking a photo](help/topics/send-files.md#take-a-photo).
 - `ConversationView.tsx` delegates picker, drop, paste and screenshot intake to
   `attachments/useAttachmentIntake.ts`. Acquisition owns conversation/runtime
   leases, staging cleanup and source-specific media intent; store intents retain
@@ -600,6 +629,15 @@ the Rust module/public-export structure, host adapters, and the feature owners
 above. It is not an exhaustive line-by-line audit or proof that all bugs have
 been eliminated. This file is the maintained ownership guide; Git history retains
 superseded audit findings and implementation reports.
+
+## Message forwarding
+
+Forwarding source authorization, canonical ordering, accepted request identity and
+attachment restaging belong to the protocol core. The desktop host supplies exact
+session/runtime admission. Chat features own selection, destination confirmation
+and read-only record presentation; shared outgoing owners retain send acceptance
+and delivery meaning. Favorites keeps its independent saved-content lifecycle.
+[Message forwarding](message-forwarding.md) owns user behavior and invariants.
 
 ## Message Favorites
 

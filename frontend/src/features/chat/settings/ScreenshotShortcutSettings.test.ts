@@ -73,7 +73,7 @@ it("records a custom binding without starting a screenshot and saves only the ca
         capture: "CommandOrControl+Shift+KeyB",
       },
     },
-    "general",
+    "shortcuts",
   );
 });
 it("keeps recording after a duplicate and explains the conflict", async () => {
@@ -110,12 +110,12 @@ it("clears one binding and restores both defaults through the acknowledged save 
     {
       screenshot_shortcuts: { ...DEFAULT_SCREENSHOT_SHORTCUTS, capture: null },
     },
-    "general",
+    "shortcuts",
   );
   await click('[data-testid="reset-screenshot-shortcuts"]');
   expect(update).toHaveBeenLastCalledWith(
     { screenshot_shortcuts: { ...DEFAULT_SCREENSHOT_SHORTCUTS } },
-    "general",
+    "shortcuts",
   );
 });
 it("requires explicit opt-in for global activation", async () => {
@@ -128,7 +128,7 @@ it("requires explicit opt-in for global activation", async () => {
   await click("#setting-screenshot-global");
   expect(update).toHaveBeenCalledWith(
     { screenshot_shortcuts: { ...DEFAULT_SCREENSHOT_SHORTCUTS, global: true } },
-    "general",
+    "shortcuts",
   );
 });
 

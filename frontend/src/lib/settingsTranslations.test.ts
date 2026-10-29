@@ -9,6 +9,7 @@ const categoryKeys = [
   "general",
   "appearance",
   "notifications",
+  "shortcuts",
   "connection",
   "privacy",
   "integrations",
