@@ -32,6 +32,7 @@ mod easytier_discovery;
 pub mod events;
 pub mod favorites;
 mod google_drive;
+mod history_storage;
 mod integrations;
 mod linked_account;
 pub mod logger;
@@ -505,6 +506,7 @@ pub fn run_tauri_configured(
                 crate::integrations::local_access::get_local_agent_access,
                 crate::integrations::local_access::set_local_agent_access,
                 crate::settings::get_app_settings,
+                crate::history_storage::history_storage_usage,
                 crate::settings::reconcile_account_settings,
                 crate::drafts::load_conversation_drafts,
                 crate::drafts::save_conversation_drafts,

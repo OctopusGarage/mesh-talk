@@ -291,6 +291,20 @@ not show an assumed Ask/Automatic choice as the persisted setting.
 
 ## Retention and backup
 
+History & backup shows the logical file size of the current local profile's
+history, indexes and settings. Subfolders, including attachment and migration
+archives, are excluded; so are backups saved elsewhere. A backup saved directly
+inside this profile folder is included. This is an on-demand metadata observation, not a recursive disk
+scan or history decryption. It visits at most 4,096 direct directory entries,
+uses constant memory, and labels a truncated observation as a lower bound.
+The displayed size can change during concurrent writes. Refresh and retry remain
+scoped to the current settings session; no background polling is added.
+
+At 1 GiB the page suggests reviewing retention or creating a backup. It never
+changes retention or deletes data on its own. Forever remains the default.
+Deleting visible history may leave signed synchronization records and exact local
+deletion evidence, so shorter retention does not promise immediate disk savings.
+
 History retention belongs to the signed-in account on this device. Changing it
 does not change another linked device's retention or delete its history. Older
 shared retention values and removals are ignored; existing local values stay

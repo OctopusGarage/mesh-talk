@@ -2049,6 +2049,7 @@ export const test = base.extend({
           suspend_screenshot_shortcuts: () => null,
           pause_screenshot_shortcuts: () => null,
           wake_screenshot_window: () => null,
+          history_storage_usage: () => ({ bytes: 0, complete: true }),
           reconcile_account_settings: () => appSettings,
           load_conversation_drafts: snapshotDrafts,
           save_conversation_drafts: (a) => {

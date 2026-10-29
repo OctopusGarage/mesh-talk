@@ -774,6 +774,7 @@
       "paths": [
         "src-tauri/src/settings.rs",
         "src-tauri/src/config_store.rs",
+        "src-tauri/src/history_storage.rs",
         "src-tauri/src/settings/"
       ],
       "rust": [
@@ -781,7 +782,8 @@
           "package": "mesh-talk",
           "filters": [
             "settings::",
-            "config_store::"
+            "config_store::",
+            "history_storage::"
           ]
         }
       ],

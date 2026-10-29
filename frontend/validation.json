@@ -612,6 +612,9 @@
       "paths": [
         "frontend/src/features/chat/SettingsDialog.tsx",
         "frontend/src/features/chat/settings/GeneralSettings.tsx",
+        "frontend/src/features/chat/settings/HistoryStorageSummary.tsx",
+        "frontend/src/features/chat/settings/HistoryStorageSummary.test.ts",
+        "frontend/e2e/history-storage.spec.ts",
         "frontend/src/features/chat/settings/model.ts",
         "frontend/src/features/chat/settings/model.test.ts",
         "frontend/src/lib/settingsTranslations.test.ts",
@@ -619,6 +622,7 @@
         "frontend/e2e/settings-categories.spec.ts"
       ],
       "frontend": [
+        "src/features/chat/settings/HistoryStorageSummary.test.ts",
         "src/features/chat/settings/model.test.ts",
         "src/features/chat/settings/useSettingsController.test.ts",
         "src/features/chat/settingsDialogSession.test.ts",
