@@ -14,7 +14,7 @@ use mesh_talk_core::discovery::{Announce, PeerRecord, Roster, UserId};
 use mesh_talk_core::identity::device::DeviceIdentity;
 use mesh_talk_core::node::{
     DEFAULT_DISCOVERY_PORT, Node, ParticipantConfig, ParticipantRuntime, PreparedParticipant,
-    ReceivedDm, discovery_socket,
+    discovery_socket,
 };
 use mesh_talk_core::postoffice::IndexedPostOffice;
 use mesh_talk_core::postoffice::federation::{
@@ -28,8 +28,6 @@ use std::sync::{Arc, Mutex};
 #[cfg(test)]
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
-
 #[path = "mesh-talk-node/federation_config.rs"]
 mod federation_config;
 #[path = "mesh-talk-node/federation_runtime.rs"]
@@ -38,6 +36,8 @@ mod federation_runtime;
 mod file_saves;
 #[path = "mesh-talk-node/network_config.rs"]
 mod network_config;
+#[path = "mesh-talk-node/reception.rs"]
+mod reception;
 #[path = "mesh-talk-node/relay_runtime.rs"]
 mod relay_runtime;
 use federation_config::{FederationSeed, parse_fingerprint};
@@ -299,24 +299,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Shared roster (discovery writes it; the node + REPL read it) and the node.
     let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
-    let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<ReceivedDm>();
-    let (channel_tx, mut channel_rx) =
-        mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedChannelMessage>();
-    let (file_tx, file_rx) = mpsc::unbounded_channel::<mesh_talk_core::node::ReceivedFile>();
     // Derive log paths from the keystore path (sibling files, same directory).
     let keystore_path = std::path::Path::new(&args.keystore);
     let data_dir = keystore_path.parent().unwrap_or(std::path::Path::new("."));
     let log_path = data_dir.join("messages.log");
     let sent_path = data_dir.join("sent.log");
-    let node = Node::open_with_profile_lease(
+    let node = Node::open_bounded_with_profile_lease(
         data_dir_lock,
-        mesh_talk_core::node::NodeOpenRequest {
+        mesh_talk_core::node::BoundedNodeOpenRequest {
             identity,
             account,
             roster: Arc::clone(&roster),
-            incoming: incoming_tx,
-            channel_incoming: channel_tx,
-            file_incoming: file_tx,
             log_path: &log_path,
             sent_path: &sent_path,
             password,
@@ -345,41 +338,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?
     .launch(&args.name);
 
-    // Print received DMs as they arrive.
-    participant.register_host_task(tokio::spawn(async move {
-        while let Some(dm) = incoming_rx.recv().await {
-            // DMs are text-only in this CLI; lossy decode is safe here.
-            let text = String::from_utf8_lossy(&dm.text);
-            emit(&format!("from {} ({}): {}", dm.from, dm.from_name, text));
-        }
-    }));
-
-    // Print inbound channel messages as they arrive.
-    participant.register_host_task(tokio::spawn(async move {
-        while let Some(m) = channel_rx.recv().await {
-            if m.reception_only {
-                continue;
-            }
-            // Channel messages are text-only in this CLI; lossy decode is safe here.
-            let text = String::from_utf8_lossy(&m.text);
-            emit(&format!(
-                "channel {} from {}: {}",
-                hex::encode(m.channel_id.as_bytes()),
-                m.from,
-                text
-            ));
-        }
-    }));
-
-    // Print inbound files as they arrive, saving them into the node's data dir.
-    {
-        let node = Arc::clone(&node);
-        let data_dir = data_dir.to_path_buf();
-        let work = participant.blocking_work();
-        participant.register_host_task(tokio::spawn(file_saves::run(
-            node, data_dir, file_rx, emit, work,
-        )));
-    }
+    // Enroll both fixed consumers before either can retire a shared prefix.
+    let output_cursor =
+        node.reception_resume(mesh_talk_core::node::ReceptionConsumer::CliOutput)?;
+    let save_cursor =
+        node.reception_resume(mesh_talk_core::node::ReceptionConsumer::CliAutosave)?;
+    participant.register_host_task(tokio::spawn(reception::output(
+        node.clone(),
+        output_cursor,
+        emit,
+        participant.blocking_work(),
+    )));
+    participant.register_host_task(tokio::spawn(file_saves::run_bounded(
+        node.clone(),
+        data_dir.to_path_buf(),
+        save_cursor,
+        emit,
+        participant.blocking_work(),
+    )));
 
     emit(&format!(
         "node {user_id} listening on tcp/{tcp_port}, discovery udp/{}",

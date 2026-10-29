@@ -40,16 +40,6 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
     let Ok(authority) = RuntimeAuthority::request(session, lease, node_handle.clone()) else {
         return;
     };
-    let dm_authority = authority.clone();
-    let channel_authority = authority.clone();
-    let file_authority = authority.clone();
-    let profile_authority = authority.clone();
-    let call_authority = authority.clone();
-    let app_handle_for_dm = app_handle.clone();
-    let app_handle_for_channel = app_handle.clone();
-    let app_handle_for_file = app_handle.clone();
-    let app_handle_for_profile = app_handle.clone();
-    let app_handle_for_call = app_handle.clone();
     let observation = authority.observation_lifetime();
     tauri::async_runtime::spawn(async move {
         let _observation = observation;
@@ -78,8 +68,8 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
         // A replacement releases the retired context before reacquiring. A
         // retained external SDK handle keeps the profile busy by design.
         drop(permit.take_retired());
-        let startup = mesh_talk_core::node::RuntimeStartup::new(
-            mesh_talk_core::node::RuntimeConfig {
+        let startup =
+            mesh_talk_core::node::RuntimeStartup::bounded(mesh_talk_core::node::RuntimeConfig {
                 base_dir: &base_dir,
                 account_id: &account_id,
                 display_name: &display_name,
@@ -90,63 +80,13 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                 candidate_source: Some(crate::routed_discovery::desktop_candidates(discovery_port)),
                 #[cfg(test)]
                 candidate_source: None,
-            },
-            mesh_talk_core::node::RuntimeEvents {
-                on_dm: Box::new(move |dm| {
-                    let _ = dm_authority.current(|_| {
-                        crate::events::emit_dm_received(&app_handle_for_dm, dm);
-                    });
-                }),
-                on_channel: Box::new(move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
-                    let _ = channel_authority.current(|_| {
-                        crate::events::emit_channel_message(
-                            &app_handle_for_channel,
-                            &format!(
-                                "{}:{}:{}",
-                                channel_authority.lease.owner(),
-                                channel_authority.lease.generation(),
-                                channel_authority.ticket
-                            ),
-                            msg,
-                        );
-                    });
-                }),
-                on_file: Box::new(move |f: mesh_talk_core::node::ReceivedFile| {
-                    let _ = file_authority.current(|_| {
-                        crate::events::emit_file_received(
-                            &app_handle_for_file,
-                            &format!(
-                                "{}:{}:{}",
-                                file_authority.lease.owner(),
-                                file_authority.lease.generation(),
-                                file_authority.ticket
-                            ),
-                            f,
-                        );
-                    });
-                }),
-                on_profile: Box::new(move |p: mesh_talk_core::node::ReceivedProfile| {
-                    let _ = profile_authority.current(|_| {
-                        crate::events::emit_profile_received(
-                            &app_handle_for_profile,
-                            p.account_id,
-                            p.avatar,
-                        );
-                    });
-                }),
-                on_call_signal: Box::new(move |s: mesh_talk_core::node::ReceivedCallSignal| {
-                    let _ = call_authority.current(|_| {
-                        crate::events::emit_call_signal(&app_handle_for_call, s.from, s.payload);
-                    });
-                }),
-            },
-        )
-        .with_network(mesh_talk_core::node::RuntimeNetworkOptions {
-            post_office_send_enabled: relay_settings.post_office_send_enabled,
-            post_office_receive_enabled: relay_settings.post_office_receive_enabled,
-            physical_lan_only: relay_settings.physical_lan_only,
-        })
-        .with_network_cost(mesh_talk_core::node::NetworkCost::Unknown);
+            })
+            .with_network(mesh_talk_core::node::RuntimeNetworkOptions {
+                post_office_send_enabled: relay_settings.post_office_send_enabled,
+                post_office_receive_enabled: relay_settings.post_office_receive_enabled,
+                physical_lan_only: relay_settings.physical_lan_only,
+            })
+            .with_network_cost(mesh_talk_core::node::NetworkCost::Unknown);
         permit.track_startup(startup.completion());
         match mesh_talk_core::node::NodeRuntime::start_owned(
             startup,
@@ -194,9 +134,33 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                         log::warn!("Account profile binding failed: {error}");
                     }
                 });
+                let Ok(runtime_id) = authority.runtime_id() else {
+                    return;
+                };
+                let reception_scope = crate::reception_host::Scope {
+                    owner: account_id.clone(),
+                    account_id: runtime.account_id().to_owned(),
+                    device_id: runtime.user_id().to_owned(),
+                    runtime_id,
+                };
+                let receipt_head = runtime.handle().reception_head();
+                app_handle
+                    .state::<crate::reception_host::ReceptionHostState>()
+                    .install(reception_scope.clone());
                 // Subscribe before installing/launching the host producer so no
                 // invalidation can fall between capturing the receiver and spawn.
                 let (installed, installation) = tokio::sync::watch::channel(false);
+                if let Ok(cursor) = receipt_head {
+                    runtime.register_host_task(tokio::spawn(after_install(
+                        installation.clone(),
+                        crate::reception_host::native_alerts(
+                            app_handle.clone(),
+                            authority.clone(),
+                            runtime.handle(),
+                            cursor,
+                        ),
+                    )));
+                }
                 let cost_node = runtime.handle();
                 runtime.register_host_task(tokio::spawn(after_install(
                     installation.clone(),
@@ -292,6 +256,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                     return;
                 }
                 installed.send_replace(true);
+                crate::reception_host::invalidate(&app_handle, &reception_scope);
                 // Keep startup's exact session and installation authority through
                 // trust publication and every relay-policy commit after a wait.
                 let Ok(admission) = crate::runtime_admission::RuntimeAdmission::capture_lease(
@@ -450,6 +415,7 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
         .await;
         if let Ok(Ok(user)) = updated {
             let _ = authority.current(|_| {
+                if crate::reception_host::invalidate_identity(&app,authority.lease.owner(),&identity.0,&identity.1) {return;}
                 let _ = app.emit(
                     "account-profile-changed",
                     serde_json::json!({"user": crate::commands::UserInfo::from(user), "account_id": identity.0, "device_id": identity.1}),

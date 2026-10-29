@@ -4,6 +4,8 @@
 //! the chunk events ride the normal bounded sync, which already re-requests only the
 //! events a peer is missing — so transfer RESUMES across reconnects for free.
 
+mod reception;
+
 use super::node::MAX_FILE_SIZE;
 use super::*;
 

@@ -7,14 +7,18 @@
         "crates/mesh-talk-core/src/node/reception_effects/",
         "crates/mesh-talk-core/src/node/runtime_delivery.rs",
         "crates/mesh-talk-core/src/node/runtime_startup.rs",
-        "crates/mesh-talk-core/src/node/ui_state.rs"
+        "crates/mesh-talk-core/src/node/ui_state.rs",
+        "crates/mesh-talk-core/src/node/host_reception.rs",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node/reception.rs",
+        "crates/mesh-talk-core/src/node/files/reception.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
             "node::reception_effects::tests::",
-            "node::runtime_delivery::tests::"
+            "node::runtime_delivery::tests::",
+            "node::host_reception::tests::"
           ]
         }
       ],
@@ -23,7 +27,7 @@
         "desktop-chat"
       ],
       "capability": {
-        "summary": "Provide bodyless durable reception work and bounded demand pages for host integration without changing frontend read-state ownership or claiming production callback cutover.",
+        "summary": "Deliver durable reception work through bounded runtime observations, on-demand materialization and fixed consumer acknowledgement without changing read-state ownership.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {

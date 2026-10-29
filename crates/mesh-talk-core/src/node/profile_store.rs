@@ -29,6 +29,14 @@ pub struct ProfileStore {
     file: EncryptedRecordLog<ProfileEntry>,
     by_account: HashMap<String, ProfileEntry>,
     records: usize,
+    revision: u64,
+}
+
+pub(super) struct AvatarPage {
+    pub rows: Vec<(String, Option<Vec<u8>>)>,
+    pub after: Option<String>,
+    pub complete: bool,
+    pub revision: u64,
 }
 
 impl ProfileStore {
@@ -49,6 +57,7 @@ impl ProfileStore {
             file,
             by_account,
             records,
+            revision: records as u64,
         };
         // Upgrade older append-only journals, preserving clear tombstones.
         if store.records > store.by_account.len() {
@@ -107,6 +116,7 @@ impl ProfileStore {
         }
         self.file.append_durable(&entry)?;
         self.records += 1;
+        self.revision = self.revision.wrapping_add(1);
         self.by_account.insert(account_id.to_string(), entry);
         Ok(true)
     }
@@ -140,6 +150,50 @@ impl ProfileStore {
             .filter_map(|(id, e)| e.avatar.clone().map(|a| (id.clone(), a)))
             .collect()
     }
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
+    /// Select only bounded key references before cloning current avatar bytes.
+    /// Obsolete profile versions never enter this presentation page.
+    pub(super) fn page(&self, after: Option<&str>) -> Result<AvatarPage, LogError> {
+        const ROWS: usize = 16;
+        const BYTES: usize = 1024 * 1024;
+        let mut selected = std::collections::BTreeMap::new();
+        let mut candidates = 0usize;
+        for (id, entry) in &self.by_account {
+            if after.is_some_and(|after| id.as_str() <= after) {
+                continue;
+            }
+            candidates += 1;
+            selected.insert(id.as_str(), entry);
+            if selected.len() > ROWS {
+                selected.pop_last();
+            }
+        }
+        let mut rows = Vec::new();
+        let mut charged = 0;
+        let mut cursor = after.map(str::to_owned);
+        for (id, entry) in selected {
+            let charge = id
+                .len()
+                .saturating_add(entry.avatar.as_ref().map_or(0, Vec::len));
+            if charge > BYTES - charged {
+                if rows.is_empty() {
+                    return Err(LogError::PageBudgetTooSmall { required: charge });
+                }
+                break;
+            }
+            charged += charge;
+            cursor = Some(id.to_owned());
+            rows.push((id.to_owned(), entry.avatar.clone()));
+        }
+        Ok(AvatarPage {
+            complete: rows.len() == candidates,
+            rows,
+            after: cursor,
+            revision: self.revision,
+        })
+    }
 
     /// Current profile state including clear tombstones and their timestamps.
     pub(crate) fn snapshot_entries(&self) -> Vec<(String, u64, Option<Vec<u8>>)> {
@@ -162,6 +216,48 @@ impl ProfileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_pages_bound_rows_and_bytes_and_include_clear_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ProfileStore::open(&dir.path().join("profiles"), "pw").unwrap();
+        for n in 0..40 {
+            store
+                .record(
+                    &format!("account-{n:02}"),
+                    1,
+                    Some(vec![42; MAX_AVATAR_BYTES]),
+                )
+                .unwrap();
+        }
+        store.record("account-05", 2, None).unwrap();
+        let revision = store.revision();
+        let mut after = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = store.page(after.as_deref()).unwrap();
+            assert!(page.rows.len() <= 16);
+            assert!(
+                page.rows
+                    .iter()
+                    .map(|(id, avatar)| id.len() + avatar.as_ref().map_or(0, Vec::len))
+                    .sum::<usize>()
+                    <= 1024 * 1024
+            );
+            assert_eq!(page.revision, revision);
+            observed.extend(page.rows);
+            if page.complete {
+                break;
+            }
+            assert_ne!(page.after, after);
+            after = page.after;
+        }
+        assert_eq!(observed.len(), 40);
+        assert_eq!(observed[5], ("account-05".into(), None));
+        assert!(observed.windows(2).all(|rows| rows[0].0 < rows[1].0));
+        assert!(!store.record("account-05", 1, Some(vec![1])).unwrap());
+        assert_eq!(store.revision(), revision);
+    }
 
     #[test]
     fn repeated_avatar_updates_have_bounded_journal_and_keep_clear_tombstones() {

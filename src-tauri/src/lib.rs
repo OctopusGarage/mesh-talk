@@ -42,6 +42,7 @@ mod notifications;
 pub mod owner_commands;
 pub mod perf;
 pub mod privacy_commands;
+mod reception_host;
 pub mod recovery;
 mod routed_discovery;
 mod runtime_admission;
@@ -332,6 +333,7 @@ pub fn run_tauri_configured(
         .manage(settings_state)
         .manage(crate::screenshot_shortcuts::ScreenshotShortcutState::default())
         .manage(crate::events::NotificationContextState::default())
+        .manage(crate::reception_host::ReceptionHostState::default())
         .manage(trust_state)
         .manage(favorites_state)
         .manage(avatars_state)
@@ -342,6 +344,8 @@ pub fn run_tauri_configured(
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 crate::window_visibility::initial_presentation_ready,
                 owner_commands::owner_node_identity,
+                reception_host::owner_reception_page,
+                reception_host::owner_reception_ack,
                 owner_commands::owner_startup_identity,
                 owner_commands::owner_enqueue_text,
                 owner_commands::owner_reveal_message,

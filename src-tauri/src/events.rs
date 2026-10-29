@@ -177,6 +177,14 @@ pub(crate) fn emit_channel_changed<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     event: ChannelChangedEvent,
 ) {
+    if crate::reception_host::invalidate_identity(
+        app_handle,
+        &event.owner,
+        &event.account_id,
+        &event.device_id,
+    ) {
+        return;
+    }
     if crate::app_lock::app_locked(app_handle) {
         return;
     }
@@ -286,6 +294,8 @@ pub struct ProgressThrottle<R: Runtime> {
     app_handle: tauri::AppHandle<R>,
     file_conv: String,
     direction: &'static str,
+    reception_scope: Option<crate::reception_host::Scope>,
+    legacy_delivery: bool,
     last: std::time::Instant,
 }
 
@@ -299,10 +309,18 @@ impl<R: Runtime> ProgressThrottle<R> {
         direction: &'static str,
     ) -> Self {
         // Back-date so the first progress tick always emits.
+        let reception_scope = app_handle
+            .try_state::<crate::reception_host::ReceptionHostState>()
+            .and_then(|state| state.scope());
+        let legacy_delivery = app_handle
+            .try_state::<crate::reception_host::ReceptionHostState>()
+            .is_none();
         Self {
             app_handle,
             file_conv,
             direction,
+            reception_scope,
+            legacy_delivery,
             last: std::time::Instant::now() - Self::MIN_INTERVAL,
         }
     }
@@ -322,6 +340,13 @@ impl<R: Runtime> ProgressThrottle<R> {
             done,
             total,
         };
+        if let Some(scope) = &self.reception_scope {
+            crate::reception_host::progress(&self.app_handle, scope, event);
+            return;
+        }
+        if !self.legacy_delivery {
+            return;
+        }
         if let Err(e) = self.app_handle.emit(EVENT_FILE_PROGRESS, event) {
             log::error!("Failed to emit file-progress event: {e}");
         }
@@ -350,12 +375,8 @@ pub struct FileReceivedEvent {
     pub batch_size: usize,
 }
 
-/// Emit a received DM to the frontend (text decoded lossily for display).
-pub fn emit_dm_received<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    dm: mesh_talk_core::node::ReceivedDm,
-) {
-    let event = DmReceivedEvent {
+pub(crate) fn dm_event(dm: mesh_talk_core::node::ReceivedDm) -> DmReceivedEvent {
+    DmReceivedEvent {
         protection: dm.protection,
         message_id: dm.message_id.map(|id| id.to_hex()),
         from_account: dm.from_account,
@@ -367,32 +388,13 @@ pub fn emit_dm_received<R: Runtime>(
             String::from_utf8_lossy(&dm.text).into_owned()
         },
         reply_to: dm.reply_to.map(|id| hex::encode(id.as_bytes())),
-    };
-    notify_if_unfocused(
-        app_handle,
-        NotificationTarget::Dm(&event.from),
-        &event.from_name,
-        if event.protection.is_some() {
-            "Protected message"
-        } else {
-            &event.text
-        },
-    );
-    if crate::app_lock::app_locked(app_handle) {
-        return;
-    }
-    if let Err(e) = app_handle.emit(EVENT_DM_RECEIVED, event) {
-        log::error!("Failed to emit dm event: {e}");
     }
 }
 
-pub fn emit_channel_message<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    owner: &str,
+pub(crate) fn channel_event(
     msg: mesh_talk_core::node::ReceivedChannelMessage,
-) {
-    use crate::channel_reception::Alert;
-    let event = ChannelMessageEvent {
+) -> ChannelMessageEvent {
+    ChannelMessageEvent {
         protection: msg.protection,
         channel_id: hex::encode(msg.channel_id.as_bytes()),
         channel_name: msg.channel_name,
@@ -412,7 +414,84 @@ pub fn emit_channel_message<R: Runtime>(
         batch_complete: msg.batch_complete,
         batch_size: msg.batch_size,
         reception_only: msg.reception_only,
-    };
+    }
+}
+
+pub(crate) fn file_event(file: mesh_talk_core::node::ReceivedFile) -> FileReceivedEvent {
+    FileReceivedEvent {
+        protection: file.protection,
+        expires_at_ms: file.expires_at_ms,
+        conv: hex::encode(file.conv.as_bytes()),
+        is_channel: file.is_channel,
+        from: file.from,
+        name: if file.protection.is_some() {
+            "Protected image".into()
+        } else {
+            file.name
+        },
+        size: file.size,
+        mime: file.mime,
+        file_conv: hex::encode(file.file_conv.as_bytes()),
+        media: file.media,
+        event_id: file.event_id.to_hex(),
+        authored_at: file.authored_at,
+        received_at: file.received_at,
+        arrival_kind: file.arrival_kind,
+        own_device: file.own_device,
+        batch_id: file.batch_id,
+        batch_complete: file.batch_complete,
+        batch_size: file.batch_size,
+    }
+}
+
+/// Emit a received DM to the frontend (text decoded lossily for display).
+pub fn emit_dm_received<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    dm: mesh_talk_core::node::ReceivedDm,
+) {
+    publish_dm_received(app_handle, dm, true);
+}
+
+fn publish_dm_received<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    dm: mesh_talk_core::node::ReceivedDm,
+    publish: bool,
+) {
+    let event = dm_event(dm);
+    notify_if_unfocused(
+        app_handle,
+        NotificationTarget::Dm(&event.from),
+        &event.from_name,
+        if event.protection.is_some() {
+            "Protected message"
+        } else {
+            &event.text
+        },
+    );
+    if !publish || crate::app_lock::app_locked(app_handle) {
+        return;
+    }
+    if let Err(e) = app_handle.emit(EVENT_DM_RECEIVED, event) {
+        log::error!("Failed to emit dm event: {e}");
+    }
+}
+
+pub fn emit_channel_message<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    owner: &str,
+    msg: mesh_talk_core::node::ReceivedChannelMessage,
+) {
+    publish_channel_message(app_handle, owner, msg, true);
+}
+
+fn publish_channel_message<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    owner: &str,
+    msg: mesh_talk_core::node::ReceivedChannelMessage,
+    publish: bool,
+) {
+    use crate::channel_reception::Alert;
+    let event = channel_event(msg);
     let alert = app_handle
         .try_state::<NotificationContextState>()
         .and_then(|state| {
@@ -457,7 +536,7 @@ pub fn emit_channel_message<R: Runtime>(
         ),
         Alert::Silent => {}
     }
-    if !decision.emit || crate::app_lock::app_locked(app_handle) {
+    if !publish || !decision.emit || crate::app_lock::app_locked(app_handle) {
         return;
     }
     if let Err(e) = app_handle.emit(EVENT_CHANNEL_MESSAGE, event) {
@@ -487,31 +566,17 @@ pub fn emit_file_received<R: Runtime>(
     owner: &str,
     file: mesh_talk_core::node::ReceivedFile,
 ) {
+    publish_file_received(app_handle, owner, file, true);
+}
+
+fn publish_file_received<R: Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    owner: &str,
+    file: mesh_talk_core::node::ReceivedFile,
+    publish: bool,
+) {
     use crate::channel_reception::Alert;
-    let event = FileReceivedEvent {
-        protection: file.protection,
-        expires_at_ms: file.expires_at_ms,
-        conv: hex::encode(file.conv.as_bytes()),
-        is_channel: file.is_channel,
-        from: file.from,
-        name: if file.protection.is_some() {
-            "Protected image".into()
-        } else {
-            file.name
-        },
-        size: file.size,
-        mime: file.mime,
-        file_conv: hex::encode(file.file_conv.as_bytes()),
-        media: file.media,
-        event_id: file.event_id.to_hex(),
-        authored_at: file.authored_at,
-        received_at: file.received_at,
-        arrival_kind: file.arrival_kind,
-        own_device: file.own_device,
-        batch_id: file.batch_id,
-        batch_complete: file.batch_complete,
-        batch_size: file.batch_size,
-    };
+    let event = file_event(file);
     let decision = app_handle
         .try_state::<NotificationContextState>()
         .and_then(|state| {
@@ -554,7 +619,7 @@ pub fn emit_file_received<R: Runtime>(
         ),
         Alert::Silent => {}
     }
-    if !decision.emit || crate::app_lock::app_locked(app_handle) {
+    if !publish || !decision.emit || crate::app_lock::app_locked(app_handle) {
         return;
     }
     if let Err(e) = app_handle.emit(EVENT_FILE_RECEIVED, event) {
@@ -808,10 +873,36 @@ pub(crate) fn emit_node_state_changed<R: Runtime>(
     app: &tauri::AppHandle<R>,
     event: NodeStateChangedEvent,
 ) {
+    if crate::reception_host::invalidate_identity(
+        app,
+        &event.owner,
+        &event.account_id,
+        &event.device_id,
+    ) {
+        return;
+    }
     if crate::app_lock::app_locked(app) {
         return;
     }
     if let Err(error) = app.emit("node-state-changed", event) {
         log::warn!("Failed to emit node state invalidation: {error}");
+    }
+}
+
+pub(crate) fn notify_reception<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    owner: &str,
+    receipt: mesh_talk_core::node::HostReception,
+) {
+    match receipt {
+        mesh_talk_core::node::HostReception::DirectMessage(dm) => {
+            publish_dm_received(app, dm, false)
+        }
+        mesh_talk_core::node::HostReception::ChannelMessage(message) => {
+            publish_channel_message(app, owner, message, false)
+        }
+        mesh_talk_core::node::HostReception::File(file) => {
+            publish_file_received(app, owner, file, false)
+        }
     }
 }

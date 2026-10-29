@@ -77,6 +77,7 @@ pub(crate) mod message;
 pub(crate) mod name_directory;
 mod network_cost;
 pub use network_cost::{GroupFileSharingStatus, NetworkCost};
+mod host_reception;
 pub(crate) mod node;
 mod opaque_receive_cache;
 mod opaque_relay;
@@ -108,6 +109,10 @@ mod relay_policy;
 mod route_timing;
 pub(crate) mod runtime;
 mod runtime_delivery;
+pub use host_reception::{
+    CurrentProfilePage, HostReception, HostReceptionPage, ReceptionConsumer, ReceptionCursor,
+    ReceptionLimit,
+};
 mod runtime_startup;
 mod runtime_work;
 pub use runtime_startup::{RuntimeStartup, StartupCompletion};
