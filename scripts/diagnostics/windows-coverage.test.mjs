@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { inventory, verifyPartition, verifyExecution, validateLcov, verifyIdentity, verifyTargets, validateProfilePath, verifyLayout } from "../ci/windows-coverage.mjs";
 
 const listing = selected => ({ "test-count": 3, "rust-suites": {
@@ -63,4 +64,19 @@ test("archive layout is anchored exactly to the metadata v1 debug/deps directory
   const separate = metadata(`${target}/debug/deps/unit`);
   separate["rust-build-meta"]["build-directory"] = `${target}/separate`;
   assert.throws(() => verifyLayout(separate), /separate build/);
+});
+
+
+test("legacy Windows cache compatibility overrides stay outside runtime execution", () => {
+  const source = readFileSync(new URL("../../.github/workflows/windows-workspace.yml", import.meta.url), "utf8");
+  const globals = source.split("\njobs:")[0];
+  assert.match(globals, /CARGO_TERM_COLOR: never/u);
+  assert.match(globals, /RUST_TEST_THREADS: '1'/u);
+  const cache = source.split(/^      - /mu).find(step => step.startsWith("uses: Swatinem/rust-cache@v2\n"));
+  assert.ok(cache);
+  assert.match(cache, /shared-key: workspace-checks-checks/u);
+  assert.match(cache, /env:\n          CARGO_TERM_COLOR: always\n          RUST_TEST_THREADS: ''/u);
+  const runtime = source.replace(cache, "");
+  assert.doesNotMatch(runtime, /CARGO_TERM_COLOR: always|RUST_TEST_THREADS: ''/u);
+  assert.match(runtime, /cargo test --workspace --doc --locked/u);
 });

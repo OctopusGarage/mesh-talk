@@ -156,7 +156,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          cargo llvm-cov --no-report -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
+          cargo llvm-cov test --no-report -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1 | tee "$RUNNER_TEMP/backend-eval-results/large-folder.log"
+          node scripts/evals/backend-runner.mjs --validate-large-folder "$RUNNER_TEMP/backend-eval-results/large-folder.log"
           cargo llvm-cov report --lcov --output-path src-tauri/e2e-lcov.info
 
       - name: Preserve Linux backend evaluation evidence

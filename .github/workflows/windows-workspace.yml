@@ -41,10 +41,13 @@ jobs:
         id: compiler
         run: rustc --version | awk '{print "rust=" $2}' >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
+        env:
+          CARGO_TERM_COLOR: always
+          RUST_TEST_THREADS: ''
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: . -> target
-          key: workspace-checks
+          shared-key: workspace-checks-checks
           cache-on-failure: true
       - name: Frontend dependencies and structural checks
         run: |

@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 
 const windows = ["windows / Windows workspace build", "windows / Windows workspace tests (1/2)", "windows / Windows workspace tests (2/2)"];
 const workspace = [...["ubuntu-latest", "macos-latest"].map(os => `checks (${os})`), ...windows];
-const health = ["health / Source and supply-chain checks", ...["ubuntu-latest", "macos-latest", "windows-latest"].map(os => `health / Portable checks (${os})`)];
-const backend = ["windows-2022", "macos-latest"].map(os => `Backend core (${os})`);
+const health = ["health / Source and supply-chain checks", ...["ubuntu-latest", "macos-26-intel", "windows-latest"].map(os => `health / Portable checks (${os})`)];
+const backend = ["windows-2022", "macos-26-intel"].map(os => `Backend core (${os})`);
 const native = ["ubuntu-24.04", "windows-2022", "macos-latest"].map(os => `native-core / Real native UI (${os})`);
 
 export const releaseSourceChecks = Object.freeze([
@@ -32,6 +32,9 @@ export function requireSuccessfulChecks(checks, names, appSlug) {
 const replacements = new Map([
   ["verify", workspace],
   ["checks (windows-latest)", windows],
+  ["health / Portable checks (macos-latest)", ["health / Portable checks (macos-26-intel)"]],
+  ["Backend core (macos-latest)", ["Backend core (macos-26-intel)"]],
+  ["Portable UI (macos-latest, webkit)", ["Portable UI (macos-26-intel, webkit)"]],
   ["Backend core (ubuntu-24.04)", ["checks (ubuntu-latest)"]],
   ["Multi-process E2E", ["checks (ubuntu-latest)", ...backend, ...native]],
   ...["ubuntu-latest", "macos-latest", "windows-latest"].map(os => [`Code Quality and Health Check (${os})`, health]),

@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, macos-latest]
+        os: [windows-2022, macos-26-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -73,7 +73,10 @@ jobs:
       # Stage a real 110 MiB folder on its own. Running it beside the unit suite
       # can starve time-sensitive socket tests, especially under ASan.
       - name: Run large-folder transfer regression
-        run: cargo test -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
+        shell: bash
+        run: |
+          cargo test -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1 | tee "$RUNNER_TEMP/backend-eval-results/large-folder.log"
+          node scripts/evals/backend-runner.mjs --validate-large-folder "$RUNNER_TEMP/backend-eval-results/large-folder.log"
 
       - name: Preserve backend evaluation evidence
         if: always()

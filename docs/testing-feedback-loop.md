@@ -48,6 +48,15 @@ Linux plus eight macOS/Windows runners. Linux coverage depends on its own shards
 and Health, so late desktop scheduling cannot delay that merge. Portable collection
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
+Desktop browser shards start after Health completes, limiting the initial runner
+burst. Browser, portable Health and independent backend jobs use the standard
+`macos-26-intel` pool; the full Rust workspace and real native desktop acceptance
+retain `macos-latest` Apple Silicon coverage. This separates demand after hosted
+ARM capacity exhaustion prevented jobs from acquiring runners. Intel is a
+[standard hosted runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+not a larger-runner purchase; both pools still require measured queue and execution
+evidence. Keep artifact consumers and app-bound required check names aligned when
+changing labels.
 The full suite keeps its existing harness budgets: Linux 90 seconds when collecting
 browser coverage, Windows 90 seconds and macOS 30 seconds; standalone portable uses
 Linux/macOS 30 seconds and Windows 120 seconds. These are harness watchdogs, not
@@ -628,6 +637,10 @@ extract that archive and run independent hash partitions. Each consumer runs
 one test at a time without retries; network/disk fixtures do not compete with
 another test on that machine. Nextest uses a fresh process per test, so tests
 must not depend on another test's process-local state.
+The producer retains the former Windows workspace cache namespace through an
+explicit shared key. Only the cache step normalizes the inherited color/thread
+environment to its previous key inputs; actual tests keep serial execution and
+plain diagnostic output. Pull requests restore caches; only main publishes them.
 
 The owning `scripts/ci/windows-coverage.mjs` helper validates every default Cargo test target, the full inventory,
 default ignored markers and the exact disjoint union of both runnable partitions.
@@ -658,8 +671,13 @@ coverage in the same execution, including the separate ignored bridge and
 large-folder acceptance. macOS and Windows keep their real backend executions.
 Accumulation uses `--no-report` between executions; combining it with `--no-clean`
 is invalid. The real CLI regression first writes a normal unit report, executes
-ignored scenarios, then verifies the final report retains both. Production builds,
+ignored scenarios and the workflow's exact filtered large-folder command, then
+verifies the final report retains all coverage. Positional test-name filtering
+uses the explicit `cargo llvm-cov test` subcommand. Production builds,
 native desktop acceptance and sanitizer checks remain distinct.
+All three large-folder gates validate the exact successful scenario and Cargo
+summary from their saved log. A renamed filter that selects zero tests cannot
+silently pass; unrelated library tests may be filtered out.
 
 Measure fixture preparation, protocol phases and teardown before changing a
 network deadline. HTTP regressions use the owner's private deadline policy while

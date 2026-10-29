@@ -54,3 +54,17 @@ test("the former Windows matrix check requires build and both executable archive
   assert.deepEqual(policy.checks.map(check => check.context), ["windows / Windows workspace build", "windows / Windows workspace tests (1/2)", "windows / Windows workspace tests (2/2)"]);
   assert.ok(policy.checks.every(check => check.app_id === 15368));
 });
+
+test("Mac capacity allocation migrates Intel work while preserving ARM acceptance", () => {
+  const oldNames = ["health / Portable checks (macos-latest)", "Backend core (macos-latest)", "Portable UI (macos-latest, webkit)"];
+  const armNames = ["checks (macos-latest)", "native-core / Real native UI (macos-latest)"];
+  const policy = migrateRequiredChecks({ strict: true, checks: [...oldNames, ...armNames].map(context => ({ context, app_id: 15368 })) });
+  const names = policy.checks.map(check => check.context);
+  for (const name of oldNames) {
+    assert.ok(!names.includes(name));
+    assert.ok(names.includes(name.replace("macos-latest", "macos-26-intel")));
+  }
+  for (const name of armNames) assert.ok(names.includes(name));
+  for (const name of ["health / Portable checks (macos-26-intel)", "Backend core (macos-26-intel)", ...armNames]) assert.ok(releaseSourceChecks.includes(name));
+  assert.deepEqual(migrateRequiredChecks(policy), policy);
+});

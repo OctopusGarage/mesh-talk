@@ -45,7 +45,7 @@ test("health owns fast checks without repeating Rust or browser suites", () => {
   const health = read("check-health.yml");
   assert.doesNotMatch(health, /bash scripts\/check-health\.sh|cargo (?:build|clippy|test)|npx playwright|src-tauri\/target/);
   for (const command of ["npm run format:check", "npm run lint", "npm run typecheck", "audit-ci", "cargo fmt --all -- --check", "cargo deny check", "cargo machete", "shellcheck", "actionlint", "typos"]) assert.ok(health.includes(command), command);
-  assert.match(health, /matrix:\n        os: \[ubuntu-latest, macos-latest, windows-latest\]/);
+  assert.match(health, /matrix:\n        os: \[ubuntu-latest, macos-26-intel, windows-latest\]/);
   const ci = read("ci.yml");
   assert.match(step(health, "Build retention safeguards (all platforms)"), /python3 -m unittest discover -s scripts -p test_build_retention.py -v/);
   for (const command of ["npm run lint", "cargo fmt", "cargo deny", "cargo machete", "shellcheck", "actionlint", "crate-ci/typos"]) assert.ok(!ci.includes(command), `duplicate ${command}`);
@@ -56,7 +56,7 @@ test("full browser coverage remains on every desktop OS with bounded shards", ()
   const shardWorkflow = read("ui-shards.yml");
   const baseline = shardWorkflow.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
   assert.match(ui, /operating_systems: '\["ubuntu-24.04"\]'/);
-  assert.match(ui, /operating_systems: '\["macos-latest","windows-latest"\]'/);
+  assert.match(ui, /operating_systems: '\["macos-26-intel","windows-latest"\]'/);
   assert.match(baseline, /os: \$\{\{ fromJSON\(inputs.operating_systems\) \}\}/);
   assert.match(baseline, /shard: \[1, 2, 3, 4\]/);
   assert.match(baseline, /fail-fast: false/);
@@ -134,14 +134,14 @@ test("full Chromium execution owns portable evidence while unique engines remain
   const ui = read("e2e-ui.yml");
   const portable = ui.split("  portable:\n")[1].split("  chromium-extended:\n")[0];
   assert.doesNotMatch(portable, /browser: chromium/);
-  assert.match(portable, /os: macos-latest, browser: webkit/);
+  assert.match(portable, /os: macos-26-intel, browser: webkit/);
   assert.match(ui, /name: Chromium portable evidence/);
   assert.match(read("ui-shards.yml"), /chromium-evidence.mjs extract/);
   assert.match(ui, /chromium-evidence.mjs collect/);
   assert.match(step(read("ui-shards.yml"), "Run UI E2E"), /--reporter=list,blob,json/);
   const reports = ui.split("  reports:\n")[1].split("  packs:\n")[0];
   assert.doesNotMatch(reports, /matrix:/);
-  assert.match(reports, /for os in ubuntu-24.04 macos-latest windows-latest/);
+  assert.match(reports, /for os in ubuntu-24.04 macos-26-intel windows-latest/);
   assert.match(ui, /chromium-extended:/);
   assert.match(ui, /firefox-extended:/);
 });

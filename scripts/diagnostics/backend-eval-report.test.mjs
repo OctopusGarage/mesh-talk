@@ -28,6 +28,16 @@ test("backend evaluates every independent suite after a failure and retains a fa
   assert.equal(recorded.channel_and_file_cli.scenarios.length, 2);
 });
 
+test("filtered large-folder acceptance rejects zero, duplicate, failed and skipped execution", async () => {
+  const { LARGE_FOLDER_SCENARIO, validateBackendOutput } = await import("../evals/backend-runner.mjs");
+  const valid = `test ${LARGE_FOLDER_SCENARIO} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1655 filtered out`;
+  const options = { allowFiltered: true };
+  assert.deepEqual(validateBackendOutput(valid, [LARGE_FOLDER_SCENARIO], options), [LARGE_FOLDER_SCENARIO]);
+  for (const output of [valid.split("\n")[1].replace("1 passed", "0 passed"), valid + `\ntest ${LARGE_FOLDER_SCENARIO} ... ok`, valid.replace("0 failed", "1 failed"), valid.replace("... ok", "... ignored"), valid.replace(LARGE_FOLDER_SCENARIO, "other_case")]) {
+    assert.throws(() => validateBackendOutput(output, [LARGE_FOLDER_SCENARIO], options));
+  }
+});
+
 test("instrumented backend execution preserves the exact ignored scenario selection", async () => {
   const { backendCargoArgs } = await import("../evals/backend-runner.mjs");
   const ordinary = backendCargoArgs("two_node_cli", false);
