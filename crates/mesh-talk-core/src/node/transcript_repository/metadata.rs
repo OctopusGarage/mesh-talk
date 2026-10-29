@@ -1,6 +1,70 @@
 //! Authenticated indexed facts used without fetching plaintext at startup.
 use super::*;
 impl TranscriptRepository {
+    pub(super) fn refresh_route_on(
+        c: &Connection,
+        kind: i64,
+        conversation: &ConversationId,
+    ) -> Result<(), LogError> {
+        c.execute("INSERT OR IGNORE INTO transcript_first_routes SELECT kind,conversation,ordinal FROM transcript_rows WHERE kind=?1 AND conversation=?2 AND route_present=1 ORDER BY ordinal LIMIT 1",params![kind,conversation.as_bytes().as_slice()])?;
+        Ok(())
+    }
+
+    /// First decoded envelope per conversation, preserving legacy route discovery.
+    /// The presence flag also retains an invalid first route without hydrating it.
+    pub(crate) fn account_routes_page(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<Vec<(ConversationId, Option<super::super::DmRoute>)>, LogError> {
+        if limit == 0 || limit > MAX_PAGE_ROWS {
+            return Err(LogError::InvalidPageBudget);
+        }
+        self.profile.database().read(|c| {
+            let mut statement=c.prepare("SELECT k.conversation,r.route_sender,r.route_recipient FROM transcript_first_routes k JOIN transcript_rows r ON r.ordinal=k.ordinal WHERE k.kind=?1 AND k.conversation>?2 ORDER BY k.conversation LIMIT ?3")?;
+            let mut rows=statement.query(params![self.kind,after.as_ref().map_or(&[][..],|c|c.as_bytes().as_slice()),size(limit)?])?;
+            let mut result=Vec::new();
+            while let Some(row)=rows.next()? {
+                let sender:Option<String>=row.get(1)?;
+                let recipient:Option<String>=row.get(2)?;
+                let route=sender.zip(recipient).map(|(sender_account,recipient_account)|super::super::DmRoute{sender_account,recipient_account});
+                result.push((ConversationId::new(blob(row,0)?),route));
+            }
+            Ok(result)
+        })
+    }
+    pub(crate) fn remove_ordinals(&mut self, ordinals: &[i64]) -> Result<usize, LogError> {
+        if ordinals.len() > MAX_PAGE_ROWS || ordinals.iter().any(|n| *n <= 0) {
+            return Err(LogError::InvalidPageBudget);
+        }
+        self.check_write()?;
+        let removed=self.profile.database().transaction(|c|{
+            let mut removed=0;
+            for ordinal in ordinals {
+                let row:Option<(Vec<u8>,i64)>=c.query_row("SELECT conversation,body_bytes FROM transcript_rows WHERE kind=?1 AND ordinal=?2",params![self.kind,ordinal],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                let Some((conversation,bytes))=row else{continue;};
+                c.execute("DELETE FROM transcript_rows WHERE kind=?1 AND ordinal=?2",params![self.kind,ordinal])?;
+                let host=ConversationId::new(conversation.as_slice().try_into().map_err(|_|invalid("invalid erased route host"))?);Self::refresh_route_on(c,self.kind,&host)?;
+                c.execute("UPDATE transcript_sources SET record_count=record_count-1,body_bytes=body_bytes-?2 WHERE kind=?1",params![self.kind,bytes])?;
+                c.execute("UPDATE transcript_conversations SET record_count=record_count-1,body_bytes=body_bytes-?3,revision=revision+1 WHERE kind=?1 AND conversation=?2",params![self.kind,conversation,bytes])?;
+                removed+=1;
+            }
+            if removed>0{c.execute("UPDATE transcript_sources SET revision=revision+1,rewrite_revision=rewrite_revision+1 WHERE kind=?1",[self.kind])?;}
+            Ok(removed)
+        })?;
+        if removed > 0 {
+            self.revision += 1;
+            self.rewrite_revision += 1;
+        }
+        Ok(removed)
+    }
+    pub(crate) fn maximum_sequence(&self, conversation: &ConversationId) -> Result<u64, LogError> {
+        self.profile.database().read(|c|{
+            let mut statement=c.prepare("SELECT sequence FROM transcript_rows WHERE kind=?1 AND conversation=?2 ORDER BY sequence DESC LIMIT 1")?;
+            let mut rows=statement.query(params![self.kind,conversation.as_bytes().as_slice()])?;
+            Ok(rows.next()?.map(|r|blob::<8>(r,0).map(u64::from_be_bytes)).transpose()?.unwrap_or(0))
+        })
+    }
     pub(crate) fn conversation_revision(
         &self,
         conversation: &ConversationId,
@@ -8,6 +72,18 @@ impl TranscriptRepository {
         self.profile.database().read(|c| {
             let revision: i64 = c.query_row("SELECT revision FROM transcript_conversations WHERE kind=?1 AND conversation=?2", params![self.kind,conversation.as_bytes().as_slice()], |r|r.get(0)).optional()?.unwrap_or(0);
             u64::try_from(revision).map_err(|_|invalid("invalid conversation revision"))
+        })
+    }
+    pub(crate) fn header_by_ordinal(
+        &self,
+        ordinal: i64,
+    ) -> Result<Option<TranscriptHeader>, LogError> {
+        self.profile.database().read(|c| {
+            let mut statement = c.prepare(&format!(
+                "SELECT {HEADER_COLUMNS} FROM transcript_rows WHERE kind=?1 AND ordinal=?2"
+            ))?;
+            let mut rows = statement.query(params![self.kind, ordinal])?;
+            rows.next()?.map(header).transpose()
         })
     }
     pub(in crate::node) fn row_by_ordinal(

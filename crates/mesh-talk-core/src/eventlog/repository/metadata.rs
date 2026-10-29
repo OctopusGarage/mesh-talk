@@ -81,6 +81,19 @@ impl EventRepository {
     pub(crate) fn count(&self, conv: &ConversationId) -> Result<u64, LogError> {
         Ok(self.metadata(conv)?.map_or(0, |m| m.count))
     }
+    pub(crate) fn authored_header(
+        &self,
+        conv: &ConversationId,
+        author: Author,
+        seq: u64,
+    ) -> Result<Option<EventHeader>, LogError> {
+        self.database.read(|c|{
+            self.require_active_on(c,conv)?;
+            let mut statement=c.prepare(&format!("SELECT {HEADER_COLUMNS} FROM retained_events WHERE domain=?1 AND conversation=?2 AND author=?3 AND seq=?4"))?;
+            let mut rows=statement.query(params![self.domain.0.as_slice(),conv.as_bytes().as_slice(),author.ed25519_pub().as_slice(),seq.to_be_bytes().as_slice()])?;
+            rows.next()?.map(read_header).transpose()
+        })
+    }
     pub(crate) fn author_max(
         &self,
         conv: &ConversationId,

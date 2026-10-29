@@ -88,16 +88,30 @@ impl ReceivedStore {
         })
     }
     pub(crate) fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
-        self.repository.put(
-            entry.conversation,
-            entry.event_id.as_bytes(),
-            entry.wall_clock,
-            0,
-            &entry.from,
-            &entry.plaintext,
-            false,
-            false,
-        )
+        if self.repository.kind == RECEIVED {
+            self.check_write()?;
+            let inserted = self.repository.profile.database().transaction(|c| {
+                Self::install_received_on(
+                    c,
+                    entry,
+                    None,
+                    super::reception_effects::ReceptionKind::DirectMessage,
+                )
+            })?;
+            self.note_channel_commit(usize::from(inserted));
+            Ok(())
+        } else {
+            self.repository.put(
+                entry.conversation,
+                entry.event_id.as_bytes(),
+                entry.wall_clock,
+                0,
+                &entry.from,
+                &entry.plaintext,
+                false,
+                false,
+            )
+        }
     }
     pub(crate) fn check_write(&self) -> Result<(), LogError> {
         self.repository.check_write()
@@ -122,10 +136,23 @@ impl ReceivedStore {
         reception: Option<&super::reception_effects::ReceptionMetadata>,
         reception_kind: super::reception_effects::ReceptionKind,
     ) -> Result<bool, LogError> {
-        let logical =
-            super::dm_envelope::DmEnvelope::decode_ref(&entry.plaintext).map(|env| env.msg_id);
+        let logical = super::dm_envelope::DmEnvelope::decode_ref(&entry.plaintext)
+            .filter(|env| {
+                super::conversation::account_conversation_id(
+                    env.route.sender_account,
+                    env.route.recipient_account,
+                ) == entry.conversation
+            })
+            .map(|env| env.msg_id);
         let suppressed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM transcript_suppression WHERE conversation=?1 AND (id=?2 OR id=?3))",rusqlite::params![entry.conversation.as_bytes().as_slice(),entry.event_id.as_bytes().as_slice(),logical.as_ref().map(|id|id.as_slice())],|r|r.get(0))?;
         if suppressed {
+            c.execute(
+                "INSERT OR IGNORE INTO transcript_received_evidence VALUES(?1,?2)",
+                rusqlite::params![
+                    entry.event_id.as_bytes().as_slice(),
+                    entry.conversation.as_bytes().as_slice()
+                ],
+            )?;
             return Ok(false);
         }
         let inserted = TranscriptRepository::put_on(
@@ -276,6 +303,12 @@ impl ReceivedStore {
     ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
         self.repository.file_headers(file, after, limit)
     }
+    pub(crate) fn header_by_ordinal(
+        &self,
+        ordinal: i64,
+    ) -> Result<Option<TranscriptHeader>, LogError> {
+        self.repository.header_by_ordinal(ordinal)
+    }
     pub(crate) fn row_by_ordinal(&self, ordinal: i64) -> Result<Option<ReceivedEntry>, LogError> {
         self.repository
             .row_by_ordinal(ordinal)?
@@ -292,6 +325,15 @@ impl ReceivedStore {
         self.repository
             .header_page(conversation, after, limit, descending)
     }
+    pub(crate) fn header_reverse_scan_page(
+        &self,
+        conversation: &ConversationId,
+        before: Option<i64>,
+        limit: TranscriptPageLimit,
+    ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
+        self.repository
+            .header_reverse_scan_page(conversation, before, limit)
+    }
     pub(crate) fn header_scan_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -299,6 +341,13 @@ impl ReceivedStore {
         limit: TranscriptPageLimit,
     ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
         self.repository.header_scan_page(conversation, after, limit)
+    }
+    pub(crate) fn account_routes_page(
+        &self,
+        after: Option<ConversationId>,
+        limit: usize,
+    ) -> Result<Vec<(ConversationId, Option<super::DmRoute>)>, LogError> {
+        self.repository.account_routes_page(after, limit)
     }
     pub(crate) fn conversation_revision(
         &self,
@@ -399,6 +448,9 @@ impl ReceivedStore {
             Ok(!found)
         })?;
         Ok(found)
+    }
+    pub(crate) fn remove_ordinals(&mut self, ordinals: &[i64]) -> Result<usize, LogError> {
+        self.repository.remove_ordinals(ordinals)
     }
     pub(crate) fn remove_where(
         &mut self,

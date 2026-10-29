@@ -999,3 +999,97 @@ fn preflight_authenticates_without_publication_and_warm_reads_no_frames() {
         .is_err()
     );
 }
+
+#[test]
+fn runtime_metadata_account_routes_use_first_envelope_metadata_and_zero_warm_body_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let path = dir.path().join("sent.log");
+    let mut store = SentStore::from_profile(owner.clone(), &path, "pw").unwrap();
+    for n in 0..257 {
+        store.record_durable(&sent(n)).unwrap();
+    }
+    let own = account.account_id();
+    let peer = "a".repeat(32);
+    let mut row = sent(300);
+    row.plaintext =
+        crate::node::DmEnvelope::new(own.clone(), peer.clone(), [19; 32], b"body".to_vec())
+            .encode();
+    store.record_durable(&row).unwrap();
+    let mut later = sent(301);
+    later.plaintext =
+        crate::node::DmEnvelope::new(own.clone(), "b".repeat(32), [20; 32], b"later".to_vec())
+            .encode();
+    store.record_durable(&later).unwrap();
+    let routes = store.account_routes_page(None, 128).unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].1.as_ref().unwrap().recipient_account, peer);
+    assert_eq!(store.body_reads(), 0);
+    drop(store);
+    drop(owner);
+    let owner = profile(dir.path(), &identity, &account);
+    let mut store = SentStore::from_profile(owner, &path, "pw").unwrap();
+    assert_eq!(store.account_routes_page(None, 128).unwrap(), routes);
+    assert_eq!(store.body_reads(), 0);
+    let first = store
+        .header_scan_page(None, Some(257), TranscriptPageLimit::default())
+        .unwrap()
+        .rows[0]
+        .ordinal;
+    assert_eq!(store.remove_ordinals(&[first]).unwrap(), 1);
+    let promoted = store.account_routes_page(None, 128).unwrap();
+    assert_eq!(
+        promoted[0].1.as_ref().unwrap().recipient_account,
+        "b".repeat(32)
+    );
+    let mut cursor = None;
+    loop {
+        let page = store
+            .header_scan_page(None, cursor, TranscriptPageLimit::default())
+            .unwrap();
+        if page.rows.is_empty() {
+            break;
+        }
+        let ordinals: Vec<_> = page
+            .rows
+            .iter()
+            .filter(|h| h.logical_id.is_some())
+            .map(|h| h.ordinal)
+            .collect();
+        cursor = page.rows.last().map(|h| h.ordinal);
+        store.remove_ordinals(&ordinals).unwrap();
+    }
+    assert!(store.account_routes_page(None, 128).unwrap().is_empty());
+    assert_eq!(store.body_reads(), 0);
+}
+
+#[test]
+fn runtime_metadata_suppressed_receive_installs_exact_evidence_without_a_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let mut rows =
+        ReceivedStore::from_profile(owner.clone(), &dir.path().join("received.log"), "pw").unwrap();
+    let mut suppression =
+        crate::node::account_suppression::IndexedAccountSuppression::from_profile(
+            owner,
+            &dir.path().join("account-suppression.log"),
+            "pw",
+        )
+        .unwrap();
+    let row = received(71);
+    suppression
+        .suppress(row.conversation, row.event_id)
+        .unwrap();
+    rows.record_durable(&row).unwrap();
+    assert!(!rows.contains(row.event_id).unwrap());
+    assert!(
+        rows.processed(row.event_id).unwrap(),
+        "an erased signed event must leave exact processing evidence"
+    );
+    assert_eq!(rows.revision(), 0);
+    assert_eq!(rows.body_reads(), 0);
+}
