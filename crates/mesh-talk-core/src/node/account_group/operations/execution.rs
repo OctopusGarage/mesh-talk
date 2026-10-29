@@ -302,8 +302,16 @@ impl Node {
             .lock()
             .expect("group operation journal mutex")
             .take_source_ready(&self.identity.public(), 8);
+        // Local executors can consume their own intents without a wire page.
+        // Consult the same forwarding fence after releasing the journal lock.
+        let blocked = self.blocked_forwarding_group_operations(
+            &ready.iter().map(|entry| entry.reference.id).collect(),
+        );
         let mut fanout = BTreeSet::new();
         for entry in ready {
+            if !entry.cancel && blocked.contains(&entry.reference.id) {
+                continue;
+            }
             let request = RequestProjection {
                 reference: entry.reference.clone(),
                 body: entry.body.clone(),

@@ -3780,6 +3780,54 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_control_accepts_one_new_wake_received_during_the_failed_attempt() {
+        use super::super::account_documents::sync::DocumentSyncCursor;
+        let peer = crate::identity::device::DeviceIdentity::generate().public();
+        let started = std::time::Instant::now();
+        let failed = started + Duration::from_secs(3);
+        let original: DocumentCheckpoint =
+            DocumentSyncCursor::control_test_timeout_window(started, failed).into();
+        let demand = ControlDemand::from([super::super::AccountGroupOperationId::for_origin(
+            &peer, [29; 16],
+        )]);
+        let mut hint = wake::ControlWakeHint::test_token(peer.clone(), [27; 16], 1);
+        hint.received_at = started;
+        let mut checkpoint = original.clone();
+        assert!(!checkpoint.refresh_timed_out_control_for_requests(
+            &peer,
+            Some(&demand),
+            Some(&hint)
+        ));
+        assert_eq!(checkpoint, original, "a pre-attempt token retains backoff");
+        hint.received_at = started + Duration::from_millis(1);
+        assert!(hint.received_at < failed);
+        assert!(checkpoint.refresh_timed_out_control_for_requests(
+            &peer,
+            Some(&demand),
+            Some(&hint)
+        ));
+        assert!(!checkpoint.refresh_timed_out_control_for_requests(
+            &peer,
+            Some(&demand),
+            Some(&hint)
+        ));
+        let next_started = failed + Duration::from_millis(1);
+        let mut retry: DocumentCheckpoint = DocumentSyncCursor::control_test_timeout_window(
+            next_started,
+            next_started + Duration::from_secs(3),
+        )
+        .into();
+        assert!(
+            !retry.refresh_timed_out_control_for_requests(&peer, Some(&demand), Some(&hint)),
+            "the same received token cannot renew a later failure"
+        );
+        let mut newer = wake::ControlWakeHint::test_token(peer.clone(), [27; 16], 2);
+        newer.received_at = next_started + Duration::from_millis(1);
+        assert!(retry.refresh_timed_out_control_for_requests(&peer, Some(&demand), Some(&newer)));
+        assert!(!retry.refresh_timed_out_control_for_requests(&peer, Some(&demand), Some(&newer)));
+    }
+
+    #[test]
     fn control_checkpoint_preserves_comparison_start_across_partial_pages_and_rollback() {
         use super::super::account_documents::{
             AccountDocumentKey, sync::DocumentSyncCursor as Cursor,

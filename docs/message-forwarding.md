@@ -97,6 +97,13 @@ If an original pending intent cannot be found after journal loss or an origin
 change, the item reports uncertain acceptance and requires review rather than
 silently binding another origin.
 
+Within a batch, same-target items retain canonical source order in the existing
+progress record. The forwarding owner withholds a later group's signed operation
+request, and local execution, until earlier admitted items reach a terminal result.
+Committed, cancelled or rejected predecessors release the next item; uncertain
+acceptance remains blocked. Other targets and unrelated operations keep their
+existing scheduling. This fence survives restart without a new wire or stored field.
+
 Batch listing projects retained journal status without admitting work, advancing
 query retries or rereading source content. Source recall after admission does not
 prevent observing or replaying the already admitted result. The existing forwarding

@@ -32,7 +32,10 @@ impl CriticalControlTrace {
             event,
         );
         self.total += 1;
-        if self.first.len() < 128 {
+        // Keep the complete bounded operation interval, including the middle
+        // request/Complete nonce pairs needed to distinguish stale cursors from
+        // scheduler delay. The former 128 + 64 sample lost those transitions.
+        if self.first.len() < 1024 {
             self.first.push(row);
         } else {
             if self.last.len() == 64 {
@@ -186,13 +189,17 @@ impl ControlTestPages {
             )
             .unwrap();
             let task = tokio::task::id();
-            let (_, origin, dispatched_at) = self
+            let Some((_, origin, dispatched_at)) = self
                 .origins
                 .iter()
                 .rev()
                 .find(|(id, _, _)| *id == task)
-                .expect("every controller request has its exact dispatch origin")
-                .clone();
+                .cloned()
+            else {
+                // Hooks can attach after a task starts, and this bounded ledger
+                // can retire an older origin. Neither is dispatch evidence.
+                return;
+            };
             if self.pages.len() == 64 {
                 self.pages.pop_front();
             }
@@ -254,6 +261,41 @@ impl ControlTestPages {
             .collect()
     }
 }
+
+#[tokio::test]
+async fn control_page_observer_requires_an_observed_dispatch_without_poisoning_late_hooks() {
+    let pages = Arc::new(Mutex::new(ControlTestPages::default()));
+    let observed = pages.clone();
+    let task = tokio::spawn(async move {
+        let request = crate::node::account_documents::wire::DocumentRequest {
+            version: 5,
+            account_id: Account::generate().account_id(),
+            domain: crate::node::AccountDocumentDomain::GroupControl,
+            after: None,
+            known_digest: [0; 32],
+            operation: None,
+        };
+        let body = format!(
+            "control_request_body={}",
+            hex::encode(serde_json::to_vec(&request).unwrap())
+        );
+        observed.lock().unwrap().observe(&body);
+        assert!(observed.lock().unwrap().pages.is_empty());
+
+        let origin = "control_task paired=false protected=false requests=[]";
+        observed.lock().unwrap().observe(origin);
+        observed.lock().unwrap().observe(&body);
+        let page = observed.lock().unwrap().task(tokio::task::id()).unwrap();
+        assert_eq!(page.origin, origin);
+        assert_eq!(
+            serde_json::to_value(&page.request).unwrap(),
+            serde_json::to_value(&request).unwrap()
+        );
+    });
+    task.await.unwrap();
+    assert_eq!(pages.lock().unwrap().pages.len(), 1);
+}
+
 pub(super) fn record_b_trace(
     trace: &BTrace,
     started: std::time::Instant,
@@ -1672,7 +1714,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                 retired.store(false, std::sync::atomic::Ordering::Release);
                 release.close();
                 resumed_release.close();
-                tokio::time::timeout(Duration::from_secs(8), async {
+                super::cold_account_setup(async {
                     while !retired.load(std::sync::atomic::Ordering::Acquire)
                         || !partial_keys.lock().unwrap().iter().all(|key| {
                             reference.account_document_meta(key).is_some()
@@ -1943,7 +1985,9 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     }
     drop(executor_boundary);
     let private_failed = receipt.is_err();
-    let recovered = tokio::time::timeout(Duration::from_secs(8), async {
+    // Draining both preserved background comparisons is fixture recovery,
+    // outside the unchanged eight-second A/B operation assertions above.
+    let recovered = super::cold_account_setup(async {
         loop {
             let receipt = reference
                 .account_group_operation_status(&account.account_id(), id)

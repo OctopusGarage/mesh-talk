@@ -256,6 +256,67 @@ impl Node {
         }
         admitted
     }
+    /// Delay a batch's later same-target effects using its existing durable order.
+    /// Snapshot forwarding first; operation status reads never nest its lock.
+    pub(in crate::node) fn blocked_forwarding_group_operations(
+        &self,
+        candidates: &std::collections::BTreeSet<AccountGroupOperationId>,
+    ) -> std::collections::BTreeSet<AccountGroupOperationId> {
+        if candidates.is_empty() {
+            return Default::default();
+        }
+        let predecessors = {
+            let store = self.forwarding.lock().expect("forwarding lock");
+            let mut predecessors = Vec::new();
+            for batch in store.batches.values() {
+                let mut prior = std::collections::BTreeMap::<_, Vec<_>>::new();
+                for item in &batch.result.items {
+                    let Ok(MessageDestination::Channel(group)) = destination(&item.target) else {
+                        continue;
+                    };
+                    let id = self.forwarding_group_id(&item_identity(
+                        &batch.request.operation_id,
+                        &item.target,
+                        &item.source_id,
+                    ));
+                    let earlier = prior.entry(*group.as_bytes()).or_default();
+                    if candidates.contains(&id) {
+                        predecessors.push((id, earlier.clone()));
+                    }
+                    if item.status != "accepted" || item.message_id.is_none() {
+                        let requires_receipt = item.status == "pending"
+                            || item.error.as_deref().is_some_and(|error| {
+                                error == "Acceptance started"
+                                    || error.starts_with("Uncertain acceptance")
+                            });
+                        earlier.push((id, requires_receipt));
+                    }
+                }
+            }
+            predecessors
+        };
+        let account = self.account_id();
+        predecessors
+            .into_iter()
+            .filter_map(|(id, earlier)| {
+                earlier
+                    .into_iter()
+                    .any(|(earlier, requires_receipt)| {
+                        match self.retained_account_group_operation_status(&account, earlier) {
+                            Ok(Some(status)) => !matches!(
+                                status.phase,
+                                AccountGroupOperationPhase::Committed
+                                    | AccountGroupOperationPhase::Cancelled
+                                    | AccountGroupOperationPhase::Rejected { .. }
+                            ),
+                            Ok(None) => requires_receipt,
+                            Err(_) => true,
+                        }
+                    })
+                    .then_some(id)
+            })
+            .collect()
+    }
     fn save_forward_progress(&self, batch: &ForwardBatch) -> Result<(), NodeError> {
         let previous = {
             let store = self.forwarding.lock().expect("forwarding lock");
@@ -546,7 +607,13 @@ impl Node {
                             };
                             // Keep sequential local acceptance for an executable device;
                             // logical siblings use the existing delegated operation owner.
-                            if !local_execution {
+                            if !local_execution
+                                || !self
+                                    .blocked_forwarding_group_operations(
+                                        &[self.forwarding_group_id(&id)].into_iter().collect(),
+                                    )
+                                    .is_empty()
+                            {
                                 let status = self.submit_account_group_text_if(
                                     &self.account_id(),
                                     self.forwarding_group_id(&id),
@@ -578,10 +645,6 @@ impl Node {
                     }
                 }
                 .await;
-                batch
-                    .result
-                    .items
-                    .retain(|item| !(item.target == *target && item.source_id == source_id));
                 let mut item = ForwardItem {
                     target: target.clone(),
                     source_id,
@@ -597,7 +660,13 @@ impl Node {
                     Ok(ForwardAcceptance::Group(status)) => apply_group_status(&mut item, &status),
                     Err(error) => item.error = Some(error.to_string()),
                 }
-                batch.result.items.push(item);
+                if let Some(existing) = batch.result.items.iter_mut().find(|existing| {
+                    existing.target == item.target && existing.source_id == item.source_id
+                }) {
+                    *existing = item;
+                } else {
+                    batch.result.items.push(item);
+                }
                 authorize(&mut || self.save_forward_progress(&batch))?;
             }
         }

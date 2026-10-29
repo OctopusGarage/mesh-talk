@@ -280,6 +280,15 @@ async fn erased_file_result_publishes_only_terminal_status_to_fresh_sibling() {
 /// A fresh authenticated wake must not wait behind an older failed Noise dial.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operation_budget() {
+    modern_leave_timeout_recovery(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn modern_leave_wake_during_real_noise_timeout_recovers_within_operation_budget() {
+    modern_leave_timeout_recovery(true).await;
+}
+
+async fn modern_leave_timeout_recovery(wake_during_attempt: bool) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
     let f = crate::node::channels::account_self_control::tests::fixture(false);
@@ -344,6 +353,7 @@ async fn modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operati
     }
     let stalled = Arc::new(AtomicBool::new(false));
     let release = Arc::new(tokio::sync::Notify::new());
+    let held_control = Arc::new(AtomicBool::new(false));
     // Existing body-free client traces identify the actual Control TCP port;
     // other lanes retain their real endpoint admission and serving behavior.
     let connection_roles = Arc::new(Mutex::new((
@@ -354,6 +364,7 @@ async fn modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operati
     let serving = source.clone();
     let server_stalled = stalled.clone();
     let server_release = release.clone();
+    let server_held_control = held_control.clone();
     let source_server = tokio::spawn(async move {
         let mut connections = tokio::task::JoinSet::new();
         loop {
@@ -364,6 +375,7 @@ async fn modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operati
                     let armed = server_stalled.load(Ordering::Acquire);
                     let roles = server_roles.clone();
                     let release = server_release.clone();
+                    let held_control = server_held_control.clone();
                     connections.spawn(Box::pin(async move {
                         let held = if armed {
                             let port = stream.peer_addr().unwrap().port();
@@ -377,6 +389,7 @@ async fn modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operati
                             }).await.expect("the real dial must publish its socket classification")
                         } else { false };
                         if held {
+                            held_control.store(true, Ordering::Release);
                             // A real accepted TCP socket receives no Noise reply.
                             // Releasing it closes this failed attempt; it cannot
                             // manufacture a successful protocol exchange.
@@ -466,22 +479,53 @@ async fn modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operati
     let reference_worker = tokio::spawn(reference.clone().run_account_history_loop());
     let source_worker = tokio::spawn(source.clone().run_account_history_loop());
     let outcome = tokio::time::timeout(Duration::from_secs(8), async {
-        while !timeout_seen.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        if wake_during_attempt {
+            let key = crate::node::AccountDocumentKey::GroupOperation {
+                channel: hex::encode(group.as_bytes()), source_device: source.user_id(),
+            };
+            loop {
+                let published_terminal = source.account_document(&key).unwrap()
+                    .and_then(|document| OperationFrame::decode(document.payload(), &account.public().ed25519_pub))
+                    .is_some_and(|frame| frame.projection.results.iter().any(|result|
+                        result.reference.id == id && result.status.phase == AccountGroupOperationPhase::Committed));
+                if held_control.load(Ordering::Acquire) && published_terminal { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // Retain the real endpoint and signed terminal head, but prevent a
+            // later automatic publication from masking this one during-attempt wake.
+            source_worker.abort();
+            while !source_worker.is_finished() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        } else {
+            while !timeout_seen.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
+        // New connections can recover; the exact original socket stays held
+        // until its genuine Noise deadline below, never a synthetic cursor error.
         stalled.store(false, Ordering::Release);
-        release.notify_waiters();
+        source.set_device_hostname(Some(if wake_during_attempt {
+            "Published during failed control attempt"
+        } else { "Published after failed control attempt" })).unwrap();
+        let (epoch, revision) = source.account_wake_token_for_test();
         let peer = source.routing_peer(&reference.user_id()).unwrap();
-        // This fresh wake traverses Noise and the authenticated Wake handler;
-        // status polling itself must not clear a failed cursor's cooldown.
         use crate::node::account_sync_wire::{AccountHistoryFrame, AccountSyncVersion};
         let mut wake = source.begin_account_exchange(&peer, AccountSyncVersion::V2,
-            AccountHistoryFrame::Wake { account_id: account.account_id(), epoch: [17; 16], revision: 1 })
+            AccountHistoryFrame::Wake { account_id: account.account_id(), epoch, revision })
             .await.unwrap();
         let ack = wake.recv().await.unwrap();
         assert!(matches!(AccountHistoryFrame::decode_versioned(&ack),
-            Some((AccountSyncVersion::V2, AccountHistoryFrame::WakeAck { epoch, revision: 1 })) if epoch == [17; 16]));
+            Some((AccountSyncVersion::V2, AccountHistoryFrame::WakeAck { epoch: observed_epoch, revision: observed_revision }))
+                if observed_epoch == epoch && observed_revision == revision));
         wake.recycle(&source);
+        if wake_during_attempt {
+            assert!(!timeout_seen.load(Ordering::Acquire), "the authenticated publication must precede the original attempt's failure");
+            while !timeout_seen.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        release.notify_waiters();
         loop {
             let status = reference.list_account_group_operations(&account.account_id(),
                 AccountGroupOperationQuery { group: Some(group), pending_only: false, after: None, limit: 64 })
@@ -522,7 +566,7 @@ async fn modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operati
     reference.runtime_work.drain().await;
     assert!(
         timeout_seen.load(Ordering::Acquire),
-        "a real Control Noise timeout must precede the recovery wake: {:?}",
+        "a real Control Noise timeout must precede recovery: {:?}",
         trace.lock().unwrap()
     );
     assert!(

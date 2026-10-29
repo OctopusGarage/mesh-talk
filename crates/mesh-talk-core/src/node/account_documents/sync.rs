@@ -133,8 +133,9 @@ pub(in crate::node) struct DocumentSyncCursor {
     page_completed: bool,
     last_failure_at: Option<Instant>,
     // A failed initial Control negotiation owns no continuation or page bytes.
-    // Only a genuinely newer authenticated wake may retire this cooldown.
-    failed_control_negotiation_at: Option<Instant>,
+    // A newer authenticated wake received during or after that failed attempt
+    // may retire this cooldown once; an earlier token cannot renew it.
+    failed_control_negotiation_started_at: Option<Instant>,
     pub(in crate::node) error: Option<String>,
     error_domain: Option<AccountDocumentDomain>,
     pub(in crate::node) pending: bool,
@@ -170,7 +171,7 @@ impl Default for DocumentSyncCursor {
             admission_deferred: false,
             page_completed: false,
             last_failure_at: None,
-            failed_control_negotiation_at: None,
+            failed_control_negotiation_started_at: None,
             error: None,
             error_domain: None,
             pending: false,
@@ -207,8 +208,16 @@ impl DocumentSyncCursor {
 
     #[cfg(test)]
     pub(in crate::node) fn control_test_timeout(failed_at: Instant) -> Self {
+        Self::control_test_timeout_window(failed_at, failed_at)
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn control_test_timeout_window(
+        started_at: Instant,
+        failed_at: Instant,
+    ) -> Self {
         Self {
-            failed_control_negotiation_at: Some(failed_at),
+            failed_control_negotiation_started_at: Some(started_at),
             last_failure_at: Some(failed_at),
             error: Some("account document exchange interrupted".into()),
             error_domain: Some(AccountDocumentDomain::GroupControl),
@@ -252,12 +261,12 @@ impl DocumentSyncCursor {
             || self.group_retry_at.is_some()
             || self.error_domain != Some(AccountDocumentDomain::GroupControl)
             || self
-                .failed_control_negotiation_at
-                .is_none_or(|failed| wake_received_at <= failed)
+                .failed_control_negotiation_started_at
+                .is_none_or(|started| wake_received_at <= started)
         {
             return false;
         }
-        self.failed_control_negotiation_at = None;
+        self.failed_control_negotiation_started_at = None;
         self.retry_at = None;
         self.error = None;
         self.error_domain = None;
@@ -844,7 +853,7 @@ impl Node {
             return Ok(());
         }
         cursor.admission_deferred = false;
-        cursor.failed_control_negotiation_at = None;
+        cursor.failed_control_negotiation_started_at = None;
         cursor.error = None;
         cursor.error_domain = None;
         if cursor
@@ -918,6 +927,7 @@ impl Node {
         let attempted_domain = DOMAINS[cursor.domain];
         let operation_digest = cursor.operation_digest;
         let had_continuation = cursor.after.is_some();
+        let attempted_at = Instant::now();
         let result = self.pull_document_exchange(peer, cursor).await;
         if result
             .as_ref()
@@ -942,7 +952,7 @@ impl Node {
                     .as_ref()
                     .is_err_and(super::super::account_session::account_dial_timed_out)
             {
-                cursor.failed_control_negotiation_at = Some(failed_at);
+                cursor.failed_control_negotiation_started_at = Some(attempted_at);
             }
         }
         if attempted_domain == AccountDocumentDomain::GroupControl
@@ -1877,7 +1887,7 @@ mod group_control_tests {
                 1 => protected.pending = true,
                 2 => protected.admission_deferred = true,
                 3 => protected.group_retry_at = Some(failed + Duration::from_secs(300)),
-                4 => protected.failed_control_negotiation_at = None,
+                4 => protected.failed_control_negotiation_started_at = None,
                 5 => protected.scope = DocumentSyncScope::Directory,
                 _ => protected.error_domain = Some(AccountDocumentDomain::GroupInventory),
             }

@@ -1027,8 +1027,14 @@ impl Node {
                 .collect();
             (pending, results, lookups)
         };
+        // The forwarding owner gates actual signed request publication. The
+        // executor cannot infer a device-local batch from independent IDs.
+        let blocked = self.blocked_forwarding_group_operations(
+            &pending.iter().map(|entry| entry.reference.id).collect(),
+        );
         let requests = pending
             .iter()
+            .filter(|entry| entry.cancel || !blocked.contains(&entry.reference.id))
             .filter_map(|entry| {
                 let ready = self.account_group_operation_ready_for(
                     &entry.reference.executor.device,

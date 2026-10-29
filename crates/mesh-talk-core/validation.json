@@ -464,8 +464,10 @@
             "unchanged_processed_operation_heads_skip_repeated_signature_decodes",
             "unchanged_local_operation_publication_does_not_repeat_signature_verification",
             "modern_leave_terminal_wake_recovers_a_real_noise_timeout_within_operation_budget",
+            "modern_leave_wake_during_real_noise_timeout_recovers_within_operation_budget",
             "timed_out_control_refresh_requires_newer_wake_and_preserves_partial_failures",
             "timed_out_control_demand_requires_original_request_and_same_full_peer",
+            "timed_out_control_accepts_one_new_wake_received_during_the_failed_attempt",
             "control_wake_receipt_time_never_changes_token_identity",
             "only_remote_dial_timeout_allows_wake_recovery",
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
@@ -491,7 +493,7 @@
             "reference": "docs/network-design-reference.md#personal-conversation-removal"
           },
           {
-            "name": "Negotiated operation patches omit only exactly known nonzero role digests before page limits, complete a normal-operation prefix before loading a following legacy payload, preserve lexical continuations and full-scope authenticated atomic completion, and repair roles or operation heads changed behind a continuation on a fresh scope. Legacy-only pages retain 64 rows and existing byte, worker and deadline bounds. Operation maintenance reuses its existing processed metadata hashes before payload decoding; changed, currently unbound or unfinished foreign inputs retain verification/retry and generic input readers remain complete. A newer authenticated same-device Wake may restart only an initial remote-dial timeout for an original pending operation without a comparison pair; token identity, partial/parked cooldowns, authentication and local-capacity rules remain unchanged.",
+            "name": "Negotiated operation patches omit only exactly known nonzero role digests before page limits, complete a normal-operation prefix before loading a following legacy payload, preserve lexical continuations and full-scope authenticated atomic completion, and repair roles or operation heads changed behind a continuation on a fresh scope. Legacy-only pages retain 64 rows and existing byte, worker and deadline bounds. Operation maintenance reuses its existing processed metadata hashes before payload decoding; changed, currently unbound or unfinished foreign inputs retain verification/retry and generic input readers remain complete. A newer authenticated same-device Wake received during or after a failed initial remote-dial attempt may restart that comparison once for an original pending operation without a comparison pair; token identity, partial/parked cooldowns, authentication and local-capacity rules remain unchanged.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
@@ -1997,7 +1999,7 @@
             "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
           },
           {
-            "name": "Stable origin-bound group operation identities survive retry and restart; missing original pending intent remains uncertain rather than admitting another send, with unchanged stored forwarding record layout",
+            "name": "Stable origin-bound group operation identities and canonical same-target order survive retry and restart; actual request publication and local execution wait for terminal predecessors, while missing original pending intent remains uncertain, with unchanged stored forwarding record layout",
             "reference": "docs/message-forwarding.md#reliability-and-verification"
           },
           {

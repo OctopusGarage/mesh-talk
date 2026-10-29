@@ -625,6 +625,36 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             current.clone().run_accept_loop(listener),
         )));
     }
+    // Establish the original linked routes before measuring custody delivery.
+    // This passive bootstrap sends no synthetic receipt or additional RPC.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let ready = [(&a, &sibling), (&sibling, &a)]
+                .into_iter()
+                .all(|(node, peer)| {
+                    let public = peer.identity.public();
+                    let exact_capability = node
+                        .account_group_versions
+                        .lock()
+                        .unwrap()
+                        .get(&peer.user_id())
+                        .is_some_and(|support| support.public == public);
+                    let documents_settled = node.device_sync_status().into_iter().any(|status| {
+                        status.device_id == peer.user_id()
+                            && status.document_phase == crate::node::SyncPhase::UpToDate
+                            && status.document_error.is_none()
+                            && !status.document_requires_upgrade
+                    });
+                    exact_capability && documents_settled
+                });
+            if ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both original linked-device routes must complete authenticated cold document setup before the custody scenario");
     let channel = a
         .create_channel(
             "custody fixture",

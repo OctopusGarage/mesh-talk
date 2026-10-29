@@ -1442,8 +1442,9 @@ are never cancelled by this scheduling rule, and worker/TCP limits do not increa
 
 An initial Control dial timeout owns no response bytes or continuation. If the
 original operation still selects that full device identity, a strictly newer
-authenticated Wake received after the timeout may restart that failed comparison
-once. This applies only without an active or parked comparison pair. Reception
+authenticated Wake received after that failed attempt began may restart the
+comparison once, including a new publication observed during its stalled dial.
+The ordinary retry deadline still starts at failure completion. This applies only without an active or parked comparison pair. Reception
 time orders this evidence but is excluded from Wake-token equality; duplicate
 notifications and status polling cannot renew the opportunity. Remote dial
 timeout is distinct from outer negotiation/local-admission waits, authentication

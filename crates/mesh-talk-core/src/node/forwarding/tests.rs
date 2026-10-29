@@ -673,6 +673,14 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
         while !reference
             .account_group_access(group)
             .is_ok_and(|access| access.role == role)
+            || !reference.account_group_operation_ready_for(
+                &source.identity.public(),
+                AccountGroupOperationKind::Text,
+            )
+            || !reference.account_group_operation_ready_for(
+                &source.identity.public(),
+                AccountGroupOperationKind::File,
+            )
         {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -681,8 +689,47 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
     .expect("real authenticated account control must establish the reference role");
     assert!(reference.channels.lock().unwrap().state(&group).is_none());
     let selected = self::source(&reference);
+    // Queue both real intents before allowing another private document read.
+    // Choose the ordinary stable item IDs in reverse scheduler order so the
+    // old independent-request publication deterministically exposes the bug.
+    let reads = Arc::new(tokio::sync::Semaphore::new(0));
+    struct ReleaseReads(Arc<tokio::sync::Semaphore>);
+    impl Drop for ReleaseReads {
+        fn drop(&mut self) {
+            self.0.add_permits(16);
+        }
+    }
+    let release_reads = ReleaseReads(reads.clone());
+    for node in [&source, &reference] {
+        *node.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let reads = reads.clone();
+            move |_, frame| {
+                let reads = reads.clone();
+                Box::pin(async move {
+                    if matches!(
+                        frame,
+                        crate::node::account_sync_wire::AccountHistoryFrame::DocumentsRequest { .. }
+                    ) {
+                        let _permit = reads.acquire().await.unwrap();
+                    }
+                })
+            }
+        }));
+    }
+    let target = ForwardTarget {
+        kind: "channel".into(),
+        target: hex::encode(group.as_bytes()),
+    };
+    let now = super::super::node::now_millis();
+    let operation_id = (0..100)
+        .map(|attempt| format!("{now}-reference-text-{attempt}"))
+        .find(|operation| {
+            item_identity(operation, &target, &Some(hex::encode([1; 32])))
+                > item_identity(operation, &target, &Some(hex::encode([2; 32])))
+        })
+        .expect("a bounded deterministic ID search must reverse the old scheduler");
     let text_request = ForwardRequest {
-        operation_id: format!("{}-reference-text", super::super::node::now_millis()),
+        operation_id,
         source: selected.clone(),
         destinations: vec![ForwardTarget {
             kind: "channel".into(),
@@ -702,6 +749,63 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
         "logical {role:?}: {:?}",
         first.items
     );
+    let first_id = reference.forwarding_group_id(&item_identity(
+        &text_request.operation_id,
+        &target,
+        &Some(hex::encode([1; 32])),
+    ));
+    let second_id = reference.forwarding_group_id(&item_identity(
+        &text_request.operation_id,
+        &target,
+        &Some(hex::encode([2; 32])),
+    ));
+    for id in [first_id, second_id] {
+        let status = reference
+            .retained_account_group_operation_status(&reference.account_id(), id)
+            .unwrap();
+        assert!(
+            status.as_ref().is_some_and(
+                |status| status.phase == AccountGroupOperationPhase::AwaitingAcceptance
+            ),
+            "both gated real intents must await acceptance: {status:?}"
+        );
+    }
+    assert_eq!(
+        reference
+            .operation_projection(group)
+            .requests
+            .iter()
+            .map(|request| request.reference.id)
+            .collect::<Vec<_>>(),
+        vec![first_id],
+        "only the first admitted forwarding leg may be published before its terminal result"
+    );
+    let published = reference
+        .account_document(&crate::node::AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: reference.user_id(),
+        })
+        .unwrap()
+        .unwrap();
+    let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
+        published.payload(),
+        &account.public().ed25519_pub,
+    )
+    .expect("actual stored publication retains its verified signature");
+    assert_eq!(
+        frame
+            .projection
+            .requests
+            .iter()
+            .map(|request| request.reference.id)
+            .collect::<Vec<_>>(),
+        vec![first_id],
+        "passive document sync cannot export a later leg"
+    );
+    for node in [&source, &reference] {
+        *node.account_session_test_hook.lock().unwrap() = None;
+    }
+    drop(release_reads);
     let text_result = wait_forward_receipts(&reference, &text_request).await;
     assert_eq!(
         source
@@ -1016,6 +1120,110 @@ async fn unauthorized_group_leg_preserves_an_accepted_account_leg() {
     };
     assert_eq!(by_identity(replay), by_identity(result));
     assert_eq!(node.account_history(&node.account_id(), 100).len(), 2);
+}
+
+#[tokio::test]
+async fn pending_forwarding_order_survives_restart_and_cancelled_predecessor() {
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let node = open(directory.path(), &account);
+    let group = node
+        .create_channel("Ordered forwarding", vec![])
+        .await
+        .unwrap();
+    let target = ForwardTarget {
+        kind: "channel".into(),
+        target: hex::encode(group.as_bytes()),
+    };
+    let request = ForwardRequest {
+        operation_id: format!("{}-pending-order", super::super::node::now_millis()),
+        source: source(&node),
+        destinations: vec![target.clone()],
+        mode: "individual".into(),
+    };
+    let mut batch = ForwardBatch {
+        request,
+        result: ForwardResult {
+            operation_id: String::new(),
+            items: Vec::new(),
+        },
+    };
+    batch.result.operation_id = batch.request.operation_id.clone();
+    let mut ids = Vec::new();
+    // Exercise the existing progress/journal boundary with real admitted sends,
+    // leaving source execution parked until both encrypted stores reopen.
+    for (index, text) in [(1, "first"), (2, "second")] {
+        let source_id = Some(hex::encode([index; 32]));
+        let id = node.forwarding_group_id(&item_identity(
+            &batch.request.operation_id,
+            &target,
+            &source_id,
+        ));
+        let status = node
+            .submit_account_group_text_if(
+                &node.account_id(),
+                id,
+                group,
+                AccountGroupTextInput {
+                    text: text.as_bytes().to_vec(),
+                    reply_to: None,
+                    expires_at_ms: None,
+                    protection: None,
+                },
+                |commit| commit(),
+            )
+            .unwrap();
+        let mut item = ForwardItem {
+            target: target.clone(),
+            source_id,
+            message_id: None,
+            status: String::new(),
+            error: None,
+        };
+        apply_group_status(&mut item, &status);
+        batch.result.items.push(item);
+        ids.push(id);
+    }
+    node.save_forward_progress(&batch).unwrap();
+    drop(node);
+    let reopened = open(directory.path(), &account);
+    let exported = || {
+        reopened
+            .operation_projection(group)
+            .requests
+            .into_iter()
+            .map(|request| request.reference.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        exported(),
+        vec![ids[0]],
+        "restart preserves the pending publication fence"
+    );
+    reopened
+        .cancel_account_group_operation(&reopened.account_id(), ids[0])
+        .unwrap();
+    reopened.maintain_account_group_operation_effects();
+    assert!(
+        reopened
+            .retained_account_group_operation_status(&reopened.account_id(), ids[0])
+            .unwrap()
+            .is_some_and(|status| status.phase == AccountGroupOperationPhase::Cancelled)
+    );
+    assert_eq!(
+        exported(),
+        vec![ids[1]],
+        "terminal cancellation releases the following leg"
+    );
+    reopened.maintain_account_group_operation_effects();
+    assert_eq!(
+        reopened
+            .channel_history(group, 10)
+            .iter()
+            .map(|row| row.text.clone())
+            .collect::<Vec<_>>(),
+        vec![b"second".to_vec()]
+    );
 }
 
 #[tokio::test]
