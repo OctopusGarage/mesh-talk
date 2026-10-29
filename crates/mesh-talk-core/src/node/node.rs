@@ -1052,7 +1052,7 @@ impl Node {
         let privacy = Arc::new(super::privacy_runtime::PrivacyControl::with_storage(
             storage.clone(),
         ));
-        let node = Arc::new(Self {
+        let mut node = Self {
             storage,
             expiry_clock_start: (std::time::Instant::now(), now_millis()),
             expiry_first_seen: Mutex::new(HashMap::new()),
@@ -1185,7 +1185,7 @@ impl Node {
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
             my_dm_reactions: Mutex::new(my_dm_reactions),
-        });
+        };
         node.reconcile_account_profiles_on_open().map_err(|error| {
             LogError::CorruptFile(format!("account profile projection: {error}"))
         })?;
@@ -1204,7 +1204,11 @@ impl Node {
             &node.account.public(),
         )?;
         crate::storage::profile::publication::cut("participant-after-adoption-clear")?;
-        Ok(node)
+        // Schema was initialized before WAL recovery. Capture the final account
+        // only after the existing authenticated adoption owner has committed.
+        node.reception_effects =
+            super::reception_effects::ReceptionEffects::open(node.storage.clone())?;
+        Ok(Arc::new(node))
     }
 
     /// This node's own user-id fingerprint.

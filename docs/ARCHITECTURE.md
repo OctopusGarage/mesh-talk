@@ -1440,6 +1440,12 @@ body. Producers install it inside the same SQL transaction as plaintext and
 exact processing evidence, before completing the existing delivery journal or
 channel checkpoint. A separate terminal batch fact survives deletion of its
 former content template. Legacy historical-source migration creates no effects.
+Each receipt stream, exact installation identity, and fixed consumer cursor is
+scoped to the authenticated `participant_profile.account` key. Producers derive
+that key within their existing SQL transaction. Open readers capture the key and
+reject pages, ACKs, and retirement after account adoption; retained accounts keep
+their own pending work and epochs. Runtime/session authority additionally fences
+individual host installations.
 
 Receipt cursors bind a persisted random epoch and local installation sequence;
 sender timestamps never order host work. A finite through-cursor prevents
