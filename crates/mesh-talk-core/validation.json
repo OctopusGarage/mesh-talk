@@ -2,6 +2,41 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-reception-effects",
+      "paths": [
+        "crates/mesh-talk-core/src/node/reception_effects/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": ["node::reception_effects::tests::"]
+        }
+      ],
+      "consumers": ["core-node", "desktop-chat"],
+      "capability": {
+        "summary": "Provide bodyless durable reception work and bounded demand pages for host integration without changing frontend read-state ownership or claiming production callback cutover.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Receipt source identity, first reception provenance and terminal batch metadata commit with transcript processing before existing journal/checkpoint completion; exact installation evidence survives pending-metadata retirement.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Epoch-scoped local installation cursors and finite through bounds admit row, raw-byte and conservative serialized-byte budgets before body reads; deleted, suppressed and expired sources advance without plaintext.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Fixed-consumer ACKs advance a committed prefix; incremental pending retirement waits for every enrolled consumer and never treats RAM autosave admission as durable completion.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Leaf repository tests do not certify atomic integration into DM/channel/file producers or actual desktop/CLI startup selection.",
+        "Production handoff requires slow-consumer, restart, owner replacement and native/browser evidence, including one outstanding wake, one bounded pull, final recall/visibility checks and durable frontend snapshot-before-ACK."
+      ]
+    },
+    {
       "id": "core-group-file-network-cost",
       "paths": [
         "crates/mesh-talk-core/src/node/network_cost.rs",

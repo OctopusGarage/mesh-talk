@@ -1408,6 +1408,37 @@ establish demand-loaded participant startup or bounded historical memory.
 
 The separate `node/transcript_repository/` owner provides indexed sent, received,
 file-card and exact suppression storage on that same encrypted connection.
+
+`node/reception_effects/` provides the derived reception-work owner for bounded
+host integration. An effect references its existing transcript row and stores
+first-installation provenance, own-device and batch metadata without copying its
+body. Producers install it inside the same SQL transaction as plaintext and
+exact processing evidence, before completing the existing delivery journal or
+channel checkpoint. A separate terminal batch fact survives deletion of its
+former content template. Legacy historical-source migration creates no effects.
+
+Receipt cursors bind a persisted random epoch and local installation sequence;
+sender timestamps never order host work. A finite through-cursor prevents
+continuous intake from extending one drain indefinitely. Each demand page scans
+at most 128 pending slots and admits at most 8 MiB of transcript body/sender
+bytes, plus bounded metadata. Before fetching a body it also checks a separate
+JSON upper bound: six times the raw byte charge plus fixed per-row/envelope
+allowances, with a maximum 64 MiB response budget. A first row that does not fit
+fails explicitly. Deleted, suppressed and expired sources advance the cursor
+without returning their bodies; recall and final owner/session authority remain
+the materializing consumer's responsibility.
+
+Desktop, CLI output and CLI autosave have fixed consumer identities. A committed
+prefix ACK records host processing, not peer delivery or user read state. Pending
+metadata retires incrementally only through every enrolled consumer's ACK;
+no enrolled consumers means retaining work. Compact exact source-to-sequence
+evidence survives that retirement, preventing an accepted-journal retry from
+creating another unread event. The desktop must atomically persist its existing
+reception state and cursor before ACK. CLI autosave must retain durable save work
+before ACK, and a bounded in-memory queue does not satisfy that requirement.
+These repository APIs alone do not switch production runtimes away from their
+legacy unbounded callbacks or prove a bounded Tauri/WebView handoff.
+
 `SentStore`, `ReceivedStore` and `IndexedAccountSuppression` require completed
 participant authority; integration must retain `validate_participant_request`
 before invoking their constructors. These owners are not yet wired into Node's
