@@ -89,6 +89,7 @@ fn domain(kind: i64) -> Result<[u8; 16], LogError> {
         RECOVERED_IDS => Ok(*b"MeshRecoveredId1"),
         FILE_PROOFS => Ok(*b"MeshFileProofs01"),
         FILE_IDENTITIES => Ok(*b"MeshFileIdent001"),
+        CHANNEL_SENDERS => Ok(*b"MeshChanSenders1"),
         _ => Err(invalid("invalid transcript source kind")),
     }
 }

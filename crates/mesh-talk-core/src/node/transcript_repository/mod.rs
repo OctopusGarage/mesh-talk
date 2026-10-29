@@ -20,12 +20,13 @@ pub(crate) const SUPPRESSION: i64 = 4;
 pub(crate) const RECOVERED_IDS: i64 = 5;
 pub(crate) const FILE_PROOFS: i64 = 6;
 pub(crate) const FILE_IDENTITIES: i64 = 7;
+pub(crate) const CHANNEL_SENDERS: i64 = 8;
 pub(crate) const MAX_PAGE_ROWS: usize = 128;
 pub(crate) const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
 const SCHEMA: &str = "
-CREATE TABLE transcript_sources(kind INTEGER PRIMARY KEY CHECK(kind BETWEEN 1 AND 7), locator BLOB NOT NULL UNIQUE, stub BLOB NOT NULL CHECK(length(stub)=54), raw_size INTEGER NOT NULL CHECK(raw_size>=0), raw_hash BLOB NOT NULL CHECK(length(raw_hash)=32), published INTEGER NOT NULL CHECK(published IN (0,1)), record_count INTEGER NOT NULL DEFAULT 0 CHECK(record_count>=0), body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(body_bytes>=0), revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(revision)='integer' AND revision>=0), rewrite_revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(rewrite_revision)='integer' AND rewrite_revision>=0));
-CREATE TABLE transcript_rows(ordinal INTEGER PRIMARY KEY AUTOINCREMENT, kind INTEGER NOT NULL REFERENCES transcript_sources(kind), conversation BLOB NOT NULL CHECK(length(conversation)=32), row_key BLOB NOT NULL CHECK(length(row_key) BETWEEN 9 AND 33), clock BLOB NOT NULL CHECK(length(clock)=8), sequence BLOB NOT NULL CHECK(length(sequence)=8), sender_bytes INTEGER NOT NULL CHECK(sender_bytes>=0), body_bytes INTEGER NOT NULL CHECK(body_bytes>=0), sender TEXT NOT NULL, deadline BLOB CHECK(deadline IS NULL OR length(deadline)=8), logical_id BLOB CHECK(logical_id IS NULL OR length(logical_id)=32), plaintext_sha256 BLOB NOT NULL CHECK(length(plaintext_sha256)=32), file_conversation BLOB CHECK(file_conversation IS NULL OR (kind=3 AND length(file_conversation)=32)), UNIQUE(kind,conversation,row_key));
+CREATE TABLE transcript_sources(kind INTEGER PRIMARY KEY CHECK(kind BETWEEN 1 AND 8), locator BLOB NOT NULL UNIQUE, stub BLOB NOT NULL CHECK(length(stub)=54), raw_size INTEGER NOT NULL CHECK(raw_size>=0), raw_hash BLOB NOT NULL CHECK(length(raw_hash)=32), published INTEGER NOT NULL CHECK(published IN (0,1)), record_count INTEGER NOT NULL DEFAULT 0 CHECK(record_count>=0), body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(body_bytes>=0), revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(revision)='integer' AND revision>=0), rewrite_revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(rewrite_revision)='integer' AND rewrite_revision>=0));
+CREATE TABLE transcript_rows(ordinal INTEGER PRIMARY KEY AUTOINCREMENT, kind INTEGER NOT NULL REFERENCES transcript_sources(kind), conversation BLOB NOT NULL CHECK(length(conversation)=32), row_key BLOB NOT NULL CHECK(length(row_key) BETWEEN 9 AND 33), clock BLOB NOT NULL CHECK(length(clock)=8), sequence BLOB NOT NULL CHECK(length(sequence)=8), sender_bytes INTEGER NOT NULL CHECK(sender_bytes>=0), body_bytes INTEGER NOT NULL CHECK(body_bytes>=0), deadline BLOB CHECK(deadline IS NULL OR length(deadline)=8), logical_id BLOB CHECK(logical_id IS NULL OR length(logical_id)=32), plaintext_sha256 BLOB NOT NULL CHECK(length(plaintext_sha256)=32), file_conversation BLOB CHECK(file_conversation IS NULL OR (kind=3 AND length(file_conversation)=32)), sender TEXT NOT NULL, UNIQUE(kind,conversation,row_key));
 CREATE INDEX transcript_row_keys ON transcript_rows(kind,row_key,ordinal);
 CREATE INDEX transcript_history ON transcript_rows(kind,conversation,clock,sequence,ordinal);
 CREATE INDEX transcript_all_history ON transcript_rows(kind,clock,sequence,ordinal);
@@ -36,6 +37,7 @@ CREATE INDEX transcript_logical ON transcript_rows(kind,conversation,logical_id,
 CREATE INDEX transcript_file_conversations ON transcript_rows(kind,file_conversation,ordinal) WHERE file_conversation IS NOT NULL;
 CREATE TABLE transcript_bodies(ordinal INTEGER PRIMARY KEY REFERENCES transcript_rows(ordinal) ON DELETE CASCADE, sender TEXT NOT NULL, plaintext BLOB NOT NULL);
 CREATE TABLE transcript_conversations(kind INTEGER NOT NULL REFERENCES transcript_sources(kind), conversation BLOB NOT NULL CHECK(length(conversation)=32), record_count INTEGER NOT NULL CHECK(record_count>=0), body_bytes INTEGER NOT NULL CHECK(body_bytes>=0), revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>0), PRIMARY KEY(kind,conversation)) WITHOUT ROWID;
+CREATE TABLE transcript_received_evidence(id BLOB PRIMARY KEY CHECK(length(id)=32), conversation BLOB NOT NULL CHECK(length(conversation)=32)) WITHOUT ROWID;
 CREATE TABLE transcript_suppression(conversation BLOB NOT NULL CHECK(length(conversation)=32), id BLOB NOT NULL CHECK(length(id)=32), PRIMARY KEY(conversation,id)) WITHOUT ROWID;
 ";
 
@@ -262,6 +264,9 @@ impl TranscriptRepository {
     pub(crate) fn rewrite_revision(&self) -> u64 {
         self.rewrite_revision
     }
+    pub(super) fn note_committed_inserts(&mut self, inserted: usize) {
+        self.revision += inserted as u64;
+    }
     #[cfg(test)]
     pub(crate) fn body_reads(&self) -> usize {
         self.body_reads.load(std::sync::atomic::Ordering::Relaxed)
@@ -454,6 +459,12 @@ impl TranscriptRepository {
             "INSERT INTO transcript_bodies VALUES(?1,?2,?3)",
             params![c.last_insert_rowid(), sender, plaintext],
         )?;
+        if kind == RECEIVED {
+            c.execute(
+                "INSERT OR IGNORE INTO transcript_received_evidence VALUES(?1,?2)",
+                params![key, conversation.as_bytes().as_slice()],
+            )?;
+        }
         c.execute("UPDATE transcript_sources SET record_count=record_count+1,body_bytes=body_bytes+?2,revision=revision+1 WHERE kind=?1",params![kind,size(plaintext.len())?])?;
         c.execute("INSERT INTO transcript_conversations VALUES(?1,?2,1,?3,1) ON CONFLICT(kind,conversation) DO UPDATE SET record_count=record_count+1,body_bytes=body_bytes+excluded.body_bytes,revision=revision+1",params![kind,conversation.as_bytes().as_slice(),size(plaintext.len())?])?;
         Ok(true)
