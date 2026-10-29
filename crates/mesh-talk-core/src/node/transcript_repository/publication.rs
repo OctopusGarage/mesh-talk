@@ -24,6 +24,16 @@ impl PublishedHistorySource {
         kind: i64,
         magic: &[u8; 6],
     ) -> Result<(), LogError> {
+        Self::authenticate_legacy_with::<R>(profile, path, password, kind, magic, |_| Ok(()))
+    }
+    pub(crate) fn authenticate_legacy_with<R: serde::Serialize + serde::de::DeserializeOwned>(
+        profile: &ProfileStorage,
+        path: &Path,
+        password: &str,
+        kind: i64,
+        magic: &[u8; 6],
+        validate: impl FnMut(R) -> Result<(), LogError>,
+    ) -> Result<(), LogError> {
         domain(kind)?;
         let parent = path
             .parent()
@@ -76,10 +86,7 @@ impl PublishedHistorySource {
         let source = snapshot.path().join("source.log");
         let before = copy(&path, &source)?;
         let log = crate::storage::record_log::EncryptedRecordLog::<R>::open_with_visitor(
-            &source,
-            password,
-            magic,
-            |_| Ok(()),
+            &source, password, magic, validate,
         )?;
         log.sync()?;
         if !inspect_regular(&path)? || stream_identity(&path)? != before {
