@@ -1396,6 +1396,14 @@ receiver settles only when its full local digest matches that completion digest;
 a role change behind a continuation therefore requires a fresh scope rather than
 claiming convergence or skipping unknown authority.
 
+When a negotiated page includes normal operation rows before legacy-operation
+rows, the exporter completes that normal prefix before loading the first legacy
+payload. The existing exclusive continuation resumes the remaining key order;
+legacy-only pages retain the 64-row ceiling. This is an earlier authenticated
+page boundary, not partial-record adoption: nonce/capability checks and atomic
+page commit still apply, and the completion digest still covers the full scope.
+The wire format, byte ceiling, worker limits and exchange deadlines do not change.
+
 Within the Control slot, locally pending account operations prioritize their
 selected executors by full device identity. An unrelated sibling's metadata read
 may be cancelled and requeued from its exact cursor checkpoint. The replacement

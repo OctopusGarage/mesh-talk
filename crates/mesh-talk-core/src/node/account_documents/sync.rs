@@ -597,10 +597,22 @@ impl Node {
         else {
             return false;
         };
-        let mut selected = Vec::new();
+        let mut selected: Vec<AccountDocumentMeta> = Vec::new();
         let mut bytes = 0usize;
         let mut next = None;
         for item in items {
+            if include_operations
+                && matches!(item.key, AccountDocumentKey::GroupLegacyOperation { .. })
+                && selected
+                    .iter()
+                    .any(|meta| matches!(meta.key, AccountDocumentKey::GroupOperation { .. }))
+            {
+                // Complete the interactive operation prefix before loading a
+                // legacy body. The full digest and strictly increasing key
+                // continuation still cover every remaining legacy/personal row.
+                next = selected.last().map(|meta| meta.key.clone());
+                break;
+            }
             if bytes + item.content_len as usize > MAX_PAGE_BYTES {
                 next = selected.last().map(|m: &AccountDocumentMeta| m.key.clone());
                 break;
@@ -2807,6 +2819,222 @@ mod group_control_tests {
         assert_eq!(repeated_roles.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows() {
+        use crate::node::{AccountGroupOperationPhase, AccountGroupTextInput, SyncCategory};
+        let mut fixture = UpgradeFixture::new().await;
+        for node in [&fixture.source, &fixture.target] {
+            node.set_device_sync_category(SyncCategory::History, false)
+                .unwrap();
+        }
+        let group = fixture
+            .source
+            .create_channel("operation prefix result", vec![])
+            .await
+            .unwrap();
+        fixture
+            .source
+            .maintain_account_channels(
+                &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
+            )
+            .await;
+        fixture.source.publish_account_group_access_for(group);
+        fixture.source.publish_account_group_operations_for(group);
+        let mut cursor = DocumentSyncCursor::control();
+        for _ in 0..16 {
+            fixture
+                .target
+                .pull_account_documents_page(&fixture.peer, &mut cursor)
+                .await
+                .unwrap();
+            if !cursor.pending {
+                break;
+            }
+        }
+        assert!(!cursor.pending && cursor.after.is_none());
+        let roles = fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .digest_scope(AccountDocumentDomain::GroupControl, false);
+        assert_ne!(roles, [0; 32]);
+        assert_eq!(
+            cursor.digests[AccountDocumentDomain::GroupControl as usize],
+            roles
+        );
+        let account = fixture.source.account_id();
+        let id = fixture
+            .source
+            .new_account_group_operation_id(&account)
+            .unwrap();
+        fixture
+            .source
+            .submit_account_group_text_if(
+                &account,
+                id,
+                group,
+                AccountGroupTextInput {
+                    text: b"new terminal copy".to_vec(),
+                    reply_to: None,
+                    expires_at_ms: None,
+                    protection: None,
+                },
+                |commit| commit(),
+            )
+            .unwrap();
+        fixture.source.maintain_account_group_operation_effects();
+        let status = fixture
+            .source
+            .account_group_operation_status(&account, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
+        assert_eq!(status.committed_events.len(), 1);
+        fixture.source.publish_account_group_operations_for(group);
+        assert_eq!(
+            fixture
+                .source
+                .account_documents
+                .lock()
+                .unwrap()
+                .digest_scope(AccountDocumentDomain::GroupControl, false),
+            roles,
+            "a real message result must not invent a different role observation"
+        );
+        let key = AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: fixture.source.user_id(),
+        };
+        let expected = fixture.source.account_document_meta(&key).unwrap();
+        assert_ne!(
+            fixture.target.account_document_meta(&key).as_ref(),
+            Some(&expected)
+        );
+        let legacy_keys: Vec<_> = (1..=66)
+            .map(|value| {
+                seed_legacy_control_page_for_test(
+                    &fixture.source,
+                    crate::eventlog::ConversationId::new([value; 32]),
+                )
+            })
+            .collect();
+        let full_digest = fixture
+            .source
+            .account_documents
+            .lock()
+            .unwrap()
+            .digest_exchange_scope(AccountDocumentDomain::GroupControl, true, true, true);
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let held = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *fixture.source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let exact = fixture.target.identity.public();
+            let release = release.clone();
+            let held = held.clone();
+            move |peer, frame| {
+                let exact = exact.clone();
+                let release = release.clone();
+                let held = held.clone();
+                Box::pin(async move {
+                    if peer == exact
+                        && let AccountHistoryFrame::DocumentHeader { body } = frame
+                    {
+                        let meta: AccountDocumentMeta = serde_json::from_slice(&body).unwrap();
+                        if matches!(meta.key, AccountDocumentKey::GroupLegacyOperation { .. }) {
+                            held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let _ = release.acquire().await;
+                        }
+                    }
+                })
+            }
+        }));
+        assert!(cursor.begin_refresh());
+        let target = fixture.target.clone();
+        let peer = fixture.peer.clone();
+        let mut pulling = tokio::spawn(async move {
+            let result = target.pull_account_documents_page(&peer, &mut cursor).await;
+            (result, cursor)
+        });
+        let before_release = tokio::time::timeout(Duration::from_secs(8), &mut pulling).await;
+        let received = fixture.target.account_document_meta(&key);
+        let held_before_release = held.load(std::sync::atomic::Ordering::SeqCst);
+        release.close();
+        let (result, mut cursor) = match before_release {
+            Ok(result) => result.unwrap(),
+            Err(_) => tokio::time::timeout(Duration::from_secs(5), pulling)
+                .await
+                .expect("released baseline page completes")
+                .unwrap(),
+        };
+        result.expect("the authenticated page remains valid");
+        *fixture.source.account_session_test_hook.lock().unwrap() = None;
+        if received.as_ref() != Some(&expected) {
+            fixture.servers.shutdown().await;
+            assert_eq!(
+                received,
+                Some(expected),
+                "normal signed terminal operation must commit atomically before the first legacy header is released"
+            );
+            return;
+        }
+        assert_eq!(
+            held_before_release, 0,
+            "normal prefix does not load or emit legacy payloads"
+        );
+        assert_eq!(
+            cursor.after.as_ref(),
+            Some(&key),
+            "Complete continues strictly after the normal operation prefix"
+        );
+        assert!(
+            !cursor.up_to_date && cursor.operation_digest != full_digest,
+            "partial prefix cannot claim whole-scope convergence"
+        );
+        let frame = fixture.target.account_document(&key).unwrap().unwrap();
+        let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
+            frame.payload(),
+            &fixture.source.account.public().ed25519_pub,
+        )
+        .unwrap();
+        assert!(
+            frame.proof.public() == fixture.source.identity.public()
+                && frame
+                    .projection
+                    .results
+                    .iter()
+                    .any(|row| row.reference.id == id
+                        && row.status.phase == AccountGroupOperationPhase::Committed
+                        && row.status.committed_events == status.committed_events)
+        );
+        fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(
+            legacy_keys
+                .iter()
+                .filter(|key| fixture.target.account_document_meta(key).is_some())
+                .count(),
+            64,
+            "legacy-only continuation keeps its full64-row ceiling"
+        );
+        assert!(
+            cursor
+                .after
+                .as_ref()
+                .is_some_and(|key| matches!(key, AccountDocumentKey::GroupLegacyOperation { .. }))
+        );
+        (cursor, _) = repair_control_scope(&fixture.target, &fixture.peer, cursor).await;
+        assert_control_scope_settled(&fixture.source, &fixture.target, &cursor);
+        assert!(
+            legacy_keys
+                .iter()
+                .all(|key| fixture.target.account_document_meta(key).is_some())
+        );
+        fixture.servers.shutdown().await;
+    }
+
     fn control_scope_metadata(node: &Node) -> Vec<AccountDocumentMeta> {
         let store = node.account_documents.lock().unwrap();
         let mut rows = Vec::new();
@@ -3046,6 +3274,24 @@ mod group_control_tests {
                 ConversationId::new([value; 32]),
             ));
         }
+        let retained_operation = {
+            let mut store = fixture.source.account_documents.lock().unwrap();
+            let old = store.meta(&operation_keys[0]).unwrap();
+            let meta = AccountDocumentMeta::new(
+                &fixture.source.account,
+                fixture.source.user_id(),
+                operation_keys[0].clone(),
+                old.revision + 1,
+                &[],
+                true,
+            );
+            assert!(
+                store.merge(meta, &[]).is_err(),
+                "typed operation heads cannot be replaced by generic tombstones"
+            );
+            assert_eq!(store.meta(&operation_keys[0]), Some(old.clone()));
+            old
+        };
         let legacy_group = ConversationId::new([90; 32]);
         let legacy_key = AccountDocumentKey::GroupLegacyOperation {
             channel: hex::encode(legacy_group.as_bytes()),
@@ -3137,6 +3383,11 @@ mod group_control_tests {
             copied, 64,
             "a redundant role prefix cannot consume an operation slot"
         );
+        assert_eq!(
+            fixture.target.account_document_meta(&operation_keys[0]),
+            Some(retained_operation)
+        );
+        let lower_operation = install_operation_head_at(&fixture, ConversationId::new([0; 32]));
         let added = fixture
             .source
             .create_channel("unknown between pages", vec![])
@@ -3154,6 +3405,28 @@ mod group_control_tests {
             source_device: fixture.source.user_id(),
         };
         let added_meta = fixture.source.account_document_meta(&added_key).unwrap();
+        fixture
+            .target
+            .pull_account_documents_page(&fixture.peer, &mut cursor)
+            .await
+            .unwrap();
+        assert_eq!(
+            cursor.after.as_ref(),
+            operation_keys.last(),
+            "last normal operation has its own complete prefix before legacy"
+        );
+        assert!(fixture.target.account_document_meta(&legacy_key).is_none());
+        assert!(
+            fixture
+                .target
+                .account_document_meta(&lower_operation)
+                .is_none(),
+            "new lower operation cannot jump behind an existing continuation"
+        );
+        assert!(
+            !cursor.up_to_date,
+            "a normal prefix cannot falsely settle fullscope"
+        );
         fixture
             .target
             .pull_account_documents_page(&fixture.peer, &mut cursor)
@@ -3181,6 +3454,11 @@ mod group_control_tests {
         );
         (cursor, _) = repair_control_scope(&fixture.target, &fixture.peer, cursor).await;
         assert_control_scope_settled(&fixture.source, &fixture.target, &cursor);
+        assert_eq!(
+            fixture.target.account_document_meta(&lower_operation),
+            fixture.source.account_document_meta(&lower_operation),
+            "fresh comparison repairs the new lower operation exactly"
+        );
         let current_added = fixture.source.account_document_meta(&added_key).unwrap();
         assert!(
             current_added.revision >= added_meta.revision,
