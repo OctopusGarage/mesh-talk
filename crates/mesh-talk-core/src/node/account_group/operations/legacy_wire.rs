@@ -79,6 +79,8 @@ impl LegacyOperationFrame {
         serde_json::to_vec(self).expect("legacy operation frame serializes")
     }
     pub fn decode(bytes: &[u8], account: &[u8; 32]) -> Option<Self> {
+        #[cfg(test)]
+        super::note_frame_decode_for_test(true);
         if bytes.len() > MAX_LEGACY_HEAD {
             return None;
         }

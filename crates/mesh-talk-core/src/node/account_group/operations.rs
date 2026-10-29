@@ -13,6 +13,24 @@ pub use preparation::{AccountGroupStickerInput, AccountGroupTextInput};
 pub(in crate::node) mod journal;
 pub(in crate::node) mod wire;
 use super::*;
+
+#[cfg(test)]
+thread_local! {
+    static FRAME_DECODE_COUNTS: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0, 0]) };
+}
+#[cfg(test)]
+pub(in crate::node) fn note_frame_decode_for_test(legacy: bool) {
+    FRAME_DECODE_COUNTS.with(|counts| {
+        let mut value = counts.get();
+        value[usize::from(legacy)] += 1;
+        counts.set(value);
+    });
+}
+#[cfg(test)]
+pub(in crate::node) fn take_frame_decode_counts_for_test() -> [usize; 2] {
+    FRAME_DECODE_COUNTS.with(|counts| counts.replace([0, 0]))
+}
+
 use crate::node::channels::{
     account_self_control::AccountSelfControlInput, owner_control::OwnerControlInput,
 };

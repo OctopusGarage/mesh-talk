@@ -453,6 +453,7 @@
             "late_group_clear_preserves_only_fresh_lifetime_ancestry",
             "known_role_digest_does_not_block_a_new_terminal_result_behind_repeated_role_headers",
             "terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows",
+            "unchanged_processed_operation_heads_skip_repeated_signature_decodes",
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
             "access_only_v5_keeps_its_role_scope_when_operation_rows_exist",
             "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot"
@@ -476,7 +477,7 @@
             "reference": "docs/network-design-reference.md#personal-conversation-removal"
           },
           {
-            "name": "Negotiated operation patches omit only exactly known nonzero role digests before page limits, complete a normal-operation prefix before loading a following legacy payload, preserve lexical continuations and full-scope authenticated atomic completion, and repair roles or operation heads changed behind a continuation on a fresh scope. Legacy-only pages retain 64 rows and existing byte, worker and deadline bounds.",
+            "name": "Negotiated operation patches omit only exactly known nonzero role digests before page limits, complete a normal-operation prefix before loading a following legacy payload, preserve lexical continuations and full-scope authenticated atomic completion, and repair roles or operation heads changed behind a continuation on a fresh scope. Legacy-only pages retain 64 rows and existing byte, worker and deadline bounds. Operation maintenance reuses its existing processed metadata hashes before payload decoding; changed, currently unbound or unfinished foreign inputs retain verification/retry and generic input readers remain complete.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]

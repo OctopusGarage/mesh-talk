@@ -1404,6 +1404,14 @@ page boundary, not partial-record adoption: nonce/capability checks and atomic
 page commit still apply, and the completion digest still covers the full scope.
 The wire format, byte ceiling, worker limits and exchange deadlines do not change.
 
+Operation maintenance checks current signed metadata hashes against its existing
+processed-input index before loading and decoding unchanged heads. Fully verified
+frames authored by this exact local device can enter that same index without
+executing a second effect. Changed, unbound or unfinished foreign inputs still
+follow ordinary verification and retry; diagnostic projection readers remain
+complete. Current metadata is rechecked under the payload guard, with no nested
+processed-index/store locks, new cache, authority rule or network resource.
+
 Within the Control slot, locally pending account operations prioritize their
 selected executors by full device identity. An unrelated sibling's metadata read
 may be cancelled and requeued from its exact cursor checkpoint. The replacement

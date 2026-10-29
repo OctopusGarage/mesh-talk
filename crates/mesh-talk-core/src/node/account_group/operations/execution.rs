@@ -116,7 +116,7 @@ impl Node {
     ) -> Vec<ConversationId> {
         // Link the separately signed child namespace before ordinary admission
         // can interpret a physical departure as a whole-account coordinator.
-        for (key, hash, frame) in self.account_group_legacy_inputs() {
+        for (key, hash, frame) in self.unseen_account_group_legacy_inputs() {
             if self
                 .operation_seen
                 .lock()
@@ -218,7 +218,7 @@ impl Node {
                     .insert(key, hash);
             }
         }
-        for (key, hash, frame) in self.account_group_operation_inputs() {
+        for (key, hash, frame) in self.unseen_account_group_operation_inputs() {
             if self
                 .operation_seen
                 .lock()

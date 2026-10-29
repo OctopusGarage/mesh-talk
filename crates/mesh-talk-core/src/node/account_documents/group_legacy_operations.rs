@@ -3,23 +3,22 @@ use super::*;
 use crate::node::account_group::operations::legacy_wire::{LegacyOperationFrame, MAX_LEGACY_HEAD};
 
 impl Node {
+    #[cfg(test)]
     pub(in crate::node) fn account_group_legacy_inputs(
         &self,
     ) -> Vec<(String, [u8; 32], LegacyOperationFrame)> {
-        let documents: Vec<_> = {
-            let store = self.account_documents.lock().expect("documents mutex");
-            store
-                .legacy_operation_rows()
-                .into_iter()
-                .filter_map(|meta| {
-                    store
-                        .get(&meta.key)
-                        .ok()
-                        .flatten()
-                        .map(|document| (meta, document))
-                })
-                .collect()
-        };
+        self.legacy_operation_inputs(false)
+    }
+    pub(in crate::node) fn unseen_account_group_legacy_inputs(
+        &self,
+    ) -> Vec<(String, [u8; 32], LegacyOperationFrame)> {
+        self.legacy_operation_inputs(true)
+    }
+    fn legacy_operation_inputs(
+        &self,
+        maintenance: bool,
+    ) -> Vec<(String, [u8; 32], LegacyOperationFrame)> {
+        let documents = self.operation_input_documents(true, maintenance);
         documents
             .into_iter()
             .filter_map(|(meta, document)| {
@@ -27,9 +26,16 @@ impl Node {
                     document.payload(),
                     &self.account.public().ed25519_pub,
                 )?;
-                if frame.proof.public() == self.identity.public()
-                    || !self.account_group_binding_current(&frame.proof)
-                {
+                if frame.proof.public() == self.identity.public() {
+                    if maintenance {
+                        self.operation_seen
+                            .lock()
+                            .expect("operation input mutex")
+                            .insert(Self::operation_input_key(&meta.key)?, meta.content_hash);
+                    }
+                    return None;
+                }
+                if !self.account_group_binding_current(&frame.proof) {
                     return None;
                 }
                 Some((
