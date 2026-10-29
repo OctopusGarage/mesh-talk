@@ -2948,6 +2948,19 @@ impl Node {
                     #[cfg(test)]
                     self.trace_account_client(&key.public(), || {
                         format!(
+                            "control_cancel task={task:?} reason={}",
+                            if fresh_same_source {
+                                "same_source"
+                            } else if selected_waiting {
+                                "selected"
+                            } else {
+                                "wake"
+                            }
+                        )
+                    });
+                    #[cfg(test)]
+                    self.trace_account_client(&key.public(), || {
+                        format!(
                             "control_owned_abort reason={}",
                             if fresh_same_source {
                                 "same_source"
@@ -3084,7 +3097,23 @@ impl Node {
                     });
                 }
                 let checkpoint = (peer.clone(), state.clone());
+                #[cfg(test)]
+                let control_task_trace = (key.lane == DocumentLane::Control).then(|| {
+                    format!(
+                        "control_task paired={} protected={} requests={:?}",
+                        control_pairs.contains_key(&key),
+                        protected,
+                        selected_requests
+                            .get(&key.identity())
+                            .cloned()
+                            .unwrap_or_default()
+                    )
+                });
                 let task = documents.spawn(permit.track(async move {
+                    #[cfg(test)]
+                    if let Some(event) = control_task_trace {
+                        node.trace_account_client(&peer.public, || event);
+                    }
                     let _ = node.pull_account_documents_page(&peer, &mut state).await;
                     (key, peer, state)
                 }));

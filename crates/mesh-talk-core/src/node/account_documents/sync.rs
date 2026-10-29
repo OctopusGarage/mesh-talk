@@ -1105,6 +1105,12 @@ impl Node {
             known_digest: cursor.digests[cursor.domain],
             operation,
         };
+        #[cfg(test)]
+        if domain == AccountDocumentDomain::GroupControl {
+            self.trace_account_client(&peer.public, || {
+                format!("control_request_body={}", hex::encode(request.encode()))
+            });
+        }
         let exchange = self
             .begin_account_exchange(
                 peer,

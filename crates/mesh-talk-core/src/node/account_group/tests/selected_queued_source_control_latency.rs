@@ -1,6 +1,6 @@
 //! A queued pre-operation suffix does not witness a newly admitted request.
 use super::selected_same_source_control_latency::{
-    BTrace, record_b_trace, record_control_frame, result_snapshot,
+    BTrace, ControlTestPages, record_b_trace, record_control_frame, result_snapshot,
 };
 use super::*;
 use crate::node::account_documents::wire::DocumentRequest;
@@ -200,12 +200,16 @@ async fn run_queued_source(gate_terminal: bool) {
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saved_after = Arc::new(Mutex::new(None));
     let b_requests = Arc::new(Mutex::new(Vec::new()));
+    let b_dispatches = Arc::new(Mutex::new(Vec::new()));
     let a_requests = Arc::new(Mutex::new(Vec::new()));
     let origins = Arc::new(Mutex::new(Vec::new()));
     let b_retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let clock = std::time::Instant::now();
     let operation = Arc::new(Mutex::new(None));
+    let pages = Arc::new(Mutex::new(ControlTestPages::default()));
+    let demand_dispatch = Arc::new(Mutex::new(None));
+    let b_unpaired_settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let first_foreground = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let foreground_after = Arc::new(Mutex::new(None::<crate::node::AccountDocumentKey>));
     let release_intent = Arc::new(Semaphore::new(0));
@@ -233,7 +237,8 @@ async fn run_queued_source(gate_terminal: bool) {
             } else if observed == peer
                 && ((phase.starts_with("control_")
                     && !phase.starts_with("control_queue")
-                    && !phase.starts_with("control_refresh"))
+                    && !phase.starts_with("control_refresh")
+                    && !phase.starts_with("control_request_body="))
                     || phase.starts_with("wake_")
                     || phase.starts_with("negotiation_"))
             {
@@ -291,12 +296,48 @@ async fn run_queued_source(gate_terminal: bool) {
         let terminal_published = terminal_published.clone();
         let terminal_wake = terminal_wake.clone();
         let wake_changed = wake_changed.clone();
+        let pages = pages.clone();
+        let operation = operation.clone();
+        let b_unpaired_settled = b_unpaired_settled.clone();
+        let demand_dispatch = demand_dispatch.clone();
         move |peer, phase| {
-            if gate_terminal
-                && peer == peer_b
-                && admitted.load(std::sync::atomic::Ordering::Acquire)
+            if peer == peer_a || peer == peer_b {
+                pages.lock().unwrap().observe(&phase);
+            }
+            if peer == peer_b
+                && phase.starts_with("control_request_body=")
+                && let Some(page) = pages.lock().unwrap().task(tokio::task::id())
+                && operation
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|id| page.contains_demand(id))
             {
-                if phase.starts_with("negotiation_begin domain=Some(GroupControl)") {
+                // Open the window at the exact committed-demand dispatch.
+                // Later recovery pages remain observable after it completes.
+                demand_dispatch
+                    .lock()
+                    .unwrap()
+                    .get_or_insert(page.dispatched_at);
+            }
+            if peer == peer_b
+                && phase.starts_with("page_end")
+                && phase.contains("outcome=ok")
+                && phase.contains("pending=false after=false")
+                && pages
+                    .lock()
+                    .unwrap()
+                    .task(tokio::task::id())
+                    .is_some_and(|page| page.origin.starts_with("control_task paired=false "))
+            {
+                b_unpaired_settled.store(true, std::sync::atomic::Ordering::Release);
+            }
+            if gate_terminal && peer == peer_b {
+                if phase.starts_with("control_task ")
+                    && operation
+                        .lock()
+                        .unwrap()
+                        .is_some_and(|id| phase.contains(&format!("{id:?}")))
+                {
                     let mut first = first_foreground.lock().unwrap();
                     if first.is_none() {
                         *first = tokio::task::try_id();
@@ -324,7 +365,8 @@ async fn run_queued_source(gate_terminal: bool) {
             if (peer == peer_a || peer == peer_b)
                 && ((phase.starts_with("control_")
                     && !phase.starts_with("control_queue")
-                    && !phase.starts_with("control_refresh"))
+                    && !phase.starts_with("control_refresh")
+                    && !phase.starts_with("control_request_body="))
                     || phase.starts_with("wake_")
                     || phase.starts_with("negotiation_")
                     || phase.starts_with("page_end"))
@@ -373,6 +415,8 @@ async fn run_queued_source(gate_terminal: bool) {
             let b_partial = b_partial.clone();
             let origins = origins.clone();
             let a_requests = a_requests.clone();
+            let pages = pages.clone();
+            let b_unpaired_settled = b_unpaired_settled.clone();
             move |peer, frame| {
                 let expected = expected.clone();
                 let release = release.clone();
@@ -381,6 +425,8 @@ async fn run_queued_source(gate_terminal: bool) {
                 let b_partial = b_partial.clone();
                 let origins = origins.clone();
                 let a_requests = a_requests.clone();
+                let pages = pages.clone();
+                let b_unpaired_settled = b_unpaired_settled.clone();
                 Box::pin(async move {
                     if peer != expected {
                         return;
@@ -395,9 +441,11 @@ async fn run_queued_source(gate_terminal: bool) {
                     };
                     let first_pending = first_tx.lock().unwrap().is_some();
                     if first_pending
-                        && !origins.lock().unwrap().last().is_some_and(|phase| {
-                            phase.starts_with("control_dispatch protected=false")
-                        })
+                        && (!b_unpaired_settled.load(std::sync::atomic::Ordering::Acquire)
+                            || !pages.lock().unwrap().request(&request).is_some_and(|page| {
+                                page.origin
+                                    .starts_with("control_task paired=false protected=false ")
+                            }))
                     {
                         return;
                     }
@@ -444,6 +492,7 @@ async fn run_queued_source(gate_terminal: bool) {
         let admitted = admitted.clone();
         let saved_after = saved_after.clone();
         let b_requests = b_requests.clone();
+        let b_dispatches = b_dispatches.clone();
         let trace = trace.clone();
         let source = Arc::downgrade(&b);
         let writer = b.user_id();
@@ -451,11 +500,14 @@ async fn run_queued_source(gate_terminal: bool) {
         let terminal_wake = terminal_wake.clone();
         let wake_changed = wake_changed.clone();
         let foreground_after = foreground_after.clone();
+        let pages = pages.clone();
+        let demand_dispatch = demand_dispatch.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let admitted = admitted.clone();
             let saved_after = saved_after.clone();
             let b_requests = b_requests.clone();
+            let b_dispatches = b_dispatches.clone();
             let trace = trace.clone();
             let source = source.clone();
             let writer = writer.clone();
@@ -463,6 +515,8 @@ async fn run_queued_source(gate_terminal: bool) {
             let terminal_wake = terminal_wake.clone();
             let wake_changed = wake_changed.clone();
             let foreground_after = foreground_after.clone();
+            let pages = pages.clone();
+            let demand_dispatch = demand_dispatch.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
@@ -481,13 +535,22 @@ async fn run_queued_source(gate_terminal: bool) {
                         result_snapshot(&source, group_b, *operation.lock().unwrap()),
                     );
                 }
-                if gate_terminal
-                    && admitted.load(std::sync::atomic::Ordering::Acquire)
-                    && let AccountHistoryFrame::DocumentsComplete { body } = &frame
-                {
+                if gate_terminal && let AccountHistoryFrame::DocumentsComplete { body } = &frame {
                     let complete: serde_json::Value = serde_json::from_slice(body).unwrap();
-                    if complete["domain"] == "group_control" {
-                        let last = b_requests.lock().unwrap().last().cloned();
+                    let page =
+                        serde_json::from_value::<[u8; 32]>(complete["operation"]["nonce"].clone())
+                            .ok()
+                            .and_then(|nonce| pages.lock().unwrap().nonce(nonce))
+                            .filter(|page| {
+                                demand_dispatch
+                                    .lock()
+                                    .unwrap()
+                                    .is_some_and(|at| page.dispatched_at >= at)
+                            });
+                    if complete["domain"] == "group_control"
+                        && let Some(page) = page
+                    {
+                        let last = Some(effective_after(&page.request));
                         if last == Some(None)
                             && !complete["next"].is_null()
                             && foreground_after.lock().unwrap().is_none()
@@ -519,14 +582,22 @@ async fn run_queued_source(gate_terminal: bool) {
                             }
                         }
                     }
-                    AccountHistoryFrame::DocumentsRequest { body }
-                        if admitted.load(std::sync::atomic::Ordering::Relaxed) =>
-                    {
+                    AccountHistoryFrame::DocumentsRequest { body } => {
                         if let Some(request) = DocumentRequest::decode(&body)
                             .filter(|request| request.domain == AccountDocumentDomain::GroupControl)
+                            && let Some(page) = pages.lock().unwrap().request(&request)
+                            && demand_dispatch
+                                .lock()
+                                .unwrap()
+                                .is_some_and(|at| page.dispatched_at >= at)
                         {
                             let mut rows = b_requests.lock().unwrap();
                             if rows.len() < 32 {
+                                b_dispatches.lock().unwrap().push((
+                                    page.task,
+                                    page.origin,
+                                    request.operation.as_ref().unwrap().nonce,
+                                ));
                                 rows.push(effective_after(&request));
                             }
                         }
@@ -539,12 +610,12 @@ async fn run_queued_source(gate_terminal: bool) {
     reference.account_sync_notify.notify_one();
     super::cold_account_setup(first_rx)
         .await
-        .expect("natural A read must precede real B publication")
+        .unwrap_or_else(|error| panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={} B_partial={}; pages={:?}", b_unpaired_settled.load(std::sync::atomic::Ordering::Acquire), b_partial.load(std::sync::atomic::Ordering::Acquire), pages.lock().unwrap().summary()))
         .unwrap();
     let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
     super::cold_account_setup(resume_rx)
         .await
-        .expect("B protected partial page must be queued before A resumes")
+        .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}", b_unpaired_settled.load(std::sync::atomic::Ordering::Acquire), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary()))
         .unwrap();
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));
     let saved = saved_after
@@ -567,7 +638,6 @@ async fn run_queued_source(gate_terminal: bool) {
     *operation.lock().unwrap() = Some(id);
     record_b_trace(&trace, clock, "fixture", "B_admission_begin".into());
     b_retired.store(false, std::sync::atomic::Ordering::Relaxed);
-    admitted.store(true, std::sync::atomic::Ordering::Release);
     let accepted = reference
         .submit_account_group_operation_if(
             &account.account_id(),
@@ -579,6 +649,7 @@ async fn run_queued_source(gate_terminal: bool) {
             |commit| commit(),
         )
         .unwrap();
+    admitted.store(true, std::sync::atomic::Ordering::Release);
     record_b_trace(&trace, clock, "fixture", "B_admitted".into());
     assert_eq!(accepted.executions.len(), 1);
     assert_eq!(accepted.executions[0].device_id, b.user_id());
@@ -672,8 +743,9 @@ async fn run_queued_source(gate_terminal: bool) {
     );
     assert!(
         first_fresh,
-        "new selected queued source resumed its OLD suffix instead of a fresh comparison: saved={saved:?}, requests={:?}",
-        b_requests.lock().unwrap()
+        "new selected queued source resumed its OLD suffix instead of a fresh comparison: saved={saved:?}, requests={:?}; dispatches={:?}",
+        b_requests.lock().unwrap(),
+        b_dispatches.lock().unwrap()
     );
     if gate_terminal {
         assert!(
@@ -684,7 +756,8 @@ async fn run_queued_source(gate_terminal: bool) {
         let requests = b_requests.lock().unwrap();
         assert!(
             requests.get(2).is_some_and(Option::is_none),
-            "new terminal must reuse completed background slot before old foreground suffix: requests={requests:?}; phases={:?}",
+            "new terminal must reuse completed background slot before old foreground suffix: requests={requests:?}; dispatches={:?}; phases={:?}",
+            b_dispatches.lock().unwrap(),
             trace.lock().unwrap()
         );
         let saved_foreground = foreground_after

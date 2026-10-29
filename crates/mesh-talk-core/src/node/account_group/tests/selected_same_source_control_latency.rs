@@ -6,12 +6,118 @@ use tokio::sync::{Semaphore, oneshot};
 
 pub(super) type BTrace =
     Arc<Mutex<std::collections::VecDeque<(u128, &'static str, Option<tokio::task::Id>, String)>>>;
+
+#[derive(Clone, Debug)]
+pub(super) struct ControlTestPage {
+    pub task: tokio::task::Id,
+    pub dispatched_at: std::time::Instant,
+    pub origin: String,
+    pub request: crate::node::account_documents::wire::DocumentRequest,
+}
+impl ControlTestPage {
+    pub fn contains_demand(&self, id: AccountGroupOperationId) -> bool {
+        self.origin.contains(&format!("{id:?}"))
+    }
+}
+#[derive(Default, Debug)]
+pub(super) struct ControlTestPages {
+    origins: std::collections::VecDeque<(tokio::task::Id, String, std::time::Instant)>,
+    pages: std::collections::VecDeque<ControlTestPage>,
+}
+impl ControlTestPages {
+    pub fn observe(&mut self, event: &str) {
+        if event.starts_with("control_task ") {
+            if self.origins.len() == 64 {
+                self.origins.pop_front();
+            }
+            self.origins
+                .push_back((tokio::task::id(), event.into(), std::time::Instant::now()));
+        }
+        if let Some(body) = event.strip_prefix("control_request_body=") {
+            let request = crate::node::account_documents::wire::DocumentRequest::decode(
+                &hex::decode(body).unwrap(),
+            )
+            .unwrap();
+            let task = tokio::task::id();
+            let (_, origin, dispatched_at) = self
+                .origins
+                .iter()
+                .rev()
+                .find(|(id, _, _)| *id == task)
+                .expect("every controller request has its exact dispatch origin")
+                .clone();
+            if self.pages.len() == 64 {
+                self.pages.pop_front();
+            }
+            self.pages.push_back(ControlTestPage {
+                task,
+                dispatched_at,
+                origin,
+                request,
+            });
+        }
+    }
+    pub fn request(
+        &self,
+        request: &crate::node::account_documents::wire::DocumentRequest,
+    ) -> Option<ControlTestPage> {
+        self.nonce(request.operation.as_ref()?.nonce)
+    }
+    pub fn nonce(&self, nonce: [u8; 32]) -> Option<ControlTestPage> {
+        self.pages
+            .iter()
+            .rev()
+            .find(|page| {
+                page.request
+                    .operation
+                    .as_ref()
+                    .is_some_and(|probe| probe.nonce == nonce)
+            })
+            .cloned()
+    }
+    pub fn task(&self, task: tokio::task::Id) -> Option<ControlTestPage> {
+        self.pages
+            .iter()
+            .rev()
+            .find(|page| page.task == task)
+            .cloned()
+    }
+    pub fn summary(&self) -> Vec<String> {
+        self.pages
+            .iter()
+            .rev()
+            .take(16)
+            .map(|page| {
+                format!(
+                    "task={:?} {} nonce={} continuation={}",
+                    page.task,
+                    page.origin.split(" requests=").next().unwrap(),
+                    page.request
+                        .operation
+                        .as_ref()
+                        .map_or_else(|| "none".into(), |probe| hex::encode(&probe.nonce[..4])),
+                    page.request.after.is_some()
+                        || page
+                            .request
+                            .operation
+                            .as_ref()
+                            .is_some_and(|probe| probe.after.is_some()),
+                )
+            })
+            .collect()
+    }
+}
 pub(super) fn record_b_trace(
     trace: &BTrace,
     started: std::time::Instant,
     side: &'static str,
     phase: String,
 ) {
+    // Exact bodies belong only to the bounded nonce ledger; keep the shared
+    // human-readable ring available for page/payment/cancellation transitions.
+    if phase.starts_with("control_request_body=") {
+        return;
+    }
     let mut rows = trace.lock().unwrap();
     if rows.len() == 384 {
         rows.pop_front();
@@ -197,6 +303,7 @@ type PaidCheckpoint = (
 struct PaidBoundaryEvidence {
     stages: Vec<(u128, String)>,
     active_page: Option<tokio::task::Id>,
+    natural_page: Option<tokio::task::Id>,
     prefix_page: Option<tokio::task::Id>,
     resume_page: Option<tokio::task::Id>,
     original: Option<PaidCheckpoint>,
@@ -296,16 +403,20 @@ async fn hold_original_pair_resume(
     let prefix_arrived = Arc::new(Semaphore::new(0));
     let resume_arrived = Arc::new(Semaphore::new(0));
     let phase = Arc::new(AtomicUsize::new(0));
-    let protected = Arc::new(AtomicBool::new(false));
     let aborted = Arc::new(AtomicBool::new(false));
+    let seed_pending = Arc::new(AtomicBool::new(true));
+    let pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let previous_client = executor.account_client_test_hook.lock().unwrap().clone();
     *executor.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let exact = source.identity.public();
         let requester = requester.identity.public();
         let evidence = gates.evidence.clone();
-        let protected = protected.clone();
         let aborted = aborted.clone();
+        let pages = pages.clone();
         let trace = trace.clone();
+        let source = source.clone();
+        let partial_keys = partial_keys.clone();
+        let seed_pending = seed_pending.clone();
         move |peer, event| {
             if let Some(prior) = &previous_client {
                 prior(peer.clone(), event.clone());
@@ -333,6 +444,19 @@ async fn hold_original_pair_resume(
                 }
             }
             if peer == exact {
+                pages.lock().unwrap().observe(&event);
+                // A paid live pair is also unprotected. Seed the new row only
+                // at a genuinely unpaired dispatch, before its request snapshot.
+                if event.starts_with("control_task paired=false protected=false ")
+                    && seed_pending.swap(false, Ordering::AcqRel)
+                {
+                    partial_keys.lock().unwrap().push(
+                        crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+                            &source,
+                            crate::eventlog::ConversationId::new([67; 32]),
+                        ),
+                    );
+                }
                 {
                     let mut data = evidence.lock().unwrap();
                     if event == "negotiation_begin domain=Some(GroupControl)" {
@@ -341,9 +465,14 @@ async fn hold_original_pair_resume(
                     if event.starts_with("control_turn_origin") {
                         data.last_origin = event.clone();
                     }
-                    if event == "control_owned_abort reason=same_source" {
+                    if data.natural_page.is_some_and(|task| {
+                        event == format!("control_cancel task={task:?} reason=same_source")
+                    }) {
                         data.source_aborts += 1;
                         data.record(clock, "same_source_owned_abort");
+                        aborted.store(true, Ordering::Release);
+                    } else if event.starts_with("control_cancel ") {
+                        data.record(clock, event.clone());
                     }
                     if event == "control_pair_retired" {
                         data.pair_retirements += 1;
@@ -360,16 +489,9 @@ async fn hold_original_pair_resume(
                         data.record(clock, format!("original_resume_completed {event}"));
                     }
                 }
-                if event.starts_with("control_dispatch") {
-                    protected.store(
-                        event.starts_with("control_dispatch protected=true"),
-                        Ordering::Release,
-                    );
-                }
-                if event == "control_owned_abort reason=same_source" {
-                    aborted.store(true, Ordering::Release);
-                }
-                if event.starts_with("control_") || event.starts_with("page_end") {
+                if (event.starts_with("control_") && !event.starts_with("control_request_body="))
+                    || event.starts_with("page_end")
+                {
                     record_b_trace(&trace, clock, "executor_to_unrelated_A", event);
                 }
             }
@@ -378,7 +500,6 @@ async fn hold_original_pair_resume(
     let previous_server = source.account_session_test_hook.lock().unwrap().clone();
     *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let exact = executor.identity.public();
-        let protected = protected.clone();
         let aborted = aborted.clone();
         let trace = trace.clone();
         let phase = phase.clone();
@@ -391,10 +512,10 @@ async fn hold_original_pair_resume(
         let resume_arrived = resume_arrived.clone();
         let checkpoint = Arc::new(Mutex::new(None));
         let evidence = gates.evidence.clone();
+        let pages = pages.clone();
         move |peer, frame| {
             let prior = previous_server.clone();
             let exact = exact.clone();
-            let protected = protected.clone();
             let aborted = aborted.clone();
             let trace = trace.clone();
             let phase = phase.clone();
@@ -407,6 +528,7 @@ async fn hold_original_pair_resume(
             let resume_arrived = resume_arrived.clone();
             let checkpoint = checkpoint.clone();
             let evidence = evidence.clone();
+            let pages = pages.clone();
             Box::pin(async move {
                 if peer != exact {
                     if let Some(prior) = prior {
@@ -422,6 +544,11 @@ async fn hold_original_pair_resume(
                 if request.domain != AccountDocumentDomain::GroupControl {
                     return;
                 }
+                let page = pages
+                    .lock()
+                    .unwrap()
+                    .request(&request)
+                    .expect("the authenticated request nonce identifies its client task");
                 let after = request
                     .operation
                     .as_ref()
@@ -452,14 +579,21 @@ async fn hold_original_pair_resume(
                         Some(crate::node::AccountDocumentKey::GroupLegacyOperation { .. })
                     ) =>
                     {
+                        if !page
+                            .origin
+                            .starts_with("control_task paired=false protected=false ")
+                        {
+                            return;
+                        }
                         assert!(
-                            !protected.load(Ordering::Acquire),
+                            page.origin.contains("protected=false"),
                             "the first tail must be an actual natural comparison"
                         );
                         *checkpoint.lock().unwrap() = Some(stamp.clone());
                         {
                             let mut data = evidence.lock().unwrap();
                             data.original = Some(stamp);
+                            data.natural_page = Some(page.task);
                             // Cold comparisons can retire before this natural
                             // read. Count only the newly established pair.
                             data.source_aborts = 0;
@@ -479,12 +613,17 @@ async fn hold_original_pair_resume(
                     1 if after.is_none() => {
                         assert!(
                             aborted.load(Ordering::Acquire),
-                            "a genuine newer Wake must preempt the natural read"
+                            "a genuine newer Wake must preempt the exact unpaired natural task: page={page:?}; evidence={:?}",
+                            evidence.lock().unwrap()
                         );
-                        assert!(protected.load(Ordering::Acquire));
+                        assert!(
+                            page.origin
+                                .starts_with("control_task paired=true protected=true "),
+                            "{page:?}"
+                        );
                         {
                             let mut data = evidence.lock().unwrap();
-                            data.prefix_page = data.active_page;
+                            data.prefix_page = Some(page.task);
                             data.record(clock, "protected_prefix_held");
                         }
                         phase.store(2, Ordering::Release);
@@ -498,7 +637,7 @@ async fn hold_original_pair_resume(
                         let _ = prefix.acquire().await;
                     }
                     2 => {
-                        assert!(protected.load(Ordering::Acquire));
+                        assert!(page.origin.contains("protected=true"));
                         assert_eq!(
                             checkpoint.lock().unwrap().as_ref(),
                             Some(&stamp),
@@ -507,7 +646,7 @@ async fn hold_original_pair_resume(
                         {
                             let mut data = evidence.lock().unwrap();
                             data.resumed = Some(stamp);
-                            data.resume_page = data.active_page;
+                            data.resume_page = Some(page.task);
                             data.record(clock, "exact_original_resume_held");
                         }
                         phase.store(3, Ordering::Release);
@@ -536,14 +675,14 @@ async fn hold_original_pair_resume(
                             {
                                 data.invalid = Some(format!(
                                     "continuation did not retain the same fully-paid pair: protected={} origin={}",
-                                    protected.load(Ordering::Acquire),
+                                    page.origin.contains("protected=true"),
                                     data.last_origin
                                 ));
                                 data.record(clock, "invalid_boundary_not_trapped");
                                 return;
                             }
                             data.continuation_trapped = true;
-                            data.trapped_protected = Some(protected.load(Ordering::Acquire));
+                            data.trapped_protected = Some(page.origin.contains("protected=true"));
                             data.trapped_origin = Some(data.last_origin.clone());
                             data.trapped_after_requester = data.requester_control.is_some();
                             data.record(clock, "paid_pair_foreground_continuation_trapped");
@@ -561,16 +700,16 @@ async fn hold_original_pair_resume(
             })
         }
     }));
-    partial_keys.lock().unwrap().push(
-        crate::node::account_documents::sync::seed_legacy_control_page_for_test(
-            source,
-            crate::eventlog::ConversationId::new([67; 32]),
-        ),
-    );
     executor.account_sync_notify.notify_one();
     super::cold_account_setup(arrived.acquire())
         .await
-        .expect("the real natural tail must arrive")
+        .unwrap_or_else(|error| {
+            panic!(
+                "the real natural tail must arrive: {error:?}; pages={:?}; evidence={:?}",
+                pages.lock().unwrap().summary(),
+                gates.evidence.lock().unwrap()
+            )
+        })
         .unwrap()
         .forget();
     // Change the actual full-scope digest after the held snapshot. The newer
@@ -585,7 +724,12 @@ async fn hold_original_pair_resume(
     send_boundary_wake(source, executor, 81, 1).await;
     super::cold_account_setup(prefix_arrived.acquire())
         .await
-        .expect("the real protected prefix must arrive")
+        .unwrap_or_else(|error| {
+            panic!(
+                "the real protected prefix must arrive: {error:?}; evidence={:?}",
+                gates.evidence.lock().unwrap()
+            )
+        })
         .unwrap()
         .forget();
     // The original socket is now cancelled. Close its obsolete responder gate
@@ -594,7 +738,13 @@ async fn hold_original_pair_resume(
     gates.prefix.close();
     super::cold_account_setup(resume_arrived.acquire())
         .await
-        .expect("the exact protected resume must arrive")
+        .unwrap_or_else(|error| {
+            panic!(
+                "the exact protected resume must arrive: {error:?}; pages={:?}; evidence={:?}",
+                pages.lock().unwrap().summary(),
+                gates.evidence.lock().unwrap()
+            )
+        })
         .unwrap()
         .forget();
     gates
@@ -1286,6 +1436,31 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                 )),
                 "A is terminal before B is admitted"
             );
+            if paid_boundary {
+                // This variant faults B's unrelated incoming-hint scheduler,
+                // not the parent's selected-B-vs-held-A boundary. Finish that
+                // exact warmup pair before rows 67/68 create a different pair.
+                retired.store(false, std::sync::atomic::Ordering::Release);
+                release.close();
+                resumed_release.close();
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    while !retired.load(std::sync::atomic::Ordering::Acquire)
+                        || !partial_keys.lock().unwrap().iter().all(|key| {
+                            reference.account_document_meta(key).is_some()
+                        })
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|error| panic!("the exact parent pair must retire before the independent fault: {error:?}; trace={:?}", abort_trace.lock().unwrap()));
+                record_b_trace(
+                    &abort_trace,
+                    b_clock,
+                    "fixture",
+                    "parent_pair_retired_before_new_fault".into(),
+                );
+            }
             let second = reference
                 .new_account_group_operation_id(&account.account_id())
                 .unwrap();
@@ -1607,13 +1782,21 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     let (requester, source) = receipt.unwrap_or_else(|_| panic!("same-source pre-operation background read blocked its new private receipt: requester={:?} source={:?} abort_trace={:?}", before_release_requester.map(|status| status.phase), before_release_source.map(|status| status.phase), abort_trace.lock().unwrap()));
     assert_eq!(held_abort_counts.len(), if other_selected { 2 } else { 1 });
     assert!(
-        held_abort_counts.iter().all(|(_, count)| *count == 1),
-        "each exact held page must be preempted once: held={held_abort_counts:?}; all_aborts={:?}",
+        if paid_boundary {
+            held_abort_counts.iter().map(|(_, count)| *count).eq([1, 0])
+        } else {
+            held_abort_counts.iter().all(|(_, count)| *count == 1)
+        },
+        "each exact held page must retain its scenario's cancellation count: held={held_abort_counts:?}; all_aborts={:?}",
         abort_trace.lock().unwrap()
     );
     assert_eq!(
         aborts_before_release,
-        if other_selected { 2 } else { 1 },
+        if other_selected && !paid_boundary {
+            2
+        } else {
+            1
+        },
         "the captured held tasks yield exactly once each despite repeated status polling; unrelated metadata preemptions remain visible in abort_trace={:?}",
         abort_trace.lock().unwrap()
     );
