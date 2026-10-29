@@ -21,11 +21,13 @@ pub(crate) const RECOVERED_IDS: i64 = 5;
 pub(crate) const FILE_PROOFS: i64 = 6;
 pub(crate) const FILE_IDENTITIES: i64 = 7;
 pub(crate) const CHANNEL_SENDERS: i64 = 8;
+pub(crate) const SENT_MANIFEST_SCOPES: i64 = 9;
+pub(crate) const RECALL_MARKS: i64 = 10;
 pub(crate) const MAX_PAGE_ROWS: usize = 128;
 pub(crate) const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
 const SCHEMA: &str = "
-CREATE TABLE transcript_sources(kind INTEGER PRIMARY KEY CHECK(kind BETWEEN 1 AND 8), locator BLOB NOT NULL UNIQUE, stub BLOB NOT NULL CHECK(length(stub)=54), raw_size INTEGER NOT NULL CHECK(raw_size>=0), raw_hash BLOB NOT NULL CHECK(length(raw_hash)=32), published INTEGER NOT NULL CHECK(published IN (0,1)), record_count INTEGER NOT NULL DEFAULT 0 CHECK(record_count>=0), body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(body_bytes>=0), revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(revision)='integer' AND revision>=0), rewrite_revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(rewrite_revision)='integer' AND rewrite_revision>=0));
+CREATE TABLE transcript_sources(kind INTEGER PRIMARY KEY CHECK(kind BETWEEN 1 AND 10), locator BLOB NOT NULL UNIQUE, stub BLOB NOT NULL CHECK(length(stub)=54), raw_size INTEGER NOT NULL CHECK(raw_size>=0), raw_hash BLOB NOT NULL CHECK(length(raw_hash)=32), published INTEGER NOT NULL CHECK(published IN (0,1)), record_count INTEGER NOT NULL DEFAULT 0 CHECK(record_count>=0), body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(body_bytes>=0), revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(revision)='integer' AND revision>=0), rewrite_revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(rewrite_revision)='integer' AND rewrite_revision>=0));
 CREATE TABLE transcript_rows(ordinal INTEGER PRIMARY KEY AUTOINCREMENT, kind INTEGER NOT NULL REFERENCES transcript_sources(kind), conversation BLOB NOT NULL CHECK(length(conversation)=32), row_key BLOB NOT NULL CHECK(length(row_key) BETWEEN 9 AND 33), clock BLOB NOT NULL CHECK(length(clock)=8), sequence BLOB NOT NULL CHECK(length(sequence)=8), sender_bytes INTEGER NOT NULL CHECK(sender_bytes>=0), body_bytes INTEGER NOT NULL CHECK(body_bytes>=0), deadline BLOB CHECK(deadline IS NULL OR length(deadline)=8), logical_id BLOB CHECK(logical_id IS NULL OR length(logical_id)=32), plaintext_sha256 BLOB NOT NULL CHECK(length(plaintext_sha256)=32), file_conversation BLOB CHECK(file_conversation IS NULL OR (kind=3 AND length(file_conversation)=32)), sender TEXT NOT NULL, UNIQUE(kind,conversation,row_key));
 CREATE INDEX transcript_row_keys ON transcript_rows(kind,row_key,ordinal);
 CREATE INDEX transcript_history ON transcript_rows(kind,conversation,clock,sequence,ordinal);

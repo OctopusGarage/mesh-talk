@@ -14,6 +14,79 @@ pub(crate) struct PublishedHistorySource {
     stub: Vec<u8>,
 }
 impl PublishedHistorySource {
+    /// Authenticate a cold source without publishing or repairing its path.
+    /// Published sources need only their authenticated SQL identity and barrier;
+    /// migration retries accept only the exact encrypted source already imported.
+    pub(crate) fn authenticate_legacy<R: serde::Serialize + serde::de::DeserializeOwned>(
+        profile: &ProfileStorage,
+        path: &Path,
+        password: &str,
+        kind: i64,
+        magic: &[u8; 6],
+    ) -> Result<(), LogError> {
+        domain(kind)?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let path = std::fs::canonicalize(parent)?.join(
+            path.file_name()
+                .ok_or_else(|| invalid("history source has no filename"))?,
+        );
+        let present = inspect_regular(&path)?;
+        let locator = manifest::encode(path.strip_prefix(profile.root()).unwrap_or(&path));
+        let state = match profile.participant_database() {
+            None => None,
+            Some(database) => database.read(|c| {
+                let initialized: bool = c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='transcript_sources')",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if initialized {
+                    load(c, kind, &locator)
+                } else {
+                    Ok(None)
+                }
+            })?,
+        };
+        if let Some(state) = state {
+            if matches_stub(&path, &state.stub)? {
+                return Ok(());
+            }
+            if state.published {
+                return Err(invalid("published history source barrier changed"));
+            }
+            let identity = if present {
+                stream_identity(&path)?
+            } else {
+                (0, vec![0; 32])
+            };
+            if identity != (state.raw_size, state.raw_hash) {
+                return Err(invalid("imported history source changed"));
+            }
+            return Ok(());
+        }
+        if !present {
+            return Ok(());
+        }
+        let snapshot = tempfile::Builder::new()
+            .prefix(".history-preflight-")
+            .tempdir_in(parent)?;
+        let source = snapshot.path().join("source.log");
+        let before = copy(&path, &source)?;
+        let log = crate::storage::record_log::EncryptedRecordLog::<R>::open_with_visitor(
+            &source,
+            password,
+            magic,
+            |_| Ok(()),
+        )?;
+        log.sync()?;
+        if !inspect_regular(&path)? || stream_identity(&path)? != before {
+            return Err(invalid("history source changed during authentication"));
+        }
+        Ok(())
+    }
     pub(crate) fn open(
         profile: Arc<ProfileStorage>,
         path: &Path,
@@ -90,6 +163,8 @@ fn domain(kind: i64) -> Result<[u8; 16], LogError> {
         FILE_PROOFS => Ok(*b"MeshFileProofs01"),
         FILE_IDENTITIES => Ok(*b"MeshFileIdent001"),
         CHANNEL_SENDERS => Ok(*b"MeshChanSenders1"),
+        SENT_MANIFEST_SCOPES => Ok(*b"MeshFileScopes01"),
+        RECALL_MARKS => Ok(*b"MeshRecallMarks1"),
         _ => Err(invalid("invalid transcript source kind")),
     }
 }

@@ -949,3 +949,53 @@ fn interrupted_fresh_import_keeps_absent_source_and_restarts_without_replay() {
     );
     assert!(SentLog::open(&path, "pw").is_err());
 }
+
+#[test]
+fn preflight_authenticates_without_publication_and_warm_reads_no_frames() {
+    use publication::PublishedHistorySource;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sent.log");
+    let mut legacy = SentLog::open(&path, "pw").unwrap();
+    legacy.record_durable(&sent(1)).unwrap();
+    drop(legacy);
+    let original = std::fs::read(&path).unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = ProfileStorage::open_participant(
+        ProfileStorageLease::acquire(dir.path()).unwrap(),
+        &identity.public(),
+        &account.public(),
+        &dir.path().join("messages.log"),
+        &path,
+        "pw",
+    )
+    .unwrap();
+    assert!(owner.participant_database().is_none());
+    assert!(
+        PublishedHistorySource::authenticate_legacy::<SentEntry>(
+            &owner, &path, "wrong", SENT, b"MTSENT"
+        )
+        .is_err()
+    );
+    PublishedHistorySource::authenticate_legacy::<SentEntry>(&owner, &path, "pw", SENT, b"MTSENT")
+        .unwrap();
+    assert!(owner.participant_database().is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    owner.complete_participant("pw", None).unwrap();
+    let store = SentStore::from_profile(owner.clone(), &path, "pw").unwrap();
+    drop(store);
+    crate::storage::record_log::frame_observations::reset();
+    PublishedHistorySource::authenticate_legacy::<SentEntry>(&owner, &path, "pw", SENT, b"MTSENT")
+        .unwrap();
+    assert_eq!(
+        crate::storage::record_log::frame_observations::maximum_capacity(),
+        0
+    );
+    std::fs::write(&path, original).unwrap();
+    assert!(
+        PublishedHistorySource::authenticate_legacy::<SentEntry>(
+            &owner, &path, "pw", SENT, b"MTSENT"
+        )
+        .is_err()
+    );
+}
