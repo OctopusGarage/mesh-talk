@@ -118,9 +118,17 @@ adoption remain separate. See [storage ownership and budgets](ARCHITECTURE.md#st
 `core/storage/profile/participant.rs` owns participant control metadata, explicit
 source locators and recoverable account-adoption intent on the shared connection.
 `core/node/delivery_runtime.rs` remains the account-adoption decision owner and
-coordinates its existing delivery journal with that intent. Participant history
-domains remain legacy until their coordinated cutover; metadata ownership does
-not establish demand-loaded history. `core/node/runtime_startup.rs` composes
+coordinates its existing delivery journal with that intent.
+`core/storage/profile/participant_events.rs` owns independent event-source
+publication, its downgrade barrier, authenticated import and retryable cleanup.
+`core/eventlog/persist.rs` selects the profile-backed repository for production
+Nodes; `persist/legacy.rs` retains the explicit standalone compatibility owner.
+`core/node/privacy_sync/network.rs` applies participant authorization to finite
+repository network pages. `core/eventlog/repository/selection.rs` owns disposable
+SQL authorization IDs, causal closure, and bounded retirement cleanup; views use
+scalar revision checks until source/proof state changes. The initial temporary
+metadata/control reducer and startup channel replay still scale with history. Other participant domains retain their
+legacy owners until their own cutovers. `core/node/runtime_startup.rs` composes
 startup inputs and completion through `runtime_work.rs`; blocking captures and
 undelivered results remain admitted until their resources are destroyed.
 The desktop startup permit retains replacement serialization, and backup consumes

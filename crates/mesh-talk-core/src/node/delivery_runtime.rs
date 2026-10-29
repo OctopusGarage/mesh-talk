@@ -564,7 +564,7 @@ impl Node {
                 .authors(manifest.file_conv());
             permitted_authors.insert(event.author);
             let log = self.log.lock().expect("log lock not poisoned");
-            let mut chunks = log.events(&manifest.file_conv());
+            let mut chunks = log.events(&manifest.file_conv())?;
             chunks.sort_by_key(|chunk| chunk.seq);
             let mut previous = None;
             let mut chunk_author = None;
@@ -793,7 +793,7 @@ impl Node {
         event: &Event,
         proof: &crate::discovery::Announce,
         store: &mut DeliveryStore,
-    ) -> Option<()> {
+    ) -> Result<Option<()>, LogError> {
         self.accept_dm_event_with_author(event, &proof.public(), Some(proof), store)
     }
 
@@ -803,18 +803,20 @@ impl Node {
         public: &PublicIdentity,
         proof: Option<&crate::discovery::Announce>,
         store: &mut DeliveryStore,
-    ) -> Option<()> {
+    ) -> Result<Option<()>, LogError> {
         let peer = public.clone();
         let sibling = self.certified_sibling(&peer);
         // Offline replay can use the already persisted exact sibling certificate.
         // Receipt and control processing still require the real signed announcement.
         if proof.is_none() && !sibling {
-            return None;
+            return Ok(None);
         }
         let own = self.identity.public();
         if event.conversation_id == super::delivery_receipt::delivery_conversation_id(&own, &peer) {
-            self.process_delivery_control(event, proof?, store);
-            return None;
+            if let Some(proof) = proof {
+                self.process_delivery_control(event, proof, store);
+            }
+            return Ok(None);
         }
         if event.conversation_id != super::conversation::dm_conversation_id(&own, &peer)
             || event.author.ed25519_pub() != &peer.ed25519_pub
@@ -823,22 +825,22 @@ impl Node {
             || event.ciphertext.len() > 256 * 1024
             || event.parents.len() > 1024
         {
-            return None;
+            return Ok(None);
         }
         if sibling && !self.device_sync_policy().history {
-            return None;
+            return Ok(None);
         }
-        store
-            .check_capacity(1, event.ciphertext.len() as u64)
-            .ok()?;
-        let (plain, prepared) = self
+        store.check_capacity(1, event.ciphertext.len() as u64)?;
+        let decrypted = self
             .dm_ratchet
             .lock()
             .expect("ratchet lock not poisoned")
-            .prepare_decrypt(&self.identity, &peer, &event.ciphertext)
-            .ok()?;
+            .prepare_decrypt(&self.identity, &peer, &event.ciphertext);
+        let Ok((plain, prepared)) = decrypted else {
+            return Ok(None);
+        };
         if plain.len() > 256 * 1024 {
-            return None;
+            return Ok(None);
         }
         let account = self.account_id();
         let sender_account = match proof {
@@ -846,7 +848,9 @@ impl Node {
             None => Some(account.clone()),
         };
         let (conversation, from) = if plain.starts_with(b"MTDE1") {
-            let env = DmEnvelope::decode(&plain)?;
+            let Some(env) = DmEnvelope::decode(&plain) else {
+                return Ok(None);
+            };
             let valid_account = |id: &str| {
                 id.len() == 32
                     && id
@@ -858,7 +862,7 @@ impl Node {
                 || sender_account.as_deref() != Some(env.route.sender_account.as_str())
                 || (env.route.sender_account != account && env.route.recipient_account != account)
             {
-                return None;
+                return Ok(None);
             }
             (
                 super::conversation::account_conversation_id(
@@ -888,14 +892,18 @@ impl Node {
             )
         });
         let receipt = if let Some(payload) = payload {
-            let proof = proof?;
+            let Some(proof) = proof else {
+                return Ok(None);
+            };
             if store.has_receipt_for(conversation, event.id) {
-                return None;
+                return Ok(None);
             }
-            let wire = payload.seal(&self.identity).ok()?;
+            let Ok(wire) = payload.seal(&self.identity) else {
+                return Ok(None);
+            };
             let log = self.log.lock().expect("log lock not poisoned");
             let conv = payload.conversation();
-            let (mut parents, lamport) = log.prepare(&conv).ok()?;
+            let (mut parents, lamport) = log.prepare(&conv)?;
             // The Ed-pair scope survives account adoption and local deletion.
             // Never make a fresh receipt depend on control ancestry that the
             // current profile cannot safely project to this exact account.
@@ -904,7 +912,7 @@ impl Node {
                 .lock()
                 .expect("control ids lock not poisoned");
             let mut eligible = std::collections::HashSet::new();
-            for previous in log.events(&conv) {
+            for previous in log.events(&conv)? {
                 let typed = (previous.author.ed25519_pub() == &own.ed25519_pub
                     && controls
                         .get(&previous.id)
@@ -913,7 +921,7 @@ impl Node {
                         &self.identity,
                         &account,
                         proof,
-                        previous,
+                        &previous,
                     )
                     .is_some();
                 if typed && previous.parents.iter().all(|id| eligible.contains(id)) {
@@ -923,7 +931,7 @@ impl Node {
             parents.retain(|id| eligible.contains(id));
             drop(controls);
             let author = crate::eventlog::Author::from_ed25519(own.ed25519_pub);
-            let seq = log.next_sequence(&conv, &author).ok()?;
+            let seq = log.next_sequence(&conv, &author)?;
             let control = Event::new(
                 &self.identity,
                 conv,
@@ -934,7 +942,7 @@ impl Node {
                 crate::eventlog::EventKind::Message,
                 wire,
             );
-            log.sync().ok()?;
+            log.sync()?;
             let logical_id = DmEnvelope::decode(&received.plaintext)
                 .map_or(event.id, |env| EventId::new(env.msg_id));
             Some(Box::new(ReceiptDelivery {
@@ -952,35 +960,26 @@ impl Node {
         } else {
             None
         };
-        self.log
-            .lock()
-            .expect("log lock not poisoned")
-            .sync()
-            .ok()?;
+        self.log.lock().expect("log lock not poisoned").sync()?;
         // Hold policy through durable acceptance; accepted WAL recovery remains unconditional.
         let policy = self
             .account_sync_policy
             .lock()
             .expect("account sync policy mutex not poisoned");
         if sibling && !policy.current().history {
-            return None;
+            return Ok(None);
         }
-        store
-            .begin(DeliveryTransaction::Incoming {
-                sender: peer.clone(),
-                original: Box::new(event.clone()),
-                ratchet: prepared,
-                received: Box::new(received),
-                receipt,
-            })
-            .ok()?;
+        store.begin(DeliveryTransaction::Incoming {
+            sender: peer.clone(),
+            original: Box::new(event.clone()),
+            ratchet: prepared,
+            received: Box::new(received),
+            receipt,
+        })?;
         drop(policy);
-        if let Err(error) = self.recover_delivery(store) {
-            log::warn!("accepted incoming delivery awaits local recovery: {error}");
-            return None;
-        }
+        self.recover_delivery(store)?;
         self.delivery_notify.notify_one();
-        Some(())
+        Ok(Some(()))
     }
     pub(in crate::node) fn recover_delivery(
         &self,
@@ -1360,12 +1359,12 @@ impl Node {
     pub(in crate::node) fn raw_sent_history(
         &self,
         conversation: ConversationId,
-    ) -> Vec<(EventId, SentEntry)> {
+    ) -> Result<Vec<(EventId, SentEntry)>, LogError> {
         let store = self.delivery.lock().expect("delivery lock not poisoned");
         let log = self.log.lock().expect("log lock not poisoned");
         let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut ids: std::collections::HashMap<_, _> = log
-            .events(&conversation)
+            .events(&conversation)?
             .into_iter()
             .filter(|e| e.kind == crate::eventlog::EventKind::Message && e.author == author)
             .map(|e| (e.seq, e.id))
@@ -1389,7 +1388,7 @@ impl Node {
             .recovered_sent_ids
             .lock()
             .expect("recovered sent ids mutex not poisoned");
-        entries
+        Ok(entries
             .into_iter()
             .map(|e| {
                 (
@@ -1401,7 +1400,7 @@ impl Node {
                     e,
                 )
             })
-            .collect()
+            .collect())
     }
 
     #[cfg(test)]
@@ -1642,7 +1641,7 @@ impl Node {
             }
             let exchange = async {
                 let store = self.sync_store(channel.peer_identity());
-                super::session::request_round(&mut channel, &store, conversation).await?;
+                super::session::request_round_paged(&mut channel, &store, conversation).await?;
                 if conversation != destination.event.conversation_id {
                     return Ok(false);
                 }
@@ -2341,7 +2340,7 @@ impl Node {
                             .is_ok()
                     } else {
                         let store = self.pull_sync_store(channel.peer_identity());
-                        super::session::request_round(&mut channel, &store, conv)
+                        super::session::request_round_paged(&mut channel, &store, conv)
                             .await
                             .is_ok()
                     };
@@ -2934,7 +2933,7 @@ impl Node {
                 }
                 if !transfer.sticker_proof_attempted {
                     transfer.sticker_proof_attempted = true;
-                    if let Some(headers) = self.sticker_chunk_proof(file.file_conversation) {
+                    if let Some(headers) = self.sticker_chunk_proof(file.file_conversation)? {
                         match super::session::request_sticker_file_consent(
                             channel,
                             file.file_conversation,
@@ -3001,7 +3000,7 @@ impl Node {
             FilePhase::Chunks => {
                 let complete = transfer
                     .sync
-                    .step_burst(
+                    .step_burst_paged(
                         channel,
                         &store,
                         file.file_conversation,
@@ -3280,7 +3279,7 @@ impl Node {
                 let store = self.sync_store(channel.peer_identity());
                 // Publish the manifest first so private recipients/relays can
                 // durably reconstruct chunk scope before any chunk disclosure.
-                if super::session::request_round(&mut channel, &store, manifest_conv)
+                if super::session::request_round_paged(&mut channel, &store, manifest_conv)
                     .await
                     .is_err()
                 {
@@ -3302,7 +3301,14 @@ impl Node {
                         };
                         channel = reconnected;
                     }
-                    if let Some(headers) = self.sticker_chunk_proof(file.file_conversation) {
+                    let headers = match self.sticker_chunk_proof(file.file_conversation) {
+                        Ok(headers) => headers,
+                        Err(error) => {
+                            log::warn!("sticker proof lookup deferred: {error}");
+                            return false;
+                        }
+                    };
+                    if let Some(headers) = headers {
                         match super::session::request_sticker_file_consent(
                             &mut channel,
                             file.file_conversation,
@@ -3349,9 +3355,13 @@ impl Node {
                                 return false;
                             };
                             channel = reconnected;
-                            if super::session::request_round(&mut channel, &store, manifest_conv)
-                                .await
-                                .is_err()
+                            if super::session::request_round_paged(
+                                &mut channel,
+                                &store,
+                                manifest_conv,
+                            )
+                            .await
+                            .is_err()
                             {
                                 return false;
                             }
@@ -3393,9 +3403,13 @@ impl Node {
                             {
                                 return false;
                             }
-                            if super::session::request_round(&mut channel, &store, manifest_conv)
-                                .await
-                                .is_err()
+                            if super::session::request_round_paged(
+                                &mut channel,
+                                &store,
+                                manifest_conv,
+                            )
+                            .await
+                            .is_err()
                             {
                                 return false;
                             }
@@ -3404,9 +3418,13 @@ impl Node {
                 }
                 #[cfg(test)]
                 phase.store(4, std::sync::atomic::Ordering::Relaxed);
-                if super::session::request_file_round(&mut channel, &store, file.file_conversation)
-                    .await
-                    .is_err()
+                if super::session::request_file_round_paged(
+                    &mut channel,
+                    &store,
+                    file.file_conversation,
+                )
+                .await
+                .is_err()
                 {
                     return false;
                 }

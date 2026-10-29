@@ -64,7 +64,7 @@ pub async fn file_statuses(
     let node = state.node_handle().await?;
     ids.into_iter()
         .map(|(file_conv, id)| {
-            let progress = node.file_progress(id);
+            let progress = node.file_progress(id)?;
             let consent = node.attachment_consent_status(id)?;
             Ok(FileStatus {
                 file_conv,

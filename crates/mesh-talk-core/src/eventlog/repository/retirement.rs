@@ -145,7 +145,6 @@ impl EventRepository {
         }
         Ok(())
     }
-    #[cfg(test)]
     pub(super) fn scope_revision_on(
         &self,
         c: &Connection,

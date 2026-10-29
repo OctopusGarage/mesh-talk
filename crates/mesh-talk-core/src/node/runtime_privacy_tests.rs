@@ -218,7 +218,7 @@ async fn pinned_private_probe_keeps_routes_without_online_presence_or_new_grants
     }
     alice.node.runtime_work.drain().await;
     let policy = alice.privacy_snapshot();
-    let conversations = alice.node.log.lock().unwrap().conversations();
+    let conversations = alice.node.log.lock().unwrap().conversations().unwrap();
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);
     alice.node.probe_private_routes().await;
     let visible = alice
@@ -227,7 +227,7 @@ async fn pinned_private_probe_keeps_routes_without_online_presence_or_new_grants
         .any(|p| p.public.user_id() == bob.user_id());
     let routable = alice.peer_public(bob.user_id()).is_some();
     let after_probe_policy = alice.privacy_snapshot();
-    let after_probe_conversations = alice.node.log.lock().unwrap().conversations();
+    let after_probe_conversations = alice.node.log.lock().unwrap().conversations().unwrap();
     bob.stop().await;
     alice.node.runtime_work.drain().await;
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);

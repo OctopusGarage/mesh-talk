@@ -117,7 +117,9 @@ pub(in crate::node) struct ArchiveCache {
 impl Node {
     /// Resolve each conversation's recalls once, before taking any row-store
     /// locks. The same projection filters selectors and materialized payloads.
-    pub(super) fn account_archive_recalls(&self) -> (RecalledAccounts, [u8; 32]) {
+    pub(super) fn account_archive_recalls(
+        &self,
+    ) -> Result<(RecalledAccounts, [u8; 32]), NodeError> {
         let own = self.account_id();
         let mut peers = self.known_account_ids();
         peers.push(own.clone());
@@ -128,7 +130,7 @@ impl Node {
         let mut count = 0u64;
         for peer in peers {
             let conversation = account_conversation_id(&own, &peer);
-            let targets = self.recalled_targets_account(&peer);
+            let targets = self.recalled_targets_account(&peer)?;
             for target in &targets {
                 let mut hash = Sha256::new();
                 hash.update(b"mesh-talk-account-archive-recall-v1");
@@ -146,7 +148,7 @@ impl Node {
         let mut hash = Sha256::new();
         hash.update(digest);
         hash.update(count.to_be_bytes());
-        (recalled, hash.finalize().into())
+        Ok((recalled, hash.finalize().into()))
     }
 
     fn build_archive_index(
@@ -502,7 +504,7 @@ impl Node {
         files: bool,
         version: AccountSyncVersion,
     ) -> Result<AccountExportPage, NodeError> {
-        let (recalled, recalls) = self.account_archive_recalls();
+        let (recalled, recalls) = self.account_archive_recalls()?;
         // The lock prevents duplicate concurrent index builds. Producers never acquire it.
         let mut cache = self
             .account_archive_cache

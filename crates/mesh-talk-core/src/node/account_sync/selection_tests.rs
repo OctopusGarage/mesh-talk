@@ -559,7 +559,7 @@ async fn account_sync_v2_personal_file_metadata_and_bytes_have_independent_categ
             !receiver.media.contains(file),
             "file card import alone must not copy bytes"
         );
-        assert_eq!(receiver.file_progress(file).unwrap().done, 0);
+        assert_eq!(receiver.file_progress(file).unwrap().unwrap().done, 0);
         if files_only {
             receiver
                 .pull_account_attachment(&peer, file, AccountSyncVersion::V2)
@@ -1099,6 +1099,7 @@ async fn account_sync_sibling_profile_remains_live_when_history_ancestor_is_paus
         .lock()
         .unwrap()
         .events(&conv)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == crate::eventlog::EventKind::Profile)
         .unwrap()
@@ -2914,7 +2915,7 @@ async fn recalled_private_file_blocks_late_cards_and_stale_sibling_byte_release(
     late.apply_account_history_page(&cards, AccountSyncVersion::V2)
         .unwrap();
     assert!(
-        late.file_progress(file).is_none(),
+        late.file_progress(file).unwrap().is_none(),
         "a canonical recall arriving first prevents a late signed card from installing its content key"
     );
     original_server.abort();

@@ -129,6 +129,7 @@ impl Chain {
             assert!(
                 self.nodes[i]
                     .list_channels()
+                    .unwrap()
                     .iter()
                     .any(|c| c.id == channel && c.pending_invite)
             );
@@ -145,6 +146,7 @@ impl Chain {
         for node in &self.nodes[..6] {
             assert!(
                 node.list_channels()
+                    .unwrap()
                     .iter()
                     .any(|c| c.id == channel && !c.pending_invite)
             );
@@ -283,22 +285,23 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
     chain.round(1, 0, group).await;
     chain.nodes[1].process_file_events(group);
     if kind == crate::file::FileKind::File {
-        assert_eq!(chain.nodes[1].file_progress(file).unwrap().done, 0);
+        assert_eq!(chain.nodes[1].file_progress(file).unwrap().unwrap().done, 0);
         chain.nodes[1].decide_attachment(file, true).unwrap();
     }
     chain.round(1, 0, file).await;
     let holder = &chain.nodes[1];
-    assert!(holder.file_progress(file).unwrap().done > 0);
-    let retained = holder.log.lock().unwrap().events(&file).len();
+    assert!(holder.file_progress(file).unwrap().unwrap().done > 0);
+    let retained = holder.log.lock().unwrap().events(&file).unwrap().len();
     let chunk_ids: std::collections::HashSet<_> = holder
         .log
         .lock()
         .unwrap()
         .events(&file)
+        .unwrap()
         .iter()
         .map(|event| event.id)
         .collect();
-    let group_events = holder.log.lock().unwrap().events(&group).len();
+    let group_events = holder.log.lock().unwrap().events(&group).unwrap().len();
     let peer = chain.nodes[2].identity.public();
     let inbound = holder.serve_sync_store(&peer);
     let outbound = holder.sync_store(&peer);
@@ -340,10 +343,13 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
         chain.nodes[2].decide_attachment(file, true).unwrap();
     }
     chain.round(2, 1, file).await;
-    assert_eq!(chain.nodes[2].file_progress(file).unwrap().done, 0);
-    assert_eq!(holder.log.lock().unwrap().events(&file).len(), retained);
+    assert_eq!(chain.nodes[2].file_progress(file).unwrap().unwrap().done, 0);
     assert_eq!(
-        holder.log.lock().unwrap().events(&group).len(),
+        holder.log.lock().unwrap().events(&file).unwrap().len(),
+        retained
+    );
+    assert_eq!(
+        holder.log.lock().unwrap().events(&group).unwrap().len(),
         group_events
     );
     assert!(holder.channel_replica_enabled(group, &holder.user_id()));
@@ -362,8 +368,8 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
     holder.set_network_cost(NetworkCost::Unrestricted);
     chain.round(2, 1, file).await;
     assert_eq!(
-        chain.nodes[2].file_progress(file).unwrap().done,
-        holder.file_progress(file).unwrap().done
+        chain.nodes[2].file_progress(file).unwrap().unwrap().done,
+        holder.file_progress(file).unwrap().unwrap().done
     );
     holder.set_network_cost(NetworkCost::Restricted);
     let mut connection = holder
@@ -401,7 +407,10 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
             "a temporary network exception must not override the saved sharing preference"
         );
     }
-    assert_eq!(holder.log.lock().unwrap().events(&file).len(), retained);
+    assert_eq!(
+        holder.log.lock().unwrap().events(&file).unwrap().len(),
+        retained
+    );
     let outsider = holder.serve_sync_store(&chain.nodes[6].identity.public());
     assert!(
         outsider
@@ -446,7 +455,7 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
     for i in 3..6 {
         assert!(!chain.has_text(i, group, b"held behind C"));
         assert!(
-            !chain.nodes[i].log.lock().unwrap().has(&held),
+            !chain.nodes[i].log.lock().unwrap().has(&held).unwrap(),
             "not even retained user-message ciphertext crosses the barrier"
         );
         assert!(
@@ -497,8 +506,8 @@ async fn unprocessed_durable_group_never_exposes_events_to_nonmember() {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
-        .cloned()
         .collect::<Vec<_>>();
     for event in signed {
         chain.nodes[5].log.lock().unwrap().append(event).unwrap();
@@ -991,10 +1000,10 @@ async fn owned_read_failure_retains_untracked_group_chunks_and_existing_media() 
         .unwrap();
     let path = receiver.media.path(file).unwrap();
     let encrypted_before = std::fs::read(&path).unwrap();
-    let chunks_before = receiver.log.lock().unwrap().events(&file).len();
+    let chunks_before = receiver.log.lock().unwrap().events(&file).unwrap().len();
     assert!(chunks_before > 0);
     assert!(
-        receiver.completion_candidates(file).is_empty(),
+        receiver.completion_candidates(file).unwrap().is_empty(),
         "group reception uses the untracked fallback"
     );
     let mut reached_completion = false;
@@ -1014,7 +1023,7 @@ async fn owned_read_failure_retains_untracked_group_chunks_and_existing_media() 
         Err(super::NodeError::Log(crate::eventlog::LogError::Io(_)))
     ));
     assert_eq!(
-        receiver.log.lock().unwrap().events(&file).len(),
+        receiver.log.lock().unwrap().events(&file).unwrap().len(),
         chunks_before
     );
     assert!(
@@ -1040,7 +1049,13 @@ async fn owned_read_failure_retains_untracked_group_chunks_and_existing_media() 
         "a real untracked retry must verify retained chunk ancestry"
     );
     assert!(
-        receiver.log.lock().unwrap().events(&file).is_empty(),
+        receiver
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .is_empty(),
         "successful share-off reclaim removes the same chunks after storage recovers"
     );
 }

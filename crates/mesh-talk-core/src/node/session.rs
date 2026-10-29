@@ -596,26 +596,6 @@ where
     Ok(progress.total)
 }
 
-/// File conversations can send several existing Followup frames after each
-/// full have-set exchange. Ordinary conversations retain their single-frame
-/// reconciliation for predictable scheduling.
-pub(in crate::node) async fn request_file_round<S, IO>(
-    channel: &mut SecureChannel<IO>,
-    store: &Mutex<S>,
-    conversation: ConversationId,
-) -> Result<ApplyReport, SessionError>
-where
-    S: SyncStore,
-    IO: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut progress = SyncProgress::default();
-    while !progress
-        .step_burst(channel, store, conversation, FILE_FOLLOWUP_BURST)
-        .await?
-    {}
-    Ok(progress.total)
-}
-
 /// Resume only between complete protocol exchanges, never midway through
 /// a Noise frame. A caller timing out a step must discard its channel and state.
 #[derive(Default)]
@@ -671,6 +651,24 @@ impl SyncProgress {
         .await
     }
 
+    pub(in crate::node) async fn step_burst_paged<
+        S: NetworkSyncStore,
+        IO: AsyncRead + AsyncWrite + Unpin,
+    >(
+        &mut self,
+        channel: &mut SecureChannel<IO>,
+        store: &Mutex<S>,
+        conversation: ConversationId,
+        max_followups: usize,
+    ) -> Result<bool, SessionError> {
+        self.step_backend(
+            channel,
+            &PagedNetworkBackend(store, None),
+            conversation,
+            max_followups,
+        )
+        .await
+    }
     async fn step_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         channel: &mut SecureChannel<IO>,
@@ -3539,6 +3537,21 @@ pub async fn request_round_paged<S: NetworkSyncStore, IO: AsyncRead + AsyncWrite
     let mut progress = SyncProgress::default();
     while !progress
         .step_backend(channel, &PagedNetworkBackend(store, None), conversation, 1)
+        .await?
+    {}
+    Ok(progress.total)
+}
+pub(in crate::node) async fn request_file_round_paged<
+    S: NetworkSyncStore,
+    IO: AsyncRead + AsyncWrite + Unpin,
+>(
+    channel: &mut SecureChannel<IO>,
+    store: &Mutex<S>,
+    conversation: ConversationId,
+) -> Result<ApplyReport, SessionError> {
+    let mut progress = SyncProgress::default();
+    while !progress
+        .step_burst_paged(channel, store, conversation, FILE_FOLLOWUP_BURST)
         .await?
     {}
     Ok(progress.total)

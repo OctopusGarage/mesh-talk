@@ -86,24 +86,30 @@ pub struct ChannelSummary {
     pub pending_invite: bool,
 }
 
-fn archived_channel_summaries(log: &PersistentEventLog, book: &ChannelBook) -> Vec<ChannelSummary> {
-    log.conversations()
-        .into_iter()
-        .filter(|id| book.state(id).is_none())
-        .filter_map(|id| {
-            let state = ChannelBook::projected_metadata(id, &log.events(&id))?;
-            Some(ChannelSummary {
-                id,
-                name: state.name().to_string(),
-                member_count: state.members().len(),
-                owner: state.owner().to_string(),
-                archived: true,
-                dissolved: state.is_dissolved(),
-                left: false,
-                pending_invite: false,
-            })
-        })
-        .collect()
+fn archived_channel_summaries(
+    log: &PersistentEventLog,
+    book: &ChannelBook,
+) -> Result<Vec<ChannelSummary>, LogError> {
+    let mut summaries = Vec::new();
+    for id in log.conversations()? {
+        if book.state(&id).is_some() {
+            continue;
+        }
+        let Some(state) = ChannelBook::projected_metadata(id, &log.events(&id)?) else {
+            continue;
+        };
+        summaries.push(ChannelSummary {
+            id,
+            name: state.name().to_string(),
+            member_count: state.members().len(),
+            owner: state.owner().to_string(),
+            archived: true,
+            dissolved: state.is_dissolved(),
+            left: false,
+            pending_invite: false,
+        });
+    }
+    Ok(summaries)
 }
 
 /// A search match: a message whose text contains the query, with enough context to
@@ -406,8 +412,7 @@ pub struct Node {
     pub(in crate::node) bridge_refresh:
         tokio::sync::Mutex<super::bridge_client::BridgeRefreshState>,
     pub(in crate::node) bridge_generation: std::sync::atomic::AtomicU64,
-    pub(in crate::node) delivery_control_ids:
-        Mutex<HashMap<EventId, super::delivery_store::ControlBinding>>,
+    pub(in crate::node) delivery_control_ids: Mutex<super::delivery_store::DeliveryControlIndex>,
     pub(in crate::node) delivery_suspended: std::sync::atomic::AtomicBool,
     /// Decrypted received-message plaintext, for serving history after the wire key is gone.
     pub(in crate::node) received: Mutex<ReceivedLog>,
@@ -593,7 +598,6 @@ impl Node {
         // file. Open them on scoped threads so the KDFs run in parallel: on a
         // multi-core machine the wall-clock cost collapses to roughly one KDF.
         let (
-            log_res,
             sent_res,
             sessions_res,
             received_res,
@@ -617,7 +621,6 @@ impl Node {
                     &account.account_id(),
                 )
             });
-            let h_log = s.spawn(|| PersistentEventLog::open(log_path, password));
             let h_sent = s.spawn(|| SentLog::open(sent_path, password));
             let h_sess = s.spawn(|| RatchetSessions::open(&dir.join("ratchet.sessions"), password));
             let h_recv = s.spawn(|| ReceivedLog::open(&dir.join("received.log"), password));
@@ -669,7 +672,6 @@ impl Node {
                 }
             });
             (
-                h_log.join(),
                 h_sent.join(),
                 h_sess.join(),
                 h_recv.join(),
@@ -690,7 +692,6 @@ impl Node {
         // is not silently swallowed. A normal open failure surfaces as the inner Err.
         let opaque_receive_cache =
             opaque_cache_res.unwrap_or_else(|e| std::panic::resume_unwind(e));
-        let mut log = log_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut sentlog = sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut received = received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -736,33 +737,9 @@ impl Node {
             storage.participant_database().is_none(),
         )?;
         delivery.validate_owner(&identity.public(), &account.account_id())?;
-        while delivery
-            .recover_next_with_channels(
-                &mut dm_ratchet,
-                &mut log,
-                &mut sentlog,
-                &mut received,
-                Some(&mut received_files),
-                Some(&mut channel_senders),
-            )?
-            .is_some()
-        {}
-        received_files
-            .remove_where(|entry| delivery.file_erased(entry.conversation, entry.event_id))?;
-        let delivery_control_ids = delivery.control_ids();
-        // Seed `emitted` with the events we have ALREADY recorded to the received store — NOT
-        // every id in the log. An event that was ingested durably but never recorded (it
-        // arrived before we learned its author — the DM-convergence race — or before its
-        // ratchet key was derivable) must stay eligible for `emit_new_messages` to retry after
-        // a restart; seeding it as emitted here would drop it from history forever. Self-
-        // authored events are excluded by the author check in `emit_new_messages`, so they
-        // need not be seeded.
-        let emitted: HashSet<EventId> = received
-            .conversations()
-            .iter()
-            .flat_map(|c| received.entries(c))
-            .map(|e| e.event_id)
-            .collect();
+        storage.validate_legacy_events(password)?;
+        // Authenticate every remaining legacy owner before first SQL source
+        // publication. Keep these handles for recovery instead of opening twice.
         let mut account_devices = super::account_devices::AccountDevices::open(
             &super::account_devices::file_path(dir, &account.account_id()),
             password,
@@ -776,70 +753,6 @@ impl Node {
             &dir.join("account-suppression.log"),
             password,
         )?;
-        let own_device_ids: HashSet<_> = account_devices
-            .devices()
-            .into_iter()
-            .map(|device| device.public.user_id())
-            .collect();
-        let mut channels = ChannelBook::new();
-        for conv in log.conversations() {
-            let events = log.events(&conv);
-            let mut replay = super::channel::ChannelReplay::new(&events);
-            // Reinstall projections lost between signed-log ingestion and a
-            // failed/crashed sidecar write. Erases are authoritative; recipient
-            // deadlines keep the existing conservative restart policy.
-            loop {
-                let (messages, limited) = channels.process_replay(
-                    &identity,
-                    conv,
-                    &mut replay,
-                    64,
-                    super::channel::CHANNEL_PENDING_BYTES,
-                );
-                let done = !limited;
-                for msg in messages {
-                    if received.entry(msg.event_id).is_some()
-                        || account_suppression.contains(conv, msg.event_id)
-                    {
-                        continue;
-                    }
-                    let own = own_device_ids.contains(&msg.from);
-                    if !own && crate::expiry::deadline(&msg.wrapped).is_some() {
-                        continue;
-                    }
-                    received.record_durable(&super::received_log::ReceivedEntry {
-                        event_id: msg.event_id,
-                        conversation: conv,
-                        from: msg.from,
-                        wall_clock: msg.wall_clock,
-                        plaintext: msg.wrapped,
-                    })?;
-                }
-                if done {
-                    break;
-                }
-            }
-        }
-        let archived_channels = archived_channel_summaries(&log, &channels);
-        // Restore our persisted sending chains into each channel state. The event log
-        // only carries OTHER members' sender keys, so `my_sender` rebuilds empty above;
-        // without this, a post-restart send would mint a fresh chain that receivers
-        // (first-wins on the chain they already hold) cannot follow.
-        for channel in channels.channel_ids() {
-            for (epoch, bytes) in channel_senders.get(&channel) {
-                if let Some(sk) = SenderKey::deserialize(&bytes)
-                    && let Some(state) = channels.state_mut(&channel)
-                {
-                    state.import_my_sender(epoch, sk);
-                }
-            }
-        }
-        // Seed the file book from the durable `received_files` record — the manifests we
-        // actually SURFACED last session (restoring them so they stay saveable), and only
-        // THOSE ids into the emitted set. A manifest that was ingested durably but never
-        // opened (its author not yet in the roster — the DM-convergence race) is absent
-        // here, so `process_file_events` retries it after restart instead of dropping the
-        // file forever. (Mirrors the message-path `emitted` seeding above.)
         let account_file_proofs = super::account_file_proofs::AccountFileProofs::open(
             &dir.join("account-file-proofs.log"),
             password,
@@ -848,49 +761,8 @@ impl Node {
             &dir.join("file-message-identities.log"),
             password,
         )?;
-        let mut files = FileBook::new();
-        for c in received_files.conversations() {
-            for entry in received_files.entries(&c) {
-                if delivery.file_erased(entry.conversation, entry.event_id)
-                    || delivery.manifest_event_erased(entry.event_id)
-                    || file_message_identities.row_suppressed(&entry, &account_suppression)
-                {
-                    continue;
-                }
-                let decoded = super::files::validated_manifest(&entry.plaintext);
-                let existing = decoded
-                    .as_ref()
-                    .and_then(|m| files.manifest(&m.file_conv()));
-                let proof = log.get(&entry.event_id)?;
-                let proof = proof
-                    .as_ref()
-                    .or_else(|| account_file_proofs.get(&entry.event_id));
-                if let Some(manifest) = super::files::eligible_manifest_row(&entry, proof, existing)
-                {
-                    files.record_event(entry.event_id, proof.unwrap().author, manifest);
-                    files.mark_emitted(entry.event_id);
-                }
-            }
-        }
-        // Durable encrypted media survives chunk prune and restart.
         let media = crate::node::media_store::MediaStore::open(dir, password, &identity.user_id())
             .map_err(|e| LogError::Io(std::io::Error::other(format!("media store open: {e}"))))?;
-        let live_media: std::collections::HashSet<_> = received_files
-            .conversations()
-            .iter()
-            .flat_map(|conversation| received_files.entries(conversation))
-            .filter(|row| !file_message_identities.row_suppressed(row, &account_suppression))
-            .filter_map(|row| {
-                super::files::validated_manifest(&row.plaintext)
-                    .map(|manifest| manifest.file_conv())
-            })
-            .collect();
-        media
-            .prune_unreferenced(&live_media)
-            .map_err(|e| LogError::Io(std::io::Error::other(format!("media prune: {e}"))))?;
-        let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
-        let (call_signal_tx, call_signal_rx) =
-            mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
         let favorites = super::favorites::FavoriteStore::open(
             &dir.join(format!("favorites-{}.log", account.account_id())),
             password,
@@ -901,9 +773,6 @@ impl Node {
             &account.account_id(),
         )
         .map_err(LogError::Io)?;
-        favorite_media
-            .prune_unreferenced(&favorites.live_files(now_millis()))
-            .map_err(LogError::Io)?;
         let account_sync_policy = super::account_sync_policy::DeviceSyncPolicyStore::open(
             &dir.join(format!("account-sync-policy-{}.log", account.account_id())),
             password,
@@ -942,7 +811,144 @@ impl Node {
             &account.public().ed25519_pub,
         )?;
         let account_document_updates = tokio::sync::watch::channel(0).0;
-        let opaque_seen = opaque_receive_cache.restored(&log);
+        storage.complete_participant(password, legacy_previous.as_deref())?;
+        let mut log = PersistentEventLog::open_profile(storage.clone(), password)?;
+        while delivery
+            .recover_next_with_channels(
+                &mut dm_ratchet,
+                &mut log,
+                &mut sentlog,
+                &mut received,
+                Some(&mut received_files),
+                Some(&mut channel_senders),
+            )?
+            .is_some()
+        {}
+        received_files
+            .remove_where(|entry| delivery.file_erased(entry.conversation, entry.event_id))?;
+        let delivery_control_ids = delivery.control_ids();
+        // Seed `emitted` with the events we have ALREADY recorded to the received store — NOT
+        // every id in the log. An event that was ingested durably but never recorded (it
+        // arrived before we learned its author — the DM-convergence race — or before its
+        // ratchet key was derivable) must stay eligible for `emit_new_messages` to retry after
+        // a restart; seeding it as emitted here would drop it from history forever. Self-
+        // authored events are excluded by the author check in `emit_new_messages`, so they
+        // need not be seeded.
+        let emitted: HashSet<EventId> = received
+            .conversations()
+            .iter()
+            .flat_map(|c| received.entries(c))
+            .map(|e| e.event_id)
+            .collect();
+        let own_device_ids: HashSet<_> = account_devices
+            .devices()
+            .into_iter()
+            .map(|device| device.public.user_id())
+            .collect();
+        let mut channels = ChannelBook::new();
+        for conv in log.conversations()? {
+            let events = log.events(&conv)?;
+            let mut replay = super::channel::ChannelReplay::new(&events);
+            // Reinstall projections lost between signed-log ingestion and a
+            // failed/crashed sidecar write. Erases are authoritative; recipient
+            // deadlines keep the existing conservative restart policy.
+            loop {
+                let (messages, limited) = channels.process_replay(
+                    &identity,
+                    conv,
+                    &mut replay,
+                    64,
+                    super::channel::CHANNEL_PENDING_BYTES,
+                );
+                let done = !limited;
+                for msg in messages {
+                    if received.entry(msg.event_id).is_some()
+                        || account_suppression.contains(conv, msg.event_id)
+                    {
+                        continue;
+                    }
+                    let own = own_device_ids.contains(&msg.from);
+                    if !own && crate::expiry::deadline(&msg.wrapped).is_some() {
+                        continue;
+                    }
+                    received.record_durable(&super::received_log::ReceivedEntry {
+                        event_id: msg.event_id,
+                        conversation: conv,
+                        from: msg.from,
+                        wall_clock: msg.wall_clock,
+                        plaintext: msg.wrapped,
+                    })?;
+                }
+                if done {
+                    break;
+                }
+            }
+        }
+        let archived_channels = archived_channel_summaries(&log, &channels)?;
+        // Restore our persisted sending chains into each channel state. The event log
+        // only carries OTHER members' sender keys, so `my_sender` rebuilds empty above;
+        // without this, a post-restart send would mint a fresh chain that receivers
+        // (first-wins on the chain they already hold) cannot follow.
+        for channel in channels.channel_ids() {
+            for (epoch, bytes) in channel_senders.get(&channel) {
+                if let Some(sk) = SenderKey::deserialize(&bytes)
+                    && let Some(state) = channels.state_mut(&channel)
+                {
+                    state.import_my_sender(epoch, sk);
+                }
+            }
+        }
+        // Seed the file book from the durable `received_files` record — the manifests we
+        // actually SURFACED last session (restoring them so they stay saveable), and only
+        // THOSE ids into the emitted set. A manifest that was ingested durably but never
+        // opened (its author not yet in the roster — the DM-convergence race) is absent
+        // here, so `process_file_events` retries it after restart instead of dropping the
+        // file forever. (Mirrors the message-path `emitted` seeding above.)
+        let mut files = FileBook::new();
+        for c in received_files.conversations() {
+            for entry in received_files.entries(&c) {
+                if delivery.file_erased(entry.conversation, entry.event_id)
+                    || delivery.manifest_event_erased(entry.event_id)
+                    || file_message_identities.row_suppressed(&entry, &account_suppression)
+                {
+                    continue;
+                }
+                let decoded = super::files::validated_manifest(&entry.plaintext);
+                let existing = decoded
+                    .as_ref()
+                    .and_then(|m| files.manifest(&m.file_conv()));
+                let proof = log.get(&entry.event_id)?;
+                let proof = proof
+                    .as_ref()
+                    .or_else(|| account_file_proofs.get(&entry.event_id));
+                if let Some(manifest) = super::files::eligible_manifest_row(&entry, proof, existing)
+                {
+                    files.record_event(entry.event_id, proof.unwrap().author, manifest);
+                    files.mark_emitted(entry.event_id);
+                }
+            }
+        }
+        // Durable encrypted media survives chunk prune and restart.
+        let live_media: std::collections::HashSet<_> = received_files
+            .conversations()
+            .iter()
+            .flat_map(|conversation| received_files.entries(conversation))
+            .filter(|row| !file_message_identities.row_suppressed(row, &account_suppression))
+            .filter_map(|row| {
+                super::files::validated_manifest(&row.plaintext)
+                    .map(|manifest| manifest.file_conv())
+            })
+            .collect();
+        media
+            .prune_unreferenced(&live_media)
+            .map_err(|e| LogError::Io(std::io::Error::other(format!("media prune: {e}"))))?;
+        let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
+        let (call_signal_tx, call_signal_rx) =
+            mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
+        favorite_media
+            .prune_unreferenced(&favorites.live_files(now_millis()))
+            .map_err(LogError::Io)?;
+        let opaque_seen = opaque_receive_cache.restored(&log)?;
         let privacy = Arc::new(super::privacy_runtime::PrivacyControl::with_storage(
             storage.clone(),
         ));
@@ -1064,7 +1070,9 @@ impl Node {
             bridge_refresh: tokio::sync::Mutex::new(Default::default()),
             sessions: super::session_pool::SessionPool::default(),
             bridge_generation: std::sync::atomic::AtomicU64::new(0),
-            delivery_control_ids: Mutex::new(delivery_control_ids),
+            delivery_control_ids: Mutex::new(super::delivery_store::DeliveryControlIndex::new(
+                delivery_control_ids,
+            )),
             delivery_suspended: std::sync::atomic::AtomicBool::new(false),
             post_office_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -1186,7 +1194,7 @@ impl Node {
     }
 
     /// Summaries of all channels this node is a member of.
-    pub fn list_channels(&self) -> Vec<ChannelSummary> {
+    pub fn list_channels(&self) -> Result<Vec<ChannelSummary>, NodeError> {
         let book = self.channels.lock().expect("channels mutex not poisoned");
         let mut channels: Vec<_> = book
             .channel_ids()
@@ -1213,7 +1221,7 @@ impl Node {
         );
         drop(book);
         for channel in &mut channels {
-            let (accounts, unbound) = self.channel_member_account_sets(channel.id);
+            let (accounts, unbound) = self.channel_member_account_sets(channel.id)?;
             if !channel.archived || !accounts.is_empty() || !unbound.is_empty() {
                 channel.member_count = accounts.len() + unbound.len();
             }
@@ -1246,7 +1254,7 @@ impl Node {
                 );
             }
         }
-        by_id.into_values().collect()
+        Ok(by_id.into_values().collect())
     }
 
     /// Owner account authority from the validated group projection.
@@ -1257,20 +1265,20 @@ impl Node {
             .state(&channel)
             .and_then(|state| state.owner_account_id().map(str::to_owned))
     }
-    pub fn channel_can_manage(&self, channel: ConversationId) -> bool {
-        self.channels
-            .lock()
-            .expect("channels mutex not poisoned")
-            .state(&channel)
-            .is_some_and(|state| self.channel_identity_can_manage(state))
+    pub fn channel_can_manage(&self, channel: ConversationId) -> Result<bool, NodeError> {
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        let Some(state) = book.state(&channel) else {
+            return Ok(false);
+        };
+        Ok(self.channel_identity_can_manage(state)?)
     }
 
-    pub fn channel_can_send(&self, channel: ConversationId) -> bool {
-        self.channels
-            .lock()
-            .expect("channels mutex not poisoned")
-            .state(&channel)
-            .is_some_and(|state| !state.is_dissolved() && self.channel_identity_is_current(state))
+    pub fn channel_can_send(&self, channel: ConversationId) -> Result<bool, NodeError> {
+        let book = self.channels.lock().expect("channels mutex not poisoned");
+        let Some(state) = book.state(&channel) else {
+            return Ok(false);
+        };
+        Ok(!state.is_dissolved() && self.channel_identity_is_current(state)?)
     }
     pub fn channel_member_account_binding(
         &self,

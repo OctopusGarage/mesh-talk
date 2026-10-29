@@ -205,12 +205,15 @@ pub(super) fn artifact_path(
         .as_os_str()
         .to_str()
         .ok_or_else(|| invalid("invalid migration directory name"))?;
-    if !directory.starts_with(".relay-publication-")
-        || directory.len() != ".relay-publication-".len() + 6
-        || !directory[".relay-publication-".len()..]
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric())
-    {
+    let prefix = [".relay-publication-", ".participant-events-"]
+        .into_iter()
+        .find(|prefix| directory.starts_with(prefix));
+    if !prefix.is_some_and(|prefix| {
+        directory.len() == prefix.len() + 6
+            && directory[prefix.len()..]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric())
+    }) {
         return Err(invalid("unrecognized migration artifact directory"));
     }
     if components[1].as_os_str()

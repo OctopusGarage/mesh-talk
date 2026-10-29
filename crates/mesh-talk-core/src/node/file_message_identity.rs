@@ -1136,6 +1136,7 @@ mod tests {
             .lock()
             .unwrap()
             .events(&other_conv)
+            .unwrap()
             .last()
             .unwrap()
             .id;
@@ -1277,9 +1278,9 @@ mod tests {
             .lock()
             .unwrap()
             .events(&conv)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::Delete)
-            .cloned()
             .collect();
         assert!(!recalls.is_empty());
         for event in recalls {
@@ -1439,7 +1440,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            receiver.account_reactions(&f.sender.account_id())[0].target,
+            receiver.account_reactions(&f.sender.account_id()).unwrap()[0].target,
             id.to_hex()
         );
         let reply_id = [17; 32];
@@ -1656,6 +1657,15 @@ mod tests {
                 .unwrap()
                 .file_message_identity(&file, &row.event_id)
                 .unwrap(),
+            Some(bundle.clone())
+        );
+        assert_eq!(
+            crate::eventlog::sync::network::NetworkSyncStore::file_message_identity(
+                &*store.lock().unwrap(),
+                &file,
+                &row.event_id
+            )
+            .unwrap(),
             Some(bundle)
         );
         assert_eq!(

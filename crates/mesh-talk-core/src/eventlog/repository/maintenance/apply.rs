@@ -35,6 +35,10 @@ impl EventRepository {
                 dropped: 0,
             });
         }
+        #[cfg(test)]
+        if let Some(hook) = self.before_mutation.lock().unwrap().take() {
+            hook();
+        }
         let remaining_count = subtract(
             i64::try_from(self.domain_charge_on(c)?.event_count)
                 .map_err(|_| LogError::RepositoryCounterExhausted)?,

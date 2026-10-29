@@ -212,7 +212,7 @@ pub async fn reactions(
     let public = rt
         .peer_public(&peer)
         .ok_or_else(|| CommandError::Validation(format!("unknown peer: {peer}")))?;
-    Ok(to_reaction_infos(rt.reactions_dm(&public)))
+    Ok(to_reaction_infos(rt.reactions_dm(&public)?))
 }
 
 #[tauri::command]
@@ -247,7 +247,7 @@ pub async fn account_reactions(
 ) -> Result<Vec<ReactionInfo>, CommandError> {
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(to_reaction_infos(rt.account_reactions(&account)))
+    Ok(to_reaction_infos(rt.account_reactions(&account)?))
 }
 
 /// Delete one message from THIS device only (local; not propagated). `conv_id` is the

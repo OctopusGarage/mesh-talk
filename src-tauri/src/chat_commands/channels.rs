@@ -39,12 +39,11 @@ pub async fn list_channels(
     admission
         .with_runtime(move |rt| {
             let node = rt.handle();
-            Ok(rt
-                .list_channels()
+            rt.list_channels()?
                 .into_iter()
                 .map(|c| {
                     let reference = node.channel_shared_reference(c.id);
-                    ChannelInfo {
+                    Ok(ChannelInfo {
                         channel_id: hex::encode(c.id.as_bytes()),
                         name: c.name,
                         member_count: c.member_count,
@@ -53,7 +52,7 @@ pub async fn list_channels(
                             .as_ref()
                             .and_then(|r| r.owner_account_id.clone())
                             .or_else(|| node.channel_owner_account_id(c.id)),
-                        can_manage: reference.is_none() && node.channel_can_manage(c.id),
+                        can_manage: reference.is_none() && node.channel_can_manage(c.id)?,
                         shared_reference: reference.is_some(),
                         reference_members_complete: reference
                             .as_ref()
@@ -67,9 +66,9 @@ pub async fn list_channels(
                         left: c.left,
                         pending_invite: c.pending_invite,
                         recovery: rt.channel_recovery(c.id),
-                    }
+                    })
                 })
-                .collect())
+                .collect()
         })
         .await
 }
@@ -189,7 +188,7 @@ pub async fn channel_members(
                 )
                 .collect();
             Ok(ChannelMembersInfo {
-                history_policy: node.channel_history_policy(channel),
+                history_policy: node.channel_history_policy(channel)?,
                 owner: reference
                     .as_ref()
                     .map(|r| r.owner.clone())
@@ -198,7 +197,7 @@ pub async fn channel_members(
                     .as_ref()
                     .and_then(|r| r.owner_account_id.clone())
                     .or_else(|| node.channel_owner_account_id(channel)),
-                can_manage: reference.is_none() && node.channel_can_manage(channel),
+                can_manage: reference.is_none() && node.channel_can_manage(channel)?,
                 members,
             })
         })
@@ -666,7 +665,7 @@ pub async fn channel_reactions(
     let channel = parse_channel_id(&channel_id)?;
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    Ok(to_reaction_infos(rt.channel_reactions(channel)))
+    Ok(to_reaction_infos(rt.channel_reactions(channel)?))
 }
 
 #[cfg(test)]

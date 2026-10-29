@@ -24,7 +24,7 @@ impl Node {
         &self,
         channel: ConversationId,
     ) -> Result<Option<(ChannelMembershipProjection, AccountAuthorityControl)>, NodeError> {
-        let projection = self.account_group_projection(channel);
+        let projection = self.account_group_projection(channel)?;
         let Some(previous) = projection.authority.current_event() else {
             return Ok(None);
         };
@@ -105,7 +105,7 @@ impl Node {
             .to_vec();
         self.append_account_control(channel, &control)?;
         if self
-            .account_group_projection(channel)
+            .account_group_projection(channel)?
             .authority
             .account_grant(&grant.id().expect("projected grant").account_pub)
             .is_some()
@@ -154,7 +154,7 @@ impl Node {
         let recipients = state.members().to_vec();
         self.append_account_control(channel, &control)?;
         if self
-            .account_group_projection(channel)
+            .account_group_projection(channel)?
             .authority
             .owner_account_id()
             .as_deref()
@@ -223,7 +223,7 @@ impl Node {
             membership_event: EventId::new([0; 32]),
             acceptance_event: None,
         });
-        let policy = self.channel_history_policy(channel);
+        let policy = self.channel_history_policy(channel)?;
         let selected = self.select_join_history(channel, policy, super::node::now_millis())?;
         self.append_invitation_with_history_and_control(
             channel,
@@ -247,7 +247,7 @@ impl Node {
         )?;
         self.process_channel(channel);
         if self
-            .account_group_projection(channel)
+            .account_group_projection(channel)?
             .authority
             .account_grant(&account_pub)
             .is_none()
@@ -411,14 +411,14 @@ mod tests {
     #[tokio::test]
     async fn inherited_owner_removes_account_and_transfers_account_authority() {
         let f = Fixture::new();
-        assert!(f.node.channel_can_manage(f.channel));
+        assert!(f.node.channel_can_manage(f.channel).unwrap());
         f.node
             .remove_channel_account_members_if(f.channel, &f.accounts[2].account_id(), |commit| {
                 commit()
             })
             .await
             .unwrap();
-        let projection = f.node.account_group_projection(f.channel);
+        let projection = f.node.account_group_projection(f.channel).unwrap();
         assert!(
             projection
                 .authority
@@ -434,7 +434,7 @@ mod tests {
             f.node.channel_owner_account_id(f.channel),
             Some(f.accounts[1].account_id())
         );
-        assert!(!f.node.channel_can_manage(f.channel));
+        assert!(!f.node.channel_can_manage(f.channel).unwrap());
     }
 
     #[tokio::test]
@@ -487,7 +487,7 @@ mod tests {
             .add_channel_member(f.channel, f.devices[3].public())
             .await
             .unwrap();
-        let projection = f.node.account_group_projection(f.channel);
+        let projection = f.node.account_group_projection(f.channel).unwrap();
         let grant = projection
             .authority
             .account_grant(&f.accounts[3].public().ed25519_pub)

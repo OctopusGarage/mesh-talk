@@ -188,135 +188,152 @@ impl Node {
     /// transiently-unopenable one (author not yet in the roster) is retried on a later
     /// sync rather than lost — mirroring `emit_new_messages`.
     pub(in crate::node) fn process_profile_events(&self, conv: ConversationId) {
-        let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-        let candidates: Vec<Event> = {
-            let log = self.log.lock().expect("log mutex not poisoned");
-            let emitted = self
-                .profiles_emitted
-                .lock()
-                .expect("profiles_emitted mutex not poisoned");
-            log.events(&conv)
-                .into_iter()
-                .filter(|e| {
-                    e.kind == EventKind::Profile
-                        && e.author != self_author
-                        && !emitted.contains(&e.id)
-                })
-                .cloned()
-                .collect()
-        };
-        for event in candidates {
-            let author_uid = event.author.user_id();
-            // The author's X25519 (to open the sealed box) + their CERTIFIED account (to
-            // bind the profile's claimed account — a device can't forge another account's
-            // avatar). Unknown author → retry later (NOT marked emitted).
-            let (sender_x25519, peer_account) = {
-                match self.routing_peer(&author_uid) {
-                    Some(p) => (p.public.x25519_pub, p.account_id.clone()),
-                    None => continue,
-                }
+        let result = (|| -> Result<(), NodeError> {
+            let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
+            let candidates: Vec<Event> = {
+                let log = self.log.lock().expect("log mutex not poisoned");
+                let emitted = self
+                    .profiles_emitted
+                    .lock()
+                    .expect("profiles_emitted mutex not poisoned");
+                log.events(&conv)?
+                    .into_iter()
+                    .filter(|e| {
+                        e.kind == EventKind::Profile
+                            && e.author != self_author
+                            && !emitted.contains(&e.id)
+                    })
+                    .collect()
             };
-            let plaintext = match crate::dm::open(&self.identity, &sender_x25519, &event.ciphertext)
-            {
-                Ok(p) => p,
-                Err(_) => continue, // not yet openable / not a profile we can read — retry later
-            };
-            // From here the event is readable; mark it emitted regardless of outcome so a
-            // malformed/forged/stale profile isn't reprocessed every sync.
-            self.profiles_emitted
-                .lock()
-                .expect("profiles_emitted mutex not poisoned")
-                .insert(event.id);
-            if plaintext.starts_with(b"MTP3") {
-                let Some(profile) = AccountProfile::decode(&plaintext) else {
-                    continue;
+            for event in candidates {
+                let author_uid = event.author.user_id();
+                // The author's X25519 (to open the sealed box) + their CERTIFIED account (to
+                // bind the profile's claimed account — a device can't forge another account's
+                // avatar). Unknown author → retry later (NOT marked emitted).
+                let (sender_x25519, peer_account) = {
+                    match self.routing_peer(&author_uid) {
+                        Some(p) => (p.public.x25519_pub, p.account_id.clone()),
+                        None => continue,
+                    }
                 };
-                if peer_account.as_deref() != Some(profile.account_id().as_str()) {
-                    continue;
-                }
-                if profile.account_id() == self.account_id() && !self.device_sync_policy().profile {
-                    self.profiles_emitted
-                        .lock()
-                        .expect("profiles_emitted mutex not poisoned")
-                        .remove(&event.id);
-                    continue;
-                }
-                if self.receive_account_profile(&profile).is_err() {
-                    self.profiles_emitted
-                        .lock()
-                        .expect("profiles_emitted mutex not poisoned")
-                        .remove(&event.id);
-                }
-                continue;
-            }
-            if plaintext.starts_with(b"MTC1") {
-                let Some(card) = TrustCard::decode(&plaintext) else {
-                    continue;
-                };
-                if peer_account.as_deref() != Some(card.account_id().as_str()) {
-                    continue;
-                }
-                if card.account_id() == self.account_id() && !self.device_sync_policy().profile {
-                    self.profiles_emitted
-                        .lock()
-                        .expect("profiles_emitted mutex not poisoned")
-                        .remove(&event.id);
-                    continue;
-                }
-                if self.receive_trust_card(&card).is_err() {
-                    self.profiles_emitted
-                        .lock()
-                        .expect("profiles_emitted mutex not poisoned")
-                        .remove(&event.id);
-                }
-                continue;
-            }
-            let Some(payload) = ProfilePayload::decode(&plaintext) else {
-                continue;
-            };
-            // Authenticated: the account signature must verify (also enforces the size
-            // bound) AND the claimed account must match the AUTHENTICATED device's
-            // certified account (re-homing/spoof defense).
-            if !payload.verify() || peer_account.as_deref() != Some(payload.account_id().as_str()) {
-                continue;
-            }
-            if payload.account_id() == self.account_id() && !self.device_sync_policy().profile {
+                let plaintext =
+                    match crate::dm::open(&self.identity, &sender_x25519, &event.ciphertext) {
+                        Ok(p) => p,
+                        Err(_) => continue, // not yet openable / not a profile we can read — retry later
+                    };
+                // From here the event is readable; mark it emitted regardless of outcome so a
+                // malformed/forged/stale profile isn't reprocessed every sync.
                 self.profiles_emitted
                     .lock()
                     .expect("profiles_emitted mutex not poisoned")
-                    .remove(&event.id);
-                continue;
-            }
-            let applied = match self.receive_legacy_profile(&payload) {
-                Ok(applied) => applied,
-                Err(_) => {
+                    .insert(event.id);
+                if plaintext.starts_with(b"MTP3") {
+                    let Some(profile) = AccountProfile::decode(&plaintext) else {
+                        continue;
+                    };
+                    if peer_account.as_deref() != Some(profile.account_id().as_str()) {
+                        continue;
+                    }
+                    if profile.account_id() == self.account_id()
+                        && !self.device_sync_policy().profile
+                    {
+                        self.profiles_emitted
+                            .lock()
+                            .expect("profiles_emitted mutex not poisoned")
+                            .remove(&event.id);
+                        continue;
+                    }
+                    if self.receive_account_profile(&profile).is_err() {
+                        self.profiles_emitted
+                            .lock()
+                            .expect("profiles_emitted mutex not poisoned")
+                            .remove(&event.id);
+                    }
+                    continue;
+                }
+                if plaintext.starts_with(b"MTC1") {
+                    let Some(card) = TrustCard::decode(&plaintext) else {
+                        continue;
+                    };
+                    if peer_account.as_deref() != Some(card.account_id().as_str()) {
+                        continue;
+                    }
+                    if card.account_id() == self.account_id() && !self.device_sync_policy().profile
+                    {
+                        self.profiles_emitted
+                            .lock()
+                            .expect("profiles_emitted mutex not poisoned")
+                            .remove(&event.id);
+                        continue;
+                    }
+                    if self.receive_trust_card(&card).is_err() {
+                        self.profiles_emitted
+                            .lock()
+                            .expect("profiles_emitted mutex not poisoned")
+                            .remove(&event.id);
+                    }
+                    continue;
+                }
+                let Some(payload) = ProfilePayload::decode(&plaintext) else {
+                    continue;
+                };
+                // Authenticated: the account signature must verify (also enforces the size
+                // bound) AND the claimed account must match the AUTHENTICATED device's
+                // certified account (re-homing/spoof defense).
+                if !payload.verify()
+                    || peer_account.as_deref() != Some(payload.account_id().as_str())
+                {
+                    continue;
+                }
+                if payload.account_id() == self.account_id() && !self.device_sync_policy().profile {
                     self.profiles_emitted
                         .lock()
                         .expect("profiles_emitted mutex not poisoned")
                         .remove(&event.id);
                     continue;
                 }
-            };
-            if applied {
-                let _ = self.profile_incoming.send(ReceivedProfile {
-                    account_id: payload.account_id(),
-                    avatar: payload.avatar,
-                });
+                let applied = match self.receive_legacy_profile(&payload) {
+                    Ok(applied) => applied,
+                    Err(_) => {
+                        self.profiles_emitted
+                            .lock()
+                            .expect("profiles_emitted mutex not poisoned")
+                            .remove(&event.id);
+                        continue;
+                    }
+                };
+                if applied {
+                    let _ = self.profile_incoming.send(ReceivedProfile {
+                        account_id: payload.account_id(),
+                        avatar: payload.avatar,
+                    });
+                }
             }
+            // Bound on-disk growth: schedule dropping superseded, unreferenced profile events
+            // for this conversation, preserving parents of retained legacy/card pairs. The accept
+            // loop performs the expensive rewrite outside this sync callback.
+            self.log
+                .lock()
+                .expect("log mutex not poisoned")
+                .request_profile_compaction(conv)?;
+
+            Ok(())
+        })();
+        if let Err(error) = result {
+            log::warn!("process_profile_events deferred after storage failure: {error}");
         }
-        // Bound on-disk growth: schedule dropping superseded, unreferenced profile events
-        // for this conversation, preserving parents of retained legacy/card pairs. The accept
-        // loop performs the expensive rewrite outside this sync callback.
-        self.log
-            .lock()
-            .expect("log mutex not poisoned")
-            .request_profile_compaction(conv);
     }
 
     /// Drain one deferred profile compaction without holding any async/network state.
     pub(in crate::node) fn drain_profile_compaction(
         &self,
     ) -> Result<Option<usize>, crate::eventlog::LogError> {
+        self.storage.maintain_participant_events()?;
+        self.log
+            .lock()
+            .expect("log mutex not poisoned")
+            .repository()?
+            .cleanup_selections()?;
         self.log
             .lock()
             .expect("log mutex not poisoned")

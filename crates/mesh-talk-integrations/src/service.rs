@@ -309,7 +309,7 @@ impl IntegrationService {
                 let authority = self.authority(token, None, describe);
                 let account_id = self.host.account_id().to_owned();
                 self.host.with_node(Box::new(move |node| {
-                    let value = if describe { json!({"conversations": describe_destinations(node, &grant.destinations)}) }
+                    let value = if describe { json!({"conversations": describe_destinations(node, &grant.destinations)?}) }
                         else { json!({"principal":{"kind":"account","account_id":account_id},"client_id":grant.client_id,"destinations":grant.destinations,"can_describe":grant.describe,"expires_at_ms":grant.expires_at_ms,"max_text_bytes":crate::MAX_TEXT_BYTES,"retry_window_days":7,"content_types":["text"],"read_access":false}) };
                     authority.commit(&mut || Ok(()))?;
                     Ok(value)
@@ -359,7 +359,7 @@ impl IntegrationService {
                 let audit = method == "audit_list";
                 self.host.with_node(Box::new(move |node| {
                     if context {
-                        let mut channels = node.list_channels();
+                        let mut channels = node.list_channels()?;
                         channels.sort_by_key(|channel| *channel.id.as_bytes());
                         return Ok(json!({"account_id":node.account_id(),"device_id":node.user_id(),"channels":channels.iter().skip(page.offset).take(page.limit).map(|channel| json!({"id":hex::encode(channel.id.as_bytes()),"name":short_name(&channel.name),"pending_invite":channel.pending_invite})).collect::<Vec<_>>(),"next_offset":page.next(channels.len())}));
                     }
@@ -392,12 +392,15 @@ fn public_grant(grant: &Grant) -> Value {
 fn short_name(name: &str) -> String {
     name.chars().take(160).collect()
 }
-fn describe_destinations(node: &Node, destinations: &[Destination]) -> Vec<Value> {
-    let channels = node.list_channels();
-    destinations.iter().map(|destination| match destination {
+fn describe_destinations(
+    node: &Node,
+    destinations: &[Destination],
+) -> Result<Vec<Value>, IntegrationError> {
+    let channels = node.list_channels()?;
+    Ok(destinations.iter().map(|destination| match destination {
         Destination::Account { id } => json!({"destination":destination,"name":short_name(node.account_display_name(id).as_deref().unwrap_or(id))}),
         Destination::Channel { id } => json!({"destination":destination,"name":short_name(channels.iter().find(|channel| hex::encode(channel.id.as_bytes()) == *id).map(|channel| channel.name.as_str()).unwrap_or(id))}),
-    }).collect()
+    }).collect())
 }
 
 #[cfg(test)]

@@ -580,9 +580,12 @@ fn select_history(
 }
 
 impl Node {
-    pub fn channel_history_policy(&self, channel: ConversationId) -> HistoryPolicy {
+    pub fn channel_history_policy(
+        &self,
+        channel: ConversationId,
+    ) -> Result<HistoryPolicy, NodeError> {
         let log = self.log.lock().expect("log lock");
-        policy(&log.events(&channel))
+        Ok(policy(&log.events(&channel)?.iter().collect::<Vec<_>>()))
     }
     pub async fn set_channel_history_policy(
         &self,
@@ -609,7 +612,7 @@ impl Node {
                 let state = book
                     .state(&channel)
                     .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-                if !self.channel_identity_can_manage(state)
+                if !self.channel_identity_can_manage(state)?
                     || !state.is_accepted_member(&self.user_id())
                     || state.is_dissolved()
                 {
@@ -678,7 +681,8 @@ impl Node {
         // earlier row. Never give that member the snapshot root as a source.
         let sources = {
             let log = self.log.lock().expect("log lock");
-            let refs = log.events(&channel);
+            let refs = log.events(&channel)?;
+            let refs: Vec<_> = refs.iter().collect();
             let view = View::new(&refs);
             let authorities: Vec<_> = rows
                 .iter()
@@ -748,7 +752,7 @@ impl Node {
         let state = book
             .state(&channel)
             .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-        if !self.channel_identity_can_manage(state)
+        if !self.channel_identity_can_manage(state)?
             || state.is_dissolved()
             || !state.is_accepted_member(&self.user_id())
             || state.epoch().checked_add(1) != Some(meta.epoch)
@@ -858,16 +862,15 @@ impl Node {
                 .log
                 .lock()
                 .expect("log lock")
-                .events(&channel)
+                .events(&channel)?
                 .into_iter()
-                .cloned()
                 .collect();
             let refs: Vec<_> = events.iter().collect();
             let view = View::new(&refs);
             let Some(current) = ChannelBook::projected_metadata(channel, &refs) else {
                 continue;
             };
-            if !self.channel_identity_is_current(&current) || current.is_dissolved() {
+            if !self.channel_identity_is_current(&current)? || current.is_dissolved() {
                 continue;
             }
             for (event, offer) in view.offers() {
@@ -880,7 +883,7 @@ impl Node {
                 if !current.is_accepted_member(&offer.recipient) {
                     continue;
                 }
-                let projection = self.account_group_projection(channel);
+                let projection = self.account_group_projection(channel)?;
                 let authority = &projection.authority;
                 let account_grant = authority.grants().into_iter().find(|grant| {
                     grant.membership_event == offer.invitation

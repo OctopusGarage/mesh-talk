@@ -376,7 +376,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             a.channel_custody_count(channel, event).unwrap(),
             Some(1),
             "a fresh authenticated probe repairs the negative; receiver={:?}",
-            lost.list_channels()
+            lost.list_channels().unwrap()
         );
         let mut cursor =
             sync::DocumentSyncCursor::for_domain(AccountDocumentDomain::ChannelCustody);
@@ -1172,7 +1172,7 @@ async fn private_dm_reaction_catches_up_through_a_third_certified_device() {
         .react_to_account(&peer_account, target, "👍", false)
         .await
         .unwrap();
-    let expected = source.account_reactions(&peer_account);
+    let expected = source.account_reactions(&peer_account).unwrap();
     assert_eq!(expected.len(), 1);
     for (from, to) in [(&source, &relay), (&relay, &fresh)] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1198,7 +1198,7 @@ async fn private_dm_reaction_catches_up_through_a_third_certified_device() {
         let _ = task.await;
     }
     assert_eq!(
-        fresh.account_reactions(&peer_account),
+        fresh.account_reactions(&peer_account).unwrap(),
         expected,
         "a newly linked device must recover old reactions from any certified sibling"
     );
@@ -1374,7 +1374,9 @@ async fn private_peer_reaction_witness_reaches_an_offline_linked_device() {
         .fail_index_for_test(false);
     observer.emit_new_messages(conv);
     pull_control_documents(&observer, &fresh, &account).await;
-    let got = fresh.account_reactions(&actor_account.account_id());
+    let got = fresh
+        .account_reactions(&actor_account.account_id())
+        .unwrap();
     assert_eq!(
         got.len(),
         1,
@@ -1406,7 +1408,7 @@ fn private_control_original_order_removal_and_generic_write_guards() {
         .publish_own_account_reaction(&peer, 20, &action(false))
         .unwrap();
     assert!(
-        source.account_reactions(&peer).is_empty(),
+        source.account_reactions(&peer).unwrap().is_empty(),
         "late/tied adds cannot resurrect a removal"
     );
     let key = AccountDocumentKey::DmReaction {
@@ -1522,13 +1524,13 @@ async fn private_controls_obey_history_policy_survive_restart_and_reject_another
         .set_device_sync_category(SyncCategory::History, false)
         .unwrap();
     pull_control_documents(&source, &fresh, &account).await;
-    assert!(fresh.account_reactions(&peer).is_empty());
+    assert!(fresh.account_reactions(&peer).unwrap().is_empty());
     source
         .set_device_sync_category(SyncCategory::History, true)
         .unwrap();
     pull_control_documents(&source, &fresh, &account).await;
-    let expected = source.account_reactions(&peer);
-    assert_eq!(fresh.account_reactions(&peer), expected);
+    let expected = source.account_reactions(&peer).unwrap();
+    assert_eq!(fresh.account_reactions(&peer).unwrap(), expected);
     let key = AccountDocumentKey::DmReaction {
         peer_account: peer.clone(),
         target: target.to_hex(),
@@ -1552,13 +1554,13 @@ async fn private_controls_obey_history_policy_survive_restart_and_reject_another
         &account,
         DeviceIdentity::from_secret_bytes(identity.0, identity.1),
     );
-    assert_eq!(reopened.account_reactions(&peer), expected);
+    assert_eq!(reopened.account_reactions(&peer).unwrap(), expected);
     source
         .react_to_account(&peer, target, "👍", true)
         .await
         .unwrap();
     pull_control_documents(&source, &reopened, &account).await;
-    assert!(reopened.account_reactions(&peer).is_empty());
+    assert!(reopened.account_reactions(&peer).unwrap().is_empty());
     assert!(
         !reopened
             .account_documents
@@ -1568,7 +1570,7 @@ async fn private_controls_obey_history_policy_survive_restart_and_reject_another
             .unwrap(),
         "an old witnessed add cannot overtake the later removal"
     );
-    assert!(reopened.account_reactions(&peer).is_empty());
+    assert!(reopened.account_reactions(&peer).unwrap().is_empty());
 }
 
 #[test]
@@ -1727,6 +1729,7 @@ fn private_peer_control_ingress_rejects_wrong_actor_and_unrelated_route() {
     assert!(
         observer
             .account_reactions(&actor_account.account_id())
+            .unwrap()
             .is_empty()
     );
 }
@@ -2133,6 +2136,7 @@ fn private_recall_witness_cannot_recall_another_accounts_target() {
     assert!(
         !observer
             .recalled_targets_account(&peer.account_id())
+            .unwrap()
             .contains(&target)
     );
     assert!(!observer.private_dm_message_recalled(&peer.account_id(), target, &own.account_id()));
@@ -2429,10 +2433,13 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     let source_worker = tokio::spawn(source.clone().run_account_history_loop());
     let worker = tokio::spawn(target.clone().run_account_history_loop());
     let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
-        while !ids
-            .iter()
-            .all(|id| target.list_channels().iter().any(|row| row.id == *id))
-        {
+        while !ids.iter().all(|id| {
+            target
+                .list_channels()
+                .unwrap()
+                .iter()
+                .any(|row| row.id == *id)
+        }) {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
@@ -2447,7 +2454,7 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
         result.is_ok(),
         "same-account descriptive inventory must include both distinct legacy groups with their owner offline: expected channels={}; actual channels={}",
         ids.len(),
-        target.list_channels().len()
+        target.list_channels().unwrap().len()
     );
     if optional_off {
         assert!(
@@ -2458,6 +2465,7 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     for id in &ids {
         let row = target
             .list_channels()
+            .unwrap()
             .into_iter()
             .find(|row| row.id == *id)
             .unwrap();
@@ -2471,7 +2479,7 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
                     && member.name.as_deref() == Some("Owner canonical")),
             "offline owner display names must come from the certified source snapshot"
         );
-        assert!(!target.channel_can_manage(*id));
+        assert!(!target.channel_can_manage(*id).unwrap());
         assert!(
             target.channel_members(*id).is_empty(),
             "display references must never become membership"
@@ -2483,7 +2491,13 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     drop(source);
     let reopened = node_with_identity(&target_path, &account, identity);
     for id in ids {
-        assert!(reopened.list_channels().iter().any(|row| row.id == id));
+        assert!(
+            reopened
+                .list_channels()
+                .unwrap()
+                .iter()
+                .any(|row| row.id == id)
+        );
     }
 }
 
@@ -2743,7 +2757,7 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         .unwrap();
     let mut maintenance =
         crate::node::channel_account_maintenance::ChannelAccountMaintenance::default();
-    for _ in 0..source.list_channels().len() {
+    for _ in 0..source.list_channels().unwrap().len() {
         source.maintain_account_channels(&mut maintenance).await;
     }
     assert!(source.channel_owner_account_id(modern).is_some());
@@ -2790,8 +2804,8 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         .merge(new_document.meta.clone(), new_document.payload())
         .unwrap();
     assert!(sibling.channel_shared_reference(legacy).is_some());
-    assert!(!sibling.channel_can_send(legacy));
-    assert!(!sibling.channel_can_manage(legacy));
+    assert!(!sibling.channel_can_send(legacy).unwrap());
+    assert!(!sibling.channel_can_manage(legacy).unwrap());
     assert!(sibling.channel_members(legacy).is_empty());
 }
 
@@ -2983,7 +2997,7 @@ fn group_inventory_archive_projection_is_coherent_and_real_local_state_wins() {
         .unwrap()
         .merge(document.meta.clone(), document.payload())
         .unwrap();
-    let rows = target.list_channels();
+    let rows = target.list_channels().unwrap();
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     let reference = target.channel_shared_reference(id).unwrap();
@@ -2992,15 +3006,15 @@ fn group_inventory_archive_projection_is_coherent_and_real_local_state_wins() {
     assert_eq!(row.owner, reference.owner);
     assert!(row.archived);
     // A real local book remains the authority for the native/UI projection.
-    let event = source.log.lock().unwrap().events(&id)[0].clone();
+    let event = source.log.lock().unwrap().events(&id).unwrap()[0].clone();
     target.log.lock().unwrap().append(event).unwrap();
     // The target is absent from this legacy event, so merely retaining that event
     // must not install membership or make the reference writable.
     target.process_channel(id);
-    assert!(!target.channel_can_send(id));
+    assert!(!target.channel_can_send(id).unwrap());
     assert!(target.channel_members(id).is_empty());
     assert!(source.channel_shared_reference(id).is_none());
-    assert!(!source.list_channels()[0].archived);
+    assert!(!source.list_channels().unwrap()[0].archived);
 }
 
 #[test]
@@ -3112,7 +3126,7 @@ fn group_inventory_publishes_validated_departure_and_dissolution_without_grantin
     );
     source.log.lock().unwrap().append(departure).unwrap();
     source.process_channel(id);
-    assert!(!source.channel_can_send(id));
+    assert!(!source.channel_can_send(id).unwrap());
     let left = group_inventory_source_document(&source, id);
     assert!(left.meta.revision > initial.meta.revision);
     target
@@ -3151,13 +3165,13 @@ fn group_inventory_publishes_validated_departure_and_dissolution_without_grantin
         .unwrap();
     assert!(target.channel_shared_reference(id).unwrap().dissolved);
     assert!(
-        target.list_channels()[0].archived
-            && target.list_channels()[0].left
-            && target.list_channels()[0].dissolved
+        target.list_channels().unwrap()[0].archived
+            && target.list_channels().unwrap()[0].left
+            && target.list_channels().unwrap()[0].dissolved
     );
     assert!(target.channel_members(id).is_empty());
-    assert!(!target.channel_can_send(id));
-    assert!(!target.channel_can_manage(id));
+    assert!(!target.channel_can_send(id).unwrap());
+    assert!(!target.channel_can_manage(id).unwrap());
 }
 
 #[test]
@@ -3205,7 +3219,7 @@ fn group_inventory_post_office_display_fact_keeps_existing_member_count_consiste
         ))
         .unwrap();
     source.process_channel(id);
-    assert_eq!(source.list_channels()[0].member_count, 2);
+    assert_eq!(source.list_channels().unwrap()[0].member_count, 2);
     source.publish_group_inventory(&mut None);
     let key = AccountDocumentKey::GroupInventory {
         channel: hex::encode(id.as_bytes()),
@@ -3234,7 +3248,7 @@ fn group_inventory_post_office_display_fact_keeps_existing_member_count_consiste
         .unwrap()
         .merge(document.meta.clone(), document.payload())
         .unwrap();
-    assert_eq!(target.list_channels()[0].member_count, 2);
+    assert_eq!(target.list_channels().unwrap()[0].member_count, 2);
     assert!(
         target.channel_members(id).is_empty(),
         "infrastructure display facts cannot become memberships"
@@ -3302,7 +3316,7 @@ fn group_inventory_long_canonical_names_fit_payload_budget_and_preserve_required
             ))
             .unwrap();
         source.process_channel(id);
-        let count = source.list_channels()[0].member_count;
+        let count = source.list_channels().unwrap()[0].member_count;
         source.publish_group_inventory(&mut None);
         let key = AccountDocumentKey::GroupInventory {
             channel: hex::encode(id.as_bytes()),
@@ -3351,14 +3365,14 @@ fn group_inventory_long_canonical_names_fit_payload_budget_and_preserve_required
             .unwrap()
             .merge(document.meta.clone(), document.payload())
             .unwrap();
-        assert_eq!(target.list_channels()[0].member_count, count);
+        assert_eq!(target.list_channels().unwrap()[0].member_count, count);
         assert!(
             !target
                 .channel_shared_reference(id)
                 .unwrap()
                 .members_complete
         );
-        assert!(!target.channel_can_send(id));
+        assert!(!target.channel_can_send(id).unwrap());
     }
 }
 

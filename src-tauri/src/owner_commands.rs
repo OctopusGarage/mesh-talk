@@ -3124,7 +3124,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .handle()
-                .channel_history_policy(channel_id),
+                .channel_history_policy(channel_id)
+                .unwrap(),
             mesh_talk_core::channel::HistoryPolicy::LastTenWithinThreeDays
         );
     }
@@ -3307,6 +3308,7 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .list_channels()
+                        .unwrap()
                         .is_empty()
                 );
             }
@@ -3898,32 +3900,36 @@ mod tests {
         };
         let before = metadata();
         let policy = node.privacy_snapshot();
-        // Discovery may publish our signed profile while this probe waits. Check
-        // every other event kind without mistaking those independent public
-        // profile writes for work accepted from the rejected owner command.
+        // This fresh fixture has accepted no non-profile work. Inspect signed
+        // event IDs through the supported archive boundary after logout has
+        // retired runtime producers, while retaining this Node's profile lease.
         let event_ids = || {
-            let snapshot = tempfile::tempdir().unwrap();
-            let path = snapshot.path().join("messages.log");
-            std::fs::copy(directory.join("messages.log"), &path).unwrap();
-            let log = mesh_talk_core::eventlog::persist::PersistentEventLog::open(
-                &path,
-                "password-owner",
-            )
-            .unwrap();
+            use mesh_talk_core::recovery::{
+                archive,
+                key::RecoveryKey,
+                snapshot::{SnapshotRecordV1, read_snapshot},
+            };
+            let key = RecoveryKey::generate();
+            let mut encrypted = Vec::new();
+            node.write_encrypted_recovery_archive(&mut encrypted, &key, 0)
+                .unwrap();
+            let mut plaintext = Vec::new();
+            archive::read_archive(encrypted.as_slice(), &mut plaintext, key.as_bytes()).unwrap();
             let mut profiles = 0;
-            let other = log
-                .all_event_ids()
-                .into_iter()
-                .filter(|id| {
-                    let profile = log.get(id).unwrap().unwrap().kind
-                        == mesh_talk_core::eventlog::event::EventKind::Profile;
-                    profiles += usize::from(profile);
-                    !profile
-                })
-                .collect::<std::collections::BTreeSet<_>>();
+            let mut other = std::collections::BTreeSet::new();
+            read_snapshot(plaintext.as_slice(), |record| {
+                if let SnapshotRecordV1::SignedEvent { event } = record {
+                    if event.kind == mesh_talk_core::eventlog::EventKind::Profile {
+                        profiles += 1;
+                    } else {
+                        other.insert(event.id);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
             (other, profiles)
         };
-        let (before_log, before_profiles) = event_ids();
         let work = || {
             [
                 "sent.log",
@@ -4047,7 +4053,7 @@ mod tests {
         let metadata_unchanged = metadata() == before;
         let policy_unchanged = node.privacy_snapshot() == policy;
         let (after_log, after_profiles) = event_ids();
-        let non_profile_log_unchanged = after_log == before_log;
+        let non_profile_log_unchanged = after_log.is_empty();
         let staged = staged.load(Ordering::SeqCst);
         let history_empty = node.account_history(&account, 10).unwrap().is_empty();
         let work_unchanged = work() == before_work;
@@ -4071,7 +4077,7 @@ mod tests {
         let reopened_empty = reopened.account_history(&account, 10).unwrap().is_empty();
         tauri::async_runtime::block_on(reopened.stop());
         eprintln!(
-            "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, non_profile_log_unchanged={non_profile_log_unchanged}, profiles_before={before_profiles}, profiles_after={after_profiles}"
+            "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, non_profile_log_unchanged={non_profile_log_unchanged}, profiles_after={after_profiles}"
         );
         assert!(authorized && published && logged_out && replaced);
         assert_eq!(

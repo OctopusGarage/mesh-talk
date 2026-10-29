@@ -22,7 +22,7 @@ impl Node {
         limit: usize,
     ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         if !self
-            .list_channels()
+            .list_channels()?
             .iter()
             .any(|summary| summary.id == channel)
         {
@@ -129,7 +129,11 @@ impl Node {
         // Match the delivery owner's lock ordering. No guard escapes this read.
         let delivery = self.delivery.lock().expect("delivery lock not poisoned");
         let log = self.log.lock().expect("log mutex not poisoned");
-        let events = log.events(&conversation);
+        let events = log.project_events(&conversation, |mut event| {
+            event.ciphertext.clear();
+            event.sig.clear();
+            event
+        })?;
         let author = crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut sent_ids: HashMap<_, _> = if account.is_none() {
             events
@@ -325,11 +329,12 @@ impl Node {
         }
         if is_channel {
             let archive: Vec<_> = rows.iter().map(|row| (row.id, row.wall_clock)).collect();
-            let ranks: HashMap<_, _> = super::timeline::ordered_ids(&events, &archive, false)
-                .into_iter()
-                .enumerate()
-                .map(|(rank, id)| (id, rank))
-                .collect();
+            let ranks: HashMap<_, _> =
+                super::timeline::ordered_ids(&events.iter().collect::<Vec<_>>(), &archive, false)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(rank, id)| (id, rank))
+                    .collect();
             rows.sort_by_key(|row| ranks.get(&row.id).copied().unwrap_or(usize::MAX));
         } else {
             rows.sort_by_key(|row| (row.wall_clock, row.id));
@@ -392,7 +397,7 @@ impl Node {
         drop(log);
         drop(delivery);
         let recalled = if let Some(peer) = account {
-            self.recalled_targets_account(peer)
+            self.recalled_targets_account(peer)?
         } else if is_channel {
             self.recalled_targets_channel(conversation)?
         } else {

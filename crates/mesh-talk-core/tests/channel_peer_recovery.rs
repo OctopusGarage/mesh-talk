@@ -4,7 +4,34 @@
 
 mod support;
 
-use mesh_talk_core::eventlog::{EventKind, persist::PersistentEventLog};
+use mesh_talk_core::{
+    discovery::Roster,
+    eventlog::ConversationId,
+    identity::{account_keystore, keystore},
+    node::{HistoryEntry, Node},
+};
+use std::sync::{Arc, Mutex};
+
+fn retained_history(root: &std::path::Path, channel: ConversationId) -> Vec<HistoryEntry> {
+    let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+    let (group, _) = tokio::sync::mpsc::unbounded_channel();
+    let (file, _) = tokio::sync::mpsc::unbounded_channel();
+    let node = Node::open_with_account(
+        keystore::load(&root.join("identity.keystore"), "pw").unwrap(),
+        account_keystore::load(&root.join("account.keystore"), "pw").unwrap(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        group,
+        file,
+        &root.join("messages.log"),
+        &root.join("sent.log"),
+        "pw",
+    )
+    .unwrap();
+    let history = node.channel_history(channel, 100).unwrap();
+    node.close_profile().unwrap();
+    history
+}
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -127,27 +154,14 @@ fn offline_member_recovers_from_replica_after_sender_exits() {
         )
         .expect("Alice created the three-member channel");
     let channel = created.split_whitespace().nth(1).unwrap().to_owned();
-    let carol_log = dir.path().join("carol/messages.log");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
-        if let Ok(log) = PersistentEventLog::open(&carol_log, "pw")
-            && log
-                .conversations()
-                .iter()
-                .any(|id| hex::encode(id.as_bytes()) == channel)
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(
-        PersistentEventLog::open(&carol_log, "pw")
-            .unwrap()
-            .conversations()
-            .iter()
-            .any(|id| hex::encode(id.as_bytes()) == channel),
-        "Carol had the channel before disconnecting"
-    );
+    let channel_id = ConversationId::new(hex::decode(&channel).unwrap().try_into().unwrap());
+    alice.send(&format!("/channel-msg {} joined-marker", &channel[..8]));
+    carol
+        .wait_for(
+            |line| line.contains(&format!("channel {channel} from {alice_id}: joined-marker")),
+            Duration::from_secs(20),
+        )
+        .expect("Carol received the channel before disconnecting");
     drop(carol);
 
     alice.send(&format!("/channel-msg {} sender-gone", &channel[..8]));
@@ -156,18 +170,15 @@ fn offline_member_recovers_from_replica_after_sender_exits() {
         Duration::from_secs(20),
     )
     .expect("Bob stored and decrypted Alice's message");
-    let bob_log = dir.path().join("bob/messages.log");
-    let bob_events = PersistentEventLog::open(&bob_log, "pw").unwrap();
-    let event_id = bob_events
-        .conversations()
-        .iter()
-        .filter(|id| hex::encode(id.as_bytes()) == channel)
-        .flat_map(|id| bob_events.events(id))
-        .find(|event| event.kind == EventKind::Message && event.author.user_id() == alice_id)
-        .expect("Bob holds Alice's signed event")
-        .id;
     drop(alice);
-
+    drop(bob);
+    let event_id = retained_history(&dir.path().join("bob"), channel_id)
+        .into_iter()
+        .find(|entry| entry.text == b"sender-gone")
+        .expect("Bob durably retained Alice's message")
+        .id;
+    let mut bob = CliNode::spawn(&dir.path().join("bob/identity.keystore"), "Bob", port);
+    assert_eq!(bob.user_id(), bob_id);
     let carol = CliNode::spawn(&carol_path, "Carol", port);
     assert_eq!(carol.user_id(), carol_id);
     carol
@@ -176,9 +187,13 @@ fn offline_member_recovers_from_replica_after_sender_exits() {
             Duration::from_secs(30),
         )
         .expect("Carol recovered the message from Bob with Alice offline");
-    let recovered = PersistentEventLog::open(&carol_log, "pw").unwrap();
+    bob.wait_for_peer(&carol_id);
+    drop(carol);
+    let recovered = retained_history(&dir.path().join("carol"), channel_id);
     assert!(
-        recovered.has(&event_id),
+        recovered
+            .iter()
+            .any(|entry| entry.id == event_id && entry.text == b"sender-gone"),
         "Carol recovered Bob's exact replica"
     );
 }

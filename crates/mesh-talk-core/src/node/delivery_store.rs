@@ -67,6 +67,44 @@ pub(crate) struct ControlBinding {
     pub account: Option<String>,
 }
 
+/// Process-local publication of receipt authorization reconstructed from the
+/// delivery owner. Callers hold the Node's index mutex for reads and mutations;
+/// the revision and bindings therefore become visible together. Map mutation
+/// stays behind this interface so cancellation and recovery cannot omit it.
+pub(in crate::node) struct DeliveryControlIndex {
+    bindings: std::collections::HashMap<EventId, ControlBinding>,
+    revision: u64,
+}
+impl DeliveryControlIndex {
+    pub(in crate::node) fn new(
+        bindings: std::collections::HashMap<EventId, ControlBinding>,
+    ) -> Self {
+        Self {
+            bindings,
+            revision: 0,
+        }
+    }
+    pub(in crate::node) fn get(&self, id: &EventId) -> Option<&ControlBinding> {
+        self.bindings.get(id)
+    }
+    pub(in crate::node) fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub(in crate::node) fn insert(&mut self, id: EventId, binding: ControlBinding) {
+        if self.bindings.get(&id) != Some(&binding) {
+            self.bindings.insert(id, binding);
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+    pub(in crate::node) fn replace(
+        &mut self,
+        bindings: std::collections::HashMap<EventId, ControlBinding>,
+    ) {
+        self.bindings = bindings;
+        self.revision = self.revision.wrapping_add(1);
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CompletedDelivery {
     pub(crate) logical_id: EventId,
@@ -1371,7 +1409,7 @@ impl DeliveryStore {
         log: &PersistentEventLog,
         author: &crate::eventlog::Author,
     ) -> Result<(), LogError> {
-        let chunks = log.events(&file.file_conversation);
+        let chunks = log.events(&file.file_conversation)?;
         if chunks.len() != file.chunk_count as usize
             || chunks.last().map(|e| e.id) != file.final_chunk
         {
@@ -1439,7 +1477,7 @@ impl DeliveryStore {
             wall_clock: message.wall_clock,
             file_conversation: manifest.file_conv(),
             final_chunk: log
-                .events(&manifest.file_conv())
+                .events(&manifest.file_conv())?
                 .last()
                 .map(|event| event.id),
             chunk_count: manifest.chunk_count(),

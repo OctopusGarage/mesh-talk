@@ -287,10 +287,9 @@ impl Node {
             .log
             .lock()
             .expect("log mutex")
-            .events(&conv)
+            .events(&conv)?
             .into_iter()
             .filter(|e| matches!(e.kind, EventKind::React | EventKind::Delete))
-            .cloned()
             .collect();
         for event in events {
             let Some(author) = self.historical_author(event.author.ed25519_pub()) else {
