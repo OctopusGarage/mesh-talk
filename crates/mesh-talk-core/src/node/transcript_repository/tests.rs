@@ -313,6 +313,84 @@ fn recovered_source_restarts_each_publication_boundary_without_replay() {
 }
 
 #[test]
+fn channel_install_commits_body_evidence_and_effect_together() {
+    use crate::node::reception_effects::{ArrivalKind, ReceptionEffects, ReceptionMetadata};
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DeviceIdentity::generate();
+    let account = Account::generate();
+    let owner = profile(dir.path(), &identity, &account);
+    let mut rows =
+        ReceivedStore::from_profile(owner.clone(), &dir.path().join("received.log"), "pw").unwrap();
+    let mut suppression =
+        crate::node::account_suppression::IndexedAccountSuppression::from_profile(
+            owner.clone(),
+            &dir.path().join("account-suppression.log"),
+            "pw",
+        )
+        .unwrap();
+    let effects = ReceptionEffects::open(owner.clone()).unwrap();
+    let metadata = ReceptionMetadata {
+        from_device: "alice".into(),
+        received_at: 55,
+        arrival_kind: ArrivalKind::Live,
+        own_device: false,
+        batch_id: None,
+        batch_complete: true,
+        batch_size: 1,
+        reception_only: false,
+    };
+    let row = received(10);
+    rows.check_write().unwrap();
+    let failed: Result<(), LogError> = owner.database().transaction(|c| {
+        assert!(ReceivedStore::install_channel_on(c, &row, Some(&metadata))?);
+        Err(std::io::Error::other("checkpoint installation failed").into())
+    });
+    assert!(failed.is_err());
+    assert!(!rows.contains(row.event_id).unwrap());
+    assert!(!rows.processed(row.event_id).unwrap());
+    assert_eq!(effects.head().unwrap().sequence, 0);
+    assert_eq!(rows.revision(), 0);
+    let inserted = owner
+        .database()
+        .transaction(|c| ReceivedStore::install_channel_on(c, &row, Some(&metadata)))
+        .unwrap();
+    rows.note_channel_commit(usize::from(inserted));
+    assert_eq!(rows.revision(), 1);
+    assert_eq!(effects.head().unwrap().sequence, 1);
+    assert!(rows.processed(row.event_id).unwrap());
+    let inserted = owner
+        .database()
+        .transaction(|c| ReceivedStore::install_channel_on(c, &row, Some(&metadata)))
+        .unwrap();
+    rows.note_channel_commit(usize::from(inserted));
+    assert_eq!(rows.revision(), 1);
+    assert_eq!(effects.head().unwrap().sequence, 1);
+    suppression
+        .suppress(conv(1), EventId::new([11; 32]))
+        .unwrap();
+    assert!(
+        !owner
+            .database()
+            .transaction(|c| ReceivedStore::install_channel_on(c, &received(11), Some(&metadata)))
+            .unwrap()
+    );
+    assert!(!rows.contains(EventId::new([11; 32])).unwrap());
+    assert_eq!(effects.head().unwrap().sequence, 1);
+    rows.remove_where(|_| true).unwrap();
+    assert!(!rows.contains(row.event_id).unwrap());
+    assert!(rows.processed(row.event_id).unwrap());
+    let sender = publication::PublishedHistorySource::open(
+        owner,
+        &dir.path().join("channel.senders"),
+        "pw",
+        CHANNEL_SENDERS,
+        |_, _, _| Ok(()),
+    )
+    .unwrap();
+    sender.check_write().unwrap();
+}
+
+#[test]
 fn ordinary_reopen_does_not_decode_historical_bodies() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sent.log");

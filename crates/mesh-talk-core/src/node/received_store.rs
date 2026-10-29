@@ -99,6 +99,85 @@ impl ReceivedStore {
             false,
         )
     }
+    pub(crate) fn check_write(&self) -> Result<(), LogError> {
+        self.repository.check_write()
+    }
+    /// The channel owner holds this store and the profile transaction. Check the
+    /// source barrier before entering it; update the cache only after COMMIT.
+    pub(crate) fn install_channel_on(
+        c: &rusqlite::Connection,
+        entry: &ReceivedEntry,
+        reception: Option<&super::reception_effects::ReceptionMetadata>,
+    ) -> Result<bool, LogError> {
+        Self::install_received_on(
+            c,
+            entry,
+            reception,
+            super::reception_effects::ReceptionKind::ChannelMessage,
+        )
+    }
+    fn install_received_on(
+        c: &rusqlite::Connection,
+        entry: &ReceivedEntry,
+        reception: Option<&super::reception_effects::ReceptionMetadata>,
+        reception_kind: super::reception_effects::ReceptionKind,
+    ) -> Result<bool, LogError> {
+        let logical =
+            super::dm_envelope::DmEnvelope::decode_ref(&entry.plaintext).map(|env| env.msg_id);
+        let suppressed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM transcript_suppression WHERE conversation=?1 AND (id=?2 OR id=?3))",rusqlite::params![entry.conversation.as_bytes().as_slice(),entry.event_id.as_bytes().as_slice(),logical.as_ref().map(|id|id.as_slice())],|r|r.get(0))?;
+        if suppressed {
+            return Ok(false);
+        }
+        let inserted = TranscriptRepository::put_on(
+            c,
+            RECEIVED,
+            entry.conversation,
+            entry.event_id.as_bytes(),
+            entry.wall_clock,
+            0,
+            &entry.from,
+            &entry.plaintext,
+            false,
+            false,
+        )?;
+        if let Some(metadata) = reception {
+            super::reception_effects::install_on(
+                c,
+                super::reception_effects::ReceptionSource {
+                    kind: reception_kind,
+                    conversation: entry.conversation,
+                    event_id: entry.event_id,
+                },
+                metadata,
+            )?;
+        }
+        Ok(inserted)
+    }
+    pub(crate) fn note_channel_commit(&mut self, inserted: usize) {
+        self.repository.note_committed_inserts(inserted);
+    }
+    pub(crate) fn record_durable_with_reception(
+        &mut self,
+        entry: &ReceivedEntry,
+        metadata: &super::reception_effects::ReceptionMetadata,
+    ) -> Result<(), LogError> {
+        if self.repository.kind != RECEIVED {
+            return Err(repository::invalid(
+                "DM reception requires message transcript owner",
+            ));
+        }
+        self.check_write()?;
+        let inserted = self.repository.profile.database().transaction(|c| {
+            Self::install_received_on(
+                c,
+                entry,
+                Some(metadata),
+                super::reception_effects::ReceptionKind::DirectMessage,
+            )
+        })?;
+        self.note_channel_commit(usize::from(inserted));
+        Ok(())
+    }
     pub(crate) fn record_file_alias_durable(
         &mut self,
         entry: &ReceivedEntry,
@@ -146,6 +225,15 @@ impl ReceivedStore {
     }
     pub(crate) fn contains(&self, id: EventId) -> Result<bool, LogError> {
         self.repository.contains(None, id.as_bytes())
+    }
+    pub(crate) fn processed(&self, id: EventId) -> Result<bool, LogError> {
+        self.repository.profile.database().read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM transcript_received_evidence WHERE id=?1)",
+                [id.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?)
+        })
     }
     pub(crate) fn contains_in(
         &self,
