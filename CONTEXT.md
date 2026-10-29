@@ -171,6 +171,14 @@ second device to be discoverable.
 UI label: **Message Yourself** (Simplified Chinese: **给自己发消息**).
 _Avoid_: second account, temporary local scratch chat.
 
+**Forwarded message**:
+A new message sent by the forwarding account using authorized retained source
+content. It has its own destination identity and delivery lifecycle. A merged
+chat record contains historical display snapshots attributed by the forwarder;
+those labels are not new signatures by the historical authors.
+_Avoid_: original message identity, authenticated original author, shared source file capability.
+See [Message forwarding](docs/message-forwarding.md).
+
 **Message favorite**:
 An account-owned saved item containing one or more ordered message snapshots and
 optional personal title, description and per-message notes. It is independent of

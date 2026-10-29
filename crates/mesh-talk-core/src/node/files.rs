@@ -771,6 +771,7 @@ impl Node {
                 manifest,
                 expires_at_ms,
                 protection,
+                None,
             )?);
             Ok(())
         })?;
@@ -779,7 +780,7 @@ impl Node {
         })
     }
 
-    fn accept_staged_manifest_authorized(
+    pub(in crate::node) fn accept_staged_manifest_authorized(
         &self,
         peers: &[crate::discovery::PeerRecord],
         host: ConversationId,
@@ -787,6 +788,7 @@ impl Node {
         manifest: &FileManifestV3,
         expires_at_ms: Option<u64>,
         protection: Option<MessageProtection>,
+        request: Option<super::delivery_store::RequestRecord>,
     ) -> Result<crate::eventlog::EventId, NodeError> {
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
         use super::delivery_store::{DeliveryDestination, OutgoingDelivery};
@@ -875,6 +877,15 @@ impl Node {
             )
         }
         .map_err(NodeError::Log)?;
+        let transaction = if let Some(mut request) = request {
+            request.message_id = id;
+            super::delivery_store::DeliveryTransaction::Requested {
+                request,
+                transaction: Box::new(transaction),
+            }
+        } else {
+            transaction
+        };
         if self.commit_outgoing_transaction(&mut store, transaction)? {
             let mut book = self.files.lock().expect("files lock not poisoned");
             book.mark_emitted(id);
@@ -1133,7 +1144,7 @@ impl Node {
         .map_err(|e| NodeError::File(format!("stage join error: {e}")))?
     }
 
-    async fn stage_file_for_host_blocking(
+    pub(in crate::node) async fn stage_file_for_host_blocking(
         self: &Arc<Self>,
         path: &Path,
         kind: FileKind,

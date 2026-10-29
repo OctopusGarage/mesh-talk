@@ -67,6 +67,10 @@ pub(crate) mod dm_envelope;
 pub(crate) mod dm_ratchet;
 pub(crate) mod expiry_policy;
 pub(crate) mod favorites;
+mod forwarding;
+pub use forwarding::{
+    ForwardBatch, ForwardInspection, ForwardItem, ForwardRequest, ForwardResult, ForwardTarget,
+};
 mod file_completion;
 mod file_consent;
 mod file_consent_store;

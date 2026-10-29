@@ -37,7 +37,13 @@ import { TransferBar } from "./TransferBar";
 import { ReceiveProgress } from "./ReceiveProgress";
 import { fileGlyph } from "./mediaFile";
 
-export function FilesTray({ navigation = false }: { navigation?: boolean }) {
+export function FilesTray({
+  navigation = false,
+  compact = false,
+}: {
+  navigation?: boolean;
+  compact?: boolean;
+}) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   // Images sent as media appear inline automatically. Files, folders and videos
@@ -214,15 +220,17 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
           aria-label={t("files.received")}
           className={
             navigation
-              ? "relative h-10 w-full justify-start gap-3 px-3 text-muted-foreground hover:text-foreground"
+              ? "relative min-h-11 min-w-0 w-full justify-start gap-2 px-2 text-muted-foreground hover:text-foreground"
               : "relative h-9 w-9 shrink-0 p-0 text-muted-foreground"
           }
         >
           <Download className="h-4 w-4 shrink-0" />
           <span
-            className={navigation ? "sidebar-tool-label truncate" : "sr-only"}
+            className={
+              navigation ? "sidebar-tool-label min-w-0 truncate" : "sr-only"
+            }
           >
-            {t("files.received")}
+            {t(compact ? "files.shortLabel" : "files.received")}
           </span>
           {files.length > 0 && (
             <Badge
@@ -232,7 +240,7 @@ export function FilesTray({ navigation = false }: { navigation?: boolean }) {
                   : "absolute -right-0.5 -top-0.5 h-4 min-w-4 justify-center bg-primary px-1 text-primary-foreground"
               }
             >
-              {files.length}
+              {compact && files.length > 999 ? "999+" : files.length}
             </Badge>
           )}
         </Button>

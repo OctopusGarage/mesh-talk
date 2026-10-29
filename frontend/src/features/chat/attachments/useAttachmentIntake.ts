@@ -67,6 +67,11 @@ export function useAttachmentIntake(
     current: Current;
   } | null>(null);
 
+  const [camera, setCamera] = useState<{
+    current: Current;
+    policy: AttachmentSendOptions;
+  } | null>(null);
+
   const screenshotPolicies = useRef(new WeakMap<File, AttachmentSendOptions>());
   const submittedPolicies = useRef(
     new WeakMap<File, { policy: AttachmentSendOptions; current: Current }>(),
@@ -270,7 +275,7 @@ export function useAttachmentIntake(
   }
   useScreenshotShortcuts({
     available: screenshotAvailable,
-    blocked: !!screenshot || capturing.current,
+    blocked: !!screenshot || !!camera || capturing.current,
     writable: writable(),
     capture: captureScreenshot,
   });
@@ -300,6 +305,7 @@ export function useAttachmentIntake(
       ) {
         conversationEpoch.current++;
         setScreenshot(null);
+        setCamera(null);
         setStagedScreenshot(null);
         setDragOver(false);
       }
@@ -311,6 +317,7 @@ export function useAttachmentIntake(
       ) {
         conversationEpoch.current++;
         setScreenshot(null);
+        setCamera(null);
         setStagedScreenshot(null);
       }
     });
@@ -391,6 +398,18 @@ export function useAttachmentIntake(
   }, [t]);
 
   return {
+    cameraOpen: !!camera?.current(),
+    openCamera: () => {
+      const current = capture();
+      if (current()) setCamera({ current, policy: snapshot() });
+    },
+    cancelCamera: () => setCamera(null),
+    confirmCamera: (file: File) => {
+      if (!camera?.current()) return;
+      screenshotPolicies.current.set(file, camera.policy);
+      setStagedScreenshot({ file, current: camera.current });
+      setCamera(null);
+    },
     dragOver,
     stagedScreenshot: stagedScreenshot?.current()
       ? stagedScreenshot.file

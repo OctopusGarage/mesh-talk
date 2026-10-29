@@ -1,14 +1,9 @@
+import type { SettingsCategory } from "../../frontend/src/features/chat/settings/model";
+
 export type HelpTarget =
   | {
       kind: "settings";
-      category:
-        | "general"
-        | "appearance"
-        | "notifications"
-        | "connection"
-        | "privacy"
-        | "files"
-        | "history";
+      category: SettingsCategory;
       controlId?: string;
     }
   | { kind: "diagnostics" };

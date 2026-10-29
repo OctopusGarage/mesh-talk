@@ -1,6 +1,6 @@
 # Settings
 
-Settings opens on **General**. Choose a category to display its page; only that
+Settings opens on **App behavior**. Choose a category to display its page; only that
 page is mounted, and scrolling never changes the selected category. Routine
 changes save automatically after the backend acknowledges them. The status line
 shows saving and successful completion; failures appear with the affected
@@ -9,16 +9,31 @@ settings to confirm the value before editing it again.
 
 ## Categories
 
-| Category              | Controls                                                                                                   |
-| --------------------- | ---------------------------------------------------------------------------------------------------------- |
-| General               | Display language, launch at OS login, close to tray and screenshot shortcuts.                                 |
-| Appearance            | Theme/library, available theme wallpapers and wallpaper visibility.                                        |
-| Notifications & calls | Notifications, message previews, experimental calling and ringtone.                                        |
-| Connection & delivery | Invisible mode, reply permissions, discovery scope, relay master/send/receive and preferred post office.   |
-| Privacy & security    | Privacy preset, idle/hidden locking, sensitive copy/clipboard, stay signed in and hidden contacts.  |
-| Integrations          | Scoped local agent access, allowed conversations and agent setup instructions.                            |
-| Files & receiving     | Attachment receiving default and download destination. Individual conversations retain their own override. |
-| History & backup      | Local retention, encrypted backup, last-backup metadata and restore guidance.                              |
+Categories follow three navigation groups. Narrow windows retain the same order in
+an accessible horizontal navigation strip.
+
+| Group | Category | Controls |
+| --- | --- | --- |
+| Experience | App behavior | Launch at OS login and close-to-tray behavior. |
+| Experience | Appearance & language | Display language, themes, theme wallpapers and wallpaper visibility. |
+| Experience | Notifications & calls | Notifications, message previews, experimental calling, ringtone and microphone/camera checks. |
+| Experience | Shortcuts | Screenshot bindings, opt-in global registration, registration status and reset. |
+| Privacy & data | Privacy & security | Privacy preset, lock/sign-in, clipboard protection, hidden contacts and related permission summaries. |
+| Privacy & data | Files & downloads | Attachment receiving defaults and download destination; conversation-specific overrides remain available. |
+| Privacy & data | History & backup | Local retention, encrypted backup, last-backup metadata and restore guidance. |
+| Connection & extensions | Network & delivery | Visibility/reply permissions, device and cross-network discovery, offline delivery and preferred post office. |
+| Connection & extensions | Agent access | Scoped local agent access, allowed conversations, grant duration, activity and setup instructions. |
+
+Privacy has separate preset, locking/sign-in and clipboard sections. Notification
+previews and agent grants retain one authoritative editing page, with read-only
+summaries and links from privacy. Network controls distinguish device discovery,
+cross-network discovery and offline delivery; dependencies and saved preferences
+retain their existing behavior.
+
+Internal category IDs and stored preference keys remain stable; `shortcuts` is the
+new category. `settings/model.ts` owns groups, order and control-to-category routes.
+Moved control links resolve through that mapping, including language, screenshots
+and agent access. Save/error feedback belongs to the page that contains the editor.
 
 ## Linked-account scope
 
@@ -59,7 +74,7 @@ see [backup and recovery](backup-recovery.md).
 The conversation selector shows selected conversations out of the listed total.
 The separate scope hint states the authorization limit of 16 conversations.
 
-In **Integrations**, expand **Allowed conversations** to choose the contacts or joined
+In **Agent access**, expand **Allowed conversations** to choose the contacts or joined
 groups a local agent may send to, then enable **Local agent access**. The collapsed
 picker shows the selected count out of the listed total. Search contacts and groups or use
 **Selected only** to review and remove grants, including unavailable conversations.
@@ -98,9 +113,24 @@ access and updates the bootstrap to its new endpoint. See the
 [local API guide](bot-integrations.md#desktop-local-agent-access) for discovery,
 authority, credential handling and transport limits.
 
+## Microphone and camera check
+
+The **Notifications & calls** page contains inline device checks when calling is
+enabled. Explicit microphone/camera actions are independent; no media is acquired
+by opening Settings. Preview and input feedback remain active only until stopped
+or their view/session retires. Active calls and device checks do not compete for
+capture. The More menu does not expose a separate development self-test.
+
+The library runner owns bounded capture, enumeration and advanced negotiation,
+connection and receive-statistics waits. Abort or timeout disposes late streams,
+peers and owned playback. The panel owns microphone analysis and muted local
+camera preview. Advanced diagnostics require actual received-media statistics,
+remain collapsed by default and make no remote-connectivity claim. See
+[calling help](help/topics/calls.md#check-microphone-and-camera).
+
 ## Screenshot shortcuts
 
-**General** provides separate bindings for **Capture screen** and **Hide window &
+**Shortcuts** provides separate bindings for **Capture screen** and **Hide window &
 capture**. Click a binding and press a modifier with a letter, digit or F1–F12;
 Esc cancels recording without closing Settings. Clear removes one binding.
 **Restore defaults** restores both bindings while preserving the global switch.
@@ -329,5 +359,5 @@ readers, or physical-network delivery. Full-suite gates remain separate.
 
 **More → Help** links task guides to the relevant settings category. An explicit
 help action can select a category and focus its control after loading, without
-changing the saved value. Opening Settings normally still starts at General.
+changing the saved value. Opening Settings normally still starts at App behavior.
 See the [user guide](help/README.md).

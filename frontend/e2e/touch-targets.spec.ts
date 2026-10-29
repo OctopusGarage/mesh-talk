@@ -77,6 +77,7 @@ test("settings switches keep a compact track inside a usable touch target", asyn
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");
+  await selectSettingsCategory(page, "appearance");
   const wallpaper = page.getByTestId("settings-wallpaper");
   const bounds = await wallpaper.boundingBox();
   expect(bounds?.width).toBeGreaterThanOrEqual(44);
@@ -97,6 +98,7 @@ test("form inputs and selects keep 44px touch targets", async ({ page }) => {
   await enterChat(page);
 
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   const settings = page.getByRole("dialog");
   const language = page.getByTestId("settings-language-select");
   expect(

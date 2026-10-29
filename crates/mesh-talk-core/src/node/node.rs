@@ -220,6 +220,8 @@ type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
 /// The node: identity + event log + shared roster + an outbound stream of
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
+    pub(in crate::node) forwarding: Mutex<super::forwarding::ForwardStore>,
+    pub(in crate::node) forwarding_gate: tokio::sync::Mutex<()>,
     pub(in crate::node) outgoing_requests_gate: tokio::sync::Mutex<()>,
     pub(in crate::node) sessions: super::session_pool::SessionPool,
     pub(in crate::node) expiry_clock_start: (std::time::Instant, u64),
@@ -807,6 +809,10 @@ impl Node {
         let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
+        let forwarding = super::forwarding::ForwardStore::open(
+            &dir.join(format!("forwarding-{}.log", account.account_id())),
+            password,
+        )?;
         let favorites = super::favorites::FavoriteStore::open(
             &dir.join(format!("favorites-{}.log", account.account_id())),
             password,
@@ -938,6 +944,8 @@ impl Node {
             recovery_origins,
             recovery_contacts,
             recovered_sent_ids: Mutex::new(recovered_sent_ids),
+            forwarding: Mutex::new(forwarding),
+            forwarding_gate: tokio::sync::Mutex::new(()),
             outgoing_requests_gate: tokio::sync::Mutex::new(()),
             channel_migration: Mutex::new(channel_migration),
             channel_senders: Mutex::new(channel_senders),

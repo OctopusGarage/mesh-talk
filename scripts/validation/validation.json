@@ -2,6 +2,56 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "message-forwarding",
+      "paths": [
+        "crates/mesh-talk-core/src/node/forwarding.rs",
+        "crates/mesh-talk-core/src/node/forwarding/",
+        "src-tauri/src/message_forwarding.rs",
+        "frontend/src/features/chat/forwarding/",
+        "frontend/src/lib/api/messageForwarding.ts",
+        "frontend/src/lib/api/messageForwarding.test.ts",
+        "frontend/src/lib/forwardedRecord.ts",
+        "frontend/src/lib/forwardedRecord.test.ts",
+        "frontend/e2e/forwarding.spec.ts",
+        "docs/message-forwarding.md"
+      ],
+      "frontend": [
+        "src/features/chat/forwarding/selection.test.ts",
+        "src/features/chat/forwarding/ForwardedRecordPreview.test.ts",
+        "src/lib/api/messageForwarding.test.ts",
+        "src/lib/forwardedRecord.test.ts"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::forwarding::"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Forward authorized canonical messages individually or as bounded encrypted chat records, preserving destination identity and retry-safe acceptance.",
+        "guide": "docs/message-forwarding.md",
+        "invariants": [
+          {
+            "name": "Source admission rejects protected, recalled and expired messages and resolves canonical order; target access and current session authority remain required at acceptance.",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          },
+          {
+            "name": "Forward batches bind stable request identities and preserve accepted item identities across partial retry and restart; attachments are independently restaged.",
+            "reference": "docs/message-forwarding.md#reliability-and-verification"
+          },
+          {
+            "name": "Merged records contain bounded versioned display snapshots and contained attachment bytes; recipients validate them without access to source conversations.",
+            "reference": "docs/message-forwarding.md#merged-record-format"
+          }
+        ]
+      },
+      "escalation": [
+        "Run frontend/e2e/forwarding.spec.ts for single/multi/merged selection, preview, recipients, cancellation and failed-only retry; run related Favorites and protected-message scenarios. Encrypted loopback account/group transfer, independent attachment readback and restart/idempotency are required for forwarding changes. Native context-menu, keyboard and save-dialog acceptance is separate from browser IPC substitutes; old-client .mtchat attachment fallback requires compatibility evidence."
+      ]
+    },
+    {
       "id": "post-office-service-installers",
       "paths": [
         "scripts/install-post-office-macos.sh",

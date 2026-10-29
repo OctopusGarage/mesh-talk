@@ -4,7 +4,7 @@ Use the marketplace or a local ZIP to extend your personal libraries.
 
 ## Choose the right library
 
-- For themes, open **More → Settings → Appearance**.
+- For themes, open **More → Settings → Appearance & language**.
 - For avatars, open your [profile](profile.md), select its avatar and open the gallery.
 - For stickers, open **Stickers → Manage sticker packs** in a conversation.
 

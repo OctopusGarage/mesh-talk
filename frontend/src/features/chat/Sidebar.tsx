@@ -398,11 +398,14 @@ export function Sidebar() {
       </nav>
 
       <div
-        className="sidebar-tools border-t px-2 py-1.5"
+        className="sidebar-tools grid min-w-0 grid-cols-2 gap-1 border-t px-2 py-1.5"
         aria-label={t("redesign.tools")}
       >
-        <UnreadMessages key={`${owner}:${generation}:${favoritesScope}`} />
-        <FilesTray navigation />
+        <UnreadMessages
+          compact
+          key={`${owner}:${generation}:${favoritesScope}`}
+        />
+        <FilesTray navigation compact />
       </div>
 
       {/* Stranded prompt: nobody's online and the grace window has passed — offer the
