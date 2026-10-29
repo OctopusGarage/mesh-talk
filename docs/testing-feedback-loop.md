@@ -215,6 +215,14 @@ fixture overhead without narrowing test scope or changing worker/deadline limits
 A resource-bound argument may explain an equivalent surviving guard mutation;
 it cannot turn an interrupted or timed-out run into a completed advisory survivor.
 
+The development profile gives the protocol core optimization level 1 because
+its callers instantiate generic authenticated-encryption loops. Dependency-only
+crypto optimization does not optimize all of those loops. Tests and mutations
+inherit this setting while retaining debug assertions, overflow checks, complete
+inventories and existing worker/deadline limits. Release settings are independent.
+Compare execution time separately from initial and incremental compilation cost
+when assessing this tradeoff; a focused speedup does not certify a full baseline.
+
 ## Change-aware development plans
 
 Use the affected-test planner during development:

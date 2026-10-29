@@ -454,6 +454,7 @@
             "known_role_digest_does_not_block_a_new_terminal_result_behind_repeated_role_headers",
             "terminal_operation_page_commits_before_a_held_legacy_header_then_replays_all_rows",
             "unchanged_processed_operation_heads_skip_repeated_signature_decodes",
+            "unchanged_local_operation_publication_does_not_repeat_signature_verification",
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
             "access_only_v5_keeps_its_role_scope_when_operation_rows_exist",
             "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot"

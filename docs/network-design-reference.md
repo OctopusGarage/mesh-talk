@@ -1411,6 +1411,10 @@ executing a second effect. Changed, unbound or unfinished foreign inputs still
 follow ordinary verification and retry; diagnostic projection readers remain
 complete. Current metadata is rechecked under the payload guard, with no nested
 processed-index/store locks, new cache, authority rule or network resource.
+Local normal and legacy publishers use that same verified hash only to compare
+an unchanged own projection without repeating its signature checks under the
+document lock. They require the exact full device identity, group and revision;
+changed bytes or an absent process-local witness take the full verification path.
 
 Within the Control slot, locally pending account operations prioritize their
 selected executors by full device identity. An unrelated sibling's metadata read

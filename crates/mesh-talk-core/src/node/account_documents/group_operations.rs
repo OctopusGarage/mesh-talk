@@ -165,12 +165,30 @@ impl Node {
                 channel: hex::encode(group.as_bytes()),
                 source_device: self.user_id(),
             };
+            let verified = self
+                .operation_seen
+                .lock()
+                .expect("operation input mutex")
+                .get(&Self::operation_input_key(&key).expect("operation key"))
+                .copied();
             #[cfg(test)]
             let published_revision;
             let changed = {
                 let mut store = self.account_documents.lock().expect("documents mutex");
                 let previous = store.meta(&key);
                 let old = store.get(&key).ok().flatten().and_then(|document| {
+                    // The input owner already verified these exact bytes. Reuse
+                    // that fact only for this device's own publication; changed,
+                    // unreadable or foreign frames retain full verification.
+                    if verified == Some(document.meta.content_hash)
+                        && let Ok(frame) =
+                            serde_json::from_slice::<OperationFrame>(document.payload())
+                        && frame.proof.public() == self.identity.public()
+                        && frame.group == group
+                        && frame.revision == document.meta.revision
+                    {
+                        return Some(frame);
+                    }
                     OperationFrame::decode(document.payload(), &self.account.public().ed25519_pub)
                 });
                 if old
@@ -224,6 +242,117 @@ mod input_tests {
         self,
         legacy_wire::{LegacyOperationFrame, LegacyOperationProjection},
     };
+
+    #[tokio::test]
+    async fn unchanged_local_operation_publication_does_not_repeat_signature_verification() {
+        let directory = tempfile::tempdir().unwrap();
+        let account = crate::identity::account::Account::generate();
+        let source = super::super::tests::node(&directory.path().join("source"), &account);
+        let group = source
+            .create_channel("Before publication", vec![])
+            .await
+            .unwrap();
+        let id = source
+            .new_account_group_operation_id(&account.account_id())
+            .unwrap();
+        source
+            .submit_account_group_operation(
+                &account.account_id(),
+                id,
+                group,
+                crate::node::AccountGroupOperation::Rename {
+                    name: "Committed publication".into(),
+                },
+            )
+            .unwrap();
+        source.maintain_account_group_operation_effects();
+        assert_eq!(
+            source
+                .account_group_operation_status(&account.account_id(), id)
+                .unwrap()
+                .unwrap()
+                .phase,
+            crate::node::AccountGroupOperationPhase::Committed
+        );
+        let legacy_key = AccountDocumentKey::GroupLegacyOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let legacy =
+            LegacyOperationFrame::new(&source, group, 1, LegacyOperationProjection::default())
+                .encode();
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(
+                AccountDocumentMeta::new(
+                    &account,
+                    source.user_id(),
+                    legacy_key.clone(),
+                    1,
+                    &legacy,
+                    false,
+                ),
+                &legacy,
+            )
+            .unwrap();
+        // Process the real local frame through the existing verified-input owner.
+        source.maintain_account_group_operation_effects();
+        let key = AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let before = source.account_documents.lock().unwrap().meta(&key).unwrap();
+        operations::take_frame_decode_counts_for_test();
+        source.publish_account_group_operations();
+        source.publish_account_group_legacy_operations();
+        let unchanged = operations::take_frame_decode_counts_for_test();
+        assert_eq!(
+            source.account_documents.lock().unwrap().meta(&key).unwrap(),
+            before
+        );
+        assert_eq!(
+            unchanged,
+            [0, 0],
+            "unchanged locally verified publication must not repeat signed-reference verification under the document lock"
+        );
+        // A new process has no verified-input witness: it must authenticate the
+        // durable rows again rather than trusting a stored local-looking key.
+        source.operation_seen.lock().unwrap().clear();
+        source.publish_account_group_operations();
+        source.publish_account_group_legacy_operations();
+        assert_eq!(operations::take_frame_decode_counts_for_test(), [1, 1]);
+        // A signed replacement has a new hash and cannot borrow the old witness.
+        source.maintain_account_group_operation_effects();
+        let projection = source.operation_projection(group);
+        let replacement =
+            OperationFrame::new(&source, group, before.revision + 1, projection).encode();
+        source
+            .account_documents
+            .lock()
+            .unwrap()
+            .merge(
+                AccountDocumentMeta::new(
+                    &account,
+                    source.user_id(),
+                    key.clone(),
+                    before.revision + 1,
+                    &replacement,
+                    false,
+                ),
+                &replacement,
+            )
+            .unwrap();
+        operations::take_frame_decode_counts_for_test();
+        source.publish_account_group_operations();
+        assert_eq!(operations::take_frame_decode_counts_for_test(), [1, 0]);
+        source.maintain_account_group_operation_effects();
+        operations::take_frame_decode_counts_for_test();
+        source.publish_account_group_operations();
+        source.publish_account_group_legacy_operations();
+        assert_eq!(operations::take_frame_decode_counts_for_test(), [0, 0]);
+    }
 
     fn put_head(reader: &Node, author: &Node, value: u8, revision: u64, legacy: bool) {
         let group = crate::eventlog::ConversationId::new([value; 32]);

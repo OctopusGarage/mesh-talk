@@ -69,6 +69,12 @@ impl Node {
                 channel: hex::encode(group.as_bytes()),
                 source_device: self.user_id(),
             };
+            let verified = self
+                .operation_seen
+                .lock()
+                .expect("operation input mutex")
+                .get(&Self::operation_input_key(&key).expect("legacy operation key"))
+                .copied();
             let changed = {
                 let mut store = self.account_documents.lock().expect("documents mutex");
                 let previous = store.meta(&key);
@@ -79,6 +85,17 @@ impl Node {
                     continue;
                 }
                 let old = store.get(&key).ok().flatten().and_then(|document| {
+                    // Exact verified own bytes need no repeated signature work
+                    // merely to compare the current publication fingerprint.
+                    if verified == Some(document.meta.content_hash)
+                        && let Ok(frame) =
+                            serde_json::from_slice::<LegacyOperationFrame>(document.payload())
+                        && frame.proof.public() == self.identity.public()
+                        && frame.group == group
+                        && frame.revision == document.meta.revision
+                    {
+                        return Some(frame);
+                    }
                     LegacyOperationFrame::decode(
                         document.payload(),
                         &self.account.public().ed25519_pub,
