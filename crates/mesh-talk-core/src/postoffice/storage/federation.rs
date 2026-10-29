@@ -274,9 +274,12 @@ impl SessionLease {
                 }
             }
             let mut additional=0i64;
-            for (id,(digest,_)) in &unique {
-                let prior:Option<Vec<u8>>=c.query_row("SELECT digest FROM relay_federation_entries WHERE session_id=?1 AND conversation=?2",params![self.session_id,id.as_slice()],|r|r.get(0)).optional()?;
-                match prior { Some(prior) if prior.as_slice()!=digest=>return Err(LogError::AdmissionRejected("conflicting federation digest".into())),None=>additional+=1,_=>{} }
+            if !unique.is_empty() {
+                let mut prior=c.prepare("SELECT digest FROM relay_federation_entries WHERE session_id=?1 AND conversation=?2")?;
+                for (id,(digest,_)) in &unique {
+                    let existing:Option<Vec<u8>>=prior.query_row(params![self.session_id,id.as_slice()],|r|r.get(0)).optional()?;
+                    match existing { Some(existing) if existing.as_slice()!=digest=>return Err(LogError::AdmissionRejected("conflicting federation digest".into())),None=>additional+=1,_=>{} }
+                }
             }
             let cost=additional.checked_mul(ENTRY_BYTES).ok_or(LogError::RepositoryCounterExhausted)?;
             let (global_rows,global_bytes):(i64,i64)=c.query_row("SELECT staged_rows,staged_bytes FROM relay_federation_runtime WHERE singleton=1",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
@@ -285,8 +288,11 @@ impl SessionLease {
             let rows=rows.checked_add(additional).ok_or(LogError::RepositoryCounterExhausted)?;
             let bytes=bytes.checked_add(cost).ok_or(LogError::RepositoryCounterExhausted)?;
             if global_rows>MAX_ROWS || global_bytes>MAX_BYTES { return Err(LogError::RelayCapacityUnavailable); }
-            for (id,(digest,first)) in unique {
-                c.execute("INSERT INTO relay_federation_entries(session_id,conversation,digest,first_seen) VALUES(?1,?2,?3,?4) ON CONFLICT(session_id,conversation) DO UPDATE SET first_seen=min(first_seen,excluded.first_seen)",params![self.session_id,id.as_slice(),digest.as_slice(),first.to_be_bytes().as_slice()])?;
+            if !unique.is_empty() {
+                let mut insert=c.prepare("INSERT INTO relay_federation_entries(session_id,conversation,digest,first_seen) VALUES(?1,?2,?3,?4) ON CONFLICT(session_id,conversation) DO UPDATE SET first_seen=min(first_seen,excluded.first_seen)")?;
+                for (id,(digest,first)) in unique {
+                    insert.execute(params![self.session_id,id.as_slice(),digest.as_slice(),first.to_be_bytes().as_slice()])?;
+                }
             }
             c.execute("UPDATE relay_federation_sessions SET receive_pages=?2,receive_entries=?3,complete=?4,row_charge=?5,byte_charge=?6 WHERE session_id=?1",params![self.session_id,pages,received,i64::from(last),rows,bytes])?;
             c.execute("UPDATE relay_federation_runtime SET staged_rows=?1,staged_bytes=?2 WHERE singleton=1",params![global_rows,global_bytes])?;
@@ -352,9 +358,15 @@ pub(crate) fn cleanup_step(profile: &ProfileStorage, now: u64) -> Result<bool, L
         let Some((id,owner))=selected else{return Ok((false,None))};
         invalidate_on(c,id,owner)?;
         let keys={let mut stmt=c.prepare("SELECT conversation FROM relay_federation_entries WHERE session_id=?1 ORDER BY conversation LIMIT 512")?;stmt.query_map([id],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?};
-        for key in &keys {c.execute("DELETE FROM relay_federation_entries WHERE session_id=?1 AND conversation=?2",params![id,key])?;}
+        if !keys.is_empty() {
+            let mut delete=c.prepare("DELETE FROM relay_federation_entries WHERE session_id=?1 AND conversation=?2")?;
+            for key in &keys {delete.execute(params![id,key])?;}
+        }
         let local_keys={let mut stmt=c.prepare("SELECT conversation FROM relay_federation_local_entries WHERE session_id=?1 ORDER BY conversation LIMIT ?2")?;stmt.query_map(params![id,(PAGE_SIZE-keys.len()) as i64],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?};
-        for key in &local_keys {c.execute("DELETE FROM relay_federation_local_entries WHERE session_id=?1 AND conversation=?2",params![id,key])?;}
+        if !local_keys.is_empty() {
+            let mut delete=c.prepare("DELETE FROM relay_federation_local_entries WHERE session_id=?1 AND conversation=?2")?;
+            for key in &local_keys {delete.execute(params![id,key])?;}
+        }
         let selected=keys.len()+local_keys.len();
         let rows=i64::try_from(selected).map_err(|_|LogError::RepositoryCounterExhausted)?;
         let bytes=rows.checked_mul(ENTRY_BYTES).ok_or(LogError::RepositoryCounterExhausted)?;

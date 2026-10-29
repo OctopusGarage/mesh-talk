@@ -37,6 +37,163 @@ fn charges(profile: &ProfileStorage) -> (i64, i64, i64) {
     profile.database().read(|c| Ok(c.query_row("SELECT session_rows,staged_rows,staged_bytes FROM relay_federation_runtime WHERE singleton=1", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?)).unwrap()
 }
 
+/// Count actual compilation of staging-table operations, including writes. This
+/// covers the session path that inventory-only metadata observations omit.
+struct StagingCompiles<'a> {
+    database: &'a EncryptedDatabase,
+    count: Option<Box<std::sync::atomic::AtomicUsize>>,
+}
+impl<'a> StagingCompiles<'a> {
+    fn install(database: &'a EncryptedDatabase) -> Self {
+        let count = Box::new(std::sync::atomic::AtomicUsize::new(0));
+        database
+            .read(|c| {
+                // SAFETY: the connection is locked and the boxed counter remains
+                // alive until Drop unregisters the compilation callback.
+                let result = unsafe {
+                    rusqlite::ffi::sqlite3_set_authorizer(
+                        c.handle(),
+                        Some(staging_compile),
+                        (&*count as *const std::sync::atomic::AtomicUsize)
+                            .cast_mut()
+                            .cast(),
+                    )
+                };
+                assert_eq!(result, rusqlite::ffi::SQLITE_OK);
+                Ok(())
+            })
+            .unwrap();
+        Self {
+            database,
+            count: Some(count),
+        }
+    }
+    fn take(&self) -> usize {
+        self.count.as_ref().unwrap().swap(0, Ordering::Relaxed)
+    }
+}
+impl Drop for StagingCompiles<'_> {
+    fn drop(&mut self) {
+        let removed = self.database.read(|c| {
+            // SAFETY: removal is serialized before the callback data is freed.
+            let result = unsafe {
+                rusqlite::ffi::sqlite3_set_authorizer(c.handle(), None, std::ptr::null_mut())
+            };
+            assert_eq!(result, rusqlite::ffi::SQLITE_OK);
+            Ok(())
+        });
+        if removed.is_err() {
+            // A faulted connection cannot be entered to unregister its callback.
+            Box::leak(self.count.take().unwrap());
+        }
+    }
+}
+unsafe extern "C" fn staging_compile(
+    userdata: *mut std::ffi::c_void,
+    action: std::ffi::c_int,
+    table: *const std::ffi::c_char,
+    _column: *const std::ffi::c_char,
+    _database: *const std::ffi::c_char,
+    _view: *const std::ffi::c_char,
+) -> std::ffi::c_int {
+    if matches!(
+        action,
+        rusqlite::ffi::SQLITE_READ | rusqlite::ffi::SQLITE_INSERT | rusqlite::ffi::SQLITE_DELETE
+    ) && !table.is_null()
+    {
+        // SAFETY: SQLite provides a live NUL-terminated table name; install and
+        // Drop keep the boxed counter alive for the complete registration.
+        let (table, count) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(table).to_bytes(),
+                &*userdata.cast::<std::sync::atomic::AtomicUsize>(),
+            )
+        };
+        if matches!(
+            table,
+            b"relay_federation_entries" | b"relay_federation_local_entries"
+        ) {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    rusqlite::ffi::SQLITE_OK
+}
+
+#[test]
+fn federation_row_work_compiles_constant_per_bounded_page() {
+    let measure = |size: u32| {
+        let root = tempfile::tempdir().unwrap();
+        let profile = profile(&root, &DeviceIdentity::generate());
+        let owner =
+            SessionOwner::begin(profile.clone(), Direction::Outbound, 100, Instant::now()).unwrap();
+        let lease = owner.lease();
+        let entries: Vec<_> = (0..size)
+            .map(|key| {
+                let mut entry = entry(key, 90 + u64::from(key % 9));
+                entry.digest = [key as u8; 32];
+                entry
+            })
+            .collect();
+        let compiles = StagingCompiles::install(profile.database());
+        lease.receive_page(&entries, true, 100).unwrap();
+        let received = compiles.take();
+        profile
+            .database()
+            .transaction(|c| lease.stage_local_page_on(c, &entries, true, 100))
+            .unwrap();
+        let selected = compiles.take();
+        assert_eq!(
+            charges(&profile),
+            (
+                1,
+                2 * i64::from(size),
+                SESSION_BYTES + 2 * i64::from(size) * ENTRY_BYTES
+            )
+        );
+        profile
+            .database()
+            .read(|c| {
+                for table in ["relay_federation_entries", "relay_federation_local_entries"] {
+                    let mut statement = c.prepare(&format!(
+                        "SELECT conversation,digest,first_seen FROM {table} WHERE session_id=?1 ORDER BY conversation"
+                    ))?;
+                    let actual = statement
+                        .query_map([lease.session_id], |r| {
+                            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?))
+                        })?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let expected: Vec<_> = entries.iter().map(|e| (e.id.as_bytes().to_vec(), e.digest.to_vec(), e.first_seen_secs.to_be_bytes().to_vec())).collect();
+                    assert_eq!(actual, expected, "{table} preserves the exact selected inventory");
+                }
+                Ok(())
+            })
+            .unwrap();
+        profile
+            .database()
+            .transaction(|c| lease.begin_mismatch_on(c, None))
+            .unwrap();
+        compiles.take();
+        let mismatch = profile
+            .database()
+            .transaction(|c| lease.mismatch_step_on(c, 512, 16))
+            .unwrap();
+        let compared = compiles.take();
+        assert!(mismatch.done && mismatch.ids.is_empty());
+        assert_eq!(mismatch.examined, 2 * (size as usize + 1));
+        drop(owner);
+        assert!(cleanup_step(&profile, 100).unwrap());
+        let cleaned = compiles.take();
+        assert_eq!(charges(&profile), (0, 0, 0));
+        [received, selected, compared, cleaned]
+    };
+    let one = measure(1);
+    let many = measure(128);
+    assert!(
+        many.iter().zip(one).all(|(many, one)| *many <= one),
+        "staging, selection, comparison and cleanup must compile per bounded operation, not per row: one={one:?}, many={many:?}"
+    );
+}
+
 #[test]
 fn owner_drop_cancels_all_cloned_leases_but_preserves_stale_charges() {
     let root = tempfile::tempdir().unwrap();

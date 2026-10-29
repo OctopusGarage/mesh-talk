@@ -47,14 +47,23 @@ impl SessionLease {
             }
         }
         let mut additional = 0i64;
-        for (key, (digest, first)) in &unique {
-            let prior:Option<(Vec<u8>,Vec<u8>)>=c.query_row("SELECT digest,first_seen FROM relay_federation_local_entries WHERE session_id=?1 AND conversation=?2",params![self.session_id,key.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            match prior {
-                None => additional += 1,
-                Some((d, f)) if d.as_slice() != digest || f.as_slice() != first.to_be_bytes() => {
-                    return Err(invalid("selected local snapshot changed"));
+        if !unique.is_empty() {
+            let mut prior = c.prepare("SELECT digest,first_seen FROM relay_federation_local_entries WHERE session_id=?1 AND conversation=?2")?;
+            for (key, (digest, first)) in &unique {
+                let existing: Option<(Vec<u8>, Vec<u8>)> = prior
+                    .query_row(params![self.session_id, key.as_slice()], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .optional()?;
+                match existing {
+                    None => additional += 1,
+                    Some((d, f))
+                        if d.as_slice() != digest || f.as_slice() != first.to_be_bytes() =>
+                    {
+                        return Err(invalid("selected local snapshot changed"));
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         let cost = additional
@@ -80,8 +89,16 @@ impl SessionLease {
         if rows > MAX_ROWS || bytes > MAX_BYTES || session_rows > MAX_ROWS {
             return Err(LogError::RelayCapacityUnavailable);
         }
-        for (key, (digest, first)) in unique {
-            c.execute("INSERT INTO relay_federation_local_entries(session_id,conversation,digest,first_seen) VALUES(?1,?2,?3,?4) ON CONFLICT(session_id,conversation) DO NOTHING",params![self.session_id,key.as_slice(),digest.as_slice(),first.to_be_bytes().as_slice()])?;
+        if !unique.is_empty() {
+            let mut insert = c.prepare("INSERT INTO relay_federation_local_entries(session_id,conversation,digest,first_seen) VALUES(?1,?2,?3,?4) ON CONFLICT(session_id,conversation) DO NOTHING")?;
+            for (key, (digest, first)) in unique {
+                insert.execute(params![
+                    self.session_id,
+                    key.as_slice(),
+                    digest.as_slice(),
+                    first.to_be_bytes().as_slice()
+                ])?;
+            }
         }
         c.execute("UPDATE relay_federation_sessions SET local_entries=?2,row_charge=?3,byte_charge=?4 WHERE session_id=?1",params![self.session_id,selected,session_rows,session_bytes])?;
         c.execute(
@@ -243,13 +260,18 @@ fn peek(
             "SELECT conversation,digest FROM relay_federation_entries WHERE session_id=?1 AND conversation>?2 AND conversation<=?3 ORDER BY conversation LIMIT 1"
         }
     };
+    // Four fixed query shapes share the connection's bounded VM cache; every
+    // lookup still reads the current transaction with fresh cursor bindings.
+    let mut statement = c.prepare_cached(sql)?;
     let row: Option<(Vec<u8>, Vec<u8>)> = if let Some(upper) = upper {
-        c.query_row(sql, params![session, after, upper], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .optional()?
+        statement
+            .query_row(params![session, after, upper], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?
     } else {
-        c.query_row(sql, params![session, after], |r| Ok((r.get(0)?, r.get(1)?)))
+        statement
+            .query_row(params![session, after], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?
     };
     row.map(|(key, digest)| {
