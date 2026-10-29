@@ -9,6 +9,9 @@ import {
   CollectionToolbar,
   FavoriteEditor,
 } from "./favorites/MessageCollection";
+import { ForwardDialog } from "./forwarding/ForwardDialog";
+import { canForward, forwardSource } from "./forwarding/selection";
+import type { ForwardSource } from "@/lib/api/messageForwarding";
 import { canCollect, MAX_FAVORITE_MESSAGES } from "./favorites/selection";
 import { useFavoriteMembership } from "./favorites/useFavoriteMembership";
 import { NotificationPermissionNotice } from "./NotificationPermissionNotice";
@@ -161,6 +164,17 @@ export function ConversationView() {
     return map;
   }, [members]);
   const key = active ? convKey(active) : "";
+  const forwardingScope = `${owner}:${authGeneration}:${receptionScope}:${key}`;
+  const [forwardingState, setForwardingState] = useState<{
+    scope: string;
+    source: ForwardSource | null;
+  }>({ scope: forwardingScope, source: null });
+  const forwarding =
+    forwardingState.scope === forwardingScope ? forwardingState.source : null;
+  const setForwarding = (source: ForwardSource | null) =>
+    setForwardingState({ scope: forwardingScope, source });
+  if (forwardingState.scope !== forwardingScope)
+    setForwardingState({ scope: forwardingScope, source: null });
   const collection = useMessageCollection(
     active,
     `${owner}:${authGeneration}:${receptionScope}:${key}`,
@@ -609,6 +623,33 @@ export function ConversationView() {
           selected={collection.selected}
           onCancel={collection.cancel}
           onCollect={() => collection.collect(collection.selected)}
+          forwardDisabled={collection.selected.some(
+            (message) => !canForward(message),
+          )}
+          onForward={() => {
+            if (
+              active &&
+              collection.selected.every((message) => canForward(message))
+            )
+              setForwarding(forwardSource(active, collection.selected));
+          }}
+        />
+      )}
+      {forwarding && (
+        <ForwardDialog
+          key={forwardingScope}
+          source={forwarding}
+          onClose={() => setForwarding(null)}
+          onAccepted={(result) => {
+            const state = useChat.getState();
+            void state.reload();
+            void state.refreshRoster();
+            if (
+              result.items.length > 0 &&
+              result.items.every((item) => item.status === "accepted")
+            )
+              collection.cancel();
+          }}
         />
       )}
       {collection.draft && (
@@ -816,6 +857,12 @@ export function ConversationView() {
                     </label>
                   )}
                   <MessageBubble
+                    onForward={
+                      canForward(m)
+                        ? (message) =>
+                            setForwarding(forwardSource(active, [message]))
+                        : undefined
+                    }
                     onCollect={
                       canCollect(m)
                         ? (message) => collection.collect([message])

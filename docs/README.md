@@ -85,6 +85,9 @@ subscriptions and incoming HTTP webhooks are later stages.
 | [`docs/DOCUMENTATION_GUIDELINES.md`](DOCUMENTATION_GUIDELINES.md)                             | Audience, source-of-truth rules, writing standards, and documentation review checklist.                  |
 | [`docs/maintenance-checklist.md`](maintenance-checklist.md)                                 | Cross-surface maintenance inventory, change triggers, alignment review and unresolved follow-ups.        |
 
+[Message forwarding](message-forwarding.md) owns selection, source admission,
+batch retry and merged chat-record behavior.
+
 ## Design boundaries
 
 [Personal messaging and synchronization](multi-device-sync-design.md) retains the

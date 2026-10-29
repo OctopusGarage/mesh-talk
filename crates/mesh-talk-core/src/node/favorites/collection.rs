@@ -190,7 +190,7 @@ impl Node {
             .unwrap_or_else(|| who.into())
     }
 
-    fn capture_favorite(
+    pub(in crate::node) fn capture_favorite(
         &self,
         mut source: FavoriteSource,
         metadata: FavoriteMetadata,

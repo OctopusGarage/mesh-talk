@@ -36,6 +36,7 @@ mod integrations;
 mod linked_account;
 pub mod logger;
 pub mod message_favorites;
+pub mod message_forwarding;
 mod network_cost;
 mod notifications;
 pub mod owner_commands;
@@ -467,6 +468,10 @@ pub fn run_tauri_configured(
                 crate::chat_commands::search,
                 crate::owner_commands::owner_search_recent,
                 crate::owner_commands::owner_search_context,
+                crate::message_forwarding::owner_inspect_forward_messages,
+                crate::message_forwarding::owner_list_forward_batches,
+                crate::message_forwarding::owner_forward_messages,
+                crate::message_forwarding::owner_export_forwarded_attachment,
                 crate::message_favorites::owner_list_message_favorites,
                 crate::message_favorites::owner_save_message_favorite,
                 crate::message_favorites::owner_edit_message_favorite,

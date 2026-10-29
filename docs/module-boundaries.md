@@ -614,6 +614,15 @@ above. It is not an exhaustive line-by-line audit or proof that all bugs have
 been eliminated. This file is the maintained ownership guide; Git history retains
 superseded audit findings and implementation reports.
 
+## Message forwarding
+
+Forwarding source authorization, canonical ordering, accepted request identity and
+attachment restaging belong to the protocol core. The desktop host supplies exact
+session/runtime admission. Chat features own selection, destination confirmation
+and read-only record presentation; shared outgoing owners retain send acceptance
+and delivery meaning. Favorites keeps its independent saved-content lifecycle.
+[Message forwarding](message-forwarding.md) owns user behavior and invariants.
+
 ## Message Favorites
 
 `core/node/favorites.rs` owns the independent encrypted collection, canonical
