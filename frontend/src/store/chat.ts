@@ -55,6 +55,7 @@ import {
   applyChatCallSignal,
   applyChatFileProgress,
   applyChatProfile,
+  finishChatAvatarIdentity,
   resetChatFileAvailability,
   resetChatFiles,
   stopChatCalls,
@@ -289,7 +290,11 @@ async function pollUntilReady(
       applyVerifiedIdentity(set, identity, true);
       const acct = identity.account_id;
       setPushStateSupport(identity.supports_push_state ? owner : null);
-      syncChatAvatarIdentity(acct, () => !isCancelled());
+      syncChatAvatarIdentity(
+        acct,
+        () => !isCancelled(),
+        !!identity.supports_bounded_delivery,
+      );
       await get().refreshRoster();
       return true;
     } catch {
@@ -901,6 +906,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         receiptCursor = loadReceptionSnapshot(scope)?.cursor ?? null;
         receiptScope = scope;
         let firstPull = true;
+        let avatarIdentityLoaded = false;
         delivery = createReceptionDelivery({
           scope,
           cursor: receiptCursor,
@@ -911,17 +917,30 @@ export const useChat = create<ChatState>((rawSet, get) => ({
             get().myAccountId === scope.account_id &&
             get().myId === scope.device_id,
           pull: async (after, through) => {
-            const page = await receptionApi.pull(
-              scope,
-              after,
-              through,
-              firstPull,
-            );
-            firstPull = false;
-            return page;
+            try {
+              const page = await receptionApi.pull(
+                scope,
+                after,
+                through,
+                firstPull,
+              );
+              firstPull = false;
+              return page;
+            } catch (error) {
+              // The host may have reserved a page whose IPC reply was lost.
+              // No page was applied, so replace that reservation on retry.
+              firstPull = true;
+              throw error;
+            }
           },
           apply: (page) => {
             receiptPending = true;
+            if (receiptCursor === null) {
+              // Establish recovery state before the first effects can touch
+              // older per-field persistence, including legacy rows without IDs.
+              saveReceptionSnapshot(scope, snapshot(page.after));
+              receiptCursor = page.after;
+            }
             for (const receipt of page.receipts) {
               switch (receipt.kind) {
                 case "dm":
@@ -949,6 +968,16 @@ export const useChat = create<ChatState>((rawSet, get) => ({
                   notifySyncInvalidation({ owner: scope.owner, kind: "state" });
                   break;
               }
+            }
+            if (page.complete && !avatarIdentityLoaded) {
+              avatarIdentityLoaded = true;
+              finishChatAvatarIdentity(
+                () =>
+                  lease.current() &&
+                  get().deliveryRuntime === runtime &&
+                  get().myAccountId === scope.account_id &&
+                  get().myId === scope.device_id,
+              );
             }
           },
           persist: (cursor) => {

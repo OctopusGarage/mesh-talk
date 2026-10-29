@@ -24,9 +24,14 @@ import { useAvatars } from "./avatars";
 it("pulls bounded native receipts through the existing unread owner and commits before ACK", async () => {
   vi.useFakeTimers();
   const values = new Map<string, string>();
+  const committedSnapshots: Array<Record<string, unknown>> = [];
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => values.get(key) ?? null,
-    setItem: (key: string, value: string) => values.set(key, value),
+    setItem: (key: string, value: string) => {
+      values.set(key, value);
+      if (key.startsWith("mesh-talk-reception-commit-v1:"))
+        committedSnapshots.push(JSON.parse(value));
+    },
   });
   const scope = {
     owner: "host",
@@ -86,6 +91,11 @@ it("pulls bounded native receipts through the existing unread owner and commits 
     await vi.advanceTimersByTimeAsync(0);
     expect(useChat.getState().unread["account:friend"]).toBe(1);
     expect(pulls).toBe(1);
+    expect(committedSnapshots[0].cursor).toEqual({ ...cursor, sequence: "0" });
+    expect(committedSnapshots[0].unread).toEqual({});
+    expect(
+      invoke.mock.calls.some(([command]) => command === "peer_avatars"),
+    ).toBe(false);
     expect(
       invoke.mock.calls.filter(
         ([command]) => command === "owner_reception_ack",
@@ -96,6 +106,65 @@ it("pulls bounded native receipts through the existing unread owner and commits 
     expect(pulls).toBe(1);
   } finally {
     stop?.();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("replaces a reserved native page after losing a later pull response", async () => {
+  vi.useFakeTimers();
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  });
+  const scope = {
+    owner: "host",
+    account_id: "myacct",
+    device_id: "me",
+    runtime_id: "installed",
+  };
+  const cursor = { epoch: "0123456789abcdef0123456789abcdef", sequence: "0" };
+  const resets: boolean[] = [];
+  invoke.mockImplementation(
+    (command: string, input: Record<string, unknown>) => {
+      if (command === "owner_node_identity")
+        return Promise.resolve({ ...scope, supports_bounded_delivery: true });
+      if (command === "owner_startup_identity")
+        return Promise.resolve({
+          ...scope,
+          startup_id: "installed",
+          phase: "ready",
+        });
+      if (command === "owner_reception_page") {
+        resets.push(input.reset as boolean);
+        if (resets.length === 2)
+          return Promise.reject(
+            new Error("reply lost after native reservation"),
+          );
+        return Promise.resolve({
+          scope,
+          token: `page-${resets.length}`,
+          after: cursor,
+          next: cursor,
+          through: cursor,
+          complete: true,
+          receipts: [],
+        });
+      }
+      if (command === "owner_reception_ack") return Promise.resolve(false);
+      return Promise.resolve([]);
+    },
+  );
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    captured.current?.onReceptionWake(scope);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(resets).toEqual([true, false, true]);
+  } finally {
+    stop();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   }
@@ -650,6 +719,7 @@ const reset = () =>
     bootBusy: false,
     bootRequest: 0,
     startupId: null,
+    deliveryRuntime: null,
     intents: {},
     deleted: {},
     statusBusy: false,

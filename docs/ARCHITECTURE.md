@@ -1473,6 +1473,8 @@ bounded ledger, unread counts, undiscovered senders, overflow, history coverage,
 batch state and exact decimal-string cursor. A persistence failure leaves that
 page pending without replaying its already-applied effects; an ambiguous ACK
 retries the same token. The snapshot is scoped to local user, account and device;
+the first observed prefix is persisted before applying any effects, so older
+per-field writes cannot become the recovery baseline after an interrupted page.
 current runtime authority fences every page and ACK. Replacing a runtime stops
 old pulls, and a new WebView may replace a lost unacknowledged page. A missing or
 corrupt previously committed snapshot is an explicit recovery failure, never an
@@ -1486,8 +1488,23 @@ caller-owned collecting contract. Ephemeral call signals use a separate inbox
 of at most 16 signals and 256 KiB including sender identifiers; admission fails
 explicitly when full, and a too-small demand read leaves the first signal queued.
 Call signaling remains best-effort and adds no wire acknowledgement or replay.
-Hosts must select this mode and complete their bounded demand handoff before
-these constructor guarantees describe a running desktop or CLI.
+Desktop startup, the node CLI and the dedicated integration host select this
+mode. The desktop publishes one scoped wake until its pending page is ACKed;
+state, channel, profile and file-progress invalidations share that gate. It
+retains only page cursor/token metadata and at most 64 current progress hints.
+Current profile values occupy at most 16 rows and 1 MiB raw per page; their walk
+restarts on a new revision or renderer replacement. Alongside receipt and call
+budgets, their conservative serialization charge remains below 64 MiB. These
+presentation-page limits do not claim the legacy current-avatar store is indexed.
+Native alerts start at launch high-water, sample at most eight live observations
+per second and intentionally coalesce excess alarms. They never retire durable
+unread work or replay old unread backlog as live notifications.
+
+CLI output and autosave enroll before either consumer starts. Output ACKs its
+printed prefix independently. Autosave keeps at most 32 pending file cards and
+does not ACK that page until each save succeeds or authoritative state says the
+file was declined or removed. Storage failures retain the durable prefix for
+retry and restart; a save completed before an interrupted ACK may run again.
 
 `SentStore`, `ReceivedStore` and `IndexedAccountSuppression` require completed
 participant authority; integration must retain `validate_participant_request`

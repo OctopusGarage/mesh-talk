@@ -35,6 +35,8 @@ pub struct NodeIdentity {
     account_id: String,
     history_revision: u64,
     supports_push_state: bool,
+    supports_bounded_delivery: bool,
+    runtime_id: Option<String>,
 }
 
 /// Atomically observes Session + runtime identity, including installation authority.
@@ -54,6 +56,8 @@ pub async fn owner_node_identity(
                 display_name: runtime.display_name(),
                 history_revision: runtime.account_history_revision(),
                 supports_push_state: true,
+                supports_bounded_delivery: runtime.handle().bounded_delivery(),
+                runtime_id: node.installed_runtime_id(admission.lease())?,
             })
         })
         .await

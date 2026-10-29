@@ -137,6 +137,22 @@ impl NodeState {
         Ok(())
     }
 
+    pub(crate) fn installed_runtime_id(
+        &self,
+        lease: &SessionLease,
+    ) -> Result<Option<String>, CommandError> {
+        self.check_installation(lease)?;
+        let state = self
+            .3
+            .lock()
+            .map_err(|_| CommandError::Internal("runtime state unavailable".into()))?;
+        Ok(state
+            .startup
+            .as_ref()
+            .filter(|startup| startup.lease == *lease && self.ticket_current(startup.ticket))
+            .map(|startup| startup.projection.startup_id.clone()))
+    }
+
     pub fn empty() -> Self {
         NodeState(
             Arc::new(RwLock::new(None)),
@@ -239,6 +255,24 @@ pub(crate) struct RuntimeAuthority {
 }
 
 impl RuntimeAuthority {
+    pub(crate) fn runtime_id(&self) -> Result<String, String> {
+        let state = self
+            .node
+            .3
+            .lock()
+            .map_err(|_| "runtime state unavailable")?;
+        state
+            .startup
+            .as_ref()
+            .filter(|startup| {
+                startup.lease == self.lease
+                    && startup.ticket == self.ticket
+                    && self.node.ticket_current(self.ticket)
+            })
+            .map(|startup| startup.projection.startup_id.clone())
+            .ok_or_else(|| "startup superseded".into())
+    }
+
     pub(crate) fn request(
         session: SessionState,
         lease: SessionLease,
