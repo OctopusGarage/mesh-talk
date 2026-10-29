@@ -153,7 +153,7 @@ test("full Chromium execution owns portable evidence while unique engines remain
   const ui = read("e2e-ui.yml");
   const portable = ui.split("  portable:\n")[1].split("  chromium-extended:\n")[0];
   assert.doesNotMatch(portable, /browser: chromium/);
-  assert.match(portable, /os: macos-26-intel, browser: webkit/);
+  assert.match(portable, /os: macos-latest, browser: webkit/);
   assert.match(ui, /name: Chromium portable evidence/);
   assert.match(read("ui-shards.yml"), /chromium-evidence.mjs extract/);
   assert.match(ui, /chromium-evidence.mjs collect/);

@@ -49,11 +49,13 @@ and Health, so late desktop scheduling cannot delay that merge. Portable collect
 and final UI acceptance still require both complete groups. One optional job
 renders all three HTML reports outside acceptance.
 Desktop browser shards start after Health completes, limiting the initial runner
-burst. Portable Health, independent backend and standalone browser jobs use the
-standard `macos-26-intel` pool. Full Chromium, the Rust workspace and real native
+burst. Portable Health and independent backend jobs use the standard
+`macos-26-intel` pool. All browser suites, the Rust workspace and real native
 desktop acceptance retain `macos-latest` Apple Silicon execution. Measure both
-queue and execution before moving a workload: full Chromium qualification on
-Intel acquired runners but substantially increased matching-case execution time.
+queue and execution before moving a workload: Intel qualification substantially
+increased full Chromium execution time, and cold WebKit startup left too little
+of the existing scenario budget for its assertions. Vite warmup did not show a
+repeatable improvement in fresh-server comparisons and is not enabled.
 Staging desktop admission keeps full Chromium out of the initial ARM burst. Intel is a
 [standard hosted runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
 not a larger-runner purchase; both pools still require measured queue and execution
@@ -809,6 +811,15 @@ consider paused virtual time only after checking every clock source; mixed
 reconciliation sleep with an observed completed round when that round is the
 actual invariant. Preserve real loopback, restart, expiry and concurrency budgets;
 neither reducing delays nor increasing Windows workers is a default speed fix.
+
+The slow-route file scheduler fixture acknowledges TCP acceptance before holding
+the handshake for 600 ms and rejects a worker that finishes during that hold.
+Its original 15-second Dial budget includes the hold; each subsequent ordered
+phase shares one existing exchange budget across all of its turns. Unexpected
+phases, redials, missing workers and server failures fail explicitly. Delivery
+confirmation and exact received bytes remain required. A negative control that
+cancels the actual Dial worker at 400 ms must fail the held-handshake assertion;
+a whole-transfer wall-clock limit is not a substitute for that regression oracle.
 
 Patch line coverage follows the frontend unit-coverage exclusions: registered
 `.test.ts` files and `.d.ts` declarations do not enter its production denominator.

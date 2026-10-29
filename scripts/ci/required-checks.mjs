@@ -34,7 +34,6 @@ const replacements = new Map([
   ["checks (windows-latest)", windows],
   ["health / Portable checks (macos-latest)", ["health / Portable checks (macos-26-intel)"]],
   ["Backend core (macos-latest)", ["Backend core (macos-26-intel)"]],
-  ["Portable UI (macos-latest, webkit)", ["Portable UI (macos-26-intel, webkit)"]],
   ["Backend core (ubuntu-24.04)", ["checks (ubuntu-latest)"]],
   ["Multi-process E2E", ["checks (ubuntu-latest)", ...backend, ...native]],
   ...["ubuntu-latest", "macos-latest", "windows-latest"].map(os => [`Code Quality and Health Check (${os})`, health]),
