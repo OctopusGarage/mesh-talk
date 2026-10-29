@@ -5,18 +5,25 @@ import { resolve } from "node:path";
 import { mutationShard, parseSelectedMutants, validateMutationReport } from "./mutation-evidence.mjs";
 
 const args = process.argv.slice(2);
+const listOnly = args[0] === "--list-only";
+if (listOnly) args.shift();
 assert.ok(args.length === 0 || (args.length === 2 && args[0] === "--in-diff"), "unsupported mutation filter arguments");
 const shard = mutationShard(Number(process.env.GITHUB_RUN_NUMBER ?? "1"), Number(process.env.MUTATION_WORKER ?? "0"), Number(process.env.MUTATION_WORKERS ?? "1"));
-// Two test processes spent 430 seconds in completed tests before the 240-second
-// suite limit; four processes fit the growing baseline without relaxing per-test
-// or whole-suite deadlines. In-place mutation still uses one mutation worker.
+// Historical full baselines were killed at 240s with hundreds of tests pending.
+// Bound the complete growing workspace independently of nextest's unchanged
+// 60s per-test deadline. A larger ceiling does not delay a completed suite.
 // In-place mode enforces one worker, reusing the checkout's build cache. CI runs
 // shards on separate machines to avoid competing workspace builds and tests.
-const options = ["--test-tool", "nextest", "--cargo-test-arg=--profile=mutants", "--workspace", "--test-workspace", "true", "--in-place", "--profile", "mutants", "--no-shuffle", "--shard", shard, "--sharding", "round-robin", "--timeout", "240", "--output", "..", ...args];
+const options = ["--test-tool", "nextest", "--cargo-test-arg=--profile=mutants", "--workspace", "--test-workspace", "true", "--in-place", "--profile", "mutants", "--no-shuffle", "--shard", shard, "--sharding", "round-robin", "--timeout", "900", "--output", "..", ...args];
 const listing = spawnSync("cargo", ["mutants", "--list", "--json", ...options], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
 if (listing.error) throw listing.error;
 assert.equal(listing.status, 0, `mutation list failed: ${listing.stderr}`);
 const selected = parseSelectedMutants(listing.stdout, listing.status);
+if (listOnly) {
+  console.log(`Mutation sample ${shard}: ${selected.length} selected`);
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `selected=${selected.length}\n`);
+  process.exit(0);
+}
 const reportPath = resolve("../mutants.out/outcomes.json");
 let exitCode = 0;
 if (selected.length > 0) {

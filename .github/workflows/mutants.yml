@@ -1,13 +1,9 @@
 name: Mutation Testing
 
-# cargo-mutants injects bugs and checks the test suite catches them (the Rust
-# equivalent of Stryker). It runs the suite once per mutant, so it is slow:
-#   - on PRs it samples mutants in the changed lines,
-#   - on main, weekly, or on demand it samples the whole workspace.
-# Each run tests one of 256 rotating round-robin samples, divided across four
-# runners. Each summary states its subshard and result count.
-# Surviving mutants are surfaced as annotations + an artifact but do NOT block
-# (this is an existing codebase; treat results as a coverage-quality signal).
+# Pull requests, merge candidates and main pushes verify the pinned runner's
+# real caught/survivor/baseline/hang/empty-selection behavior. Broad workspace
+# mutation samples run daily or on explicit dispatch, independently of merging.
+# Deep samples retain complete baselines, all consumers and strict reports.
 on:
   merge_group:
     types: [checks_requested]
@@ -16,22 +12,39 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '0 4 * * 1' # Mondays 04:00 UTC
+    - cron: '0 4 * * *' # Daily deep assurance, outside the merge critical path
   workflow_dispatch:
 
 concurrency:
-  group: mutants-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: mutants-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' }}
 
 permissions:
   contents: read
 
 jobs:
-  mutants:
+  runner-contract:
     runs-on: ubuntu-latest
-    # The observed 17-mutant shards need up to ~117 minutes including setup,
-    # baseline, 130s builds and the existing 240s per-suite bound.
-    timeout-minutes: 120
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+      - uses: taiki-e/install-action@v2.87.31
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
+      - name: Verify pinned mutation runner behavior
+        run: node --test scripts/diagnostics/mutants-workflow.test.mjs scripts/diagnostics/mutation-evidence.test.mjs scripts/release/run-mutants.test.mjs
+
+  mutants:
+    needs: runner-contract
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # Cover setup plus 18 builds/suites (baseline and 17 mutants) at the
+    # observed 130s build and bounded 900s suite budgets, without truncation.
+    timeout-minutes: 360
     strategy:
       fail-fast: false # Keep other reports if one runner has a baseline/tool failure.
       matrix:
@@ -44,20 +57,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # PR-diff mode needs history
-
-      - name: Install Tauri system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf
+          fetch-depth: 1 # Daily sampling does not need repository history
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: '.'
-          key: mutants
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -65,32 +67,42 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Build frontend
-        working-directory: frontend
-        run: |
-          npm ci
-          npm run build
-
       - name: Install mutation test tools
         uses: taiki-e/install-action@v2.87.31
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
 
-      - name: Compute PR diff
-        if: github.event_name == 'pull_request'
-        run: git diff "origin/${{ github.base_ref }}"...HEAD > mutants-diff.patch
-
-      # cargo-mutants runs and validates its own baseline before injecting bugs.
-      - name: Validate mutation runner
-        run: node --test scripts/diagnostics/mutants-workflow.test.mjs scripts/diagnostics/mutation-evidence.test.mjs scripts/release/run-mutants.test.mjs
-
-      - name: Mutants (PR diff)
-        if: github.event_name == 'pull_request'
+      - name: Select mutation sample
+        id: selection
         working-directory: src-tauri
-        run: node ../scripts/release/run-mutants.mjs --in-diff ../mutants-diff.patch
+        run: node ../scripts/release/run-mutants.mjs --list-only
 
+      - name: Install Tauri system dependencies
+        if: steps.selection.outputs.selected != '0'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Cache mutation build
+        if: steps.selection.outputs.selected != '0'
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: '.'
+          key: mutants
+
+      - name: Build frontend
+        if: steps.selection.outputs.selected != '0'
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      # The shared runner contract passed before these shards started.
       - name: Mutants (workspace sample)
-        if: github.event_name != 'pull_request'
+        if: steps.selection.outputs.selected != '0'
         working-directory: src-tauri
         run: node ../scripts/release/run-mutants.mjs
 
@@ -106,13 +118,20 @@ jobs:
   # Preserve the stable branch-protection check across matrix size changes.
   mutation-gate:
     name: mutants
-    needs: mutants
+    needs: [runner-contract, mutants]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require all mutation shards
         env:
+          CONTRACTS: ${{ needs.runner-contract.result }}
+          DEEP: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           SHARDS: ${{ needs.mutants.result }}
         run: |
-          test "$SHARDS" = success
+          test "$CONTRACTS" = success
+          if [ "$DEEP" = true ]; then
+            test "$SHARDS" = success
+          else
+            test "$SHARDS" = skipped
+          fi

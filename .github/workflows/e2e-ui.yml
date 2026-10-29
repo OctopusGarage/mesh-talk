@@ -192,6 +192,8 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
+  # HTML presentation is independent of acceptance; raw traces/blob reports
+  # remain mandatory artifacts on the test shards themselves.
   reports:
     name: Merged UI report (${{ matrix.os }})
     needs: e2e
@@ -369,7 +371,7 @@ jobs:
 
   ui-gate:
     name: Playwright UI E2E
-    needs: [e2e, coverage, reports, packs, portable, firefox-extended]
+    needs: [e2e, coverage, packs, portable, firefox-extended]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -377,7 +379,6 @@ jobs:
         env:
           BASELINE: ${{ needs.e2e.result }}
           COVERAGE: ${{ needs.coverage.result }}
-          REPORTS: ${{ needs.reports.result }}
           PACKS: ${{ needs.packs.result }}
           PORTABLE: ${{ needs.portable.result }}
           FIREFOX: ${{ needs.firefox-extended.result }}
@@ -385,7 +386,6 @@ jobs:
         run: |
           test "$BASELINE" = success
           test "$COVERAGE" = success
-          test "$REPORTS" = success
           test "$PACKS" = success
           test "$PORTABLE" = success
           if [ "$EXTENDED" = true ]; then

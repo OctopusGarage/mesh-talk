@@ -6,24 +6,52 @@ import { spawnSync } from "node:child_process";
 const workflow = readFileSync(new URL("../../.github/workflows/mutants.yml", import.meta.url), "utf8");
 const wrapper = readFileSync(new URL("../release/run-mutants.mjs", import.meta.url), "utf8");
 
-test("the protected mutants check requires every mutation shard to succeed", () => {
-  const gate = workflow.split("  mutation-gate:\n")[1];
-  assert.ok(gate, "the sharded workflow must still report the protected mutants check");
-  assert.match(gate, /name: mutants\n/);
-  assert.match(gate, /needs: mutants\n/);
-  assert.match(gate, /if: always\(\)/);
-  assert.match(gate, /SHARDS: \$\{\{ needs.mutants.result \}\}/);
-  const script = gate.split("        run: |\n")[1].replace(/^          /gm, "");
-  for (const result of ["success", "failure", "cancelled", "skipped", ""]) {
-    const run = spawnSync("bash", ["-e", "-c", script], {
-      encoding: "utf8", env: { ...process.env, SHARDS: result },
-    });
-    assert.equal(run.status === 0, result === "success", result);
+test("main pushes cannot cancel scheduled deep assurance", () => {
+  assert.match(workflow, /group: mutants-\$\{\{ github.event_name \}\}-/);
+  assert.match(workflow, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \|\| github.event_name == 'merge_group' \|\| github.event_name == 'push' \}\}/);
+});
+
+test("mutation selection precedes expensive setup and zero selections skip only execution work", () => {
+  const selection = workflow.indexOf("name: Select mutation sample");
+  assert.ok(selection > 0);
+  for (const name of ["Install Tauri system dependencies", "Build frontend", "Cache mutation build"]) {
+    const block = workflow.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
+    assert.ok(block, name);
+    assert.ok(workflow.indexOf(`name: ${name}`) > selection, name);
+    assert.match(block, /if: steps.selection.outputs.selected != '0'/);
+  }
+  assert.match(workflow, /--list-only\n/);
+  for (const name of ["Mutants (workspace sample)"]) {
+    const block = workflow.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
+    assert.match(block, /steps.selection.outputs.selected != '0'/);
   }
 });
 
-test("both mutation modes use process-isolated tests with bounded execution", () => {
-  assert.equal([...workflow.matchAll(/run: node \.\.\/scripts\/release\/run-mutants\.mjs/g)].length, 2);
+test("the protected mutation gate requires runner contracts and every selected deep shard", () => {
+  const gate = workflow.split("  mutation-gate:\n")[1];
+  assert.ok(gate);
+  assert.match(gate, /name: mutants\n/);
+  assert.match(gate, /needs: \[runner-contract, mutants\]/);
+  assert.match(gate, /if: always\(\)/);
+  const script = gate.split("        run: |\n")[1].replace(/^          /gm, "");
+  for (const deep of ["true", "false"]) {
+    for (const contracts of ["success", "failure", "cancelled", "skipped", ""]) {
+      for (const shards of ["success", "failure", "cancelled", "skipped", ""]) {
+        const run = spawnSync("bash", ["-e", "-c", script], {
+          encoding: "utf8", env: { ...process.env, CONTRACTS: contracts, SHARDS: shards, DEEP: deep },
+        });
+        assert.equal(run.status === 0, contracts === "success" && shards === (deep === "true" ? "success" : "skipped"), `${deep}/${contracts}/${shards}`);
+      }
+    }
+  }
+  const deep = workflow.split("  mutants:\n")[1].split("  mutation-gate:\n")[0];
+  assert.match(deep, /if: github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch'/);
+  const contracts = workflow.split("  runner-contract:\n")[1].split("  mutants:\n")[0];
+  assert.match(contracts, /scripts\/release\/run-mutants.test.mjs/);
+});
+
+test("deep mutation samples use process-isolated tests with bounded execution", () => {
+  assert.equal([...workflow.matchAll(/run: node \.\.\/scripts\/release\/run-mutants\.mjs$/gm)].length, 1);
   assert.match(wrapper, /"--test-tool", "nextest"/);
   assert.match(wrapper, /"--cargo-test-arg=--profile=mutants"/);
   assert.match(wrapper, /"--", "--test-threads=4"/);
@@ -35,7 +63,7 @@ test("both mutation modes use process-isolated tests with bounded execution", ()
   assert.match(wrapper, /const shard = mutationShard\(Number\(process\.env\.GITHUB_RUN_NUMBER/);
   assert.match(wrapper, /"--shard", shard/);
   assert.match(wrapper, /"--sharding", "round-robin"/);
-  assert.match(wrapper, /"--timeout", "240"/);
+  assert.match(wrapper, /"--timeout", "900"/);
 });
 
 test("mutation report upload includes the workspace-root output directory", () => {
@@ -60,7 +88,8 @@ test("mutation builds reuse one incremental tree per matrix runner", () => {
 
 test("mutation job budget fits the observed workspace sample without relaxing test deadlines", () => {
   // Run 40187525604 selected 17 mutants in a shard. Builds reached 130s;
-  // retain the runner's 240s suite bound for the baseline and every mutant.
+  // A healthy growing baseline exceeded 240s; preserve per-test isolation while
+  // allowing 900s for the complete workspace, including every consumer.
   const selected = 17;
   const buildSeconds = 130;
   const suiteSeconds = Number(wrapper.match(/"--timeout", "(\d+)"/)[1]);

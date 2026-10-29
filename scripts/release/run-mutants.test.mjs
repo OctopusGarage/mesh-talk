@@ -9,6 +9,31 @@ import test from "node:test";
 // Run explicitly in mutation CI, where the pinned tool is installed. These tiny,
 // dependency-free crates exercise its actual CLI and report format in seconds.
 const runner = fileURLToPath(new URL("./run-mutants.mjs", import.meta.url));
+test("selection preflight uses the real parser without compiling or running a failing baseline", t => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-mutants-selection-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cwd = join(root, "src-tauri");
+  mkdirSync(join(cwd, "src"), { recursive: true });
+  writeFileSync(join(root, "Cargo.toml"), '[workspace]\nmembers = ["src-tauri"]\nresolver = "3"\n[profile.mutants]\ninherits = "test"\n');
+  writeFileSync(join(cwd, "Cargo.toml"), '[package]\nname = "selection-smoke"\nversion = "0.1.0"\nedition = "2024"\n');
+  writeFileSync(join(cwd, "src/lib.rs"), 'pub fn eligible(x: u32) -> bool { x > 10 }\n#[cfg(test)] mod tests { #[test] fn fails() { panic!("baseline must not run"); } }\n');
+  for (const [runNumber, count] of [["1", 1], ["256", 0]]) {
+    const output = join(root, `output-${runNumber}`);
+    const result = spawnSync(process.execPath, [runner, "--list-only"], {
+      cwd, encoding: "utf8", timeout: 30_000,
+      env: { ...process.env, GITHUB_RUN_NUMBER: runNumber, MUTATION_WORKER: "0", MUTATION_WORKERS: "1", GITHUB_OUTPUT: output },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(readFileSync(output, "utf8"), `selected=${count}\n`);
+  }
+  const invalid = spawnSync(process.execPath, [runner, "--list-only", "--in-diff", "missing.patch"], {
+    cwd, encoding: "utf8", timeout: 30_000,
+    env: { ...process.env, GITHUB_RUN_NUMBER: "1", MUTATION_WORKER: "0", MUTATION_WORKERS: "1" },
+  });
+  assert.ifError(invalid.error);
+  assert.notEqual(invalid.status, 0, "invalid selection must never certify an empty sample");
+});
 for (const scenario of ["caught", "missed", "baseline failure", "empty", "hanging mutant", "hanging baseline"]) {
   test(`real cargo-mutants runner: ${scenario}`, () => {
     const root = mkdtempSync(join(tmpdir(), "mesh-mutants-runner-"));

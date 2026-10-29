@@ -52,6 +52,8 @@ jobs:
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Configure hosted macOS multicast route
         if: runner.os == 'macOS'

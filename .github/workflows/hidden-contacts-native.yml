@@ -47,6 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # Keep compiled dependencies when a scenario fails, not its verdict.
           cache-on-failure: true
       - name: Route the fixture multicast group locally (macOS runner only)

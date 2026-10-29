@@ -390,10 +390,16 @@ not a claim of hermetic execution or transferable signed evidence.
 No local receipt replaces a protected GitHub check. Local receipts are trusted
 workspace acceleration, not signed attestations against a hostile local user.
 
+Running-stage heartbeats exclude queue time, matching the structured execution
+duration rather than counting resource waits as test runtime.
+
 Heavy local stages share a resource lock across Git worktrees, preventing browser,
 coverage and Rust compilation workloads from competing. Node unit tests default
-to two workers and Rust tests to one thread; explicit `VITEST_MAX_WORKERS` and
-`RUST_TEST_THREADS` values override those defaults and invalidate matching evidence.
+to two workers. Cargo owns Rust test concurrency through `.cargo/config.toml`
+(four threads); the supervisor does not inject a competing default into aggregate
+stages or their Cargo children. Explicit `RUST_TEST_THREADS` values remain
+authoritative for serial Windows/sanitizer checks and invalidate matching
+evidence. Direct test-binary callers must supply their intended thread budget.
 Each browser stage owns an available port and private results/report directory.
 The full browser process has a two-hour ceiling; selected/portable processes have
 30 minutes. `MESH_BROWSER_TIMEOUT_SECONDS` can set an explicit 1–7200 second
@@ -453,14 +459,14 @@ independent checks run concurrently and heavy suites are not repeated by health.
 
 | Owner                                 | Checks                                                                                                                                                                                                                 |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, dependency audits on Linux/macOS/Windows                                                                                                      |
+| `check-health.yml` platform jobs      | Frontend formatting, ESLint, source/E2E TypeScript, npm advisory policy, unit coverage and upload, help tests/audit, diagnostic/Python regressions on Linux/macOS/Windows; Linux eval smoke                                                                                                      |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
-| `ci.yml`                              | Frontend builds, built-JS compatibility, unit coverage, diagnostic/Python regressions, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage, Linux multi-process coverage and eval smoke |
+| `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage and Linux multi-process coverage |
 | `e2e-ui.yml`                          | Full Chromium regression on Linux/macOS/Windows, Linux browser coverage, optional-pack checks, portable browser matrices and scheduled extended scenarios                                                                       |
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                        |
 
 Every existing protected health name now requires both the source scanner job
-and the complete platform static matrix. A failed, cancelled or skipped dependency
+and the complete portable validation matrix. A failed, cancelled or skipped dependency
 fails the gate. Health runs for every PR base so moving source checks out of CI
 does not leave non-main PRs without them. CI retains the weekly Rust run formerly
 provided by scheduled full health; UI E2E runs the full browser matrices daily.
@@ -469,6 +475,14 @@ when complete hosted verification is needed. The local full-health command is
 unchanged. Required CI, health, UI E2E and backend check names remain stable.
 The protected `Full Linux UI regression` name now belongs to the coverage merge
 job, which explicitly fails when its browser shard matrix is unsuccessful.
+
+Portable validation reuses Health's existing Node, Python and frontend dependency
+setup. Native CI no longer waits for frontend unit tests, help audits or diagnostic
+regressions before starting Clippy and workspace builds. Health uploads frontend
+coverage; CI uploads Rust coverage. Both remain protected checks, including strict
+coverage upload failures. Native CI has a 90-minute job budget; Health portable
+jobs have a 25-minute budget. These are execution bounds, not latency promises.
+Compare hosted queue, execution and all-required-check completion after deployment.
 
 Full Chromium tests use four Playwright shards per OS, with one worker and zero
 retries per runner. This keeps the existing per-machine rendering budget while
@@ -495,8 +509,10 @@ input. Unit coverage artifacts are attempt-bound: use **Re-run all jobs** for th
 workflow when retrying a failed attempt, so producer and shards belong to the
 same attempt. The extra producer job adds setup/queue/transfer cost; benchmark
 its net latency and runner-minute effect before claiming a speedup.
-The final UI gate requires successful browser, coverage, merged-report,
-optional-pack and portable jobs, plus Firefox when selected. Blob reports and failure
+The final UI gate requires successful browser, coverage, optional-pack and
+portable jobs, plus Firefox when selected. HTML report rendering runs independently
+and is not a merge acceptance dependency; each test shard still requires its raw
+blob/trace evidence upload to succeed. Blob reports and failure
 traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
 when browser execution fails.
 
@@ -504,10 +520,40 @@ The Rust build cache maps the workspace root to `target/`, matching
 `cargo metadata --no-deps --format-version 1`. The CI cache has its own build
 configuration key; native release, mutation and sanitizer caches stay separate.
 Cached build output never replaces executing checks on the current revision.
+Verification jobs restore caches on all selected events, while only `main` writes
+Rust caches. This avoids accumulating PR-private compiled copies that other PRs
+cannot reuse. A PR changing dependencies may rebuild them until its lockfile lands
+on main; normal main checks refresh the shared baseline. Existing caches are not
+deleted by this policy. See [GitHub cache scope](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache).
 
-Mutation testing retains one rotating workspace sample across four runners. Its
-120-minute job budget covers setup, the unmutated baseline and the complete sample;
-it does not extend the 60-second per-test or 240-second per-suite deadlines. The
+The protected `mutants` check verifies the pinned runner on PRs, merge groups
+and main pushes using real tiny-crate caught, survivor, baseline-failure, hanging
+and empty-selection scenarios. Broad workspace mutation sampling is daily/manual
+assurance, outside merge acceptance; it is not claimed as PR mutation coverage.
+The gate requires runner-contract success on every event. It requires complete
+successful deep shards on daily/manual runs and an explicitly skipped deep job
+on other events; unexpected missing, cancelled or failed work never passes.
+Daily failures remain visible in Actions and require owner triage before the next
+scheduled run. Dispatch Mutation Testing after a critical invariant change when
+immediate deep evidence is needed. This policy keeps all ordinary platform,
+security, unit, integration and coverage acceptance gates in place.
+
+Mutation runners list their exact rotating/diff selection before installing native
+system libraries, restoring compiled caches or building the frontend. An empty
+selection skips those execution costs; listing errors fail the runner. Nonempty
+selections still execute their own unmodified baseline and strict outcome validation.
+The preflight does not narrow the sample or certify any test result. Pinned-tool
+smoke tests cover empty and nonempty selections without compiling a failing fixture.
+
+Daily/manual mutation testing retains one rotating workspace sample across four runners. Its
+360-minute job ceiling covers setup, the unmutated baseline and the complete sample.
+The per-test nextest deadline remains 60 seconds. The full-workspace ceiling is
+900 seconds: a complete local 2,340-test nextest baseline passed in 552 seconds,
+and historical baselines hit the previous 240-second limit with hundreds
+of tests still pending. This is a harness resource budget, not a product deadline;
+completed suites return immediately, and timeouts still fail strict validation.
+The in-place runner cannot use cargo-mutants timeout multipliers, so keep this
+bound explicit and reassess it from baseline measurements as the suite grows. The
 October 25 sample selected 16–17 mutants per runner, with builds up to 130 seconds
 and successful suites around 180–217 seconds. A 60-minute job canceled unfinished
 shards despite passing baselines. Reassess this budget from selected counts and
@@ -515,6 +561,16 @@ build/test timings as the workspace grows; incomplete reports still fail the gat
 Loopback UDP reply fixtures connect their receiving socket to their own listener
 so concurrent discovery traffic cannot masquerade as a reply. Tests must still
 reject extra replies from that listener after a refresh.
+
+Nickname publication fixtures seed the existing signed account profile alongside
+the account key before starting a sibling, then install reciprocal device certificates. A key-only clone creates a new local
+profile and can race the intended edit with a newer host-name card. Assert this
+starting state explicitly; nickname updates retain their existing deadlines and
+preservation checks. Successful outbound profile reconciliation must project any
+newer sibling events it pulls before marking publication complete. The loopback
+regression `publishing_profile_projects_newer_sibling_profile_pulled_in_same_round`
+verifies durable event import and immediate signed profile/avatar projection
+without a reverse connection or background runtime masking the result.
 
 Registered desktop IPC fixtures wait for their signed peer to appear and repeat
 its UDP announcement within the existing setup deadline. A successful UDP send is

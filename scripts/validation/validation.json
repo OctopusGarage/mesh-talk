@@ -185,7 +185,7 @@
         "scripts/diagnostics/patch-coverage.test.mjs"
       ],
       "escalation": [
-        "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI."
+        "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI. Supervisor Rust thread-policy changes also require full workspace consumers and the real Cargo thread-policy fixture; preserve explicit Windows/sanitizer caller limits."
       ]
     },
     {
@@ -257,6 +257,7 @@
       "id": "ci-verification",
       "paths": [
         "_typos.toml",
+        "scripts/ai-eval-smoke.sh",
         "scripts/check-health.sh",
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
@@ -265,6 +266,7 @@
         ".github/workflows/check-health.yml",
         ".github/workflows/e2e-ui.yml",
         ".github/workflows/e2e-backend.yml",
+        ".github/workflows/hidden-contacts-native.yml",
         ".github/workflows/sanitizers.yml",
         ".github/workflows/mutants.yml",
         ".config/nextest.toml",
@@ -281,13 +283,14 @@
       ],
       "node": [
         "scripts/diagnostics/ci-latency.test.mjs",
+        "scripts/test-ai-eval.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
         "scripts/diagnostics/merge-queue.test.mjs",
         "scripts/diagnostics/mutants-workflow.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs"
       ],
       "escalation": [
-        "Run actionlint and affected workflow regressions; preserve full mutation sample completion, strict report validation and bounded per-test/per-suite execution. Size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
+        "Run actionlint and affected workflow regressions. Mutation runner changes also require scripts/release/run-mutants.test.mjs with the pinned cargo-mutants and cargo-nextest tools; verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
       ]
     },
     {

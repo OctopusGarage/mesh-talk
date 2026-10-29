@@ -1135,7 +1135,7 @@
         }
       ],
       "escalation": [
-        "Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
+        "Profile publication changes require publishing_profile_projects_newer_sibling_profile_pulled_in_same_round, proving durable import and immediate authenticated projection without a reverse connection. Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
       ],
       "consumers": [
         "desktop-chat",

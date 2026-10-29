@@ -784,6 +784,16 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
         &runtime.node.account,
     )
     .unwrap();
+    // This fixture models an existing account on a sibling device. Seed its
+    // signed card as well as its key: a key-only clone is a fresh single-device
+    // account and legitimately creates a newer card from the host name.
+    crate::node::account_profile_data::AccountProfileStore::open(
+        &joining_dir.join("account-profiles.log"),
+        "pw",
+    )
+    .unwrap()
+    .record(old.clone())
+    .unwrap();
     let joining = NodeRuntime::start(
         root.path(),
         "joining",
@@ -798,7 +808,25 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        joining.handle().account_profile(joining.account_id()),
+        Some(old.clone()),
+        "the sibling starts with the existing signed account profile"
+    );
     for (receiver, sender) in [(&runtime, &joining), (&joining, &runtime)] {
+        receiver
+            .node
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(crate::node::AccountDevice {
+                public: sender.node.identity.public(),
+                certificate: runtime
+                    .node
+                    .account
+                    .certify(&sender.node.identity.public().ed25519_pub),
+            })
+            .unwrap();
         receiver.roster.lock().unwrap().update(
             &sender
                 .node
@@ -850,7 +878,13 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
         }
     })
     .await
-    .expect("the kept device receives the joining device's later nickname edit");
+    .unwrap_or_else(|error| {
+        panic!(
+            "the kept device receives the joining device's later nickname edit: {error}; expected={shared:?}; owner={:?}; sibling={:?}",
+            runtime.handle().account_profile(runtime.account_id()),
+            joining.handle().account_profile(joining.account_id()),
+        )
+    });
     assert_eq!(shared.bio, "Personal signature");
     assert_eq!(shared.avatar, Some(b"avatar".to_vec()));
     joining.stop().await;

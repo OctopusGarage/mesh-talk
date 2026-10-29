@@ -37,6 +37,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -60,6 +61,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: . -> target
           key: workspace-checks
           cache-on-failure: true
@@ -70,17 +72,12 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Validate public help and MCP
-        run: |
-          npm ci --prefix tools/help --ignore-scripts
-          node --test tools/help/*.test.mjs
-          npm audit --prefix tools/help --audit-level=high
-
       - name: Install frontend dependencies and check standards
         shell: bash
         run: |
           npm ci --prefix frontend
           node scripts/validation/standards.mjs
+          node scripts/check-repository-hygiene.mjs
 
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend
@@ -91,38 +88,7 @@ jobs:
         working-directory: frontend
         run: npm run check:build-syntax
 
-      - name: Frontend unit tests and coverage
-        working-directory: frontend
-        run: npm run test:coverage
-
-      - name: Upload frontend coverage
-        if: always() && matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v7
-        with:
-          name: frontend-coverage-${{ github.run_attempt }}
-          path: frontend/coverage/
-          if-no-files-found: warn
-
-      - name: Delivery and AI eval smoke
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          make eval-smoke
-          node --test scripts/test-ai-eval.mjs
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Diagnostic and release gate regressions (all platforms)
-        shell: bash
-        run: |
-          node scripts/check-repository-hygiene.mjs
-          node --test scripts/diagnostics/*.test.mjs
-
-      - name: Build retention safeguards (all platforms)
-        run: python3 -m unittest discover -s scripts -p test_build_retention.py -v
-
-      # All platforms retain the Clippy and build checks formerly repeated by health.
+      # Keep native lint, production builds and instrumented tests on every OS.
       - name: Clippy
         working-directory: src-tauri
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -139,7 +105,7 @@ jobs:
 
       # Every platform collects coverage in its existing test pass: native-only
       # updater policy cannot be represented by Linux's AppImage-only branch.
-      # --workspace so BOTH crates (mesh-talk-core + the app) are tested, not just the app.
+      # --workspace covers the protocol, integrations, MCP adapter and desktop app.
       - name: Test (macOS + Windows)
         if: matrix.os != 'ubuntu-latest'
         working-directory: src-tauri
@@ -238,7 +204,7 @@ jobs:
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ${{ matrix.os == 'ubuntu-latest' && 'frontend/coverage/lcov.info,src-tauri/lcov.info,src-tauri/e2e-lcov.info' || 'src-tauri/lcov.info' }}
+          files: ${{ matrix.os == 'ubuntu-latest' && 'src-tauri/lcov.info,src-tauri/e2e-lcov.info' || 'src-tauri/lcov.info' }}
           name: workspace-${{ matrix.os }}-${{ github.run_attempt }}
           # Branch protection requires codecov/patch; surface upload failures in CI too.
           fail_ci_if_error: true

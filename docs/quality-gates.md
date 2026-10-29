@@ -47,15 +47,18 @@ literal test glob is not execution evidence. Require the native health check nam
 alongside `verify` in branch protection to make these PR checks merge-blocking;
 the workflow alone does not change administrator branch-protection settings.
 
-Mutation testing uses pinned cargo-mutants 27.1.0 and examines both Rust workspace
-members. Each run rotates through one of 256 round-robin samples and partitions that
+Mutation testing uses pinned cargo-mutants 27.1.0 and examines all Rust workspace
+members on daily and manual runs. PR, push and merge-queue runs validate the pinned
+runner with real fixture crates; they do not sample product mutations. See the
+[mutation execution policy](testing-feedback-loop.md) for ownership and budgets.
+Each broad run rotates through one of 256 round-robin samples and partitions that
 same sample across four runners (subshards of 1024), without changing the selected
 mutant set. Each runner uses one in-place worker, incremental compilation, the
 symbol-free `mutants` Cargo profile, and the workspace-root build cache. Every
 mutant still runs the workspace tests through pinned cargo-nextest 0.9.148. Its
 `mutants` profile isolates each test in a process and fails tests exceeding 60
 seconds (with a five-second termination grace period). This catches injected busy
-loops even when they prevent an async timeout from being polled. The 240-second
+loops even when they prevent an async timeout from being polled. The 900-second
 whole-suite deadline remains a hard failure. Reports are uploaded as `mutants-report-0`
 through `mutants-report-3`; assess all four reports for the complete sample.
 

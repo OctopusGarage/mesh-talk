@@ -6,6 +6,33 @@ import { spawnSync } from "node:child_process";
 const read = name => readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
 const step = (source, name) => source.split(/^      - /m).find(value => value.startsWith(`name: ${name}\n`));
 
+test("verification Rust caches restore on PRs and publish reusable main caches", () => {
+  for (const file of ["ci.yml", "e2e-backend.yml", "hidden-contacts-native.yml", "sanitizers.yml", "mutants.yml"]) {
+    const cache = read(file).split(/^      - /m).find(value => value.includes("uses: Swatinem/rust-cache@v2"));
+    assert.ok(cache, file);
+    assert.match(cache, /save-if: \$\{\{ github.ref == 'refs\/heads\/main' \}\}/, file);
+    assert.doesNotMatch(cache, /^        if:.*github.ref/m, "PRs still restore compatible caches");
+  }
+});
+
+test("portable diagnostics declare the Rust toolchain needed by their real Cargo fixture", () => {
+  const platform = read("check-health.yml").split("  platform:\n")[1].split("  source:\n")[0];
+  const toolchain = platform.indexOf("uses: dtolnay/rust-toolchain@stable");
+  assert.ok(toolchain >= 0 && toolchain < platform.indexOf("node --test scripts/diagnostics/*.test.mjs"));
+});
+
+test("portable validation runs beside native compilation using existing health runners", () => {
+  const ci = read("ci.yml");
+  const health = read("check-health.yml");
+  for (const command of ["npm run test:coverage", "node --test scripts/diagnostics/*.test.mjs", "python3 -m unittest discover", "node --test tools/help/*.test.mjs"]) {
+    assert.ok(health.includes(command), `Health must retain ${command}`);
+    assert.ok(!ci.includes(command), `native compilation must not wait for ${command}`);
+  }
+  assert.match(ci.split("  checks:\n")[1], /timeout-minutes: 90/);
+  assert.match(health, /name: Upload frontend coverage/);
+  assert.match(health, /files: frontend\/coverage\/lcov.info/);
+});
+
 test("CI caches the workspace output and retains native lint and build coverage", () => {
   const ci = read("ci.yml");
   assert.match(ci, /workspaces: ['"]?\. -> target/);
@@ -20,7 +47,7 @@ test("health owns fast checks without repeating Rust or browser suites", () => {
   for (const command of ["npm run format:check", "npm run lint", "npm run typecheck", "audit-ci", "cargo fmt --all -- --check", "cargo deny check", "cargo machete", "shellcheck", "actionlint", "typos"]) assert.ok(health.includes(command), command);
   assert.match(health, /matrix:\n        os: \[ubuntu-latest, macos-latest, windows-latest\]/);
   const ci = read("ci.yml");
-  assert.match(step(ci, "Build retention safeguards (all platforms)"), /python3 -m unittest discover -s scripts -p test_build_retention.py -v/);
+  assert.match(step(health, "Build retention safeguards (all platforms)"), /python3 -m unittest discover -s scripts -p test_build_retention.py -v/);
   for (const command of ["npm run lint", "cargo fmt", "cargo deny", "cargo machete", "shellcheck", "actionlint", "crate-ci/typos"]) assert.ok(!ci.includes(command), `duplicate ${command}`);
 });
 
@@ -44,7 +71,7 @@ test("the stable UI gate requires coverage merged from all Linux shards", () => 
   assert.match(coverage, /actions\/download-artifact@/);
   assert.match(coverage, /collect-ui-coverage.mjs/);
   assert.match(coverage, /merge-e2e-coverage.mjs/);
-  assert.match(ui, /needs: \[e2e, coverage, reports, packs, portable, firefox-extended\]/);
+  assert.match(ui, /needs: \[e2e, coverage, packs, portable, firefox-extended\]/);
   assert.match(ui, /COVERAGE: \$\{\{ needs.coverage.result \}\}/);
   assert.match(ui, /test "\$COVERAGE" = success/);
 });
@@ -71,7 +98,8 @@ test("every protected health platform check requires both source and platform re
 test("the final UI gate rejects failed, cancelled or missing required jobs", () => {
   const env = { BASELINE: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", PORTABLE: "success", FIREFOX: "skipped", EXTENDED: "false" };
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", env).status, 0);
-  for (const job of ["BASELINE", "COVERAGE", "REPORTS", "PACKS", "PORTABLE"]) {
+  assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, REPORTS: "failure" }).status, 0, "HTML presentation is independent of test acceptance");
+  for (const job of ["BASELINE", "COVERAGE", "PACKS", "PORTABLE"]) {
     for (const result of ["failure", "cancelled", "skipped", ""]) assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, [job]: result }).status, 0, `${job}=${result}`);
   }
   assert.notEqual(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, EXTENDED: "true" }).status, 0);
@@ -106,7 +134,7 @@ test("UI coverage consumers share one same-workflow Linux unit run", () => {
 });
 
 test("CI runs release workflow diagnostics only through the shared glob", () => {
-  const ci = read("ci.yml");
+  const ci = read("check-health.yml");
   assert.match(ci, /node --test scripts\/diagnostics\/\*.test.mjs/);
   assert.doesNotMatch(ci, /node --test scripts\/diagnostics\/release-workflow.test.mjs/);
 });
