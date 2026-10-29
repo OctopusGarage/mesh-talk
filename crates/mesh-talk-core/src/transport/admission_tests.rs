@@ -55,10 +55,50 @@ async fn stalled_gated_frame_write_has_deadline_and_releases_revocation_guard() 
     let _non_reading_peer = server.await.unwrap();
     let gate = Arc::new(tokio::sync::RwLock::new(()));
     channel.set_io_admission(gate.clone(), Arc::new(|| true));
-    let result = tokio::time::timeout(Duration::from_secs(12), channel.send(&vec![0; 60_000]))
+    let payload = vec![0; 60_000];
+    // The Noise handshake has completed. Only this in-memory stalled write uses
+    // virtual time; retain the production deadline and the non-reading peer.
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let send = tokio::time::timeout(Duration::from_secs(12), channel.send(&payload));
+    tokio::pin!(send);
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(send.as_mut(), cx))
+        })
         .await
-        .unwrap();
-    assert!(matches!(result, Err(TransportError::Noise(_))));
+        .is_pending()
+    );
+    assert!(
+        gate.try_write().is_err(),
+        "the stalled send must hold the policy guard"
+    );
+    tokio::time::advance(Duration::from_millis(9_999)).await;
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(send.as_mut(), cx))
+        })
+        .await
+        .is_pending(),
+        "the production ten-second deadline must not fire early"
+    );
+    assert!(
+        gate.try_write().is_err(),
+        "the pending write must still hold its guard"
+    );
+    // Await the same bounded send so the paused driver can process its timer.
+    // Tokio rounds timer deadlines to millisecond ticks; advance() alone does
+    // not promise completion on the next poll at exactly ten seconds.
+    let result = send.await;
+    let elapsed = tokio::time::Instant::now() - started;
+    tokio::time::resume();
+    assert!(elapsed >= Duration::from_secs(10));
+    assert!(elapsed < Duration::from_secs(12));
+    let result = result.unwrap();
+    assert!(matches!(
+        result,
+        Err(TransportError::Noise(message)) if message == "policy-gated send timed out"
+    ));
     let _guard = tokio::time::timeout(DEADLINE, gate.write())
         .await
         .expect("stalled peer retained policy guard");

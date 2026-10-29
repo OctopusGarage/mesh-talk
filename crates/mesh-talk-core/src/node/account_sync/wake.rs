@@ -150,6 +150,13 @@ impl Default for AccountWake {
 }
 
 impl Node {
+    #[cfg(test)]
+    pub(in crate::node) fn account_wake_token_for_test(&self) -> ([u8; 16], u64) {
+        (
+            self.account_wake.epoch,
+            self.account_wake.revision.load(Ordering::Acquire),
+        )
+    }
     pub(super) fn pending_control_wakes(&self) -> Vec<ControlWakeHint> {
         let own = self.account_id();
         let devices = self.linked_devices();

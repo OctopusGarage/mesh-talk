@@ -821,7 +821,7 @@ impl Node {
         requests
     }
 
-    pub fn account_group_operation_status(
+    pub(in crate::node) fn retained_account_group_operation_status(
         &self,
         expected_account: &str,
         id: AccountGroupOperationId,
@@ -839,6 +839,15 @@ impl Node {
                 .map(|entry| entry.status.clone())
                 .or_else(|| journal.lookups.get(&id).map(|entry| entry.status.clone()))
         };
+        Ok(status)
+    }
+
+    pub fn account_group_operation_status(
+        &self,
+        expected_account: &str,
+        id: AccountGroupOperationId,
+    ) -> Result<Option<AccountGroupOperationStatus>, NodeError> {
+        let status = self.retained_account_group_operation_status(expected_account, id)?;
         if status.as_ref().is_some_and(|status| {
             !matches!(
                 status.phase,

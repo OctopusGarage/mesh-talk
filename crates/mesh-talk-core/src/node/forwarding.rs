@@ -1,11 +1,12 @@
 //! Canonical source forwarding and encrypted, resumable local operation records.
 use super::delivery_store::RequestRecord;
 use super::outgoing_message::{MessageDestination, OutgoingMessageRequest};
-use super::{FavoriteMessage, FavoriteMetadata, FavoriteSource, Node, NodeError};
-use crate::{
-    eventlog::{LogError, event::EventKind},
-    storage::record_log::EncryptedRecordLog,
+use super::{
+    AccountGroupOperationId, AccountGroupOperationKind, AccountGroupOperationPhase,
+    AccountGroupOperationStatus, AccountGroupTextInput, FavoriteMessage, FavoriteMetadata,
+    FavoriteSource, Node, NodeError,
 };
+use crate::{eventlog::LogError, storage::record_log::EncryptedRecordLog};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -26,7 +27,7 @@ pub struct ForwardInspection {
     pub messages: Vec<FavoriteMessage>,
     pub source_label: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForwardItem {
     pub target: ForwardTarget,
     pub source_id: Option<String>,
@@ -34,7 +35,7 @@ pub struct ForwardItem {
     pub status: String,
     pub error: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ForwardResult {
     pub operation_id: String,
     pub items: Vec<ForwardItem>,
@@ -54,12 +55,48 @@ pub(super) struct ForwardStore {
     batches: BTreeMap<String, ForwardBatch>,
     fingerprints: BTreeMap<String, [u8; 32]>,
     writes: usize,
+    #[cfg(test)]
+    batch_limit: usize,
 }
 fn invalid(s: &str) -> NodeError {
     NodeError::InvalidInput(s.into())
 }
 fn fingerprint(request: &ForwardRequest) -> [u8; 32] {
     Sha256::digest(serde_json::to_vec(request).expect("forward request encoding")).into()
+}
+fn item_identity(operation: &str, target: &ForwardTarget, source: &Option<String>) -> [u8; 32] {
+    Sha256::digest(serde_json::to_vec(&(operation, target, source)).expect("forward item identity"))
+        .into()
+}
+enum ForwardAcceptance {
+    Message(String),
+    Group(AccountGroupOperationStatus),
+}
+fn apply_group_status(item: &mut ForwardItem, status: &AccountGroupOperationStatus) {
+    item.message_id = None;
+    item.error = None;
+    match &status.phase {
+        AccountGroupOperationPhase::Committed => {
+            if let Some(event) = status.primary_event {
+                item.status = "accepted".into();
+                item.message_id = Some(event.to_hex());
+            } else {
+                item.status = "failed".into();
+                item.error =
+                    Some("Committed forwarding receipt has no original message identity".into());
+            }
+        }
+        AccountGroupOperationPhase::Rejected { reason }
+        | AccountGroupOperationPhase::ActionRequired { reason } => {
+            item.status = "failed".into();
+            item.error = Some(format!("Group forwarding requires review: {reason:?}"));
+        }
+        AccountGroupOperationPhase::Cancelled => {
+            item.status = "failed".into();
+            item.error = Some("Group forwarding was cancelled".into());
+        }
+        _ => item.status = "pending".into(),
+    }
 }
 const FORWARD_RETRY_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 fn operation_time(id: &str) -> Option<u64> {
@@ -102,6 +139,8 @@ impl ForwardStore {
             batches,
             fingerprints,
             writes: 0,
+            #[cfg(test)]
+            batch_limit: 128,
         })
     }
     fn save(&mut self, batch: &ForwardBatch) -> Result<(), NodeError> {
@@ -114,7 +153,13 @@ impl ForwardStore {
         {
             return Err(invalid("Forwarding operation history budget reached"));
         }
-        if !self.batches.contains_key(&batch.request.operation_id) && self.batches.len() >= 128 {
+        #[cfg(test)]
+        let batch_limit = self.batch_limit;
+        #[cfg(not(test))]
+        let batch_limit = 128;
+        if !self.batches.contains_key(&batch.request.operation_id)
+            && self.batches.len() >= batch_limit
+        {
             let retired = self
                 .batches
                 .iter()
@@ -160,6 +205,83 @@ impl ForwardStore {
 }
 
 impl Node {
+    fn forwarding_group_id(&self, item: &[u8; 32]) -> AccountGroupOperationId {
+        let mut nonce = [0; 16];
+        nonce.copy_from_slice(&item[..16]);
+        AccountGroupOperationId::for_origin(&self.identity.public(), nonce)
+    }
+    fn project_forward_item(&self, operation: &str, item: &mut ForwardItem) -> bool {
+        if item.status == "accepted" && item.message_id.is_some() {
+            return true;
+        }
+        let Ok(MessageDestination::Channel(group)) = destination(&item.target) else {
+            return false;
+        };
+        let identity = item_identity(operation, &item.target, &item.source_id);
+        // Preserve delivery records accepted by earlier physical forwarding.
+        if let Some(record) = self
+            .delivery
+            .lock()
+            .expect("delivery lock")
+            .request(&identity)
+            .cloned()
+            && record.destination == MessageDestination::Channel(group)
+        {
+            item.status = "accepted".into();
+            item.message_id = Some(record.message_id.to_hex());
+            item.error = None;
+            return true;
+        }
+        if let Ok(Some(status)) = self.retained_account_group_operation_status(
+            &self.account_id(),
+            self.forwarding_group_id(&identity),
+        ) && status.group == group
+        {
+            apply_group_status(item, &status);
+            return true;
+        }
+        if item.status == "pending" {
+            // A missing original journal/origin cannot justify a second send.
+            item.status = "failed".into();
+            item.error = Some(
+                "Uncertain acceptance; original group forwarding intent is unavailable".into(),
+            );
+        }
+        false
+    }
+    fn project_forward_batch(&self, batch: &mut ForwardBatch) -> bool {
+        let mut admitted = true;
+        for item in &mut batch.result.items {
+            admitted &= self.project_forward_item(&batch.request.operation_id, item);
+        }
+        admitted
+    }
+    fn save_forward_progress(&self, batch: &ForwardBatch) -> Result<(), NodeError> {
+        let previous = {
+            let store = self.forwarding.lock().expect("forwarding lock");
+            if store.batches.contains_key(&batch.request.operation_id) {
+                Vec::new()
+            } else {
+                store.batches.values().cloned().collect::<Vec<_>>()
+            }
+        };
+        // Reconcile under the existing admission writer, never in list reads.
+        // Terminal receipts must free the same 128-batch retirement budget.
+        for mut old in previous {
+            if old.request.operation_id == batch.request.operation_id {
+                continue;
+            }
+            let before = old.result.clone();
+            self.project_forward_batch(&mut old);
+            if old.result != before {
+                self.forwarding
+                    .lock()
+                    .expect("forwarding lock")
+                    .save(&old)?;
+            }
+        }
+        self.forwarding.lock().expect("forwarding lock").save(batch)
+    }
     pub fn inspect_forward_messages(
         &self,
         source: &FavoriteSource,
@@ -191,7 +313,8 @@ impl Node {
         })
     }
     pub fn list_forward_batches(&self) -> Vec<ForwardBatch> {
-        self.forwarding
+        let mut batches = self
+            .forwarding
             .lock()
             .expect("forwarding lock")
             .batches
@@ -199,7 +322,11 @@ impl Node {
             .rev()
             .take(128)
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        for batch in &mut batches {
+            self.project_forward_batch(batch);
+        }
+        batches
     }
     pub async fn forward_messages_if(
         self: &Arc<Self>,
@@ -242,17 +369,18 @@ impl Node {
                 }
             }
         }
-        let existing = self
+        let mut existing = self
             .forwarding
             .lock()
             .expect("forwarding lock")
             .batches
             .get(&request.operation_id)
             .cloned();
-        if let Some(old) = &existing {
+        if let Some(old) = &mut existing {
             if old.request != request {
                 return Err(NodeError::RequestConflict);
             }
+            let admitted = self.project_forward_batch(old);
             if old.result.items.len()
                 == request.destinations.len()
                     * if request.mode == "merged" {
@@ -260,11 +388,7 @@ impl Node {
                     } else {
                         request.source.message_ids.len()
                     }
-                && old
-                    .result
-                    .items
-                    .iter()
-                    .all(|item| item.status == "accepted")
+                && admitted
             {
                 return Ok(old.result.clone());
             }
@@ -309,12 +433,7 @@ impl Node {
                 }
             }
         }
-        authorize(&mut || {
-            self.forwarding
-                .lock()
-                .expect("forwarding lock")
-                .save(&batch)
-        })?;
+        authorize(&mut || self.save_forward_progress(&batch))?;
         let merged = if request.mode == "merged" {
             Some(self.forward_bundle(&snapshot)?)
         } else {
@@ -333,15 +452,11 @@ impl Node {
                 if batch.result.items.iter().any(|item| {
                     item.target == *target
                         && item.source_id == source_id
-                        && item.status == "accepted"
+                        && self.project_forward_item(&request.operation_id, &mut item.clone())
                 }) {
                     continue;
                 }
-                let key = Sha256::digest(
-                    serde_json::to_vec(&(&request.operation_id, target, &source_id))
-                        .map_err(|e| invalid(&e.to_string()))?,
-                );
-                let id: [u8; 32] = key.into();
+                let id = item_identity(&request.operation_id, target, &source_id);
                 let previous = batch
                     .result
                     .items
@@ -367,12 +482,7 @@ impl Node {
                         item.error =
                             Some("Uncertain acceptance; cannot safely retry automatically".into());
                     }
-                    authorize(&mut || {
-                        self.forwarding
-                            .lock()
-                            .expect("forwarding lock")
-                            .save(&batch)
-                    })?;
+                    authorize(&mut || self.save_forward_progress(&batch))?;
                     continue;
                 }
                 if let Some(item) = batch
@@ -383,12 +493,7 @@ impl Node {
                 {
                     item.error = Some("Acceptance started".into());
                 }
-                authorize(&mut || {
-                    self.forwarding
-                        .lock()
-                        .expect("forwarding lock")
-                        .save(&batch)
-                })?;
+                authorize(&mut || self.save_forward_progress(&batch))?;
                 let mut authorize_item = |commit: &mut dyn FnMut() -> Result<(), NodeError>| {
                     authorize(&mut || {
                         self.inspect_forward_messages(&request.source)?;
@@ -433,6 +538,30 @@ impl Node {
                         )
                         .await
                     } else {
+                        if let MessageDestination::Channel(group) = destination(target)? {
+                            let local_execution = {
+                                let book = self.channels.lock().expect("channels lock");
+                                book.state(&group)
+                                    .is_some_and(|state| self.channel_identity_is_current(state))
+                            };
+                            // Keep sequential local acceptance for an executable device;
+                            // logical siblings use the existing delegated operation owner.
+                            if !local_execution {
+                                let status = self.submit_account_group_text_if(
+                                    &self.account_id(),
+                                    self.forwarding_group_id(&id),
+                                    group,
+                                    AccountGroupTextInput {
+                                        text: message.text.as_bytes().to_vec(),
+                                        reply_to: None,
+                                        expires_at_ms: message.expires_at_ms,
+                                        protection: None,
+                                    },
+                                    &mut authorize_item,
+                                )?;
+                                return Ok(ForwardAcceptance::Group(status));
+                            }
+                        }
                         let accepted = self
                             .enqueue_message_once_if(
                                 &OutgoingMessageRequest {
@@ -445,7 +574,7 @@ impl Node {
                                 &mut authorize_item,
                             )
                             .await?;
-                        Ok(accepted.message_id.to_hex())
+                        Ok(ForwardAcceptance::Message(accepted.message_id.to_hex()))
                     }
                 }
                 .await;
@@ -453,28 +582,23 @@ impl Node {
                     .result
                     .items
                     .retain(|item| !(item.target == *target && item.source_id == source_id));
-                batch.result.items.push(match result {
-                    Ok(id) => ForwardItem {
-                        target: target.clone(),
-                        source_id,
-                        message_id: Some(id),
-                        status: "accepted".into(),
-                        error: None,
-                    },
-                    Err(e) => ForwardItem {
-                        target: target.clone(),
-                        source_id,
-                        message_id: None,
-                        status: "failed".into(),
-                        error: Some(e.to_string()),
-                    },
-                });
-                authorize(&mut || {
-                    self.forwarding
-                        .lock()
-                        .expect("forwarding lock")
-                        .save(&batch)
-                })?;
+                let mut item = ForwardItem {
+                    target: target.clone(),
+                    source_id,
+                    message_id: None,
+                    status: "failed".into(),
+                    error: None,
+                };
+                match result {
+                    Ok(ForwardAcceptance::Message(id)) => {
+                        item.status = "accepted".into();
+                        item.message_id = Some(id);
+                    }
+                    Ok(ForwardAcceptance::Group(status)) => apply_group_status(&mut item, &status),
+                    Err(error) => item.error = Some(error.to_string()),
+                }
+                batch.result.items.push(item);
+                authorize(&mut || self.save_forward_progress(&batch))?;
             }
         }
         self.account_sync_notify.notify_one();
@@ -490,7 +614,7 @@ impl Node {
         authorize: &mut (
                  impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError> + Send
              ),
-    ) -> Result<String, NodeError> {
+    ) -> Result<ForwardAcceptance, NodeError> {
         let _gate = self.outgoing_requests_gate.lock().await;
         let dest = destination(target)?;
         let digest: [u8; 32] =
@@ -506,7 +630,7 @@ impl Node {
             if record.digest != digest {
                 return Err(NodeError::RequestConflict);
             }
-            return Ok(record.message_id.to_hex());
+            return Ok(ForwardAcceptance::Message(record.message_id.to_hex()));
         }
         match &dest {
             MessageDestination::Account(account) => {
@@ -523,12 +647,12 @@ impl Node {
                 }
             }
             MessageDestination::Channel(channel) => {
-                let book = self.channels.lock().expect("channels lock");
-                if book
-                    .state(channel)
-                    .is_none_or(|state| !self.channel_identity_is_current(state))
+                if !AccountGroupOperationKind::File
+                    .admits_role(self.account_group_access(*channel)?.role)
                 {
-                    return Err(invalid("Not an accepted channel member"));
+                    return Err(NodeError::Authorization(
+                        "account is not authorized to forward to this group".into(),
+                    ));
                 }
             }
         }
@@ -541,14 +665,31 @@ impl Node {
             .ok_or_else(|| invalid("Invalid attachment name"))?;
         let path = dir.path().join(safe);
         std::fs::write(&path, bytes).map_err(|e| NodeError::File(e.to_string()))?;
-        let (host, account) = match &dest {
-            MessageDestination::Account(account) => (
-                super::conversation::account_conversation_id(&self.account_id(), account),
-                Some(account.clone()),
-            ),
-            MessageDestination::Channel(channel) => (*channel, None),
+        if let MessageDestination::Channel(group) = &dest {
+            let status = self
+                .submit_account_group_file_if(
+                    &self.account_id(),
+                    self.forwarding_group_id(&id),
+                    *group,
+                    &path,
+                    if media {
+                        crate::file::FileKind::Media
+                    } else {
+                        crate::file::FileKind::File
+                    },
+                    None,
+                    None,
+                    |_| {},
+                    |commit| authorize(commit),
+                )
+                .await?;
+            return Ok(ForwardAcceptance::Group(status));
+        }
+        let MessageDestination::Account(account) = dest else {
+            return Err(invalid("Invalid forwarding destination"));
         };
-        let (manifest, file_conv) = self
+        let host = super::conversation::account_conversation_id(&self.account_id(), &account);
+        let (manifest, _) = self
             .stage_file_for_host_blocking(
                 &path,
                 if media {
@@ -558,61 +699,44 @@ impl Node {
                 },
                 |_| {},
                 host,
-                account,
+                Some(account.clone()),
                 None,
             )
             .await?;
         let record = RequestRecord {
             request_id: id,
             digest,
-            destination: dest.clone(),
+            destination: MessageDestination::Account(account.clone()),
             message_id: crate::eventlog::EventId::new([0; 32]),
             accepted_at_ms: super::node::now_millis(),
         };
-        let result = match dest {
-            MessageDestination::Account(account) => {
-                let peers = self
-                    .account_fanout_targets(&account)
-                    .into_iter()
-                    .filter(|p| p.account_id.as_deref() != Some(self.account_id().as_str()))
-                    .collect::<Vec<_>>();
-                if account != self.account_id()
-                    && !peers
-                        .iter()
-                        .any(|p| p.account_id.as_deref() == Some(&account))
-                {
-                    return Err(invalid("Unknown forwarding account"));
-                }
-                let host =
-                    super::conversation::account_conversation_id(&self.account_id(), &account);
-                let mut accepted = None;
-                authorize(&mut || {
-                    accepted = Some(self.accept_staged_manifest_authorized(
-                        &peers,
-                        host,
-                        Some(account.clone()),
-                        &manifest,
-                        None,
-                        None,
-                        Some(record.clone()),
-                    )?);
-                    Ok(())
-                })?;
-                accepted.ok_or_else(|| invalid("Forward acceptance was not executed"))?
-            }
-            MessageDestination::Channel(channel) => {
-                let result = self.enqueue_channel_payload_if(
-                    channel,
-                    manifest.encode(),
-                    EventKind::FileManifest,
-                    Some(record),
-                    authorize,
-                )?;
-                self.queue_group_file_delivery(file_conv, result);
-                result
-            }
-        };
-        Ok(result.to_hex())
+        let peers = self
+            .account_fanout_targets(&account)
+            .into_iter()
+            .filter(|peer| peer.account_id.as_deref() != Some(self.account_id().as_str()))
+            .collect::<Vec<_>>();
+        if account != self.account_id()
+            && !peers
+                .iter()
+                .any(|peer| peer.account_id.as_deref() == Some(&account))
+        {
+            return Err(invalid("Unknown forwarding account"));
+        }
+        let mut accepted = None;
+        authorize(&mut || {
+            accepted = Some(self.accept_staged_manifest_authorized(
+                &peers,
+                host,
+                Some(account.clone()),
+                &manifest,
+                None,
+                None,
+                Some(record.clone()),
+            )?);
+            Ok(())
+        })?;
+        let result = accepted.ok_or_else(|| invalid("Forward acceptance was not executed"))?;
+        Ok(ForwardAcceptance::Message(result.to_hex()))
     }
     fn forward_bundle(&self, snapshot: &ForwardInspection) -> Result<Vec<u8>, NodeError> {
         use base64::Engine;

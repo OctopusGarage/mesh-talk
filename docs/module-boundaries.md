@@ -650,8 +650,12 @@ superseded audit findings and implementation reports.
 ## Message forwarding
 
 Forwarding source authorization, canonical ordering, accepted request identity and
-attachment restaging belong to the protocol core. The desktop host supplies exact
-session/runtime admission. Chat features own selection, destination confirmation
+attachment restaging belong to the protocol core. Group forwarding reuses the
+account-group operation journal for admission and pending/committed lifecycle;
+forwarding retains batch progress and derives stable item identities without a
+second send journal. Read-only progress queries use retained operation status,
+while the existing forwarding writer reconciles terminal receipts before retirement.
+The desktop host supplies exact session/runtime admission. Chat features own selection, destination confirmation
 and read-only record presentation; shared outgoing owners retain send acceptance
 and delivery meaning. Favorites keeps its independent saved-content lifecycle.
 [Message forwarding](message-forwarding.md) owns user behavior and invariants.

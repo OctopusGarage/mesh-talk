@@ -623,6 +623,31 @@ October 25 sample selected 16–17 mutants per runner, with builds up to 130 sec
 and successful suites around 180–217 seconds. A 60-minute job canceled unfinished
 shards despite passing baselines. Reassess this budget from selected counts and
 build/test timings as the workspace grows; incomplete reports still fail the gate.
+
+The pinned cargo-mutants 27.1.0 baseline selects only packages containing the
+selected mutations, even with `--workspace --test-workspace true`; individual
+mutations still run the complete workspace. Record both actual commands and test
+inventories. A package-only baseline is not a measured workspace baseline, and
+its wall time must not be compared directly with a larger mutation run. Acceptance
+also requires the separate complete workspace CI gate; no mutation baseline is
+skipped or reported as broader than it ran.
+
+The mutation runner explicitly sets `CARGO_INCREMENTAL=1` for both tool child
+processes because rust-cache exports `0` through the job environment. The real-tool
+smoke regression starts from that disabled parent environment and checks actual
+Rust incremental query-cache output. The existing fifteen-second UDP gateway
+proof-withdrawal fixture has higher scheduling priority only in the mutation
+profile, so its three refreshes can overlap other tests. The in-memory stalled
+policy-write fixture completes its original Noise handshake before pausing Tokio
+time, proves the real send owns the guard, and checks it remains pending at
+9.999 seconds, then the unchanged ten-second production timer must complete before
+the original twelve-second outer bound and release that guard. Paused time
+auto-drives the awaited timer, including Tokio's millisecond tick rounding. No real
+UDP clock is accelerated. Test inventory, four
+processes, sixty-second per-test and 240-second suite limits remain unchanged.
+Scheduling estimates are not completed-run evidence; validate the full unchanged
+workspace inventory on the current candidate before claiming a timing improvement.
+
 Loopback UDP reply fixtures connect their receiving socket to their own listener
 so concurrent discovery traffic cannot masquerade as a reply. Tests must still
 reject extra replies from that listener after a refresh.

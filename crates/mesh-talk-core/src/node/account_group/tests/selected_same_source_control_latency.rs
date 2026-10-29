@@ -7,6 +7,153 @@ use tokio::sync::{Semaphore, oneshot};
 pub(super) type BTrace =
     Arc<Mutex<std::collections::VecDeque<(u128, &'static str, Option<tokio::task::Id>, String)>>>;
 
+type CriticalControlEvent = (u128, &'static str, Option<tokio::task::Id>, String);
+#[derive(Clone, Debug, Default)]
+struct CriticalControlTrace {
+    first: Vec<CriticalControlEvent>,
+    last: std::collections::VecDeque<CriticalControlEvent>,
+    total: usize,
+    tasks: std::collections::VecDeque<tokio::task::Id>,
+    queues: Vec<(&'static str, String)>,
+}
+impl CriticalControlTrace {
+    fn begin_budget(&mut self, clock: std::time::Instant) {
+        self.first.clear();
+        self.last.clear();
+        self.queues.clear();
+        self.total = 0;
+        self.record(clock, "fixture", "B_submit_begin".into());
+    }
+    fn record(&mut self, clock: std::time::Instant, side: &'static str, event: String) {
+        let row = (
+            clock.elapsed().as_millis(),
+            side,
+            tokio::task::try_id(),
+            event,
+        );
+        self.total += 1;
+        if self.first.len() < 128 {
+            self.first.push(row);
+        } else {
+            if self.last.len() == 64 {
+                self.last.pop_front();
+            }
+            self.last.push_back(row);
+        }
+    }
+    fn client(
+        &mut self,
+        clock: std::time::Instant,
+        side: &'static str,
+        event: &str,
+        enabled: bool,
+    ) {
+        if event.starts_with("control_task ") {
+            if self.tasks.len() == 64 {
+                self.tasks.pop_front();
+            }
+            self.tasks.push_back(tokio::task::id());
+        }
+        if !enabled {
+            return;
+        }
+        if let Some(body) = event.strip_prefix("control_request_body=") {
+            let request = crate::node::account_documents::wire::DocumentRequest::decode(
+                &hex::decode(body).unwrap(),
+            )
+            .unwrap();
+            self.record(clock, side, Self::request(&request));
+            return;
+        }
+        if event.starts_with("control_queue ") {
+            if let Some((_, previous)) = self.queues.iter_mut().find(|(peer, _)| *peer == side) {
+                if previous == event {
+                    return;
+                }
+                *previous = event.into();
+            } else {
+                assert!(self.queues.len() < 8, "fixture identities are bounded");
+                self.queues.push((side, event.into()));
+            }
+        }
+        let control_task = tokio::task::try_id().is_some_and(|id| self.tasks.contains(&id));
+        if event.starts_with("control_")
+            || event.starts_with("wake_")
+            || event.starts_with("operation_local_published")
+            || control_task
+                && (event.starts_with("page_")
+                    || event.starts_with("negotiation_")
+                    || event.starts_with("dial_"))
+        {
+            self.record(clock, side, event.chars().take(512).collect());
+        }
+    }
+    fn request(request: &crate::node::account_documents::wire::DocumentRequest) -> String {
+        format!(
+            "Control_request version={} nonce={} after={:?} probe_after={:?} roles={} operations={}",
+            request.version,
+            request
+                .operation
+                .as_ref()
+                .map_or_else(|| "none".into(), |probe| hex::encode(probe.nonce)),
+            request.after,
+            request
+                .operation
+                .as_ref()
+                .and_then(|probe| probe.after.as_ref()),
+            hex::encode(request.known_digest),
+            request
+                .operation
+                .as_ref()
+                .map_or_else(|| "none".into(), |probe| hex::encode(probe.known_digest))
+        )
+    }
+    fn frame(
+        &mut self,
+        clock: std::time::Instant,
+        side: &'static str,
+        frame: &AccountHistoryFrame,
+    ) {
+        match frame {
+            AccountHistoryFrame::DocumentsRequest { body } => {
+                if let Some(request) =
+                    crate::node::account_documents::wire::DocumentRequest::decode(body)
+                        .filter(|request| request.domain == AccountDocumentDomain::GroupControl)
+                {
+                    self.record(clock, side, Self::request(&request));
+                }
+            }
+            AccountHistoryFrame::DocumentsComplete { body } => {
+                let complete: serde_json::Value = serde_json::from_slice(body).unwrap();
+                if complete["domain"] == "group_control" {
+                    let nonce =
+                        serde_json::from_value::<[u8; 32]>(complete["operation"]["nonce"].clone())
+                            .ok()
+                            .map(hex::encode);
+                    self.record(
+                        clock,
+                        side,
+                        format!(
+                            "Control_complete nonce={nonce:?} next={} enabled={}",
+                            complete["next"], complete["enabled"]
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    fn snapshot(
+        &self,
+    ) -> (
+        usize,
+        Vec<CriticalControlEvent>,
+        std::collections::VecDeque<CriticalControlEvent>,
+    ) {
+        (self.total, self.first.clone(), self.last.clone())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct ControlTestPage {
     pub task: tokio::task::Id,
@@ -293,6 +440,8 @@ async fn incoming_operation_wake_runs_after_paid_pair_pages_before_unrelated_con
     run_same_source_receipt(true, true, true).await;
 }
 
+type PostHandoffPage = (u128, tokio::task::Id, Option<[u8; 32]>, bool, String);
+
 type PaidCheckpoint = (
     u8,
     Option<crate::node::AccountDocumentKey>,
@@ -316,10 +465,15 @@ struct PaidBoundaryEvidence {
     requester_wake: bool,
     ready_requester_hint: Option<String>,
     requester_control: Option<(u128, String)>,
+    requester_page: Option<tokio::task::Id>,
+    requester_nonce: Option<[u8; 32]>,
+    post_handoff_pages: Vec<PostHandoffPage>,
     continuation_trapped: bool,
     trapped_protected: Option<bool>,
     trapped_origin: Option<String>,
     trapped_after_requester: bool,
+    trapped_page: Option<tokio::task::Id>,
+    trapped_nonce: Option<[u8; 32]>,
     invalid: Option<String>,
 }
 impl PaidBoundaryEvidence {
@@ -349,16 +503,17 @@ impl Drop for PaidPairBoundary {
     }
 }
 
-async fn send_boundary_wake(source: &Arc<Node>, target: &Arc<Node>, epoch: u8, revision: u64) {
+async fn send_boundary_wake(source: &Arc<Node>, target: &Arc<Node>) -> ([u8; 16], u64) {
     use crate::node::account_sync_wire::AccountSyncVersion;
     let peer = source.routing_peer(&target.user_id()).unwrap();
+    let (epoch, revision) = source.account_wake_token_for_test();
     let mut channel = source
         .begin_account_exchange(
             &peer,
             AccountSyncVersion::V2,
             AccountHistoryFrame::Wake {
                 account_id: source.account_id(),
-                epoch: [epoch; 16],
+                epoch,
                 revision,
             },
         )
@@ -367,8 +522,9 @@ async fn send_boundary_wake(source: &Arc<Node>, target: &Arc<Node>, epoch: u8, r
     let bytes = channel.recv().await.unwrap();
     assert!(matches!(AccountHistoryFrame::decode_versioned(&bytes),
         Some((AccountSyncVersion::V2, AccountHistoryFrame::WakeAck { epoch: received, revision: received_revision }))
-        if received == [epoch; 16] && received_revision == revision));
+        if received == epoch && received_revision == revision));
     channel.recycle(source);
+    (epoch, revision)
 }
 
 /// Create an actual pair through a held authenticated natural tail and a newer
@@ -423,10 +579,6 @@ async fn hold_original_pair_resume(
             }
             if peer == requester {
                 let mut data = evidence.lock().unwrap();
-                if event == "wake_received revision=611" {
-                    data.requester_wake = true;
-                    data.record(clock, "authenticated_requester_wake_received");
-                }
                 if data.requester_wake
                     && event.starts_with("control_queue")
                     && event.contains("hint=true ready=true")
@@ -436,10 +588,21 @@ async fn hold_original_pair_resume(
                     data.record(clock, "requester_hint_ready");
                 }
                 if data.requester_wake
+                    && data.requester_nonce.is_none()
+                    && let Some(body) = event.strip_prefix("control_request_body=")
+                {
+                    data.requester_nonce =
+                        crate::node::account_documents::wire::DocumentRequest::decode(
+                            &hex::decode(body).unwrap(),
+                        )
+                        .and_then(|request| request.operation.map(|probe| probe.nonce));
+                }
+                if data.requester_wake
                     && event == "negotiation_begin domain=Some(GroupControl)"
                     && data.requester_control.is_none()
                 {
                     data.requester_control = Some((clock.elapsed().as_millis(), event.clone()));
+                    data.requester_page = tokio::task::try_id();
                     data.record(clock, "requester_control_started");
                 }
             }
@@ -668,6 +831,23 @@ async fn hold_original_pair_resume(
                     3 => {
                         {
                             let mut data = evidence.lock().unwrap();
+                            // The fault ends at the genuine requester handoff.
+                            // Later owned replacements/resumes may be required
+                            // to finish that same request and must run normally.
+                            if data.requester_control.is_some() {
+                                if data.post_handoff_pages.len() < 8 {
+                                    let origin = data.last_origin.clone();
+                                    data.post_handoff_pages.push((
+                                        clock.elapsed().as_millis(),
+                                        page.task,
+                                        request.operation.as_ref().map(|probe| probe.nonce),
+                                        page.origin.contains("protected=true"),
+                                        origin,
+                                    ));
+                                    data.record(clock, "post_handoff_continuation_allowed");
+                                }
+                                return;
+                            }
                             if !data.prefix_paid
                                 || !data.resume_paid
                                 || !data.requester_wake
@@ -685,6 +865,9 @@ async fn hold_original_pair_resume(
                             data.trapped_protected = Some(page.origin.contains("protected=true"));
                             data.trapped_origin = Some(data.last_origin.clone());
                             data.trapped_after_requester = data.requester_control.is_some();
+                            data.trapped_page = Some(page.task);
+                            data.trapped_nonce =
+                                request.operation.as_ref().map(|probe| probe.nonce);
                             data.record(clock, "paid_pair_foreground_continuation_trapped");
                         }
                         record_b_trace(
@@ -721,7 +904,8 @@ async fn hold_original_pair_resume(
             crate::eventlog::ConversationId::new([68; 32]),
         ),
     );
-    send_boundary_wake(source, executor, 81, 1).await;
+    source.note_account_local_change();
+    send_boundary_wake(source, executor).await;
     super::cold_account_setup(prefix_arrived.acquire())
         .await
         .unwrap_or_else(|error| {
@@ -941,8 +1125,35 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     assert!(reference.pending_account_operation_sources().is_empty());
 
     let b_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let b_critical = Arc::new(Mutex::new(CriticalControlTrace::default()));
     let b_clock = std::time::Instant::now();
     let b_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Some(other) = &other {
+        *other.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let critical = b_critical.clone();
+            let active = b_active.clone();
+            let requester = reference.identity.public();
+            let source_a = owner.identity.public();
+            let own = other.identity.public();
+            move |peer, phase| {
+                let side = if peer == requester {
+                    "B_to_requester"
+                } else if peer == source_a {
+                    "B_to_A"
+                } else if peer == own {
+                    "B_publication"
+                } else {
+                    return;
+                };
+                critical.lock().unwrap().client(
+                    b_clock,
+                    side,
+                    &phase,
+                    active.load(std::sync::atomic::Ordering::Acquire),
+                );
+            }
+        }));
+    }
     // Keep the setup interval too: a natural Control read may legitimately
     // yield to authenticated publication before either operation is admitted.
     let abort_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -964,10 +1175,28 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
         let exact_requester = reference.identity.public();
         let exact_other = other.as_ref().map(|other| other.identity.public());
         let b_trace = b_trace.clone();
+        let b_critical = b_critical.clone();
         let b_active = b_active.clone();
         let abort_trace = abort_trace.clone();
         let active_a_page = active_a_page.clone();
         move |peer, phase| {
+            let side = if peer == exact_owner {
+                Some("requester_to_A")
+            } else if exact_other.as_ref() == Some(&peer) {
+                Some("requester_to_B")
+            } else if peer == exact_requester {
+                Some("requester_publication")
+            } else {
+                None
+            };
+            if let Some(side) = side {
+                b_critical.lock().unwrap().client(
+                    b_clock,
+                    side,
+                    &phase,
+                    b_active.load(std::sync::atomic::Ordering::Acquire),
+                );
+            }
             if b_active.load(std::sync::atomic::Ordering::Relaxed)
                 && (peer == exact_owner
                     || exact_other.as_ref() == Some(&peer)
@@ -1466,13 +1695,22 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                 .unwrap();
             second_id = Some(second);
             b_active.store(true, std::sync::atomic::Ordering::Relaxed);
+            b_critical
+                .lock()
+                .unwrap()
+                .record(b_clock, "fixture", "B_admission_begin".into());
             record_b_trace(&b_trace, b_clock, "fixture", "B_admission_begin".into());
             record_b_trace(&abort_trace, b_clock, "fixture", "B_admission_begin".into());
+            let previous_b_client = other.account_client_test_hook.lock().unwrap().clone();
             *other.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+                let previous = previous_b_client;
                 let trace = b_trace.clone();
                 let requester = reference.identity.public();
                 let own = other.identity.public();
                 move |peer, phase| {
+                    if let Some(previous) = &previous {
+                        previous(peer.clone(), phase.clone());
+                    }
                     if peer == requester || peer == own {
                         record_b_trace(&trace, b_clock, "B_client", phase);
                     }
@@ -1481,25 +1719,37 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
             for (side, target, expected) in [
                 ("B_server", other, reference.identity.public()),
                 ("requester_server", &reference, other.identity.public()),
+                ("A_server_for_B", &owner, other.identity.public()),
             ] {
+                let previous = target.account_session_test_hook.lock().unwrap().clone();
                 *target.account_session_test_hook.lock().unwrap() = Some(Arc::new({
                     let trace = b_trace.clone();
+                    let critical = b_critical.clone();
                     move |peer, frame| {
                         let trace = trace.clone();
+                        let critical = critical.clone();
                         let expected = expected.clone();
+                        let previous = previous.clone();
                         Box::pin(async move {
                             if peer != expected {
+                                if let Some(previous) = previous {
+                                    previous(peer, frame).await;
+                                }
                                 return;
                             }
+                            critical.lock().unwrap().frame(b_clock, side, &frame);
                             use crate::node::account_documents::wire::DocumentRequest;
-                            let phase = match frame {
-                            AccountHistoryFrame::DocumentsRequest{body} => DocumentRequest::decode(&body).filter(|request|request.domain==AccountDocumentDomain::GroupControl).map(|request| format!("Control_request version={} partial={} nonce={:?}",request.version,request.after.is_some() || request.operation.as_ref().is_some_and(|probe|probe.after.is_some()),request.operation.as_ref().map(|probe|hex::encode(&probe.nonce[..4])))),
-                            AccountHistoryFrame::DocumentHeader{body} => serde_json::from_slice::<crate::node::AccountDocumentMeta>(&body).ok().filter(|meta|matches!(&meta.key,crate::node::AccountDocumentKey::GroupOperation{channel,..} if *channel==hex::encode(other_group.as_bytes()))).map(|meta|format!("B_operation_header revision={} hash={}",meta.revision,hex::encode(&meta.content_hash[..4]))),
-                            AccountHistoryFrame::DocumentsComplete{body} => serde_json::from_slice::<serde_json::Value>(&body).ok().filter(|value|value.get("domain").and_then(|v|v.as_str())==Some("group_control")).map(|value|format!("Control_complete next={} enabled={}",!value["next"].is_null(),value["enabled"])),
+                            let phase = match &frame {
+                            AccountHistoryFrame::DocumentsRequest{body} => DocumentRequest::decode(body).filter(|request|request.domain==AccountDocumentDomain::GroupControl).map(|request| format!("Control_request version={} partial={} nonce={:?}",request.version,request.after.is_some() || request.operation.as_ref().is_some_and(|probe|probe.after.is_some()),request.operation.as_ref().map(|probe|hex::encode(&probe.nonce[..4])))),
+                            AccountHistoryFrame::DocumentHeader{body} => serde_json::from_slice::<crate::node::AccountDocumentMeta>(body).ok().filter(|meta|matches!(&meta.key,crate::node::AccountDocumentKey::GroupOperation{channel,..} if *channel==hex::encode(other_group.as_bytes()))).map(|meta|format!("B_operation_header revision={} hash={}",meta.revision,hex::encode(&meta.content_hash[..4]))),
+                            AccountHistoryFrame::DocumentsComplete{body} => serde_json::from_slice::<serde_json::Value>(body).ok().filter(|value|value.get("domain").and_then(|v|v.as_str())==Some("group_control")).map(|value|format!("Control_complete next={} enabled={}",!value["next"].is_null(),value["enabled"])),
                             _ => None,
                         };
                             if let Some(phase) = phase {
                                 record_b_trace(&trace, b_clock, side, phase);
+                            }
+                            if let Some(previous) = previous {
+                                previous(peer, frame).await;
                             }
                         })
                     }
@@ -1519,6 +1769,8 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                     .await,
                 );
             }
+            let request_wake_before_submit = reference.account_wake_token_for_test().1;
+            b_critical.lock().unwrap().begin_budget(b_clock);
             reference
                 .submit_account_group_operation_if(
                     &account.account_id(),
@@ -1531,6 +1783,10 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                 )
                 .unwrap();
             record_b_trace(&b_trace, b_clock, "fixture", "B_admitted".into());
+            b_critical
+                .lock()
+                .unwrap()
+                .record(b_clock, "fixture", "B_admitted".into());
             record_b_trace(&abort_trace, b_clock, "fixture", "B_admitted".into());
             Some(
                 tokio::time::timeout(Duration::from_secs(8), async {
@@ -1542,7 +1798,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                             channel: hex::encode(other_group.as_bytes()),
                             source_device: reference.user_id(),
                         };
-                        while !reference.account_document(&own_key).unwrap().and_then(|document| {
+                        while reference.account_wake_token_for_test().1 <= request_wake_before_submit || !reference.account_document(&own_key).unwrap().and_then(|document| {
                             crate::node::account_group::operations::wire::OperationFrame::decode(
                                 document.payload(), &reference.account.public().ed25519_pub,
                             )
@@ -1553,7 +1809,12 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                         }) {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
-                        send_boundary_wake(&reference, other, 82, 611).await;
+                        send_boundary_wake(&reference, other).await;
+                        {
+                            let mut data = boundary.evidence.lock().unwrap();
+                            data.requester_wake = true;
+                            data.record(b_clock, "authenticated_requester_wake_acknowledged");
+                        }
                         record_b_trace(
                             &b_trace,
                             b_clock,
@@ -1600,6 +1861,24 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     } else {
         None
     };
+    let b_critical_snapshot = other_receipt.as_ref().map(|result| {
+        let mut trace = b_critical.lock().unwrap();
+        trace.record(
+            b_clock,
+            "fixture",
+            if result.is_ok() {
+                "B_private_receipt"
+            } else {
+                "B_deadline_expired"
+            }
+            .into(),
+        );
+        let snapshot = trace.snapshot();
+        eprintln!(
+            "B_critical_at_receipt_deadline paid_boundary={paid_boundary} snapshot={snapshot:?}"
+        );
+        snapshot
+    });
     if let Some(result) = &other_receipt {
         record_b_trace(
             &b_trace,
@@ -1619,12 +1898,17 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                 b_operation_snapshot(&reference, other.as_ref().unwrap(), other_group, second),
                 b_operation_snapshot(other.as_ref().unwrap(), &reference, other_group, second),
                 classes.lock().unwrap().clone(),
-                b_trace.lock().unwrap().clone(),
+                b_critical_snapshot.clone(),
             )
         })
     } else {
         None
     };
+    if let Some((requester, executor, _, _)) = &b_failure_snapshot {
+        eprintln!(
+            "B_metadata_at_deadline paid_boundary={paid_boundary} requester={requester} executor={executor}"
+        );
+    }
     if let Some(result) = &other_receipt {
         record_b_trace(
             &abort_trace,
@@ -1675,8 +1959,28 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                 .unwrap()
                 .iter()
                 .all(|key| reference.account_document_meta(key).is_some());
+            let b_receipt_recovered = !paid_boundary
+                || second_id.is_some_and(|second| {
+                    let source = other.as_ref().unwrap();
+                    source
+                        .account_group_operation_status(&account.account_id(), second)
+                        .unwrap()
+                        .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)
+                        && reference.account_group_operation_inputs().into_iter().any(
+                            |(_, _, frame)| {
+                                frame.group == other_group
+                                    && frame.proof.public() == source.identity.public()
+                                    && frame.projection.results.iter().any(|row| {
+                                        row.reference.id == second
+                                            && row.status.phase
+                                                == AccountGroupOperationPhase::Committed
+                                    })
+                            },
+                        )
+                });
             if checkpoints.lock().unwrap().len() >= 2
                 && partial_complete
+                && b_receipt_recovered
                 && (!partial
                     || private_failed
                     || retired.load(std::sync::atomic::Ordering::Relaxed))
@@ -1718,6 +2022,9 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
             .count(),
         aborts_before_release,
     );
+    if other_selected {
+        eprintln!("B_after_release paid_boundary={paid_boundary} recovery={recovery_snapshot:?}");
+    }
     *owner.account_session_test_hook.lock().unwrap() = None;
     *owner.account_client_test_hook.lock().unwrap() = None;
     *reference.account_client_test_hook.lock().unwrap() = None;
@@ -1769,8 +2076,14 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     }
     assert!(
         recovered.is_ok(),
-        "releasing the old metadata read must restore ordinary progress and public receipt: {recovery_snapshot:?}; B_failure_snapshot={b_failure_snapshot:?}; paid_boundary={paid_boundary_evidence:?}; abort_trace={:?}",
-        abort_trace.lock().unwrap()
+        "releasing the old metadata read must restore ordinary progress and public receipt: {recovery_snapshot:?}; B_failure_snapshot={b_failure_snapshot:?}; paid_boundary={paid_boundary_evidence:?}; abort_tail={:?}",
+        abort_trace
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(16)
+            .collect::<Vec<_>>()
     );
     assert!(
         before_release_source
@@ -1806,7 +2119,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     );
     if other_selected {
         let events = other_receipt.expect("the second real operation was admitted after A committed")
-            .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}; paid_boundary={paid_boundary_evidence:?}; abort_trace={:?}", abort_trace.lock().unwrap()));
+            .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}; paid_boundary={paid_boundary_evidence:?}; held_tasks={held_abort_counts:?}"));
         assert_eq!(events.len(), 1);
         let other = other.as_ref().unwrap();
         let event = other.log.lock().unwrap().get(&events[0]).unwrap().clone();

@@ -208,7 +208,8 @@
       "consumers": [
         "core-node",
         "core-channel-account-membership",
-        "desktop-account-group-inventory"
+        "desktop-account-group-inventory",
+        "core-message-forwarding"
       ],
       "escalation": [
         "Require signed legacy-owner/member/reference sibling scenarios, current account binding, offline availability, transfer/revocation replay, durable pending operations and exact committed effects. Role display tests do not prove mutation authority or native cross-device convergence."
@@ -1968,6 +1969,49 @@
       ],
       "escalation": [
         "Run real loopback two-relay federation with unavailable direct client endpoints, pre-approval custody, sender shutdown, recipient approval/save and exact completion; include independent-recipient replay/compaction and revoke/expiry evidence. Installed Mac-to-Mac acceptance and deployed relay capacity/retention remain separate native requirements."
+      ]
+    },
+    {
+      "id": "core-message-forwarding",
+      "paths": [
+        "crates/mesh-talk-core/src/node/forwarding.rs",
+        "crates/mesh-talk-core/src/node/forwarding/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::forwarding::"
+          ]
+        }
+      ],
+      "consumers": [
+        "frontend-message-forwarding"
+      ],
+      "capability": {
+        "summary": "Forward canonical retained sources to accounts or logical account groups through the existing acceptance owners, retaining per-item identity and read-only pending receipt projections.",
+        "guide": "docs/message-forwarding.md",
+        "invariants": [
+          {
+            "name": "Certified reference-only account Owners and Members forward text, files and merged records through the existing group operation journal; metadata never grants physical membership or sender keys",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          },
+          {
+            "name": "Stable origin-bound group operation identities survive retry and restart; missing original pending intent remains uncertain rather than admitting another send, with unchanged stored forwarding record layout",
+            "reference": "docs/message-forwarding.md#reliability-and-verification"
+          },
+          {
+            "name": "Read-only batch listing projects retained committed and pending receipts without rereading source content, advancing query nonces, notifying network work or admitting operations; the existing writer reconciles terminal progress before batch retirement",
+            "reference": "docs/message-forwarding.md#reliability-and-verification"
+          },
+          {
+            "name": "Unauthorized group legs reject before file restaging or network admission while preserving accepted and pending legs; canonical source policy and current runtime authority are rechecked inside admission",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          }
+        ]
+      },
+      "escalation": [
+        "Run the reference-only Owner/Member Noise regressions, text/file/merged delivery, source-policy, partial retry, retirement and restart checks. Public native admission and cross-device behavior require affected host review and protected CI; browser substitutes do not prove encrypted execution."
       ]
     }
   ],

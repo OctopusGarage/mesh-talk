@@ -46,6 +46,17 @@ with independent file identity/key material and sent through the normal encrypte
 attachment/consent lifecycle. Recipients do not need source conversation membership.
 No source file keys, local paths or temporary Blob URLs belong in the archive.
 
+Group destinations use the account's Owner or Member role, including certified
+reference-only siblings. An already executable local device retains sequential
+text acceptance through the existing send owner. Logical siblings delegate text,
+and all group individual files and merged records enter the existing account-group
+operation journal and execute through its selected eligible physical device. Reference metadata does not install membership or sender keys.
+A group leg remains pending until its verified committed result supplies the
+original public message identity. Unknown or unauthorized group legs fail before
+file restaging or network admission; other accepted or pending legs remain intact.
+The canonical source policy and current runtime authority are checked again at
+journal admission, including after asynchronous file preparation.
+
 ## Merged record format
 
 Merged records travel as ordinary encrypted `.mtchat` attachments. Capable clients
@@ -77,6 +88,20 @@ full records are retired. If acceptance started before a crash but its exact
 request identity can no longer be recovered, the item reports uncertain acceptance
 and is not automatically resent. Inspect destination history before starting a
 new operation for that content.
+
+For group legs, the existing durable batch/item identity derives one origin-bound
+account-group operation ID. Retry observes that same journal entry instead of
+restaging or submitting a second intent. The forwarding record layout is unchanged:
+`pending` carries no message ID; `accepted` carries the verified original event ID.
+If an original pending intent cannot be found after journal loss or an origin
+change, the item reports uncertain acceptance and requires review rather than
+silently binding another origin.
+
+Batch listing projects retained journal status without admitting work, advancing
+query retries or rereading source content. Source recall after admission does not
+prevent observing or replaying the already admitted result. The existing forwarding
+writer reconciles verified terminal receipts before applying its batch-retirement
+budget, so committed group work does not remain stored as unfinished indefinitely.
 
 Focused tests cover selection, source policy, canonical order, request conflicts,
 partial retries, restart recovery, archive parsing and owner retirement. Encrypted

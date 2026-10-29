@@ -2170,6 +2170,45 @@
       "escalation": [
         "Run e2e/camera-capture.spec.ts and inspect wide and compact dialog captures. Verify real camera permission, device switching, track release and lock/logout in packaged desktop apps; browser mocks cannot certify OS permission behavior."
       ]
+    },
+    {
+      "id": "frontend-message-forwarding",
+      "paths": [
+        "frontend/src/features/chat/forwarding/",
+        "frontend/src/lib/api/messageForwarding.ts",
+        "frontend/src/lib/api/messageForwarding.test.ts",
+        "frontend/e2e/forwarding.spec.ts"
+      ],
+      "frontend": [
+        "src/features/chat/forwarding/ForwardDialog.test.ts",
+        "src/features/chat/forwarding/selection.test.ts",
+        "src/features/chat/forwarding/ForwardedRecordPreview.test.ts",
+        "src/lib/api/messageForwarding.test.ts",
+        "src/features/chat/channelPermissions.test.ts",
+        "src/features/chat/useSerialPoll.test.ts",
+        "src/lib/localeParity.test.ts"
+      ],
+      "capability": {
+        "summary": "Review exact forwarding sources and account-authorized destinations, preserve stable partial batch identities, and observe pending group admission within the current runtime.",
+        "guide": "docs/message-forwarding.md",
+        "invariants": [
+          {
+            "name": "Reference-only member and owner accounts remain eligible independently of local signer availability; unknown, retired and invited accounts do not become writable targets.",
+            "reference": "docs/message-forwarding.md#interaction"
+          },
+          {
+            "name": "Pending is distinct from failure and public message acceptance. Observation uses existing batch identities without source inspection or new admission, and retired runtimes cannot publish completion.",
+            "reference": "docs/message-forwarding.md#reliability-and-verification"
+          },
+          {
+            "name": "Partial retries retain the original request and accepted item identities; protected, recalled and expired sources remain subject to canonical core admission.",
+            "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          }
+        ]
+      },
+      "escalation": [
+        "Run frontend/e2e/forwarding.spec.ts for selection, exact target confirmation, partial retries, pending review and draft preservation. Native account-group admission and encrypted loopback evidence remain required; browser IPC substitutes do not certify linked-device execution."
+      ]
     }
   ],
   "prScenarios": [
@@ -2810,6 +2849,16 @@
         "frontend/e2e/camera-capture.spec.ts"
       ],
       "browser": ["e2e/camera-capture.spec.ts"],
+      "native": ["host"]
+    },
+    {
+      "id": "frontend-message-forwarding-acceptance",
+      "paths": [
+        "frontend/src/features/chat/forwarding/",
+        "frontend/src/lib/api/messageForwarding.ts",
+        "frontend/e2e/forwarding.spec.ts"
+      ],
+      "browser": ["e2e/forwarding.spec.ts"],
       "native": ["host"]
     }
   ]
