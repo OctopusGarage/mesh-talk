@@ -33,6 +33,25 @@ test("portable validation runs beside native compilation using existing health r
   assert.match(health, /files: frontend\/coverage\/lcov.info/);
 });
 
+test("all platforms run the complete frontend suite while Linux owns its coverage", () => {
+  const health = read("check-health.yml");
+  const coverage = step(health, "Frontend unit tests and coverage");
+  const plain = step(health, "Frontend unit tests (macOS and Windows)");
+  assert.ok(coverage && plain, "both execution modes must exist");
+  assert.match(coverage, /^        if: runner.os == 'Linux'$/m);
+  assert.match(plain, /^        if: runner.os != 'Linux'$/m);
+  assert.match(coverage, /^        run: npm run test:coverage$/m);
+  assert.match(plain, /^        run: npm test$/m);
+  for (const selected of [coverage, plain]) {
+    assert.match(selected, /^        working-directory: frontend$/m);
+    assert.doesNotMatch(selected, /continue-on-error|timeout|--exclude|--testNamePattern/);
+  }
+  const { scripts } = JSON.parse(readFileSync(new URL("../../frontend/package.json", import.meta.url), "utf8"));
+  assert.equal(scripts.test, "vitest run");
+  assert.equal(scripts["test:coverage"], `${scripts.test} --coverage`);
+  assert.match(step(health, "Seal browser unit line map from this run"), /^        if: runner.os == 'Linux'$/m);
+});
+
 test("CI caches the workspace output and retains native lint and build coverage", () => {
   const ci = read("ci.yml");
   assert.match(ci, /workspaces: ['"]?\. -> target/);

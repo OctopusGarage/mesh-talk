@@ -66,8 +66,14 @@ jobs:
         run: npm audit --prefix tools/help --audit-level=high
 
       - name: Frontend unit tests and coverage
+        if: runner.os == 'Linux'
         working-directory: frontend
         run: npm run test:coverage
+
+      - name: Frontend unit tests (macOS and Windows)
+        if: runner.os != 'Linux'
+        working-directory: frontend
+        run: npm test
 
       - name: Seal browser unit line map from this run
         if: runner.os == 'Linux'

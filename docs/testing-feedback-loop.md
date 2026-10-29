@@ -507,7 +507,7 @@ independent checks run concurrently and heavy suites are not repeated by health.
 
 | Owner                                 | Checks                                                                                                                                                                                                                 |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-health.yml` platform jobs      | Unit coverage, help and diagnostic/Python regressions on Linux/macOS/Windows; formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                                                                                      |
+| `check-health.yml` platform jobs      | Complete frontend units, help and diagnostic/Python regressions on Linux/macOS/Windows; unit coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                                                                                      |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
 | `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit and scheduled extended scenarios                                                                       |
@@ -528,7 +528,11 @@ which rejects failed, skipped or incomplete dependencies.
 Portable validation reuses Health's existing Node, Python and frontend dependency
 setup. Native CI no longer waits for frontend unit tests, help audits or diagnostic
 regressions before starting Clippy and workspace builds. Health uploads frontend
-coverage; CI uploads Rust coverage. Both remain protected checks, including strict
+coverage from Linux; macOS and Windows run the same complete Vitest inventory
+without collecting unused duplicate reports. Linux still enforces the configured
+coverage thresholds and supplies the same-run browser line map. Test deadlines
+and assertions are identical in both modes. CI uploads Rust coverage from each
+platform. Both workflows remain protected, including strict
 coverage upload failures. Native CI has a 90-minute job budget; Health portable
 jobs have a 25-minute budget. These are execution bounds, not latency promises.
 Compare hosted queue, execution and all-required-check completion after deployment.
