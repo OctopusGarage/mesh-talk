@@ -12,10 +12,16 @@
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::reception_effects::tests::", "node::runtime_delivery::tests::"]
+          "filters": [
+            "node::reception_effects::tests::",
+            "node::runtime_delivery::tests::"
+          ]
         }
       ],
-      "consumers": ["core-node", "desktop-chat"],
+      "consumers": [
+        "core-node",
+        "desktop-chat"
+      ],
       "capability": {
         "summary": "Provide bodyless durable reception work and bounded demand pages for host integration without changing frontend read-state ownership or claiming production callback cutover.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
@@ -1323,7 +1329,8 @@
         "crates/mesh-talk-core/src/node/account_profile_io_tests.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/runtime_routed_tests.rs",
-        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs"
+        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
+        "crates/mesh-talk-core/src/node/profile_receive_work.rs"
       ],
       "rust": [
         {
@@ -1346,7 +1353,10 @@
             "node::node::tests::account_profile_terminal_legacy_avatar_reconciles_on_restart",
             "node::node::tests::account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent",
             "node::account_profile_data::tests::",
-            "node::account_profile_io::tests::"
+            "node::account_profile_io::tests::",
+            "node::profile_receive_work::tests::",
+            "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
         },
         {
@@ -1371,7 +1381,10 @@
             "node::runtime::tests::account_nickname_preserves_bio_and_wins_over_host_name_on_restart",
             "node::runtime::tests::contact_nickname_survives_a_stale_signed_card_name_and_restart",
             "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
-            "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback"
+            "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
+            "node::profile_receive_work::tests::",
+            "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
         }
       ],

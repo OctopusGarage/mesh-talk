@@ -92,6 +92,7 @@ pub(crate) mod privacy_runtime;
 pub(crate) mod privacy_sync;
 pub(crate) mod profile;
 pub(crate) mod profile_io;
+mod profile_receive_work;
 pub(crate) mod profile_store;
 pub(crate) mod queries;
 pub(crate) mod ratchet_sessions;

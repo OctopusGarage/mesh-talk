@@ -653,6 +653,13 @@ metadata persisted with the account key. Pairing and recovery preserve it withou
 inferring missing dates. `node/account_profile_data.rs` owns signed bounded
 ordinary profile data and current-profile persistence; `node/account_profile_io.rs`
 owns admitted edits, authenticated reception and legacy compatibility.
+`node/profile_receive_work.rs` owns account-scoped exact receive evidence and
+retry scheduling on the profile's encrypted SQL connection. Discovery advances
+through at most 128 committed event headers; each retry pass selects 16 fixed
+metadata rows before loading one signed body at a time. Unknown devices and
+disabled sibling-profile synchronization remain pending. Current-profile writes
+finish before processed evidence is committed, so a crash or storage failure
+retries idempotently. No historical profile-ID set is rebuilt in memory.
 Send preparation enters host authority before acquiring the delivery journal.
 Desktop biography saves reply after durable local acceptance while admitted fanout
 continues independently. The ordinary nickname and bio edit share the publication

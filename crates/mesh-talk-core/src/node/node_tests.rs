@@ -9334,6 +9334,7 @@ async fn account_history_backfills_to_a_linked_device() {
 async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
+    let bob_keys = bob.secret_bytes();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let alice_roster = seed_roster(
         &bob,
@@ -9343,6 +9344,10 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
     );
     let bob_roster = seed_roster(&alice, "Alice", 4000, &bob.public().user_id());
     let dir = tempfile::tempdir().unwrap();
+    let alice_dir = dir.path().join("alice");
+    let bob_dir = dir.path().join("bob");
+    std::fs::create_dir_all(&alice_dir).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
     let (a_dm, _a_rx) = mpsc::unbounded_channel();
     let (a_ch, _a_ch_rx) = mpsc::unbounded_channel();
     let (a_file, _a_file_rx) = mpsc::unbounded_channel();
@@ -9355,12 +9360,12 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
         a_dm,
         a_ch,
         a_file,
-        &dir.path().join("alice.log"),
-        &dir.path().join("alice-sent.log"),
+        &alice_dir.join("alice.log"),
+        &alice_dir.join("alice-sent.log"),
         "pw",
     )
     .unwrap();
-    let bob_path = dir.path().join("bob.log");
+    let bob_path = bob_dir.join("bob.log");
     let bob_node = Node::open(
         bob,
         bob_roster,
@@ -9368,7 +9373,7 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
         b_ch,
         b_file,
         &bob_path,
-        &dir.path().join("bob-sent.log"),
+        &bob_dir.join("bob-sent.log"),
         "pw",
     )
     .unwrap();
@@ -9449,23 +9454,45 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
         bob_node.peer_avatar(&alice_node.account.account_id()),
         Some(vec![9])
     );
-    let reopened = PersistentEventLog::open(&bob_path, "pw").unwrap();
-    assert_eq!(reopened.conversation_len(&conv).unwrap(), 3);
-    assert_eq!(
-        reopened
-            .events(&conv)
-            .unwrap()
-            .iter()
-            .filter(|e| e.kind == EventKind::Message)
-            .count(),
-        1
-    );
-    // Compaction must leave the live append handle attached to the rewritten file.
+    // The live indexed writer remains usable after incremental compaction.
     bob_node
         .append_event(conv, EventKind::Message, b"after compaction".to_vec())
         .unwrap();
-    let reopened = PersistentEventLog::open(&bob_path, "pw").unwrap();
-    assert_eq!(reopened.conversation_len(&conv).unwrap(), 4);
+    let roster = bob_node.roster.clone();
+    bob_node.close_profile().unwrap();
+    let reopened = Node::open(
+        DeviceIdentity::from_secret_bytes(bob_keys.0, bob_keys.1),
+        roster,
+        mpsc::unbounded_channel().0,
+        mpsc::unbounded_channel().0,
+        mpsc::unbounded_channel().0,
+        &bob_path,
+        &bob_dir.join("bob-sent.log"),
+        "pw",
+    )
+    .unwrap();
+    assert_eq!(
+        reopened
+            .log
+            .lock()
+            .unwrap()
+            .conversation_len(&conv)
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        reopened
+            .log
+            .lock()
+            .unwrap()
+            .events(&conv)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == EventKind::Message)
+            .count(),
+        2
+    );
+    reopened.close_profile().unwrap();
 }
 
 #[tokio::test]
@@ -10986,6 +11013,10 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
     let alice_uid = alice.public().user_id();
     let bob_uid = bob.public().user_id();
     let dir = tempfile::tempdir().unwrap();
+    let alice_dir = dir.path().join("alice");
+    let bob_dir = dir.path().join("bob");
+    std::fs::create_dir_all(&alice_dir).unwrap();
+    std::fs::create_dir_all(&bob_dir).unwrap();
 
     let bob_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bob_addr = bob_listener.local_addr().unwrap();
@@ -11020,8 +11051,8 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &alice_dir.join("a.log"),
+        &alice_dir.join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -11036,13 +11067,13 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &bob_dir.join("b.log"),
+        &bob_dir.join("b-sent.log"),
         "pw",
     )
     .unwrap();
 
-    tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
+    let accept = tokio::spawn(Arc::clone(&bob_node).run_accept_loop(bob_listener));
 
     alice_node
         .save_account_profile_if("Alice".into(), "Self-declared bio".into(), |commit| {
@@ -11076,6 +11107,8 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
             .created_at_ms,
         alice_acct.created_at_ms()
     );
+    accept.abort();
+    let _ = accept.await;
 }
 
 #[tokio::test]

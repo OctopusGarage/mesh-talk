@@ -443,9 +443,9 @@ pub struct Node {
     pub(in crate::node) call_signal_incoming: super::runtime_delivery::CallInbox,
     pub(in crate::node) call_signal_rx:
         Mutex<Option<mpsc::UnboundedReceiver<crate::node::call::ReceivedCallSignal>>>,
-    /// Profile events we've already surfaced this session (dedup), so re-syncing a peer's
-    /// device-pair conversation doesn't re-emit a profile we already applied.
-    pub(in crate::node) profiles_emitted: Mutex<HashSet<EventId>>,
+    /// Exact profile receive facts and bounded metadata discovery/retry.
+    pub(in crate::node) profile_receive_work:
+        Mutex<super::profile_receive_work::ProfileReceiveWork>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
     pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::ReactionStore>,
     // Declared last so every legacy handle drops before the connection and lease.
@@ -897,6 +897,8 @@ impl Node {
         )?;
         let account_document_updates = tokio::sync::watch::channel(0).0;
         storage.complete_participant(password, legacy_previous.as_deref())?;
+        let profile_receive_work =
+            super::profile_receive_work::ProfileReceiveWork::open(storage.clone())?;
         let reception_effects = super::reception_effects::ReceptionEffects::open(storage.clone())?;
         let mut log = PersistentEventLog::open_profile(storage.clone(), password)?;
         while delivery
@@ -1108,7 +1110,7 @@ impl Node {
             profile_rx: Mutex::new(profile_rx),
             call_signal_incoming: call_signal_tx,
             call_signal_rx: Mutex::new(call_signal_rx),
-            profiles_emitted: Mutex::new(HashSet::new()),
+            profile_receive_work: Mutex::new(profile_receive_work),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),
             sentlog: Mutex::new(sentlog),
@@ -1208,6 +1210,9 @@ impl Node {
         // only after the existing authenticated adoption owner has committed.
         node.reception_effects =
             super::reception_effects::ReceptionEffects::open(node.storage.clone())?;
+        node.profile_receive_work = Mutex::new(
+            super::profile_receive_work::ProfileReceiveWork::open(node.storage.clone())?,
+        );
         Ok(Arc::new(node))
     }
 
