@@ -90,8 +90,438 @@ pub(super) fn node_with_identity(
 }
 
 #[tokio::test]
+async fn failed_initial_sibling_custody_is_repaired_after_history_recovers() {
+    use crate::{discovery::Announce, node::account_devices::AccountDevice};
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let sibling = node(&dir.path().join("sibling"), &account);
+    let external = DeviceIdentity::generate();
+    for (owner, peer) in [(&source, &sibling), (&sibling, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: peer.identity.public(),
+                certificate: account.certify(&peer.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    // No endpoint exists during initial control publication. The original
+    // legacy membership still contains an external principal, currently offline.
+    let group = source
+        .create_channel(
+            "Failed initial custody",
+            vec![sibling.identity.public(), external.public()],
+        )
+        .await
+        .unwrap();
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sibling_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_addr = source_listener.local_addr().unwrap();
+    let sibling_addr = sibling_listener.local_addr().unwrap();
+    for (owner, peer, address) in [
+        (&source, &sibling, sibling_addr),
+        (&sibling, &source, source_addr),
+    ] {
+        owner.roster.lock().unwrap().update(
+            &Announce::new_with_account(&peer.identity, &account, "custody peer", address.port()),
+            address.ip(),
+            &owner.user_id(),
+        );
+    }
+    // A real TCP endpoint with no accepting responder makes the first bounded
+    // Noise exchange fail. No permit, capability or custody state is fabricated.
+    source
+        .send_channel_message(group, b"synthetic failed initial custody")
+        .await
+        .unwrap();
+    assert_eq!(
+        *source.channel_last_send.lock().unwrap(),
+        Some((1, 0)),
+        "one real routed sibling was attempted but the original exchange never completed"
+    );
+    let event = source.channel_history(group, 10)[0].id;
+    assert!(source.channel_custody_observations(group, event).is_empty());
+    assert_eq!(source.channel_custody_count(group, event), Some(0));
+    let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
+    let sibling_server = tokio::spawn(sibling.clone().run_accept_loop(sibling_listener));
+    let history = tokio::time::timeout(Duration::from_secs(8), async {
+        while !sibling
+            .channel_history(group, 10)
+            .iter()
+            .any(|row| row.id == event && row.from_me)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let repaired = tokio::time::timeout(Duration::from_secs(8), async {
+        while sibling.channel_custody_count(group, event) != Some(0) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let source_observations = source.channel_custody_observations(group, event);
+    let sibling_observations = sibling.channel_custody_observations(group, event);
+    for server in [source_server, sibling_server] {
+        server.abort();
+        let _ = server.await;
+    }
+    source.runtime_work.drain().await;
+    sibling.runtime_work.drain().await;
+    history.expect("authenticated History recovers the exact original outgoing message");
+    assert!(
+        repaired.is_ok(),
+        "real failed initial custody must remain repairable: source={source_observations:?} sibling={sibling_observations:?}"
+    );
+    assert!(!source_observations.is_empty());
+    assert!(!sibling_observations.is_empty());
+}
+
+#[tokio::test]
+async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report() {
+    use crate::{discovery::Announce, node::account_devices::AccountDevice};
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let sibling = node(&dir.path().join("new-sibling"), &account);
+    let group = source
+        .create_account_channel_invited_if("Existing account group", vec![], |commit| commit())
+        .await
+        .unwrap();
+    source
+        .send_channel_message(group, b"before the new device linked")
+        .await
+        .unwrap();
+    let event = source.channel_history(group, 10)[0].id;
+    assert!(
+        source
+            .channels
+            .lock()
+            .unwrap()
+            .state(&group)
+            .unwrap()
+            .owner_account_id()
+            .is_some()
+    );
+    assert!(
+        !source
+            .channels
+            .lock()
+            .unwrap()
+            .state(&group)
+            .unwrap()
+            .members()
+            .contains(&sibling.identity.public())
+    );
+    for (owner, peer) in [(&source, &sibling), (&sibling, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: peer.identity.public(),
+                certificate: account.certify(&peer.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sibling_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    for (owner, peer, address) in [
+        (&source, &sibling, sibling_listener.local_addr().unwrap()),
+        (&sibling, &source, source_listener.local_addr().unwrap()),
+    ] {
+        owner.roster.lock().unwrap().update(
+            &Announce::new_with_account(
+                &peer.identity,
+                &account,
+                "new linked device",
+                address.port(),
+            ),
+            address.ip(),
+            &owner.user_id(),
+        );
+    }
+    let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
+    // Isolate the account-history/report boundary: use the existing inbound-only
+    // server owner and real account loop, without a channel-membership producer.
+    let serving = sibling.clone();
+    let sibling_server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                result = sibling_listener.accept() => {
+                    let (stream, _) = result.unwrap();
+                    let serving = serving.clone();
+                    connections.spawn(Box::pin(async move {
+                        if let Ok(channel) = serving.privacy_accept(stream).await {
+                            serving.serve_connection(channel).await;
+                        }
+                    }));
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    let sibling_history = tokio::spawn(sibling.clone().run_account_history_loop());
+    let recovered = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let history = sibling
+                .channel_history(group, 10)
+                .iter()
+                .any(|row| row.id == event && row.from_me);
+            let reports = source.channel_custody_observations(group, event);
+            let shared = sibling.channel_custody_observations(group, event);
+            if history && reports.len() == 1 && reports[0].tombstone && reports == shared {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let history = sibling
+        .channel_history(group, 10)
+        .iter()
+        .any(|row| row.id == event && row.from_me);
+    let original_present = sibling.log.lock().unwrap().get(&event).is_some();
+    let physically_enrolled = source
+        .channels
+        .lock()
+        .unwrap()
+        .state(&group)
+        .unwrap()
+        .members()
+        .contains(&sibling.identity.public());
+    let reports = source.channel_custody_observations(group, event);
+    let shared_reports = sibling.channel_custody_observations(group, event);
+    let shared_count = sibling.channel_custody_count(group, event);
+    let positive = if recovered.is_ok() {
+        // The existing original-event durability boundary, separate from
+        // History's plaintext-only import, is required for a positive reply.
+        let originals: Vec<_> = source
+            .log
+            .lock()
+            .unwrap()
+            .events(&group)
+            .into_iter()
+            .cloned()
+            .collect();
+        for original in originals {
+            sibling
+                .log
+                .lock()
+                .unwrap()
+                .append_durable(original)
+                .unwrap();
+        }
+        sibling.process_channel(group);
+        let peer = source.routing_peer(&sibling.user_id()).unwrap();
+        let query = tokio::time::timeout(
+            Duration::from_secs(8),
+            source.recheck_channel_custody_peer(group, event, &peer),
+        )
+        .await;
+        let shared = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let reports = source.channel_custody_observations(group, event);
+                if reports.len() == 1
+                    && !reports[0].tombstone
+                    && sibling.channel_custody_observations(group, event) == reports
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        Some((
+            query.is_ok(),
+            shared.is_ok(),
+            source.channel_custody_count(group, event),
+            sibling.channel_custody_count(group, event),
+        ))
+    } else {
+        None
+    };
+    for task in [source_server, sibling_server, sibling_history] {
+        task.abort();
+        let _ = task.await;
+    }
+    source.runtime_work.drain().await;
+    sibling.runtime_work.drain().await;
+    assert!(
+        history,
+        "the existing authenticated History path must recover the exact plaintext"
+    );
+    assert!(
+        !original_present,
+        "History and read-only queries cannot replicate the original ciphertext"
+    );
+    assert!(
+        !physically_enrolled,
+        "a custody report cannot enroll the linked device as a physical member"
+    );
+    assert!(
+        recovered.is_ok(),
+        "a certified nonphysical sibling can report an honest absence: reports={reports:?} shared_count={shared_count:?}"
+    );
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        shared_reports, reports,
+        "the exact signed negative report is shared through ordinary private documents"
+    );
+    assert_eq!(source.channel_custody_count(group, event), Some(0));
+    assert_eq!(
+        shared_count,
+        Some(0),
+        "verified account access, an exact own History row and only signed negatives establish zero without a physical grant"
+    );
+    assert!(
+        reports[0].tombstone,
+        "plaintext-only History must never become a positive original-custody claim"
+    );
+    assert_eq!(
+        positive,
+        Some((true, true, Some(0), None)),
+        "real stored originals can produce positive evidence, but a nonphysical view cannot misclassify unresolved positives as zero"
+    );
+}
+
+#[tokio::test]
 async fn channel_custody_is_shared_with_certified_sibling_while_holder_is_offline() {
     channel_custody_sibling_scenario(true).await;
+}
+
+#[tokio::test]
+async fn sibling_custody_report_queries_never_replicate_the_missing_original() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        discovery::Announce,
+        eventlog::{Event, EventKind},
+        node::{account_devices::AccountDevice, session},
+        transport::SecureChannel,
+    };
+    use tokio::net::TcpListener;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let sibling = node(&dir.path().join("sibling"), &account);
+    for (owner, peer) in [(&source, &sibling), (&sibling, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: peer.identity.public(),
+                certificate: account.certify(&peer.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let genesis = Event::new(
+        &source.identity,
+        new_channel_id(),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Read-only custody report".into(),
+            members: vec![source.identity.public(), sibling.identity.public()],
+            epoch: 0,
+            owner: source.user_id(),
+        }
+        .encode(),
+    );
+    let group = genesis.conversation_id;
+    for current in [&source, &sibling] {
+        current
+            .log
+            .lock()
+            .unwrap()
+            .append_durable(genesis.clone())
+            .unwrap();
+        current.process_channel(group);
+    }
+    source
+        .send_channel_message(group, b"original absent at query recipient")
+        .await
+        .unwrap();
+    let event = source.channel_history(group, 10)[0].id;
+    // Reserve both endpoints together so each independent query has a fresh
+    // real route; a responder close cannot race pooled-channel reuse.
+    let listeners = [
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+    ];
+    for (index, listener) in listeners.into_iter().enumerate() {
+        if index == 1 {
+            // Store the actual signed causal events durably before the positive query.
+            let events: Vec<_> = source
+                .log
+                .lock()
+                .unwrap()
+                .events(&group)
+                .into_iter()
+                .cloned()
+                .collect();
+            for event in events {
+                sibling.log.lock().unwrap().append_durable(event).unwrap();
+            }
+            sibling.process_channel(group);
+        }
+        let address = listener.local_addr().unwrap();
+        source.roster.lock().unwrap().update(
+            &Announce::new_with_account(&sibling.identity, &account, "report peer", address.port()),
+            address.ip(),
+            &source.user_id(),
+        );
+        let peer = source.routing_peer(&sibling.user_id()).unwrap();
+        let served = sibling.clone();
+        let responder = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut channel = SecureChannel::accept(stream, &served.identity)
+                .await
+                .unwrap();
+            let bytes = channel.recv().await.unwrap();
+            assert_eq!(
+                session::durable_have_query_for_test(&bytes),
+                Some((group, event)),
+                "report repair must send only the exact-event query, never a sync request or event payload"
+            );
+            let store = served.sync_store(channel.peer_identity());
+            assert!(
+                matches!(session::serve_wire_bytes(&mut channel, &store, &bytes).await.unwrap(), session::Served::Handled(id) if id == group)
+            );
+        });
+        source
+            .recheck_channel_custody_peer(group, event, &peer)
+            .await;
+        responder.await.unwrap();
+        assert_eq!(
+            sibling.log.lock().unwrap().get(&event).is_some(),
+            index == 1,
+            "a read-only query cannot replicate an absent original"
+        );
+        let observations = source.channel_custody_observations(group, event);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0].tombstone,
+            index == 0,
+            "the published report must match the actual durable storage at query time"
+        );
+        assert_eq!(
+            source.channel_custody_count(group, event),
+            Some(0),
+            "authenticated own-sibling custody never becomes an external replica"
+        );
+    }
 }
 
 async fn pull_custody_page_observed(
@@ -534,12 +964,15 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             bob_peer.addr.ip(),
             &a.user_id(),
         );
-        a.retry_one_channel_custody(
-            0,
-            &mut std::collections::HashMap::new(),
-            &mut std::collections::HashMap::new(),
-        )
-        .await;
+        assert!(
+            a.retry_one_channel_custody(
+                0,
+                &mut std::collections::HashMap::new(),
+                &mut std::collections::HashMap::new(),
+            )
+            .await
+            .is_none()
+        );
         assert!(
             lost.log.lock().unwrap().get(&event).is_some(),
             "a shared negative must allow retry despite an old local journal positive"
@@ -547,12 +980,15 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         // Apply the receiver's retained controls before asking it to qualify
         // the repaired copy. The first exchange bootstrapped its lost state.
         lost.process_channel(channel);
-        a.retry_one_channel_custody(
-            0,
-            &mut std::collections::HashMap::new(),
-            &mut std::collections::HashMap::new(),
-        )
-        .await;
+        assert!(
+            a.retry_one_channel_custody(
+                0,
+                &mut std::collections::HashMap::new(),
+                &mut std::collections::HashMap::new(),
+            )
+            .await
+            .is_none()
+        );
         assert_eq!(
             a.channel_custody_count(channel, event),
             Some(1),

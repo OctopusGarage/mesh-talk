@@ -329,6 +329,19 @@ where
     }
 }
 
+#[cfg(test)]
+pub(in crate::node) fn durable_have_query_for_test(
+    bytes: &[u8],
+) -> Option<(ConversationId, EventId)> {
+    match decode(bytes).ok()? {
+        SyncWire::DurableHaveRequest {
+            conversation,
+            event_id,
+        } => Some((conversation, event_id)),
+        _ => None,
+    }
+}
+
 /// Query a recipient after the manifest is durable and before a chunk is sent.
 /// An older endpoint closes on this appended variant; the caller handles that
 /// explicit compatibility fallback on a fresh connection.

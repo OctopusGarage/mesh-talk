@@ -926,6 +926,21 @@ holder-signed delivery receipts. Later confirmations and revocations reconcile
 independently of the immutable message-history digest. Local legacy observations
 migrate automatically without replacing newer shared revisions.
 
+When initial copy confirmation fails, the existing recovery slot may query a
+currently certified account sibling for the exact retained event if that turn
+did not attempt external replication. This reuses the authenticated read-only
+durable-have exchange, including for siblings without a physical group grant;
+it neither transfers the original nor grants membership. An honest negative
+report is sufficient for synchronized known-zero status. History plaintext alone
+is not proof that the sibling retains the original encrypted event.
+
+A logical account owner or member with an associated own-account history row
+may display zero from signed negative observations only when no positive claim
+remains after journal reconciliation. Without the public membership information
+needed to qualify positive external holders, that positive count remains unknown.
+The report query uses the existing recovery clock and slot, and stops after an
+authenticated report rather than repeatedly polling account-only history caches.
+
 The displayed member-copy count deduplicates accepted external member accounts
 and excludes the sender's entire account. Own-device synchronization and opaque
 post-office custody remain separate facts. A device missing status data displays

@@ -285,7 +285,7 @@
         "guide": "docs/help/topics/channels.md#understand-message-copy-status",
         "invariants": [
           {
-            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. Generic document writes cannot create custody controls.",
+            "name": "Versioned holder observations and negative rechecks converge independently of message history; own-account copies are excluded and missing state remains unknown. Unused recovery slots may repair reports through authenticated read-only sibling queries without replication or membership grants; logical members project signed negative-only evidence conservatively. Generic document writes cannot create custody controls.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {

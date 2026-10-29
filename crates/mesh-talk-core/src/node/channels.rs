@@ -588,8 +588,15 @@ impl Node {
             }
             // Custody and failed plaintext retain their existing retry clock.
             if custody_tick {
-                self.retry_one_channel_custody(custody_cursor, &mut retry_after, &mut retry_cycle)
-                    .await;
+                if let Some((channel, event, peer)) = self
+                    .retry_one_channel_custody(custody_cursor, &mut retry_after, &mut retry_cycle)
+                    .await
+                {
+                    // No replication exchange used this turn. Repair only the
+                    // missing report with the existing exact durable-have query.
+                    self.recheck_channel_custody_peer(channel, event, &peer)
+                        .await;
+                }
                 if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
                     self.recheck_one_channel_custody(
                         custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS,
@@ -1960,13 +1967,11 @@ impl Node {
     /// authenticated custody evidence. This never establishes delivery or reading.
     /// A sibling-authored row without synchronized evidence remains unknown.
     pub fn channel_custody_count(&self, channel: ConversationId, id: EventId) -> Option<usize> {
-        {
+        let physical_member = {
             let book = self.channels.lock().expect("channels mutex");
-            let state = book.state(&channel)?;
-            if !self.channel_identity_matches_account(state) {
-                return None;
-            }
-        }
+            book.state(&channel)
+                .is_some_and(|state| self.channel_identity_matches_account(state))
+        };
         let own_devices: HashSet<_> = self
             .linked_devices()
             .into_iter()
@@ -2003,6 +2008,23 @@ impl Node {
             return None;
         }
         let observations = self.channel_custody_observations(channel, id);
+        if !physical_member {
+            // Account-private history and signed negatives can establish zero
+            // observed external copies without installing a physical grant.
+            // Positive holder qualification still needs the existing public
+            // membership view; never turn an unresolved positive into zero.
+            let (confirmed, _) = self.effective_channel_custody_observations(channel, id);
+            return (!observations.is_empty()
+                && observations.iter().all(|meta| meta.tombstone)
+                && confirmed.is_empty()
+                && self.account_group_access(channel).is_ok_and(|access| {
+                    matches!(
+                        access.role,
+                        super::AccountGroupRole::Owner | super::AccountGroupRole::Member
+                    )
+                }))
+            .then_some(0);
+        }
         if !own_local && observations.is_empty() {
             return None;
         }
@@ -2317,12 +2339,14 @@ impl Node {
 
     /// Retry one insufficiently replicated own message per tick. The event log is
     /// the durable pending queue, so a restart cannot forget local-only messages.
+    /// If no replication exchange starts, return at most one missing-report
+    /// candidate for the same recovery slot's read-only durable-have query.
     pub(in crate::node) async fn retry_one_channel_custody(
         &self,
         cursor: usize,
         after: &mut HashMap<ConversationId, (u64, EventId)>,
         cycles: &mut HashMap<ConversationId, usize>,
-    ) {
+    ) -> Option<(ConversationId, EventId, PeerRecord)> {
         let me = self.user_id();
         let mut channels: Vec<_> = {
             let book = self.channels.lock().expect("channels mutex not poisoned");
@@ -2336,7 +2360,7 @@ impl Node {
                 .collect()
         };
         if channels.is_empty() {
-            return;
+            return None;
         }
         channels.sort_unstable_by_key(|(channel, _)| *channel.as_bytes());
         let (channel, _) = &channels[cursor % channels.len()];
@@ -2354,12 +2378,42 @@ impl Node {
             )
         };
         if candidates.is_empty() {
-            return;
+            return None;
         }
+        // A read-only custody report does not require a physical group grant.
+        // Pairing's current full-device/account binding selects the endpoint;
+        // the ordinary durable-have responder still owns original visibility.
+        let own_account = self.account_id();
+        let report_peers: Vec<_> = self
+            .linked_devices()
+            .into_iter()
+            .filter(|device| {
+                device.public != self.identity.public()
+                    && device.certificate.verify()
+                    && device.certificate.account_ed25519_pub == self.account.public().ed25519_pub
+                    && device.certificate.device_ed25519_pub == device.public.ed25519_pub
+            })
+            .filter_map(|device| {
+                self.routing_peer(&device.public.user_id()).filter(|peer| {
+                    peer.public == device.public
+                        && !peer.post_office
+                        && peer.account_id.as_deref() == Some(own_account.as_str())
+                })
+            })
+            .collect();
+        let mut missing_report = None;
         let mut candidates = candidates.into_iter();
         while let Some((event_id, cycle)) =
             next_custody_retry_key(&mut candidates, channel, after, cycles)
         {
+            if missing_report.is_none()
+                && self
+                    .channel_custody_observations(channel, event_id)
+                    .is_empty()
+            {
+                missing_report = select_custody_peer(report_peers.clone(), cycle)
+                    .map(|peer| (channel, event_id, peer));
+            }
             let target = members
                 .iter()
                 .filter_map(|member| self.channel_custody_member_principal(channel, member, None))
@@ -2387,9 +2441,10 @@ impl Node {
                     self.sync_and_confirm_custody(channel, event_id, &peer),
                 )
                 .await;
-                break;
+                return None;
             }
         }
+        missing_report
     }
 
     async fn distribute_channel_targets(
@@ -2687,12 +2742,17 @@ mod fanout_tests {
                     &node.user_id(),
                 );
             }
-            tokio::time::timeout(
+            let report = tokio::time::timeout(
                 Duration::from_millis(250),
                 node.retry_one_channel_custody(0, &mut HashMap::new(), &mut HashMap::new()),
             )
             .await
             .expect("a satisfied or empty external-principal target must not open a retry");
+            assert_eq!(
+                report.is_some(),
+                !external,
+                "only a missing own-sibling report proposes a read-only query; confirmed external custody needs neither work"
+            );
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), listener.accept())
                     .await
