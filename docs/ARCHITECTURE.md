@@ -1463,6 +1463,17 @@ before ACK, and a bounded in-memory queue does not satisfy that requirement.
 These repository APIs alone do not switch production runtimes away from their
 legacy unbounded callbacks or prove a bounded Tauri/WebView handoff.
 
+`RuntimeStartup::bounded` and `Node::open_bounded_with_profile_lease` select the
+additive production delivery mode. They allocate no DM, channel, file or profile
+payload queue; durable reception/current-profile commits wake the existing
+coalesced state watch. Legacy callback constructors retain their existing
+caller-owned collecting contract. Ephemeral call signals use a separate inbox
+of at most 16 signals and 256 KiB including sender identifiers; admission fails
+explicitly when full, and a too-small demand read leaves the first signal queued.
+Call signaling remains best-effort and adds no wire acknowledgement or replay.
+Hosts must select this mode and complete their bounded demand handoff before
+these constructor guarantees describe a running desktop or CLI.
+
 `SentStore`, `ReceivedStore` and `IndexedAccountSuppression` require completed
 participant authority; integration must retain `validate_participant_request`
 before invoking their constructors. These owners are not yet wired into Node's

@@ -320,8 +320,10 @@ pub struct Node {
     pub(in crate::node) roster: Arc<Mutex<Roster>>,
     /// Session-local preferred address after a successful pinned Noise handshake.
     pub(in crate::node) preferred_routes: Mutex<HashMap<UserId, std::net::SocketAddr>>,
-    pub(in crate::node) incoming: mpsc::UnboundedSender<ReceivedDm>,
-    pub(in crate::node) channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
+    pub(in crate::node) incoming: super::runtime_delivery::HostPayload<ReceivedDm>,
+    pub(in crate::node) channel_incoming:
+        super::runtime_delivery::HostPayload<ReceivedChannelMessage>,
+    pub(in crate::node) reception_effects: super::reception_effects::ReceptionEffects,
     /// Serialize owner membership commits with conditional sibling enrollment.
     pub(in crate::node) channel_membership_commit: Mutex<()>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
@@ -350,7 +352,7 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) channel_last_send: Mutex<Option<(usize, u64)>>,
     pub(in crate::node) emitted: Mutex<HashSet<EventId>>,
-    pub(in crate::node) file_incoming: mpsc::UnboundedSender<ReceivedFile>,
+    pub(in crate::node) file_incoming: super::runtime_delivery::HostPayload<ReceivedFile>,
     pub(in crate::node) files: Mutex<FileBook>,
     pub(super) group_file_sharing: super::network_cost::GroupFileSharingPolicy,
     /// Per-file conversations we've seen a manifest for but don't yet hold all chunks of —
@@ -432,14 +434,13 @@ pub struct Node {
     /// node owns BOTH ends (created in `open_with_account`) so the constructor signature
     /// is unchanged across its many call sites; the runtime claims the receiver once via
     /// [`Node::take_profile_receiver`].
-    pub(in crate::node) profile_incoming: mpsc::UnboundedSender<ReceivedProfile>,
+    pub(in crate::node) profile_incoming: super::runtime_delivery::HostPayload<ReceivedProfile>,
     pub(in crate::node) profile_rx: Mutex<Option<mpsc::UnboundedReceiver<ReceivedProfile>>>,
     /// Live stream of inbound call signals (WebRTC SDP/bye), surfaced to the app. Like
     /// `profile_incoming`, the node owns BOTH ends (created in `open_with_account`) so the
     /// constructor signature is unchanged; the runtime claims the receiver once via
     /// [`Node::take_call_signal_receiver`]. Ephemeral — never touches the event log.
-    pub(in crate::node) call_signal_incoming:
-        mpsc::UnboundedSender<crate::node::call::ReceivedCallSignal>,
+    pub(in crate::node) call_signal_incoming: super::runtime_delivery::CallInbox,
     pub(in crate::node) call_signal_rx:
         Mutex<Option<mpsc::UnboundedReceiver<crate::node::call::ReceivedCallSignal>>>,
     /// Profile events we've already surfaced this session (dedup), so re-syncing a peer's
@@ -463,6 +464,24 @@ pub struct NodeOpenRequest<'a> {
     pub log_path: &'a Path,
     pub sent_path: &'a Path,
     pub password: &'a str,
+}
+
+/// Production hosts observe durable reception/current state on demand. This
+/// constructor has no caller-owned payload queues; legacy constructors remain
+/// live-only SDK collecting APIs with caller-owned unbounded delivery.
+pub struct BoundedNodeOpenRequest<'a> {
+    pub identity: DeviceIdentity,
+    pub account: Account,
+    pub roster: Arc<Mutex<Roster>>,
+    pub log_path: &'a Path,
+    pub sent_path: &'a Path,
+    pub password: &'a str,
+}
+
+pub(crate) struct LegacyPayloadTargets {
+    pub incoming: mpsc::UnboundedSender<ReceivedDm>,
+    pub channel_incoming: mpsc::UnboundedSender<ReceivedChannelMessage>,
+    pub file_incoming: mpsc::UnboundedSender<ReceivedFile>,
 }
 
 impl Node {
@@ -569,6 +588,21 @@ impl Node {
         Self::open_in_storage(storage, request)
     }
 
+    pub fn open_bounded_with_profile_lease(
+        lease: crate::storage::profile::ProfileStorageLease,
+        request: BoundedNodeOpenRequest<'_>,
+    ) -> Result<Arc<Self>, LogError> {
+        let storage = crate::storage::profile::context::ProfileStorage::open_participant(
+            lease,
+            &request.identity.public(),
+            &request.account.public(),
+            request.log_path,
+            request.sent_path,
+            request.password,
+        )?;
+        Self::open_in_storage_delivery(storage, request, None)
+    }
+
     pub(crate) fn open_in_storage(
         storage: Arc<crate::storage::profile::context::ProfileStorage>,
         request: NodeOpenRequest<'_>,
@@ -584,6 +618,57 @@ impl Node {
             sent_path,
             password,
         } = request;
+        Self::open_in_storage_delivery(
+            storage,
+            BoundedNodeOpenRequest {
+                identity,
+                account,
+                roster,
+                log_path,
+                sent_path,
+                password,
+            },
+            Some(LegacyPayloadTargets {
+                incoming,
+                channel_incoming,
+                file_incoming,
+            }),
+        )
+    }
+
+    pub(crate) fn open_in_storage_delivery(
+        storage: Arc<crate::storage::profile::context::ProfileStorage>,
+        request: BoundedNodeOpenRequest<'_>,
+        targets: Option<LegacyPayloadTargets>,
+    ) -> Result<Arc<Self>, LogError> {
+        let BoundedNodeOpenRequest {
+            identity,
+            account,
+            roster,
+            log_path,
+            sent_path,
+            password,
+        } = request;
+        let legacy_delivery = targets.is_some();
+        let ui_changes = tokio::sync::watch::channel(0).0;
+        let (incoming, channel_incoming, file_incoming) = match targets {
+            Some(targets) => (
+                super::runtime_delivery::HostPayload::legacy(targets.incoming, ui_changes.clone()),
+                super::runtime_delivery::HostPayload::legacy(
+                    targets.channel_incoming,
+                    ui_changes.clone(),
+                ),
+                super::runtime_delivery::HostPayload::legacy(
+                    targets.file_incoming,
+                    ui_changes.clone(),
+                ),
+            ),
+            None => (
+                super::runtime_delivery::HostPayload::projection(ui_changes.clone()),
+                super::runtime_delivery::HostPayload::projection(ui_changes.clone()),
+                super::runtime_delivery::HostPayload::projection(ui_changes.clone()),
+            ),
+        };
         storage.validate_participant_request(
             &identity.public(),
             &account.public(),
@@ -812,6 +897,7 @@ impl Node {
         )?;
         let account_document_updates = tokio::sync::watch::channel(0).0;
         storage.complete_participant(password, legacy_previous.as_deref())?;
+        let reception_effects = super::reception_effects::ReceptionEffects::open(storage.clone())?;
         let mut log = PersistentEventLog::open_profile(storage.clone(), password)?;
         while delivery
             .recover_next_with_channels(
@@ -942,9 +1028,23 @@ impl Node {
         media
             .prune_unreferenced(&live_media)
             .map_err(|e| LogError::Io(std::io::Error::other(format!("media prune: {e}"))))?;
-        let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
-        let (call_signal_tx, call_signal_rx) =
-            mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
+        let (profile_tx, profile_rx, call_signal_tx, call_signal_rx) = if legacy_delivery {
+            let (profile_tx, profile_rx) = mpsc::unbounded_channel();
+            let (call_tx, call_rx) = mpsc::unbounded_channel();
+            (
+                super::runtime_delivery::HostPayload::legacy(profile_tx, ui_changes.clone()),
+                Some(profile_rx),
+                super::runtime_delivery::CallInbox::legacy(call_tx),
+                Some(call_rx),
+            )
+        } else {
+            (
+                super::runtime_delivery::HostPayload::projection(ui_changes.clone()),
+                None,
+                super::runtime_delivery::CallInbox::bounded(ui_changes.clone()),
+                None,
+            )
+        };
         favorite_media
             .prune_unreferenced(&favorites.live_files(now_millis()))
             .map_err(LogError::Io)?;
@@ -1005,9 +1105,9 @@ impl Node {
             trust_cards,
             profiles,
             profile_incoming: profile_tx,
-            profile_rx: Mutex::new(Some(profile_rx)),
+            profile_rx: Mutex::new(profile_rx),
             call_signal_incoming: call_signal_tx,
-            call_signal_rx: Mutex::new(Some(call_signal_rx)),
+            call_signal_rx: Mutex::new(call_signal_rx),
             profiles_emitted: Mutex::new(HashSet::new()),
             pending_link: Mutex::new(None),
             log: Mutex::new(log),
@@ -1015,6 +1115,7 @@ impl Node {
             roster,
             incoming,
             channel_incoming,
+            reception_effects,
             channel_membership_commit: Mutex::new(()),
             channels: Mutex::new(channels),
             pending_channel_plaintext: Mutex::new(Default::default()),
@@ -1041,7 +1142,7 @@ impl Node {
             file_pull_gate: tokio::sync::Mutex::new(()),
             relay_retry_after: Mutex::new(HashMap::new()),
             relay_drain_cursor: Mutex::new(HashMap::new()),
-            ui_changes: tokio::sync::watch::channel(0).0,
+            ui_changes,
             file_changes: tokio::sync::watch::channel(0).0,
             attachment_consent: Mutex::new(attachment_consent),
             file_consent: Mutex::new(file_consent),

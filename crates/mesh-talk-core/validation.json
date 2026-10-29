@@ -4,12 +4,15 @@
     {
       "id": "core-reception-effects",
       "paths": [
-        "crates/mesh-talk-core/src/node/reception_effects/"
+        "crates/mesh-talk-core/src/node/reception_effects/",
+        "crates/mesh-talk-core/src/node/runtime_delivery.rs",
+        "crates/mesh-talk-core/src/node/runtime_startup.rs",
+        "crates/mesh-talk-core/src/node/ui_state.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::reception_effects::tests::"]
+          "filters": ["node::reception_effects::tests::", "node::runtime_delivery::tests::"]
         }
       ],
       "consumers": ["core-node", "desktop-chat"],
