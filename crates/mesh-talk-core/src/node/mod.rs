@@ -108,7 +108,9 @@ pub(crate) mod runtime;
 mod runtime_startup;
 mod runtime_work;
 pub use runtime_startup::{RuntimeStartup, StartupCompletion};
+pub(crate) mod received_store;
 mod search;
+pub(crate) mod sent_store;
 pub(crate) mod sentlog;
 pub(crate) mod serving;
 pub(crate) mod session;
@@ -118,6 +120,7 @@ mod sticker_media;
 mod sticker_media_tests;
 #[cfg(test)]
 mod test_support;
+pub(crate) mod transcript_repository;
 pub(crate) mod transport;
 mod ui_state;
 #[cfg(test)]

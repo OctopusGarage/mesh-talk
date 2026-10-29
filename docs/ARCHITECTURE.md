@@ -1406,6 +1406,37 @@ events, transcripts, crypto and projection stores remain legacy and eager under
 its lease; it publishes no participant history-migration barrier. It does not
 establish demand-loaded participant startup or bounded historical memory.
 
+The separate `node/transcript_repository/` owner provides indexed sent, received,
+file-card and exact suppression storage on that same encrypted connection.
+`SentStore`, `ReceivedStore` and `IndexedAccountSuppression` require completed
+participant authority; integration must retain `validate_participant_request`
+before invoking their constructors. These owners are not yet wired into Node's
+legacy consumers and do not establish bounded participant startup by themselves.
+
+Each transcript source imports independently from a private encrypted snapshot,
+retaining one authenticated record at a time. Original source identity must still
+match before committing imported rows and before replacing the legacy path with
+its exact downgrade barrier. Tail repair affects only the snapshot. Import
+failure preserves the original source; an interrupted committed import resumes
+publication without replaying it. The imported rows become available only after
+the barrier is durable and SQL publication completes. A published source with a
+missing or changed barrier fails closed. Warm constructors inspect fixed metadata
+and barriers without decoding historical bodies or opening another connection.
+The existing profile lease excludes cooperating writers; identity comparisons
+also reject detected source changes during import.
+
+Transcript lookups return owned, fallible results. Chronological, reverse and
+insertion-order pages select keys and aggregate sender/body bytes before fetching
+payloads, enforcing at most 128 rows and 8 MiB. Invalid budgets and oversized first
+rows fail before body reads. Exact event/logical-ID and deadline indexes support
+existence checks and expiry selection without payload scans. Deadline consumers
+continue until an empty page, since the byte budget may shorten a page. Removal
+predicates run under the shared SQL lock and must remain pure; body deletion and
+physical row/byte counters commit together. Counts include retained aliases and
+per-device copies rather than canonical UI message counts. Suppression uses exact
+64-byte conversation/ID keys with bounded export pages and no expiry or Bloom
+filter. The existing delivery journal remains the cross-store transaction owner.
+
 Relay source publication validates independent encrypted legacy archives before
 replacing source paths with manifest-bound downgrade barriers. A private database
 bootstrap is checkpointed and closed before publication. Prepared, frozen,

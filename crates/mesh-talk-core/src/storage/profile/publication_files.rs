@@ -45,7 +45,7 @@ pub(super) fn source_layout(root: &Path, event: &Path) -> Result<[PathBuf; 2], L
     Ok(result)
 }
 
-pub(super) fn inspect_regular(path: &Path) -> Result<bool, LogError> {
+pub(crate) fn inspect_regular(path: &Path) -> Result<bool, LogError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -75,7 +75,7 @@ pub(super) fn inspect_regular(path: &Path) -> Result<bool, LogError> {
     Ok(true)
 }
 
-pub(super) fn reader(path: &Path) -> Result<File, LogError> {
+pub(crate) fn reader(path: &Path) -> Result<File, LogError> {
     if !inspect_regular(path)? {
         return Err(invalid("missing publication source"));
     }
@@ -109,7 +109,7 @@ pub(super) fn private_file(path: &Path) -> Result<File, LogError> {
     Ok(options.open(path)?)
 }
 
-pub(super) fn stream_identity(path: &Path) -> Result<(u64, Vec<u8>), LogError> {
+pub(crate) fn stream_identity(path: &Path) -> Result<(u64, Vec<u8>), LogError> {
     observe("hash");
     let mut file = reader(path)?;
     let mut hash = Sha256::new();
@@ -128,7 +128,7 @@ pub(super) fn stream_identity(path: &Path) -> Result<(u64, Vec<u8>), LogError> {
     Ok((size, hash.finalize().to_vec()))
 }
 
-pub(super) fn copy(source: &Path, target: &Path) -> Result<(u64, Vec<u8>), LogError> {
+pub(crate) fn copy(source: &Path, target: &Path) -> Result<(u64, Vec<u8>), LogError> {
     let mut source = reader(source)?;
     let mut target = private_file(target)?;
     let mut buffer = [0; 65536];
@@ -157,7 +157,7 @@ pub(super) fn matches_raw(path: &Path, source: &Source) -> Result<bool, LogError
     Ok(size == source.raw_size && Some(hash) == source.raw_hash)
 }
 
-pub(super) fn matches_stub(path: &Path, stub: &[u8]) -> Result<bool, LogError> {
+pub(crate) fn matches_stub(path: &Path, stub: &[u8]) -> Result<bool, LogError> {
     if !inspect_regular(path)? {
         return Ok(false);
     }
@@ -170,7 +170,7 @@ pub(super) fn matches_stub(path: &Path, stub: &[u8]) -> Result<bool, LogError> {
     Ok(actual.as_slice() == stub)
 }
 
-pub(super) fn sync_parent(path: &Path) -> Result<(), LogError> {
+pub(crate) fn sync_parent(path: &Path) -> Result<(), LogError> {
     #[cfg(unix)]
     File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
     #[cfg(not(unix))]
@@ -180,7 +180,7 @@ pub(super) fn sync_parent(path: &Path) -> Result<(), LogError> {
     Ok(())
 }
 
-pub(super) fn validate_header(path: &Path, magic: &[u8; 6]) -> Result<(), LogError> {
+pub(crate) fn validate_header(path: &Path, magic: &[u8; 6]) -> Result<(), LogError> {
     let mut file = reader(path)?;
     let mut header = [0; 22];
     file.read_exact(&mut header)

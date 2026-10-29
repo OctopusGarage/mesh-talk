@@ -522,7 +522,7 @@ pub(crate) mod participant;
 pub(crate) mod publication;
 #[cfg(test)]
 mod publication_acceptance_tests;
-mod publication_files;
+pub(crate) mod publication_files;
 #[cfg(test)]
 mod publication_tests;
 

@@ -34,7 +34,7 @@ pub(super) struct Source {
     pub authenticated_records: i64,
 }
 
-pub(super) fn encode(path: &Path) -> Vec<u8> {
+pub(crate) fn encode(path: &Path) -> Vec<u8> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

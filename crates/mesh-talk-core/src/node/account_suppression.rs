@@ -80,3 +80,105 @@ mod tests {
         assert!(!reopened.contains(conversation, failed));
     }
 }
+
+/// Exact device-local deletion facts in the profile database. No history-sized
+/// in-memory set, expiry policy, or probabilistic membership structure is used.
+pub(super) struct IndexedAccountSuppression {
+    repository: super::transcript_repository::TranscriptRepository,
+}
+impl IndexedAccountSuppression {
+    pub(super) fn from_profile(
+        profile: std::sync::Arc<crate::storage::profile::context::ProfileStorage>,
+        path: &Path,
+        password: &str,
+    ) -> Result<Self, LogError> {
+        use super::transcript_repository::{SUPPRESSION, TranscriptRepository};
+        let repository = TranscriptRepository::open(
+            profile,
+            path,
+            password,
+            SUPPRESSION,
+            |c, path, password| {
+                let writer = EncryptedRecordLog::<Suppressed>::open_with_visitor(
+                    path,
+                    password,
+                    MAGIC,
+                    |entry| {
+                        Self::insert_on(c, entry.conversation, entry.id)?;
+                        Ok(())
+                    },
+                )?;
+                writer.sync()
+            },
+        )?;
+        Ok(Self { repository })
+    }
+    fn insert_on(
+        c: &rusqlite::Connection,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> Result<(), LogError> {
+        let added = c.execute(
+            "INSERT OR IGNORE INTO transcript_suppression VALUES(?1,?2)",
+            rusqlite::params![conversation.as_bytes().as_slice(), id.as_bytes().as_slice()],
+        )?;
+        if added != 0 {
+            c.execute(
+                "UPDATE transcript_sources SET record_count=record_count+1 WHERE kind=?1",
+                [super::transcript_repository::SUPPRESSION],
+            )?;
+        }
+        Ok(())
+    }
+    pub(super) fn len(&self) -> Result<usize, LogError> {
+        self.repository.count(None)
+    }
+    pub(super) fn marker_bytes(&self) -> Result<u64, LogError> {
+        self.repository
+            .usage()?
+            .records
+            .checked_mul(64)
+            .ok_or_else(|| LogError::CorruptFile("suppression byte count overflow".into()))
+    }
+    pub(super) fn contains(
+        &self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> Result<bool, LogError> {
+        self.repository.profile.database().read(|c|Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM transcript_suppression WHERE conversation=?1 AND id=?2)",rusqlite::params![conversation.as_bytes().as_slice(),id.as_bytes().as_slice()],|r|r.get(0))?))
+    }
+    pub(super) fn suppress(
+        &mut self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> Result<(), LogError> {
+        self.repository.check_write()?;
+        self.repository
+            .profile
+            .database()
+            .transaction(|c| Self::insert_on(c, conversation, id))
+    }
+    /// Exact 64-byte keys in lexicographic order, at most 128 per owned page.
+    pub(super) fn page(
+        &self,
+        after: Option<(ConversationId, EventId)>,
+        limit: usize,
+    ) -> Result<Vec<(ConversationId, EventId)>, LogError> {
+        if limit == 0 || limit > super::transcript_repository::MAX_PAGE_ROWS {
+            return Err(LogError::CorruptFile(
+                "suppression page exceeds key budget".into(),
+            ));
+        }
+        self.repository.profile.database().read(|c| {
+            let seek=if after.is_some(){" WHERE (conversation,id)>(?1,?2)"}else{""};
+            let mut statement=c.prepare(&format!("SELECT conversation,id FROM transcript_suppression{seek} ORDER BY conversation,id LIMIT ?3"))?;
+            let mut rows=statement.query(rusqlite::params![after.as_ref().map(|(host,_)|host.as_bytes().as_slice()),after.as_ref().map(|(_,id)|id.as_bytes().as_slice()),limit as i64])?;
+            let mut keys=Vec::new();
+            while let Some(row)=rows.next()? {
+                let key=|index|->Result<[u8;32],LogError>{row.get_ref(index)?.as_blob().map_err(|_|LogError::CorruptFile("invalid suppression key".into()))?.try_into().map_err(|_|LogError::CorruptFile("invalid suppression key width".into()))};
+                keys.push((ConversationId::new(key(0)?),EventId::new(key(1)?)));
+            }
+            Ok(keys)
+        })
+    }
+}

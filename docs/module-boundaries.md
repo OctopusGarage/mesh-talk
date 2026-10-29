@@ -127,6 +127,14 @@ The desktop startup permit retains replacement serialization, and backup consume
 the retired owner only after matching its host local-user label and physical
 profile root. Core does not derive desktop authority from account keys or paths.
 
+`core/node/transcript_repository/` owns indexed transcript headers, bodies,
+metadata counters and independent source publication on the shared profile
+connection. `sent_store.rs`, `received_store.rs` and the indexed owner in
+`account_suppression.rs` expose owned lookups, bounded pages and exact local
+deletion markers. Their constructors require validated participant authority;
+the existing Node consumers remain on the legacy stores until their coordinated
+integration. See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
+
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary
 projections omit the content. The explicit exact-message content lookup is for
