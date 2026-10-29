@@ -1181,6 +1181,9 @@ impl Node {
             if removed && let Some((sender, original_conv, entry, file, incoming)) = notification {
                 self.note_account_history_change();
                 if file {
+                    if incoming {
+                        self.note_reception_change();
+                    }
                     if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
                         let fresh = {
                             let mut book = self.files.lock().expect("files lock not poisoned");

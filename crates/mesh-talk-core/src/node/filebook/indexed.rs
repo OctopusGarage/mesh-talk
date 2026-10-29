@@ -793,4 +793,87 @@ mod tests {
             .unwrap();
         assert_eq!(f.book.import_position().unwrap(), None);
     }
+    #[test]
+    fn file_receive_projection_installs_durable_body_binding_and_first_receipt() {
+        let mut f = Fixture::new();
+        let effects =
+            crate::node::reception_effects::ReceptionEffects::open(f.book.profile.clone()).unwrap();
+        let after = effects.head().unwrap();
+        let (entry, original, manifest) = f.fixture(7);
+        let mut metadata = crate::node::reception_effects::ReceptionMetadata::for_incoming(
+            &original,
+            &entry,
+            &f.device.public(),
+            &f.account.account_id(),
+            1234,
+        );
+        f.records
+            .record_file_with_reception(&entry, Some(&original), Some(&metadata))
+            .unwrap();
+        assert_eq!(
+            f.book.manifest(manifest.file_conv()).unwrap(),
+            Some(manifest)
+        );
+        assert!(f.book.processed(entry.event_id).unwrap());
+        let head = effects.head().unwrap();
+        assert_ne!(head, after);
+        metadata.received_at = 9999;
+        f.records
+            .record_file_with_reception(&entry, Some(&original), Some(&metadata))
+            .unwrap();
+        assert_eq!(effects.head().unwrap(), head);
+        let page = effects.page(after, head, Default::default(), 1234).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].metadata.received_at, 1234);
+        assert_eq!(
+            page.rows[0].source.kind,
+            crate::node::reception_effects::ReceptionKind::File
+        );
+    }
+
+    #[test]
+    fn receipt_storage_failure_rolls_back_file_body_binding_and_processing_evidence() {
+        let mut f = Fixture::new();
+        let effects =
+            crate::node::reception_effects::ReceptionEffects::open(f.book.profile.clone()).unwrap();
+        let after = effects.head().unwrap();
+        let (entry, original, manifest) = f.fixture(8);
+        let metadata = crate::node::reception_effects::ReceptionMetadata::for_incoming(
+            &original,
+            &entry,
+            &f.device.public(),
+            &f.account.account_id(),
+            1234,
+        );
+        f.book.profile.database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER reject_file_reception BEFORE INSERT ON reception_pending BEGIN SELECT RAISE(ABORT,'injected reception write failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(
+            f.records
+                .record_file_with_reception(&entry, Some(&original), Some(&metadata))
+                .is_err()
+        );
+        assert!(f.records.entry(entry.event_id).unwrap().is_none());
+        assert!(f.book.manifest(manifest.file_conv()).unwrap().is_none());
+        assert!(!f.book.processed(entry.event_id).unwrap());
+        assert_eq!(effects.head().unwrap(), after);
+        assert_eq!(f.book.revision().unwrap(), 0);
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER reject_file_reception;")?;
+                Ok(())
+            })
+            .unwrap();
+        f.records
+            .record_file_with_reception(&entry, Some(&original), Some(&metadata))
+            .unwrap();
+        assert_eq!(
+            f.book.manifest(manifest.file_conv()).unwrap(),
+            Some(manifest)
+        );
+        assert_ne!(effects.head().unwrap(), after);
+    }
 }

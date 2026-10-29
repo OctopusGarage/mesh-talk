@@ -2514,6 +2514,7 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
             Announce::new_with_account(&bob, &bob_account, "Bob", bl.local_addr().unwrap().port());
         let (a, _) = node(ad.path(), alice, aa, &bp);
         let (mut b, _, mut files) = node_with_files(bd.path(), bob, bob_account, &ap);
+        let reception_start = b.reception_head().unwrap();
         let path = ad.path().join("empty.txt");
         std::fs::write(&path, []).unwrap();
         let (id, file) = a
@@ -2533,6 +2534,7 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         assert!(files.try_recv().is_err());
         assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
         assert!(b.files.lock().unwrap().manifest(&file).is_none());
+        assert_eq!(b.reception_head().unwrap(), reception_start);
         b.received_files
             .lock()
             .unwrap()
@@ -2571,6 +2573,23 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         assert!(files.try_recv().is_err());
         assert_eq!(b.account_history(&a.account_id(), 10).unwrap().len(), 1);
         assert!(b.files.lock().unwrap().manifest(&file).is_some());
+        let page = b
+            .reception_page(reception_start, None, Default::default())
+            .unwrap();
+        assert_eq!(
+            page.receipts.len(),
+            1,
+            "the durable host effect survives live retry and restart"
+        );
+        let super::HostReception::File(received) = &page.receipts[0] else {
+            panic!("expected file reception");
+        };
+        assert_eq!(received.file_conv, file);
+        assert_eq!(received.arrival_kind, "live");
+        assert!(!received.own_device);
+        assert_eq!(received.batch_size, 1);
+        assert!(received.batch_complete);
+        assert!(received.batch_id.is_none());
     }
 }
 

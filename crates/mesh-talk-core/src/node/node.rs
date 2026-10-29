@@ -939,6 +939,9 @@ impl Node {
             )?,
         );
         let mut log = PersistentEventLog::open_profile(storage.clone(), password)?;
+        // Derived file eligibility must exist before a manifest WAL intent can
+        // install its body, exact evidence and reception effect atomically.
+        let _file_projection = super::filebook::indexed::IndexedFileBook::open(storage.clone())?;
         log.repository()?
             .initialize_receiving(crate::eventlog::Author::from_ed25519(
                 identity.public().ed25519_pub,

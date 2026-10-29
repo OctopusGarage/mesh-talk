@@ -1447,11 +1447,15 @@ its persisted revision and retains compact processing evidence. Durable local
 suppression also revokes eligibility in that same transaction, before physical
 cleanup can fail. Signed logical aliases apply this rule in either arrival order;
 the indexed author and exact plaintext digest must match the retained offer.
-Metadata pages
-check row and byte budgets; selected manifest reads verify physical allocation
+Metadata pages check row and byte budgets; selected manifest reads verify physical allocation
 charges before loading bytes. Account adoption fences old handles and never
 imports the former account into the new namespace. This leaf does not by itself
-replace Node file producers, legacy FileBook retention or media startup work.
+replace legacy FileBook retention or media startup work. Delivery-journal file
+projections now install FILES, validated eligibility and incoming reception facts
+in one transaction before retiring the intent. Incoming channel files use the
+same installer inside the receiver checkpoint transaction. Outgoing manifest
+projections create no incoming effect. Signed same-account certification retains
+own-device attribution across recovery; retry preserves the first durable effect.
 
 `node/reception_effects/` provides the derived reception-work owner for bounded
 host integration. An effect references its existing transcript row and stores
