@@ -4,6 +4,30 @@ use super::pages::PageBudget;
 use super::*;
 use std::collections::{HashMap, HashSet};
 impl EventRepository {
+    pub(crate) fn committed_headers_page(
+        &self,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<CommittedHeader>, LogError> {
+        if !(1..=128).contains(&limit) || after.is_some_and(|n| n < 0) {
+            return Err(LogError::InvalidPageBudget);
+        }
+        self.database.read(|c| {
+            let columns = HEADER_COLUMNS.split(',').map(|s| format!("e.{s}"))
+                .collect::<Vec<_>>().join(",");
+            let mut statement = c.prepare(&format!(
+                "SELECT {columns},e.commit_ordinal,s.lifecycle FROM retained_events e JOIN event_conversations s ON s.domain=e.domain AND s.conversation=e.conversation WHERE e.domain=?1 AND e.commit_ordinal>?2 ORDER BY e.commit_ordinal LIMIT ?3"
+            ))?;
+            let mut rows = statement.query(params![self.domain.0.as_slice(), after.unwrap_or(-1), limit as i64])?;
+            let mut result = Vec::new();
+            while let Some(row) = rows.next()? {
+                let lifecycle: i64 = row.get(13)?;
+                if !(0..=1).contains(&lifecycle) { return Err(corrupt("invalid discovery lifecycle")); }
+                result.push(CommittedHeader { ordinal: nonnegative(row.get(12)?)?, header: read_header(row)?, active: lifecycle == 0 });
+            }
+            Ok(result)
+        })
+    }
     pub(crate) fn sync(&self) -> Result<(), LogError> {
         // FULL-synchronous transactions already committed their WAL. Retain the
         // delivery boundary's fault check without a checkpoint or history scan.
