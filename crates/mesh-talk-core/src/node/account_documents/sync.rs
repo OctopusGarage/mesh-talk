@@ -2928,8 +2928,10 @@ mod group_control_tests {
             !cursor.pending && cursor.up_to_date && cursor.after.is_none(),
             "fixture warmup must settle before controlled source growth"
         );
-        assert!(
-            control_scope_metadata(&fixture.source) == control_scope_metadata(&fixture.target),
+        let source_warmup = control_scope_metadata(&fixture.source);
+        let target_warmup = control_scope_metadata(&fixture.target);
+        assert_eq!(
+            source_warmup, target_warmup,
             "fixture warmup must contain the exact source metadata before controlled growth"
         );
         let rows = control_scope_metadata(&fixture.source);

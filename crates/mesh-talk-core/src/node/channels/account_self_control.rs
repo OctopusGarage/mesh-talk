@@ -1351,6 +1351,14 @@ pub(in crate::node) mod tests {
                 handles.push(Some(tokio::spawn(node.clone().run_accept_loop(listener))));
             }
         }
+        let (online, offline_index) = match &extra {
+            Some(extra) if extra.user_id() < source.user_id() => (extra.clone(), Some(0)),
+            Some(_) => (source.clone(), Some(3)),
+            None => (source.clone(), None),
+        };
+        *selected_trace_peer.lock().unwrap() = Some(online.identity.public());
+        let offline = offline_index.map(|index| nodes[index].1.clone());
+        let offline_public = offline.as_ref().map(|node| node.identity.public());
         let archive_source = if pending { &owner } else { &source };
         archive_source
             .send_channel_message(group, b"unrelated retained archive")
@@ -1367,9 +1375,57 @@ pub(in crate::node) mod tests {
                 .all(|(_, node)| node.history(group, 100).iter().any(|row| row.id == archive)),
                 "the archive marker must be fully retained by physical sources before reference enrollment").await;
         }
+        // Keep the original signed Member head through a real account exchange
+        // before retiring its author. The requester has no routes or worker yet.
+        // One existing 30s cold-setup budget covers this and final-topology readiness.
+        let readiness_started = std::time::Instant::now();
+        let readiness_budget = std::time::Duration::from_secs(30);
+        if let Some(public) = offline_public.as_ref() {
+            wait_self_control_noise_diagnosed(
+                readiness_budget.saturating_sub(readiness_started.elapsed()),
+                || online.group_control_heads(group).iter().any(|head| {
+                    head.proof.public() == *public
+                        && head.valid(&shared.public().ed25519_pub)
+                        && head.access.observation.role == AccountGroupRole::Member
+                }),
+                || format!(
+                    "the live sibling must retain the offline author's authenticated Member head over Noise before requester enrollment: elapsed_ms={} online={} retained_heads={}",
+                    readiness_started.elapsed().as_millis(), online.user_id(),
+                    online.group_control_heads(group).len()
+                ),
+            ).await;
+        }
+        if let Some(index) = offline_index {
+            let offline = offline.as_ref().unwrap();
+            offline.runtime_work.close();
+            let handle = handles[index].take().unwrap();
+            handle.abort();
+            let _ = handle.await;
+            offline.sessions.clear();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                offline.runtime_work.drain(),
+            )
+            .await
+            .unwrap();
+            // This scenario retains authenticated stale membership provenance,
+            // not a live discovery advertisement for the retired participant.
+            // Withdraw only its route after retirement; signed heads and the
+            // certified account directory must survive the simulated outage.
+            let offline_public = offline.identity.public();
+            for (_, node) in &nodes {
+                if node.user_id() != offline.user_id() {
+                    node.roster.lock().unwrap().forget(&offline_public);
+                }
+            }
+        }
         for (_, left) in &nodes {
             for ((_, right), address) in nodes.iter().zip(&addresses) {
-                if left.user_id() != right.user_id() {
+                if left.user_id() != right.user_id()
+                    && offline_public.as_ref().is_none_or(|public| {
+                        left.identity.public() != *public && right.identity.public() != *public
+                    })
+                {
                     left.roster.lock().unwrap().update(
                         &right.signed_announce("Self control peer", address.port()),
                         address.ip(),
@@ -1383,14 +1439,6 @@ pub(in crate::node) mod tests {
                 .clone()
                 .run_accept_loop(reference_listener.take().unwrap()),
         ));
-        let (online, offline_index) = match &extra {
-            Some(extra) if extra.user_id() < source.user_id() => (extra.clone(), Some(0)),
-            Some(_) => (source.clone(), Some(3)),
-            None => (source.clone(), None),
-        };
-        *selected_trace_peer.lock().unwrap() = Some(online.identity.public());
-        let offline = offline_index.map(|index| nodes[index].1.clone());
-        let offline_public = offline.as_ref().map(|node| node.identity.public());
         let kind = input.operation().kind();
         let readiness = || {
             let role_ready = reference.account_group_access(group).unwrap().role
@@ -1430,9 +1478,9 @@ pub(in crate::node) mod tests {
             .unwrap()
             .0;
         let mut observed_caps = None;
-        // Match owner-rename cold setup; the admitted action retains its own 8s deadline.
-        let readiness_started = std::time::Instant::now();
-        wait_self_control_noise_diagnosed(std::time::Duration::from_secs(30), || {
+        // All readiness proofs must come from the final topology; the admitted
+        // action retains its independent, unchanged 8s deadline.
+        wait_self_control_noise_diagnosed(readiness_budget.saturating_sub(readiness_started.elapsed()), || {
             let forward = reference.group_operation_versions.lock().unwrap().get(&online.user_id())
                 .map(|support| (support.public == online.identity.public(), support.kinds));
             let reverse = online.group_operation_versions.lock().unwrap().get(&reference.user_id())
@@ -1473,29 +1521,8 @@ pub(in crate::node) mod tests {
             trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
             trace.lock().unwrap().iter().cloned().collect::<Vec<_>>()
         );
-        if let Some(index) = offline_index {
-            let offline = offline.as_ref().unwrap();
-            offline.runtime_work.close();
-            let handle = handles[index].take().unwrap();
-            handle.abort();
-            let _ = handle.await;
-            offline.sessions.clear();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                offline.runtime_work.drain(),
-            )
-            .await
-            .unwrap();
-            // This scenario retains authenticated stale membership provenance,
-            // not a live discovery advertisement for the retired participant.
-            // Withdraw only its route after retirement; signed heads and the
-            // certified account directory must survive the simulated outage.
+        if let Some(offline) = offline.as_ref() {
             let offline_public = offline.identity.public();
-            for (_, node) in &nodes {
-                if node.user_id() != offline.user_id() {
-                    node.roster.lock().unwrap().forget(&offline_public);
-                }
-            }
             for node in [&reference, &online] {
                 assert!(
                     node.linked_devices().iter().any(|device| {
@@ -1646,9 +1673,11 @@ pub(in crate::node) mod tests {
                     (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
                 format!("node={label} phase={phase:?} role={role:?} source_role={source_role:?} effects={effects} committed_count={committed_count} effects_local={effects_local} effects_external={effects_external} executor={} runtime_closed={} fanout_sequence={:?} sync={sync:?}", node.user_id() == executor.user_id(), node.runtime_work.is_closed(), node.account_group_fanout_sequence(group))
             }).collect();
+            // Drop the diagnostic mutex before panicking; background observers
+            // must not turn the original failure into unrelated poison panics.
+            let failure_trace = trace.lock().unwrap().iter().cloned().collect::<Vec<_>>();
             panic!(
-                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} trace={:?}",
-                trace.lock().unwrap()
+                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} trace={failure_trace:?}"
             );
         }
         eprintln!(

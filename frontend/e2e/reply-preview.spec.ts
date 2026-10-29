@@ -100,13 +100,40 @@ for (const theme of ["light", "dark"] as const) {
           .evaluate((img: HTMLImageElement) => img.naturalWidth),
       )
       .toBe(1600);
-    const thumbnail = (await quote.locator("img").boundingBox())!;
+    const measurement = {
+      current: null as {
+        thumbnail: { width: number; height: number };
+        thumbnailFrame: { height: number };
+      } | null,
+    };
+    await expect
+      .poll(async () => {
+        // Virtualization hides rows while measuring. Read both rectangles from
+        // one visible, decoded instance rather than across separate remounts.
+        measurement.current = await quote
+          .locator("img")
+          .evaluate((img: HTMLImageElement) => {
+            const thumbnail = img.getBoundingClientRect();
+            const thumbnailFrame = img.parentElement!.getBoundingClientRect();
+            if (
+              getComputedStyle(img).visibility !== "visible" ||
+              img.naturalWidth !== 1600 ||
+              thumbnail.width === 0 ||
+              thumbnail.height === 0 ||
+              thumbnailFrame.height === 0
+            )
+              return null;
+            return {
+              thumbnail: { width: thumbnail.width, height: thumbnail.height },
+              thumbnailFrame: { height: thumbnailFrame.height },
+            };
+          });
+        return measurement.current;
+      })
+      .not.toBeNull();
+    const { thumbnail, thumbnailFrame } = measurement.current!;
     expect(thumbnail.width / thumbnail.height).toBeCloseTo(8, 1);
     expect(thumbnail.width).toBeLessThanOrEqual(64);
-    const thumbnailFrame = (await quote
-      .locator("img")
-      .locator("..")
-      .boundingBox())!;
     expect(thumbnailFrame.height).toBeCloseTo(thumbnail.height, 0);
     await expect(
       page.locator('[data-message-id="photo-original"]'),

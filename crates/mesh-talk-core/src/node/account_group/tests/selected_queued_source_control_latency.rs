@@ -1,4 +1,7 @@
 //! A queued pre-operation suffix does not witness a newly admitted request.
+use super::selected_same_source_control_latency::{
+    BTrace, record_b_trace, record_control_frame, result_snapshot,
+};
 use super::*;
 use crate::node::account_documents::wire::DocumentRequest;
 use crate::node::account_sync_wire::AccountHistoryFrame;
@@ -191,13 +194,84 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
     let a_requests = Arc::new(Mutex::new(Vec::new()));
     let origins = Arc::new(Mutex::new(Vec::new()));
     let b_retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let clock = std::time::Instant::now();
+    let operation = Arc::new(Mutex::new(None));
+    *b.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let source = Arc::downgrade(&b);
+        let operation = operation.clone();
+        let trace = trace.clone();
+        let peer = reference.identity.public();
+        move |observed, phase| {
+            if phase.starts_with("operation_local_published") {
+                if let Some(source) = source.upgrade() {
+                    record_b_trace(
+                        &trace,
+                        clock,
+                        "B_publication",
+                        result_snapshot(&source, group_b, *operation.lock().unwrap()),
+                    );
+                }
+            } else if observed == peer
+                && ((phase.starts_with("control_")
+                    && !phase.starts_with("control_queue")
+                    && !phase.starts_with("control_refresh"))
+                    || phase.starts_with("wake_")
+                    || phase.starts_with("negotiation_"))
+            {
+                record_b_trace(&trace, clock, "B_to_requester", phase);
+            }
+        }
+    }));
+    *reference.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let trace = trace.clone();
+        let peer = b.identity.public();
+        let writer = b.user_id();
+        move |observed, frame| {
+            let trace = trace.clone();
+            let peer = peer.clone();
+            let writer = writer.clone();
+            Box::pin(async move {
+                if observed == peer {
+                    record_control_frame(
+                        &trace,
+                        clock,
+                        "requester_receive",
+                        &frame,
+                        group_b,
+                        &writer,
+                    );
+                }
+            })
+        }
+    }));
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let peer_a = a.identity.public();
         let peer_b = b.identity.public();
         let origins = origins.clone();
         let b_partial = b_partial.clone();
         let b_retired = b_retired.clone();
+        let trace = trace.clone();
         move |peer, phase| {
+            if (peer == peer_a || peer == peer_b)
+                && ((phase.starts_with("control_")
+                    && !phase.starts_with("control_queue")
+                    && !phase.starts_with("control_refresh"))
+                    || phase.starts_with("wake_")
+                    || phase.starts_with("negotiation_")
+                    || phase.starts_with("page_end"))
+            {
+                record_b_trace(
+                    &trace,
+                    clock,
+                    if peer == peer_a {
+                        "requester_to_A"
+                    } else {
+                        "requester_to_B"
+                    },
+                    phase.clone(),
+                );
+            }
             if peer == peer_a
                 && (phase.starts_with("control_turn_origin")
                     || phase.starts_with("control_dispatch"))
@@ -292,14 +366,36 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
         let admitted = admitted.clone();
         let saved_after = saved_after.clone();
         let b_requests = b_requests.clone();
+        let trace = trace.clone();
+        let source = Arc::downgrade(&b);
+        let writer = b.user_id();
+        let operation = operation.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let admitted = admitted.clone();
             let saved_after = saved_after.clone();
             let b_requests = b_requests.clone();
+            let trace = trace.clone();
+            let source = source.clone();
+            let writer = writer.clone();
+            let operation = operation.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
+                }
+                record_control_frame(&trace, clock, "B_server", &frame, group_b, &writer);
+                if let AccountHistoryFrame::DocumentsRequest { body } = &frame
+                    && DocumentRequest::decode(body).is_some_and(|request| {
+                        request.domain == AccountDocumentDomain::GroupControl
+                    })
+                    && let Some(source) = source.upgrade()
+                {
+                    record_b_trace(
+                        &trace,
+                        clock,
+                        "B_snapshot_start",
+                        result_snapshot(&source, group_b, *operation.lock().unwrap()),
+                    );
                 }
                 match frame {
                     AccountHistoryFrame::DocumentsComplete { body }
@@ -362,6 +458,8 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
     let id = reference
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
+    *operation.lock().unwrap() = Some(id);
+    record_b_trace(&trace, clock, "fixture", "B_admission_begin".into());
     admitted.store(true, std::sync::atomic::Ordering::Relaxed);
     let accepted = reference
         .submit_account_group_operation_if(
@@ -374,6 +472,7 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
             |commit| commit(),
         )
         .unwrap();
+    record_b_trace(&trace, clock, "fixture", "B_admitted".into());
     assert_eq!(accepted.executions.len(), 1);
     assert_eq!(accepted.executions[0].device_id, b.user_id());
     let receipt = tokio::time::timeout(Duration::from_secs(8), async {
@@ -407,6 +506,17 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
         }
     })
     .await;
+    record_b_trace(
+        &trace,
+        clock,
+        "fixture",
+        if receipt.is_ok() {
+            "B_private_receipt"
+        } else {
+            "B_deadline_expired"
+        }
+        .into(),
+    );
     release.close();
     let first_fresh = b_requests
         .lock()
@@ -434,6 +544,8 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
     .await;
     *a.account_session_test_hook.lock().unwrap() = None;
     *b.account_session_test_hook.lock().unwrap() = None;
+    *b.account_client_test_hook.lock().unwrap() = None;
+    *reference.account_session_test_hook.lock().unwrap() = None;
     *reference.account_client_test_hook.lock().unwrap() = None;
     for (_, node) in &devices {
         node.runtime_work.close();
@@ -446,14 +558,15 @@ async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_part
     }
     assert!(
         recovered.is_ok(),
-        "releasing A must restore actual public receipt and complete all signed rows"
+        "releasing A must restore actual public receipt and complete all signed rows; phases={:?}",
+        trace.lock().unwrap()
     );
     assert!(
         first_fresh,
         "new selected queued source resumed its OLD suffix instead of a fresh comparison: saved={saved:?}, requests={:?}",
         b_requests.lock().unwrap()
     );
-    let result=receipt.expect("queued selected source must return its real private receipt within unchanged eight seconds");
+    let result=receipt.unwrap_or_else(|error|panic!("queued selected source must return its real private receipt within unchanged eight seconds: {error:?}; phases={:?}",trace.lock().unwrap()));
     assert_eq!(result.committed_events.len(), 1);
     let event = b
         .log
