@@ -1461,6 +1461,16 @@ per-device copies rather than canonical UI message counts. Suppression uses exac
 64-byte conversation/ID keys with bounded export pages and no expiry or Bloom
 filter. The existing delivery journal remains the cross-store transaction owner.
 
+Metadata-only transcript pages charge 256 bytes per header and expose stable
+ordinals for exact owned body lookup. Source revisions persist across reopening;
+conversation revisions retain empty tombstones so deletion and recreation cannot
+reuse an old revision. File-conversation metadata is an untrusted selector derived
+from parsed file cards and grants no authorization. Recovered sent identities use
+the same exact conversation/sequence/time/plaintext-digest key on disk, with no
+resident history map. `PublishedHistorySource` shares the independent source
+registry and downgrade-barrier checks with auxiliary file-proof and file-identity
+owners, whose SQL tables and validation remain their own responsibility.
+
 Relay source publication validates independent encrypted legacy archives before
 replacing source paths with manifest-bound downgrade barriers. A private database
 bootstrap is checkpointed and closed before publication. Prepared, frozen,
