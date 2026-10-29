@@ -63,6 +63,7 @@ import {
   type ConversationHistoryState,
   emptyConversationHistory,
   reloadConversation,
+  requestConversationReload,
   revealConversationIdentity,
   scanConversationHistory,
 } from "./conversationHistory";
@@ -927,7 +928,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           return;
         // Outgoing delegated sends do not count as inbound notifications. Fetch
         // their content through the same guarded history path as ordinary sends.
-        void state.reload();
+        void requestConversationReload(rawSet, get);
       },
 
       onDm: (e) => {
@@ -1554,7 +1555,7 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
     // Compatibility for event providers predating logical DM identities.
     bump(set, key, isActive && isConversationVisible());
   }
-  if (isActive) void get().reload();
+  if (isActive) void requestConversationReload(set, get);
 }
 
 function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
@@ -1595,7 +1596,7 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
       ),
     );
   } else if (!e.own_device) bump(set, key, isActive && isConversationVisible());
-  if (isActive) void get().reload();
+  if (isActive) void requestConversationReload(set, get);
 }
 
 function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
@@ -1660,7 +1661,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   }
   const isActive = get().active !== null && convKey(get().active!) === key;
   if (!e.event_id && !own) bump(set, key, isActive && isConversationVisible());
-  if (isActive && !knownIdentity) void get().reload();
+  if (isActive && !knownIdentity) void requestConversationReload(set, get);
 }
 
 useChat.subscribe((state, previous) => {

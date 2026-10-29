@@ -127,11 +127,145 @@ function reactionsFor(c: Conversation) {
     : chat.channelReactions(c.id);
 }
 
-export async function reloadConversation(
+type AutomaticReloadRequest = {
+  set: Set;
+  unrestricted: boolean;
+  current: () => boolean;
+  discoverChanges: boolean;
+  promise: Promise<boolean>;
+  resolve: (loaded: boolean) => void;
+  reject: (error: unknown) => void;
+  stopWaiting: () => void;
+};
+type AutomaticReload = { queued: AutomaticReloadRequest | null };
+const automaticReloads = new WeakMap<Get, AutomaticReload>();
+
+/** Live invalidations retain one running bundle and one shared dirty request.
+ * UI deadlines release presentation waiters, but only actual native settlement
+ * releases automatic admission. Explicit navigation/retry keeps its own path.
+ */
+export function requestConversationReload(
+  rawSet: Set,
+  get: Get,
+  discoverChanges = true,
+  stillCurrent?: () => boolean,
+): Promise<boolean> {
+  const lease = captureChatOwner(get);
+  const current = () => lease.current() && (stillCurrent?.() ?? true);
+  if (!current() || !get().active) return Promise.resolve(false);
+  const running = automaticReloads.get(get);
+  if (running?.queued) {
+    if (running.queued.current()) {
+      // A live invalidation must survive a coalesced roster request retiring.
+      if (!running.queued.unrestricted) {
+        running.queued.current = current;
+        running.queued.set = rawSet;
+      }
+      running.queued.unrestricted ||= stillCurrent === undefined;
+      running.queued.discoverChanges ||= discoverChanges;
+      return running.queued.promise;
+    }
+    running.queued.resolve(false);
+  }
+  let resolve!: AutomaticReloadRequest["resolve"];
+  let reject!: AutomaticReloadRequest["reject"];
+  let queueDeadline: ReturnType<typeof setTimeout> | undefined;
+  const stopWaiting = () => clearTimeout(queueDeadline);
+  const promise = new Promise<boolean>((accept, fail) => {
+    resolve = (loaded) => {
+      stopWaiting();
+      accept(loaded);
+    };
+    reject = (error) => {
+      stopWaiting();
+      fail(error);
+    };
+  });
+  const request = {
+    set: rawSet,
+    unrestricted: stillCurrent === undefined,
+    current,
+    discoverChanges,
+    promise,
+    resolve,
+    reject,
+    stopWaiting,
+  };
+  if (running) {
+    running.queued = request;
+    // One shared wait deadline releases roster callers without claiming success
+    // or retiring the dirty request/native lane. Bursts add no timers or waiters.
+    queueDeadline = setTimeout(() => resolve(false), 10_000);
+  } else {
+    const reload: AutomaticReload = { queued: null };
+    automaticReloads.set(get, reload);
+    startAutomaticReload(get, reload, request);
+  }
+  return promise;
+}
+
+function startAutomaticReload(
+  get: Get,
+  reload: AutomaticReload,
+  request: AutomaticReloadRequest,
+) {
+  request.stopWaiting();
+  // Snapshot submission is synchronous before its first await. Retain only
+  // settlement signals, not successful native payloads, while another read waits.
+  const nativeReads: Promise<void>[] = [];
+  const result = reloadConversationSnapshot(
+    request.set,
+    get,
+    request.discoverChanges,
+    request.current,
+    nativeReads,
+  );
+  void result.then(request.resolve, request.reject);
+  void Promise.allSettled([...nativeReads, result]).then(() => {
+    const queued = reload.queued;
+    reload.queued = null;
+    if (queued?.current()) startAutomaticReload(get, reload, queued);
+    else {
+      queued?.resolve(false);
+      automaticReloads.delete(get);
+    }
+  });
+}
+
+export function reloadConversation(
   rawSet: Set,
   get: Get,
   discoverChanges = true,
   stillCurrent: () => boolean = () => true,
+) {
+  // Navigation/retry already reads the latest snapshot. Satisfy older queued
+  // invalidations with it instead of starting another spinner after open returns.
+  // Preserve the caller's coverage policy: expanding an archive is a baseline,
+  // while receipt identities already observed live remain unread independently.
+  const automatic = automaticReloads.get(get);
+  const queued = automatic?.queued;
+  if (automatic) automatic.queued = null;
+  const validQueued = queued?.current();
+  const result = reloadConversationSnapshot(
+    rawSet,
+    get,
+    discoverChanges,
+    stillCurrent,
+  );
+  if (queued) {
+    queued.stopWaiting();
+    if (validQueued) void result.then(queued.resolve, queued.reject);
+    else queued.resolve(false);
+  }
+  return result;
+}
+
+async function reloadConversationSnapshot(
+  rawSet: Set,
+  get: Get,
+  discoverChanges = true,
+  stillCurrent: () => boolean = () => true,
+  nativeReads?: Promise<void>[],
 ) {
   const lease = captureChatOwner(get);
   const current = () => lease.current() && stillCurrent();
@@ -157,13 +291,22 @@ export async function reloadConversation(
     const target = get().searchTarget;
     const exactTarget =
       target?.key === key && "reference" in target ? target : null;
+    const read = <T>(operation: () => Promise<T>) =>
+      readWithDeadline(() => {
+        const native = operation();
+        nativeReads?.push(
+          native.then(
+            () => undefined,
+            () => undefined,
+          ),
+        );
+        return native;
+      });
     const [items, reacts, context] = await Promise.all([
-      readWithDeadline(() =>
-        historyFor(c, lease.owner!, get().historyLimits[key]),
-      ),
-      readWithDeadline(() => reactionsFor(c)),
+      read(() => historyFor(c, lease.owner!, get().historyLimits[key])),
+      read(() => reactionsFor(c)),
       exactTarget
-        ? readWithDeadline(() =>
+        ? read(() =>
             chat.searchContext(lease.owner!, exactTarget.reference),
           ).catch(() => null)
         : Promise.resolve(null),
@@ -364,7 +507,8 @@ export async function scanConversationHistory(
   }
   if (!current()) return;
   if (changed && get().active)
-    loaded = (await reloadConversation(rawSet, get, true, current)) && loaded;
+    loaded =
+      (await requestConversationReload(rawSet, get, true, current)) && loaded;
   if (!current()) return;
   if (loaded && !get().historyScanQueue.length)
     set({ historyRevision: get().historyScanRevision ?? revision });

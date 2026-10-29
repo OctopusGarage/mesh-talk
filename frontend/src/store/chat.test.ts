@@ -4656,3 +4656,189 @@ it("discards staged sticker bytes after the account owner changes", async () => 
   expect(useChat.getState().intents).toEqual({});
   usePacks.setState({ packs: [] });
 });
+
+it.each(["onDm", "onChannelMessage", "onFile", "onIntegrationMessageAccepted"])(
+  "coalesces automatic history reloads from %s bursts",
+  async (eventName) => {
+    invoke.mockImplementation((command: string) =>
+      Promise.resolve(
+        command === "owner_node_identity"
+          ? { owner: "host", device_id: "me", account_id: "myacct" }
+          : [],
+      ),
+    );
+    const stop = useChat.getState().start();
+    const finishes: Array<(rows: unknown[]) => void> = [];
+    try {
+      await vi.waitFor(() => expect(useChat.getState().ready).toBe(true));
+      const kind = eventName === "onChannelMessage" ? "channel" : "account";
+      const key = `${kind}:target`;
+      const historyCommand =
+        kind === "account" ? "owner_account_history" : "channel_history";
+      const reactionCommand =
+        kind === "account" ? "account_reactions" : "channel_reactions";
+      useChat.setState({
+        active: { kind, id: "target", name: "Target" },
+        cacheOrder: [key],
+        peers: [
+          {
+            user_id: "peer",
+            account_id: "target",
+            name: "Friend",
+            addr: "127.0.0.1:1",
+            post_office: false,
+          },
+        ],
+      });
+      invoke.mockImplementation((command: string) =>
+        command === historyCommand
+          ? new Promise((resolve) => finishes.push(resolve))
+          : Promise.resolve([]),
+      );
+      invoke.mockClear();
+      for (let index = 0; index < 100; index++) {
+        captured.current![eventName]({
+          owner: "host",
+          account_id: "myacct",
+          destination: { kind, id: "target" },
+          from: "peer",
+          from_name: "Friend",
+          text: `event ${index}`,
+          message_id: `message-${index}`,
+          event_id: `message-${index}`,
+          channel_id: "target",
+          channel_name: "Target",
+          conv: "target",
+          file_conv: `file-${index}`,
+          name: "file.txt",
+          size: 1,
+          mime: "text/plain",
+          media: false,
+          is_channel: false,
+        });
+      }
+      expect(finishes).toHaveLength(1);
+      expect(
+        invoke.mock.calls.filter(([command]) => command === reactionCommand),
+      ).toHaveLength(1);
+      finishes[0]([]);
+      await vi.waitFor(() => expect(finishes).toHaveLength(2));
+      finishes[1]([
+        {
+          id: "latest",
+          from_me: false,
+          who: "Friend",
+          text: "latest",
+          wall_clock: 1,
+        },
+      ]);
+      await vi.waitFor(() =>
+        expect(useChat.getState().messages[key]?.[0]?.id).toBe("latest"),
+      );
+      expect(finishes).toHaveLength(2);
+      expect(
+        invoke.mock.calls.filter(([command]) => command === reactionCommand),
+      ).toHaveLength(2);
+    } finally {
+      stop();
+      finishes.forEach((finish) => finish([]));
+    }
+  },
+);
+
+it("keeps roster refresh progressing while automatic history waits for a stalled native reaction", async () => {
+  vi.useFakeTimers();
+  let stop: (() => void) | undefined;
+  let finishReaction: (() => void) | undefined;
+  let revision = 1;
+  let peerName = "Before";
+  let stallReactions = false;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: revision,
+        supports_push_state: true,
+      });
+    if (command === "list_peers")
+      return Promise.resolve([
+        {
+          user_id: "peer",
+          account_id: "friend",
+          name: peerName,
+          addr: "127.0.0.1:1",
+          post_office: false,
+        },
+      ]);
+    if (command === "list_accounts")
+      return Promise.resolve([
+        { account_id: "friend", device_count: 1, names: [peerName] },
+      ]);
+    if (command === "account_reactions" && stallReactions)
+      return new Promise((resolve) => {
+        finishReaction = () => resolve([]);
+      });
+    return Promise.resolve([]);
+  });
+  try {
+    stop = useChat.getState().start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().historyRevision).toBe(1);
+    useChat.setState({
+      active: { kind: "account", id: "friend", name: "Friend" },
+      cacheOrder: ["account:friend"],
+    });
+    stallReactions = true;
+    captured.current!.onIntegrationMessageAccepted({
+      owner: "host",
+      account_id: "myacct",
+      destination: { kind: "account", id: "friend" },
+    });
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(useChat.getState().loading).toBe(false);
+    expect(useChat.getState().historyError).toBe("account:friend");
+    revision = 2;
+    let firstSettled = false;
+    void useChat
+      .getState()
+      .refreshRoster()
+      .then(() => {
+        firstSettled = true;
+      });
+    await vi.advanceTimersByTimeAsync(0);
+    const identityCalls = invoke.mock.calls.filter(
+      ([command]) => command === "owner_node_identity",
+    ).length;
+    peerName = "After";
+    let nextSettled = false;
+    void useChat
+      .getState()
+      .refreshRoster()
+      .then(() => {
+        nextSettled = true;
+      });
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(useChat.getState().peers[0].name).toBe("After");
+    expect(useChat.getState().accounts[0].names).toEqual(["After"]);
+    expect(
+      invoke.mock.calls.filter(
+        ([command]) => command === "owner_node_identity",
+      ),
+    ).toHaveLength(identityCalls + 1);
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(firstSettled).toBe(true);
+    expect(nextSettled).toBe(true);
+    expect(useChat.getState().historyRevision).toBe(1);
+    expect(
+      invoke.mock.calls.filter(([command]) => command === "account_reactions"),
+    ).toHaveLength(1);
+  } finally {
+    stop?.();
+    stallReactions = false;
+    finishReaction?.();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+  }
+});

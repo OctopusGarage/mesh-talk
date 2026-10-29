@@ -654,7 +654,17 @@
       ],
       "consumers": [
         "frontend-chat"
-      ]
+      ],
+      "capability": {
+        "summary": "Select and reconcile owner-scoped history while coalescing automatic invalidations into bounded native read bundles.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "One running automatic bundle and one pending invalidation wait for all original native reads; explicit archive expansion preserves its baseline policy",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
     },
     {
       "id": "frontend-outgoing",

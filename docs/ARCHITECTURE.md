@@ -1675,6 +1675,19 @@ order differs from authored time; pending accepted rows follow durable rows.
 Signed DAG ancestry is not pruned to satisfy a local memory
 limit; authenticated checkpoint compaction remains a separate protocol decision.
 
+Automatic desktop history refreshes share one running native-read bundle and one
+coalesced pending invalidation. The running slot remains occupied until every
+original history, reaction and context read settles, even after a presentation
+deadline or an early rejection. Explicit navigation, search and retry retain their
+own admission path and preserve their history-baseline policy. The existing global
+64-read admission limit and owner/run fences still apply. A native read that never
+settles holds the automatic lane; explicit reads remain available within the global
+limit. This bounds burst refresh work without dropping durable messages.
+A queued presentation waiter has one shared ten-second deadline, so a stalled
+history operation cannot hold the roster-refresh coordinator indefinitely. This
+deadline reports incomplete history without clearing the pending invalidation,
+advancing its revision, or releasing native admission.
+
 Profile maintenance preserves referenced ancestors and the latest two safe
 profile leaves per author. Pending conversations share one atomic rewrite rather
 than rewriting the entire log separately for each conversation. Maintenance
