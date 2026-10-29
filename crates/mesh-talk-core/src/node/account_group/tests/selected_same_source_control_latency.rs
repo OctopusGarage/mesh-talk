@@ -169,20 +169,438 @@ impl Drop for ReleaseReadOnDrop {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_source_receipt_overtakes_its_own_preoperation_background_control_read() {
-    run_same_source_receipt(false, false).await;
+    run_same_source_receipt(false, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_source_lower_key_receipt_preserves_both_partial_control_comparisons() {
-    run_same_source_receipt(true, false).await;
+    run_same_source_receipt(true, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_selected_executor_overtakes_a_completed_operations_paired_background_page() {
-    run_same_source_receipt(true, true).await;
+    run_same_source_receipt(true, true, false).await;
 }
 
-async fn run_same_source_receipt(partial: bool, other_selected: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn incoming_operation_wake_runs_after_paid_pair_pages_before_unrelated_continuation() {
+    run_same_source_receipt(true, true, true).await;
+}
+
+type PaidCheckpoint = (
+    u8,
+    Option<crate::node::AccountDocumentKey>,
+    [u8; 32],
+    Option<[u8; 32]>,
+);
+#[derive(Clone, Debug, Default)]
+struct PaidBoundaryEvidence {
+    stages: Vec<(u128, String)>,
+    active_page: Option<tokio::task::Id>,
+    prefix_page: Option<tokio::task::Id>,
+    resume_page: Option<tokio::task::Id>,
+    original: Option<PaidCheckpoint>,
+    resumed: Option<PaidCheckpoint>,
+    prefix_paid: bool,
+    resume_paid: bool,
+    source_aborts: usize,
+    pair_retirements: usize,
+    last_origin: String,
+    requester_wake: bool,
+    ready_requester_hint: Option<String>,
+    requester_control: Option<(u128, String)>,
+    continuation_trapped: bool,
+    trapped_protected: Option<bool>,
+    trapped_origin: Option<String>,
+    trapped_after_requester: bool,
+    invalid: Option<String>,
+}
+impl PaidBoundaryEvidence {
+    fn record(&mut self, clock: std::time::Instant, event: impl Into<String>) {
+        // Critical transitions only. Routine queue/page chatter stays in the
+        // separately bounded shared ring and cannot evict payment evidence.
+        if self.stages.len() < 24 {
+            self.stages
+                .push((clock.elapsed().as_millis(), event.into()));
+        }
+    }
+}
+
+struct PaidPairBoundary {
+    original: Arc<Semaphore>,
+    prefix: Arc<Semaphore>,
+    resume: Arc<Semaphore>,
+    continuation: Arc<Semaphore>,
+    evidence: Arc<Mutex<PaidBoundaryEvidence>>,
+}
+impl Drop for PaidPairBoundary {
+    fn drop(&mut self) {
+        self.original.close();
+        self.prefix.close();
+        self.resume.close();
+        self.continuation.close();
+    }
+}
+
+async fn send_boundary_wake(source: &Arc<Node>, target: &Arc<Node>, epoch: u8, revision: u64) {
+    use crate::node::account_sync_wire::AccountSyncVersion;
+    let peer = source.routing_peer(&target.user_id()).unwrap();
+    let mut channel = source
+        .begin_account_exchange(
+            &peer,
+            AccountSyncVersion::V2,
+            AccountHistoryFrame::Wake {
+                account_id: source.account_id(),
+                epoch: [epoch; 16],
+                revision,
+            },
+        )
+        .await
+        .unwrap();
+    let bytes = channel.recv().await.unwrap();
+    assert!(matches!(AccountHistoryFrame::decode_versioned(&bytes),
+        Some((AccountSyncVersion::V2, AccountHistoryFrame::WakeAck { epoch: received, revision: received_revision }))
+        if received == [epoch; 16] && received_revision == revision));
+    channel.recycle(source);
+}
+
+/// Create an actual pair through a held authenticated natural tail and a newer
+/// source Wake. Pay its fresh prefix, then hold its exact original resume.
+async fn hold_original_pair_resume(
+    source: &Arc<Node>,
+    executor: &Arc<Node>,
+    requester: &Arc<Node>,
+    partial_keys: &Arc<Mutex<Vec<crate::node::AccountDocumentKey>>>,
+    trace: &BTrace,
+    clock: std::time::Instant,
+) -> PaidPairBoundary {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    super::cold_account_setup(async {
+        while !executor.device_sync_status().iter().any(|status| {
+            status.device_id == source.user_id()
+                && status.document_phase == crate::node::SyncPhase::UpToDate
+        }) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the executor's unrelated scope must settle before the deterministic fault");
+    let gates = PaidPairBoundary {
+        original: Arc::new(Semaphore::new(0)),
+        prefix: Arc::new(Semaphore::new(0)),
+        resume: Arc::new(Semaphore::new(0)),
+        continuation: Arc::new(Semaphore::new(0)),
+        evidence: Arc::new(Mutex::new(PaidBoundaryEvidence::default())),
+    };
+    let arrived = Arc::new(Semaphore::new(0));
+    let prefix_arrived = Arc::new(Semaphore::new(0));
+    let resume_arrived = Arc::new(Semaphore::new(0));
+    let phase = Arc::new(AtomicUsize::new(0));
+    let protected = Arc::new(AtomicBool::new(false));
+    let aborted = Arc::new(AtomicBool::new(false));
+    let previous_client = executor.account_client_test_hook.lock().unwrap().clone();
+    *executor.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let exact = source.identity.public();
+        let requester = requester.identity.public();
+        let evidence = gates.evidence.clone();
+        let protected = protected.clone();
+        let aborted = aborted.clone();
+        let trace = trace.clone();
+        move |peer, event| {
+            if let Some(prior) = &previous_client {
+                prior(peer.clone(), event.clone());
+            }
+            if peer == requester {
+                let mut data = evidence.lock().unwrap();
+                if event == "wake_received revision=611" {
+                    data.requester_wake = true;
+                    data.record(clock, "authenticated_requester_wake_received");
+                }
+                if data.requester_wake
+                    && event.starts_with("control_queue")
+                    && event.contains("hint=true ready=true")
+                    && data.ready_requester_hint.is_none()
+                {
+                    data.ready_requester_hint = Some(event.clone());
+                    data.record(clock, "requester_hint_ready");
+                }
+                if data.requester_wake
+                    && event == "negotiation_begin domain=Some(GroupControl)"
+                    && data.requester_control.is_none()
+                {
+                    data.requester_control = Some((clock.elapsed().as_millis(), event.clone()));
+                    data.record(clock, "requester_control_started");
+                }
+            }
+            if peer == exact {
+                {
+                    let mut data = evidence.lock().unwrap();
+                    if event == "negotiation_begin domain=Some(GroupControl)" {
+                        data.active_page = tokio::task::try_id();
+                    }
+                    if event.starts_with("control_turn_origin") {
+                        data.last_origin = event.clone();
+                    }
+                    if event == "control_owned_abort reason=same_source" {
+                        data.source_aborts += 1;
+                        data.record(clock, "same_source_owned_abort");
+                    }
+                    if event == "control_pair_retired" {
+                        data.pair_retirements += 1;
+                        data.record(clock, "pair_retired");
+                    }
+                    if event.starts_with("page_end") && tokio::task::try_id() == data.prefix_page {
+                        data.prefix_paid =
+                            event.contains("outcome=ok") && event.contains("after=true");
+                        data.record(clock, format!("prefix_completed {event}"));
+                    }
+                    if event.starts_with("page_end") && tokio::task::try_id() == data.resume_page {
+                        data.resume_paid =
+                            event.contains("outcome=ok") && event.contains("after=false");
+                        data.record(clock, format!("original_resume_completed {event}"));
+                    }
+                }
+                if event.starts_with("control_dispatch") {
+                    protected.store(
+                        event.starts_with("control_dispatch protected=true"),
+                        Ordering::Release,
+                    );
+                }
+                if event == "control_owned_abort reason=same_source" {
+                    aborted.store(true, Ordering::Release);
+                }
+                if event.starts_with("control_") || event.starts_with("page_end") {
+                    record_b_trace(&trace, clock, "executor_to_unrelated_A", event);
+                }
+            }
+        }
+    }));
+    let previous_server = source.account_session_test_hook.lock().unwrap().clone();
+    *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let exact = executor.identity.public();
+        let protected = protected.clone();
+        let aborted = aborted.clone();
+        let trace = trace.clone();
+        let phase = phase.clone();
+        let original = gates.original.clone();
+        let prefix = gates.prefix.clone();
+        let resume = gates.resume.clone();
+        let continuation = gates.continuation.clone();
+        let arrived = arrived.clone();
+        let prefix_arrived = prefix_arrived.clone();
+        let resume_arrived = resume_arrived.clone();
+        let checkpoint = Arc::new(Mutex::new(None));
+        let evidence = gates.evidence.clone();
+        move |peer, frame| {
+            let prior = previous_server.clone();
+            let exact = exact.clone();
+            let protected = protected.clone();
+            let aborted = aborted.clone();
+            let trace = trace.clone();
+            let phase = phase.clone();
+            let original = original.clone();
+            let prefix = prefix.clone();
+            let resume = resume.clone();
+            let continuation = continuation.clone();
+            let arrived = arrived.clone();
+            let prefix_arrived = prefix_arrived.clone();
+            let resume_arrived = resume_arrived.clone();
+            let checkpoint = checkpoint.clone();
+            let evidence = evidence.clone();
+            Box::pin(async move {
+                if peer != exact {
+                    if let Some(prior) = prior {
+                        prior(peer, frame).await;
+                    }
+                    return;
+                }
+                let AccountHistoryFrame::DocumentsRequest { body } = frame else {
+                    return;
+                };
+                let request =
+                    crate::node::account_documents::wire::DocumentRequest::decode(&body).unwrap();
+                if request.domain != AccountDocumentDomain::GroupControl {
+                    return;
+                }
+                let after = request
+                    .operation
+                    .as_ref()
+                    .and_then(|probe| probe.after.as_ref())
+                    .map(|after| {
+                        if after.legacy_leave {
+                            crate::node::AccountDocumentKey::GroupLegacyOperation {
+                                channel: after.channel.clone(),
+                                source_device: after.source_device.clone(),
+                            }
+                        } else {
+                            crate::node::AccountDocumentKey::GroupOperation {
+                                channel: after.channel.clone(),
+                                source_device: after.source_device.clone(),
+                            }
+                        }
+                    })
+                    .or(request.after.clone());
+                let stamp = (
+                    request.version,
+                    after.clone(),
+                    request.known_digest,
+                    request.operation.as_ref().map(|probe| probe.known_digest),
+                );
+                match phase.load(Ordering::Acquire) {
+                    0 if matches!(
+                        after,
+                        Some(crate::node::AccountDocumentKey::GroupLegacyOperation { .. })
+                    ) =>
+                    {
+                        assert!(
+                            !protected.load(Ordering::Acquire),
+                            "the first tail must be an actual natural comparison"
+                        );
+                        *checkpoint.lock().unwrap() = Some(stamp.clone());
+                        {
+                            let mut data = evidence.lock().unwrap();
+                            data.original = Some(stamp);
+                            // Cold comparisons can retire before this natural
+                            // read. Count only the newly established pair.
+                            data.source_aborts = 0;
+                            data.pair_retirements = 0;
+                            data.record(clock, "natural_tail_held");
+                        }
+                        phase.store(1, Ordering::Release);
+                        record_b_trace(
+                            &trace,
+                            clock,
+                            "fixture",
+                            "executor_natural_tail_held".into(),
+                        );
+                        arrived.add_permits(1);
+                        let _ = original.acquire().await;
+                    }
+                    1 if after.is_none() => {
+                        assert!(
+                            aborted.load(Ordering::Acquire),
+                            "a genuine newer Wake must preempt the natural read"
+                        );
+                        assert!(protected.load(Ordering::Acquire));
+                        {
+                            let mut data = evidence.lock().unwrap();
+                            data.prefix_page = data.active_page;
+                            data.record(clock, "protected_prefix_held");
+                        }
+                        phase.store(2, Ordering::Release);
+                        record_b_trace(
+                            &trace,
+                            clock,
+                            "fixture",
+                            "executor_protected_prefix_held".into(),
+                        );
+                        prefix_arrived.add_permits(1);
+                        let _ = prefix.acquire().await;
+                    }
+                    2 => {
+                        assert!(protected.load(Ordering::Acquire));
+                        assert_eq!(
+                            checkpoint.lock().unwrap().as_ref(),
+                            Some(&stamp),
+                            "the original resume must preserve exact scope, continuation and both digests"
+                        );
+                        {
+                            let mut data = evidence.lock().unwrap();
+                            data.resumed = Some(stamp);
+                            data.resume_page = data.active_page;
+                            data.record(clock, "exact_original_resume_held");
+                        }
+                        phase.store(3, Ordering::Release);
+                        record_b_trace(
+                            &trace,
+                            clock,
+                            "fixture",
+                            "executor_original_resume_held".into(),
+                        );
+                        resume_arrived.add_permits(1);
+                        let _ = resume.acquire().await;
+                        record_b_trace(
+                            &trace,
+                            clock,
+                            "fixture",
+                            "executor_original_resume_released".into(),
+                        );
+                    }
+                    3 => {
+                        {
+                            let mut data = evidence.lock().unwrap();
+                            if !data.prefix_paid
+                                || !data.resume_paid
+                                || !data.requester_wake
+                                || data.pair_retirements != 0
+                            {
+                                data.invalid = Some(format!(
+                                    "continuation did not retain the same fully-paid pair: protected={} origin={}",
+                                    protected.load(Ordering::Acquire),
+                                    data.last_origin
+                                ));
+                                data.record(clock, "invalid_boundary_not_trapped");
+                                return;
+                            }
+                            data.continuation_trapped = true;
+                            data.trapped_protected = Some(protected.load(Ordering::Acquire));
+                            data.trapped_origin = Some(data.last_origin.clone());
+                            data.trapped_after_requester = data.requester_control.is_some();
+                            data.record(clock, "paid_pair_foreground_continuation_trapped");
+                        }
+                        record_b_trace(
+                            &trace,
+                            clock,
+                            "fixture",
+                            "executor_unrelated_continuation_trapped".into(),
+                        );
+                        let _ = continuation.acquire().await;
+                    }
+                    _ => {}
+                }
+            })
+        }
+    }));
+    partial_keys.lock().unwrap().push(
+        crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+            source,
+            crate::eventlog::ConversationId::new([67; 32]),
+        ),
+    );
+    executor.account_sync_notify.notify_one();
+    super::cold_account_setup(arrived.acquire())
+        .await
+        .expect("the real natural tail must arrive")
+        .unwrap()
+        .forget();
+    // Change the actual full-scope digest after the held snapshot. The newer
+    // Wake must create a nonempty partial prefix, not an empty comparison that
+    // would legitimately retire as soon as the old tail is repaid.
+    partial_keys.lock().unwrap().push(
+        crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+            source,
+            crate::eventlog::ConversationId::new([68; 32]),
+        ),
+    );
+    send_boundary_wake(source, executor, 81, 1).await;
+    super::cold_account_setup(prefix_arrived.acquire())
+        .await
+        .expect("the real protected prefix must arrive")
+        .unwrap()
+        .forget();
+    // The original socket is now cancelled. Close its obsolete responder gate
+    // so it cannot consume an endpoint permit while the real resume is served.
+    gates.original.close();
+    gates.prefix.close();
+    super::cold_account_setup(resume_arrived.acquire())
+        .await
+        .expect("the exact protected resume must arrive")
+        .unwrap()
+        .forget();
+    gates
+}
+
+async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_boundary: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let owner = node(&dir.path().join("owner"), &account);
@@ -854,6 +1272,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         .account_group_operation_status(&account.account_id(), id)
         .unwrap();
     let mut second_id = None;
+    let mut executor_boundary = None;
     let other_receipt = if let Some(other) = &other {
         if receipt.is_ok() {
             tokio::time::timeout(Duration::from_secs(8), resumed_wait)
@@ -912,6 +1331,19 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
                 }));
             }
 
+            if paid_boundary {
+                executor_boundary = Some(
+                    hold_original_pair_resume(
+                        &owner,
+                        other,
+                        &reference,
+                        &partial_keys,
+                        &b_trace,
+                        b_clock,
+                    )
+                    .await,
+                );
+            }
             reference
                 .submit_account_group_operation_if(
                     &account.account_id(),
@@ -927,6 +1359,34 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
             record_b_trace(&abort_trace, b_clock, "fixture", "B_admitted".into());
             Some(
                 tokio::time::timeout(Duration::from_secs(8), async {
+                    if let Some(boundary) = &executor_boundary {
+                        // Wait inside the ORIGINAL operation budget for its
+                        // actual signed request publication, then deliver a real
+                        // authenticated Wake before paying the held resume page.
+                        let own_key = crate::node::AccountDocumentKey::GroupOperation {
+                            channel: hex::encode(other_group.as_bytes()),
+                            source_device: reference.user_id(),
+                        };
+                        while !reference.account_document(&own_key).unwrap().and_then(|document| {
+                            crate::node::account_group::operations::wire::OperationFrame::decode(
+                                document.payload(), &reference.account.public().ed25519_pub,
+                            )
+                        }).is_some_and(|frame| {
+                            frame.group == other_group
+                                && frame.proof.public() == reference.identity.public()
+                                && frame.projection.requests.iter().any(|row| row.reference.id == second)
+                        }) {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        send_boundary_wake(&reference, other, 82, 611).await;
+                        record_b_trace(
+                            &b_trace,
+                            b_clock,
+                            "fixture",
+                            "incoming_request_wake_acknowledged_before_paid_resume".into(),
+                        );
+                        boundary.resume.close();
+                    }
                     loop {
                         let local = reference
                             .account_group_operation_status(&account.account_id(), second)
@@ -1016,6 +1476,13 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
         .collect::<Vec<_>>();
     release.close();
     resumed_release.close();
+    let paid_boundary_evidence = executor_boundary
+        .as_ref()
+        .map(|boundary| boundary.evidence.lock().unwrap().clone());
+    if let Some(evidence) = &paid_boundary_evidence {
+        eprintln!("paid_pair_boundary_evidence={evidence:?}");
+    }
+    drop(executor_boundary);
     let private_failed = receipt.is_err();
     let recovered = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
@@ -1097,9 +1564,37 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
             .await
             .expect("all original fixture owners must drain");
     }
+    if let Some(evidence) = &paid_boundary_evidence {
+        assert!(
+            evidence.prefix_paid
+                && evidence.resume_paid
+                && evidence.requester_wake
+                && evidence.original == evidence.resumed
+                && evidence.source_aborts == 1
+                && evidence.invalid.is_none(),
+            "the deterministic boundary must pay both protected pages and preserve the exact original checkpoint: {evidence:?}"
+        );
+        if other_receipt.as_ref().is_some_and(Result::is_err) {
+            assert!(
+                evidence.continuation_trapped
+                    && evidence.ready_requester_hint.is_some()
+                    && evidence.requester_control.is_none()
+                    && evidence.trapped_protected == Some(true)
+                    && evidence.trapped_origin.as_deref()
+                        == Some("control_turn_origin resumed=false replacement=false"),
+                "a RED must show the genuine ready requester blocked by the still-live paid pair: {evidence:?}"
+            );
+        } else {
+            assert!(
+                evidence.requester_control.is_some()
+                    && (!evidence.continuation_trapped || evidence.trapped_after_requester),
+                "the genuine incoming requester must run before any unrelated continuation after both owed pages are paid: {evidence:?}"
+            );
+        }
+    }
     assert!(
         recovered.is_ok(),
-        "releasing the old metadata read must restore ordinary progress and public receipt: {recovery_snapshot:?}; abort_trace={:?}",
+        "releasing the old metadata read must restore ordinary progress and public receipt: {recovery_snapshot:?}; B_failure_snapshot={b_failure_snapshot:?}; paid_boundary={paid_boundary_evidence:?}; abort_trace={:?}",
         abort_trace.lock().unwrap()
     );
     assert!(
@@ -1128,7 +1623,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool) {
     );
     if other_selected {
         let events = other_receipt.expect("the second real operation was admitted after A committed")
-            .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}; abort_trace={:?}", abort_trace.lock().unwrap()));
+            .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}; paid_boundary={paid_boundary_evidence:?}; abort_trace={:?}", abort_trace.lock().unwrap()));
         assert_eq!(events.len(), 1);
         let other = other.as_ref().unwrap();
         let event = other.log.lock().unwrap().get(&events[0]).unwrap().clone();

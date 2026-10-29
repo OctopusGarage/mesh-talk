@@ -1462,11 +1462,22 @@ support observations and retry deadlines. Failed or deferred admission does not
 pay for a page turn. Readiness respects both deadlines, and aggregate status cannot
 claim convergence while either comparison remains unfinished.
 
+A pair's initial scheduling credit covers one validated foreground page and,
+when its original checkpoint is incomplete, one validated original resume page.
+Failed or deferred reads retain that credit; follow-up publications never renew
+it. After both pages are paid, a pair without a locally selected operation no
+longer outranks a fresh authenticated hint from another sibling. Its later pages
+use ordinary scheduling and owned cancellation while retaining both independent
+checkpoints. Local operation priority and newly owed replacement/resume turns
+keep their existing protection. Pair lifetime and cursor alternation therefore
+do not confer permanent cross-peer priority or delay discovery of incoming
+account operations. No worker, cursor, timer, wire or authority is added.
+
 Only newly admitted immutable operation IDs or a new authenticated Wake token
 coalesce a foreground follow-up; polling and operation status writes do not.
 If one comparison has completed while the other still has a continuation, a
 new follow-up reuses the completed slot for a fresh foreground prefix. The
-unfinished checkpoint becomes the exact protected background, regardless of
+unfinished checkpoint becomes the exact retained background, regardless of
 which slot had completed. The fresh prefix pays its next validated page before
 that background resumes. Both-partial comparisons retain their two independent
 checkpoints; failed/deferred pages and unchanged demand cannot rotate a slot.
@@ -1489,10 +1500,11 @@ The same Control owner retains at most 64 authenticated Wake sender tokens, keye
 by full Ed25519/X25519 identity and current account binding. Fresh tokens coalesce
 in sender FIFO order. A waiting sender may preempt an unrelated ordinary metadata read, including a
 natural first turn ordered by a publication hint. A hint alone is not an explicit
-operation or a reservation. The owned replacement foreground turn, its resumed
-background checkpoint and an active locally selected executor remain protected.
-One replacement comparison is followed by the interrupted background checkpoint
-before more sender hints; a hint storm cannot repeatedly cancel either turn.
+operation or a reservation. The owed replacement foreground page, its initial
+original resume page and an active locally selected executor remain protected.
+The replacement page is followed by the owed interrupted page before more sender
+hints; a hint storm cannot repeatedly cancel either turn. Completed initial
+credits do not protect every later page of an unfinished pair.
 Partial-page and parked-comparison retry deadlines remain in force,
 and policy/identity changes retire stale tokens. Hints confer no read or mutation
 authority; every replacement exchange performs normal session admission.

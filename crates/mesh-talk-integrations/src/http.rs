@@ -464,6 +464,61 @@ mod tests {
         }
     }
 
+    async fn read_response(
+        stream: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> std::io::Result<String> {
+        let mut bytes = Vec::new();
+        // These JSON responses declare their length. Waiting for transport EOF
+        // instead can reject a complete admission response when the overloaded
+        // connection is subsequently reset on macOS.
+        while !bytes.ends_with(b"\r\n\r\n") {
+            if bytes.len() == MAX_BODY_BYTES {
+                return Err(std::io::Error::other("HTTP response headers too large"));
+            }
+            bytes.push(stream.read_u8().await?);
+        }
+        let headers = std::str::from_utf8(&bytes).map_err(std::io::Error::other)?;
+        let length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .filter(|length| *length <= MAX_BODY_BYTES)
+            .ok_or_else(|| std::io::Error::other("Missing or invalid HTTP response length"))?;
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await?;
+        bytes.extend_from_slice(&body);
+        String::from_utf8(bytes).map_err(std::io::Error::other)
+    }
+
+    #[tokio::test]
+    async fn incomplete_response_body_is_rejected() {
+        let mut response = &b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\n\r\n{"[..];
+        assert_eq!(
+            read_response(&mut response).await.unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_response_does_not_require_transport_eof() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        let response = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\n\r\n{}";
+        server.write_all(response.as_bytes()).await.unwrap();
+        // The response is complete while the transport remains open. A later
+        // platform-specific reset must not invalidate its already received body.
+        let received = tokio::time::timeout(Duration::from_secs(2), read_response(&mut client))
+            .await
+            .expect("Content-Length completes an HTTP response before transport EOF")
+            .unwrap();
+        assert_eq!(received, response);
+        drop(server);
+    }
+
     async fn request(
         fixture: &Fixture,
         method: &str,
@@ -487,9 +542,7 @@ mod tests {
             body.len()
         );
         stream.write_all(request.as_bytes()).await.unwrap();
-        let mut bytes = Vec::new();
-        stream.read_to_end(&mut bytes).await.unwrap();
-        let response = String::from_utf8(bytes).unwrap();
+        let response = read_response(&mut stream).await.unwrap();
         let (headers, body) = response.split_once("\r\n\r\n").unwrap();
         assert!(
             headers

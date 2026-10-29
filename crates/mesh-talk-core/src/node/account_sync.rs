@@ -318,7 +318,18 @@ impl DocumentCheckpoint {
     }
 }
 
+/// Cross-peer scheduling credits belong only to the initial replacement and
+/// exact interrupted resume. A later same-peer refresh retains its checkpoints,
+/// but does not renew either credit ahead of another authenticated sender.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlPairCredit {
+    Prefix,
+    Resume,
+    Repaid,
+}
+
 struct ControlComparisonPair {
+    credit: ControlPairCredit,
     parked: DocumentCheckpoint,
     foreground: bool,
     followup: bool,
@@ -332,12 +343,22 @@ impl ControlComparisonPair {
         wake: Option<wake::ControlWakeHint>,
     ) -> Self {
         Self {
+            credit: ControlPairCredit::Prefix,
             parked: background,
             foreground: true,
             followup: false,
             local_requests,
             wake,
         }
+    }
+    fn prefix_turn_owed(&self) -> bool {
+        self.credit == ControlPairCredit::Prefix && self.foreground
+    }
+    fn resume_turn_owed(&self) -> bool {
+        self.credit == ControlPairCredit::Resume && !self.foreground
+    }
+    fn current_turn_owed(&self) -> bool {
+        self.prefix_turn_owed() || self.resume_turn_owed()
     }
     fn observe(&mut self, local_requests: ControlDemand, wake: Option<&wake::ControlWakeHint>) {
         if !local_requests.is_subset(&self.local_requests) {
@@ -363,6 +384,15 @@ impl ControlComparisonPair {
         // Keep this owner and its checkpoint until a validated Complete.
         if !current.control_page_completed() {
             return false;
+        }
+        if self.prefix_turn_owed() {
+            self.credit = if self.parked.control_comparison_complete() {
+                ControlPairCredit::Repaid
+            } else {
+                ControlPairCredit::Resume
+            };
+        } else if self.resume_turn_owed() {
+            self.credit = ControlPairCredit::Repaid;
         }
         let foreground = if self.foreground {
             &mut *current
@@ -2935,9 +2965,13 @@ impl Node {
                 control_queue_priority(
                     selected.contains(&key.identity()),
                     foreground_next == Some(key.identity())
-                        || control_pairs.get(key).is_some_and(|pair| pair.foreground),
+                        || control_pairs
+                            .get(key)
+                            .is_some_and(ControlComparisonPair::prefix_turn_owed),
                     document_resumes.contains(key)
-                        || control_pairs.get(key).is_some_and(|pair| !pair.foreground),
+                        || control_pairs
+                            .get(key)
+                            .is_some_and(ControlComparisonPair::resume_turn_owed),
                     hints.iter().position(|hint| hint.public == key.public()),
                 )
             });
@@ -3021,7 +3055,9 @@ impl Node {
                     && (control_turn_protected(
                         document_resumes.remove(&key),
                         foreground_next == Some(key.identity()),
-                    ) || control_pairs.contains_key(&key)
+                    ) || control_pairs
+                        .get(&key)
+                        .is_some_and(ControlComparisonPair::current_turn_owed)
                         || selected.contains(&key.identity()));
                 if key.lane == DocumentLane::Control {
                     if foreground_next == Some(key.identity()) {
@@ -3786,6 +3822,93 @@ mod tests {
         assert!(state.control_start.is_none());
         state.start_control_comparison(&ControlDemand::new(), None);
         assert!(state.predates_control_demand(&requests, None));
+    }
+
+    #[test]
+    fn paid_pair_credit_is_spent_after_prefix_and_original_resume_without_followup_renewal() {
+        use super::super::account_documents::{
+            AccountDocumentKey, sync::DocumentSyncCursor as Cursor,
+        };
+        let background: DocumentCheckpoint =
+            Cursor::control_test_page(Some(AccountDocumentKey::GroupLegacyOperation {
+                channel: "4".repeat(64),
+                source_device: "1".repeat(32),
+            }))
+            .into();
+        let foreground: DocumentCheckpoint =
+            Cursor::control_test_page(Some(AccountDocumentKey::GroupOperation {
+                channel: "2".repeat(64),
+                source_device: "1".repeat(32),
+            }))
+            .into();
+        let mut pair = ControlComparisonPair::new(background.clone(), ControlDemand::new(), None);
+        let mut unpaid: DocumentCheckpoint = Cursor::control().into();
+        assert!(!pair.finish_page(&mut unpaid));
+        assert!(
+            pair.prefix_turn_owed(),
+            "a failed/admission-deferred prefix did not pay a page"
+        );
+        let mut current = foreground.clone();
+        assert!(!pair.finish_page(&mut current));
+        assert_eq!(
+            current, background,
+            "the exact interrupted checkpoint owns the next protected turn"
+        );
+        assert!(pair.resume_turn_owed());
+        assert!(!pair.finish_page(&mut unpaid));
+        assert!(
+            pair.resume_turn_owed(),
+            "a failed resume cannot consume its credit"
+        );
+        current = Cursor::control_test_page(None).into();
+        assert!(!pair.finish_page(&mut current));
+        assert_eq!(
+            current, foreground,
+            "paying the resume must retain the still-partial foreground"
+        );
+        assert!(pair.foreground && !pair.current_turn_owed());
+        assert!(
+            control_queue_priority(false, false, false, Some(0))
+                < control_queue_priority(
+                    false,
+                    pair.prefix_turn_owed(),
+                    pair.resume_turn_owed(),
+                    None
+                ),
+            "a fresh authenticated sender precedes unrelated work after both initial credits are paid"
+        );
+        let hint = wake::ControlWakeHint::test_token(
+            crate::identity::device::DeviceIdentity::generate().public(),
+            [9; 16],
+            1,
+        );
+        pair.observe(ControlDemand::new(), Some(&hint));
+        current = Cursor::control_test_page(None).into();
+        assert!(!pair.finish_page(&mut current));
+        assert!(
+            !pair.current_turn_owed(),
+            "coalesced publication followups never renew global priority"
+        );
+    }
+
+    #[test]
+    fn completed_parked_control_needs_no_resume_credit() {
+        use super::super::account_documents::{
+            AccountDocumentKey, sync::DocumentSyncCursor as Cursor,
+        };
+        let background = Cursor::control_test_page(None).into();
+        let mut current = Cursor::control_test_page(Some(AccountDocumentKey::GroupOperation {
+            channel: "2".repeat(64),
+            source_device: "1".repeat(32),
+        }))
+        .into();
+        let mut pair = ControlComparisonPair::new(background, ControlDemand::new(), None);
+        assert!(pair.prefix_turn_owed());
+        assert!(!pair.finish_page(&mut current));
+        assert!(
+            !pair.current_turn_owed(),
+            "an already completed parked scope has no interrupted page to repay"
+        );
     }
 
     #[test]

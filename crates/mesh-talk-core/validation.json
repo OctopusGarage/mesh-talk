@@ -107,6 +107,9 @@
             "selected_source_receipt_overtakes_its_own_preoperation_background_control_read",
             "selected_source_lower_key_receipt_preserves_both_partial_control_comparisons",
             "another_selected_executor_overtakes_a_completed_operations_paired_background_page",
+            "incoming_operation_wake_runs_after_paid_pair_pages_before_unrelated_continuation",
+            "paid_pair_credit_is_spent_after_prefix_and_original_resume_without_followup_renewal",
+            "completed_parked_control_needs_no_resume_credit",
             "paired_control_pages_preserve_both_partial_checkpoints_and_alternate",
             "paired_control_deferral_keeps_owner_and_waits_for_both_retry_deadlines",
             "paired_control_followup_requires_a_new_admitted_operation_or_wake_token",
@@ -193,7 +196,11 @@
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
-            "name": "Comparison-start immutable demand and consumed authenticated Wake evidence travel with queued checkpoints, owned rollback and paired swaps. New demand starts a separate fresh comparison before an old queued suffix. A genuine follow-up can reuse a completed comparison slot while retaining the exact unfinished comparison as protected background; both-partial checkpoints, unchanged demand, refused refresh, cooldowns and full-identity cleanup preserve their existing contracts.",
+            "name": "Comparison-start immutable demand and consumed authenticated Wake evidence travel with queued checkpoints, owned rollback and paired swaps. New demand starts a separate fresh comparison before an old queued suffix. A genuine follow-up can reuse a completed comparison slot while retaining the exact unfinished comparison as background; both-partial checkpoints, unchanged demand, refused refresh, cooldowns and full-identity cleanup preserve their existing contracts.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Initial pair priority pays one foreground page and at most one original resume page; only validated completions spend credit and follow-ups never renew it. After payment, fresh authenticated incoming work overtakes remaining background pages without losing either checkpoint or changing local-operation priority, worker limits or exchange deadlines.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
