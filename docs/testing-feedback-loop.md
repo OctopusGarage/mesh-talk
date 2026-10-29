@@ -661,6 +661,13 @@ workspace uses the 360-second suite budget described above.
 Scheduling estimates are not completed-run evidence; validate the full unchanged
 workspace inventory on the current candidate before claiming a timing improvement.
 
+The real Cargo retention fixture compiles its disarmed build script before
+starting the lock probe. An explicit `rerun-if-env-changed` input then arms that
+compiled script inside a new Cargo process, preserving actual Cargo/cleanup lock
+interoperability in both directions. Cold compilation has a separate five-minute
+setup bound; probe readiness and reverse lock contention each use a fifteen-second
+bound. No cleanup assertion is skipped when Windows linking is slow.
+
 Loopback UDP reply fixtures connect their receiving socket to their own listener
 so concurrent discovery traffic cannot masquerade as a reply. Tests must still
 reject extra replies from that listener after a refresh.
