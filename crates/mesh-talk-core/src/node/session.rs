@@ -47,7 +47,7 @@ const MAX_HAVE_CHUNKS: usize = 1000;
 /// per-chunk + chunk-count bounds. Without it a peer could pin `HAVE_IDS_PER_CHUNK *
 /// MAX_HAVE_CHUNKS` ids (~48 MB) per concurrent sync against the always-on relay; this
 /// caps it at ~6 MB while staying far above any realistic conversation's id-set.
-const MAX_HAVE_IDS_TOTAL: usize = 200_000;
+pub(super) const MAX_HAVE_IDS_TOTAL: usize = 200_000;
 
 /// One framed sync message on the wire.
 ///

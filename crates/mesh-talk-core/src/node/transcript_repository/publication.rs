@@ -172,6 +172,7 @@ fn domain(kind: i64) -> Result<[u8; 16], LogError> {
         CHANNEL_SENDERS => Ok(*b"MeshChanSenders1"),
         SENT_MANIFEST_SCOPES => Ok(*b"MeshFileScopes01"),
         RECALL_MARKS => Ok(*b"MeshRecallMarks1"),
+        OPAQUE_RECEIVE_HINTS => Ok(*b"MeshOpaqueHints1"),
         _ => Err(invalid("invalid transcript source kind")),
     }
 }
