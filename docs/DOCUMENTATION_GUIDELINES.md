@@ -128,6 +128,12 @@ Keep language assertions after priming, verify active expansion before the actua
 chooser change, and retain its bounded language, geometry and visibility checks.
 Dedicated public-language scenarios exercise chooser loading, failure and stale
 request behavior.
+Their chooser and initial-navigation assertions await the current
+`MeshTalkLocale.ready` operation before checking content; settlement also occurs
+on failure and never starts another selection. Superseded work cannot settle a
+newer choice. Keep the loader deadline and content assertion budgets unchanged:
+[browser evaluation awaits returned promises](https://playwright.dev/docs/evaluating),
+while [assertions have a separate timeout](https://playwright.dev/docs/test-timeouts).
 
 Help search stores its query in the URL, restores it on browser Back, and offers
 clear, Escape, `/` focus, timeout and retry behavior. Keep static topics available
