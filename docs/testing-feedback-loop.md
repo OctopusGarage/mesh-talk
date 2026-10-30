@@ -233,6 +233,13 @@ continuations and the original total pull bound, and require both full settlemen
 and the complete exact source metadata set. Failure diagnostics should report
 body-free cursor flags and metadata-class differences rather than message bodies.
 
+Growing-history fixtures observe exact durable IDs without blocking their
+current-thread network runtime on repeated full history projections. Once those
+IDs are present, retain the public history projection and exact original-ID
+assertion within the same watchdog. Preserve the original corpus, source appends,
+continuation-page requirement and legacy protocol coverage. Forward progress
+through a changing archive does not require its moving digest to settle.
+
 Explicit custody-page fixtures follow the production cursor's local-admission
 contract. A typed local-capacity rejection exchanges no bytes: preserve the same
 cursor and continuation, wait for its existing retry time, and retry within the
