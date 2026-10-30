@@ -1272,3 +1272,180 @@ fn runtime_metadata_interrupted_history_retirement_cannot_reuse_partial_ready_ge
     }
     assert_eq!(repo.body_read_counts(), (0, 0));
 }
+
+#[test]
+fn runtime_metadata_combined_history_append_failure_and_expiry_never_publish_partial_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([2; 16])).unwrap();
+    let conv = ConversationId::new([77; 32]);
+    repo.initialize_history_order().unwrap();
+    let row = |n, clock| combined::HistorySelector {
+        id: EventId::new([n; 32]),
+        clock,
+        source_kind: 2,
+        ordinal: i64::from(n),
+        priority: 2,
+        sequence: 0,
+        charged_bytes: 1,
+    };
+    let ready = |job| {
+        loop {
+            let generation = repo.history_order_step(job).unwrap();
+            if generation.ready {
+                return generation;
+            }
+        }
+    };
+    let first = repo.history_generation(&conv, b"one", 0, None).unwrap();
+    repo.history_add(&conv, first.job, row(1, 10), Some(20))
+        .unwrap();
+    ready(first.job);
+    repo.history_finish_inputs(&conv, first.job, b"stable", [1, 0, 0], 0)
+        .unwrap();
+
+    let (append, prefix) = repo
+        .history_append_generation(&conv, b"two", b"stable", 0, None, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(append.job, first.job);
+    assert!(!append.ready);
+    db.transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER reject_history_append BEFORE INSERT ON history_order_candidates BEGIN SELECT RAISE(ABORT,'append interrupted'); END;")?;
+        Ok(())
+    }).unwrap();
+    assert!(
+        repo.history_append_candidate(&conv, append.job, prefix, row(2, 30), None)
+            .is_err()
+    );
+    assert!(
+        repo.history_append_generation(&conv, b"one", b"stable", 0, None, None)
+            .unwrap()
+            .is_none(),
+        "reverting the source token cannot expose an interrupted append"
+    );
+    db.transaction(|c| {
+        c.execute_batch("DROP TRIGGER reject_history_append")?;
+        Ok(())
+    })
+    .unwrap();
+    drop(repo);
+    drop(db);
+
+    let repo = EventRepository::new(database(&dir), EventDomainId([2; 16])).unwrap();
+    repo.initialize_history_order().unwrap();
+    let rebuilt = repo.history_generation(&conv, b"one", 0, None).unwrap();
+    assert!(!rebuilt.ready);
+    assert_ne!(rebuilt.job, first.job);
+    repo.history_add(&conv, rebuilt.job, row(1, 10), Some(20))
+        .unwrap();
+    while !repo.history_order_step(rebuilt.job).unwrap().ready {}
+    repo.history_finish_inputs(&conv, rebuilt.job, b"stable", [1, 0, 0], 0)
+        .unwrap();
+    assert!(
+        repo.history_append_generation(&conv, b"one", b"stable", 20, None, None)
+            .unwrap()
+            .is_none()
+    );
+    let expired = repo.history_generation(&conv, b"one", 20, None).unwrap();
+    assert_ne!(expired.job, rebuilt.job);
+    assert_eq!(repo.history_order_step(expired.job).unwrap().count, 0);
+    assert_eq!(repo.body_read_counts(), (0, 0));
+}
+#[test]
+fn runtime_metadata_combined_history_prefix_reuses_signed_tail_and_rejects_retarget_or_late_parent()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let repo = EventRepository::new(database(&dir), EventDomainId([2; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    let original = event(&author, 1, vec![], 100, EventKind::Message);
+    let conv = original.conversation_id;
+    repo.append(&original).unwrap();
+    finish(&repo, &conv, CausalOrder::WallClock);
+    repo.initialize_history_order().unwrap();
+    let candidate = |id, clock, ordinal| combined::HistorySelector {
+        id,
+        clock,
+        source_kind: 2,
+        ordinal,
+        priority: 2,
+        sequence: 0,
+        charged_bytes: 1,
+    };
+    let first = repo
+        .history_generation(
+            &conv,
+            b"one",
+            0,
+            repo.order_generation(&conv, CausalOrder::WallClock)
+                .unwrap(),
+        )
+        .unwrap();
+    repo.history_add(&conv, first.job, candidate(original.id, 100, 1), None)
+        .unwrap();
+    while !repo.history_order_step(first.job).unwrap().ready {}
+    repo.history_finish_inputs(&conv, first.job, b"stable", [0, 1, 0], 0)
+        .unwrap();
+    let tail = event(&author, 2, vec![original.id], 101, EventKind::Message);
+    repo.append(&tail).unwrap();
+    finish(&repo, &conv, CausalOrder::WallClock);
+    let signed = repo
+        .order_generation(&conv, CausalOrder::WallClock)
+        .unwrap();
+    let (append, prefix) = repo
+        .history_append_generation(&conv, b"two", b"stable", 0, signed, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(append.job, first.job);
+    assert!(
+        repo.history_append_candidate(&conv, append.job, prefix, candidate(tail.id, 101, 2), None)
+            .unwrap()
+    );
+    let archive = EventId::new([9; 32]);
+    assert!(
+        repo.history_append_candidate(&conv, append.job, prefix, candidate(archive, 102, 3), None)
+            .unwrap()
+    );
+    while !repo.history_order_step(append.job).unwrap().ready {}
+    assert_eq!(
+        repo.history_selectors(append.job, 0, 3, 4096)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>(),
+        [original.id, tail.id, archive]
+    );
+    repo.history_finish_inputs(&conv, append.job, b"stable", [0, 3, 0], 0)
+        .unwrap();
+    let (retarget, prefix) = repo
+        .history_append_generation(&conv, b"retarget", b"stable", 0, signed, None)
+        .unwrap()
+        .unwrap();
+    let mut replacement = candidate(archive, 0, 4);
+    replacement.priority = 1;
+    assert!(
+        !repo
+            .history_append_candidate(&conv, retarget.job, prefix, replacement, None)
+            .unwrap(),
+        "an earlier winning archive selector must rebuild its rank"
+    );
+    assert!(
+        !repo
+            .history_generation(&conv, b"retarget", 0, signed)
+            .unwrap()
+            .ready
+    );
+    // A later signed child with an inverted wall clock changes the signed job,
+    // invalidating the combined prefix even when no transcript body changed.
+    let late = event(&author, 3, vec![tail.id], 2, EventKind::Message);
+    repo.append(&late).unwrap();
+    finish(&repo, &conv, CausalOrder::WallClock);
+    assert_ne!(
+        signed.unwrap().job,
+        repo.order_generation(&conv, CausalOrder::WallClock)
+            .unwrap()
+            .unwrap()
+            .job
+    );
+    assert_eq!(repo.body_read_counts(), (0, 0));
+}

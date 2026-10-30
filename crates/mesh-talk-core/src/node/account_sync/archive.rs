@@ -716,11 +716,7 @@ impl Node {
             if super::super::files::eligible_manifest_row(&entry, Some(proof), None).is_none() {
                 return Ok(None);
             }
-            let author = self
-                .file_message_identities
-                .lock()
-                .expect("file identities mutex")
-                .row_author_account(&entry)?;
+            let author = self.file_message_row_author_account(&entry, Some(proof))?;
             if self.message_recalled_selected(
                 entry.conversation,
                 entry.event_id,

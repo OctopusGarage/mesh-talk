@@ -172,7 +172,7 @@ impl PreparedParticipant {
                     }).await {
                         log::warn!("file receive worker failed: {error}");
                     }
-                    let pending = node.files.lock().expect("files lock").download_work_pending().unwrap_or_else(|error| {log::warn!("download scheduling observation failed: {error}");true}) || node.group_file_work_pending();
+                    let pending = node.files.lock().expect("files lock").download_work_pending().unwrap_or_else(|error| {log::warn!("download scheduling observation failed: {error}");true}) || node.group_file_work_pending() || node.pending_channel_file().is_some();
                     tokio::select! {
                         _ = node.pull_pending_files() => {},
                         _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },

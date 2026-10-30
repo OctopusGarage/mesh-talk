@@ -219,7 +219,7 @@ fn indexed_authored_reactions_write_rollback_and_removal_predicates_release_conn
         })
         .unwrap();
     store
-        .try_remove_where(|_, _, _| {
+        .remove_matching(|_, _, _| {
             profile
                 .database()
                 .read(|c| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, bool>(0))?))
@@ -357,5 +357,40 @@ fn indexed_reaction_erasure_uses_headers_for_both_families() {
             .unwrap()
             .rows
             .is_empty()
+    );
+}
+
+#[test]
+fn indexed_authored_reaction_erasure_uses_fixed_keys_without_body_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let profile = fixture(dir.path(), &account);
+    let mut store = IndexedReactionStore::from_profile(
+        profile.clone(),
+        &dir.path().join("own-reactions"),
+        "pw",
+        account.public().ed25519_pub,
+    )
+    .unwrap();
+    for n in 0..130u8 {
+        let mut value = payload(n, false);
+        value.emoji = "x".repeat(32 * 1024);
+        store.record(conversation(), u64::from(n), value).unwrap();
+    }
+    BODY_READS.with(|value| value.set(0));
+    store
+        .remove_matching(|conv, wall, target| {
+            // The production predicate also consults exact suppression. Keeping the
+            // connection available here prevents a nested SQL owner deadlock.
+            profile.database().read(|_| {
+                Ok(conv == conversation() && (wall < 64 || target == EventId::new([128; 32])))
+            })
+        })
+        .unwrap();
+    assert_eq!(store.len(), 65);
+    assert_eq!(
+        BODY_READS.with(|value| value.get()),
+        0,
+        "local reaction erasure needs only conversation, clock and target keys"
     );
 }

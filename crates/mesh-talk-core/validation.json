@@ -2435,7 +2435,9 @@
         "crates/mesh-talk-core/src/node/ui_state.rs",
         "crates/mesh-talk-core/src/node/host_reception.rs",
         "crates/mesh-talk-core/src/bin/mesh-talk-node/reception.rs",
-        "crates/mesh-talk-core/src/node/files/reception.rs"
+        "crates/mesh-talk-core/src/node/files/reception.rs",
+        "crates/mesh-talk-core/src/node/files/channel_receive.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/file_preview.rs"
       ],
       "rust": [
         {
@@ -2444,7 +2446,8 @@
             "node::reception_effects::tests::",
             "node::runtime_delivery::tests::",
             "node::host_reception::tests::",
-            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace"
+            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace",
+            "node::files::channel_receive::tests::"
           ]
         }
       ],
@@ -2485,6 +2488,7 @@
         "crates/mesh-talk-core/src/node/transcript_repository/",
         "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
         "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/order/combined/",
         "crates/mesh-talk-core/src/node/filebook/",
         "crates/mesh-talk-core/src/node/attachment_consent.rs",
         "crates/mesh-talk-core/src/node/attachment_consent/",
@@ -2497,6 +2501,7 @@
             "node::transcript_repository::tests::",
             "node::account_file_repository::tests::",
             "runtime_metadata_",
+            "indexed_runtime_recent_history_",
             "node::filebook::indexed::tests::",
             "node::attachment_consent::",
             "direct_file_approval_shares_signed_revision_with_relay_delivery",
@@ -2539,12 +2544,55 @@
           {
             "name": "Metadata-only identity and deadline selection, transactional physical deletion/counters, exact file aliases and 64-byte suppression keys survive restart without resident history sets; suppression export uses bounded keyset pages with no expiry or probabilistic lookup.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Manifest receive discovery qualifies account commit intervals before pending insertion; account-indexed bounded retries preserve oversized legal rows and returning-account work, while adoption generations reject stale reads, acknowledgements and message/file reception writes even after the account returns.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
       "escalation": [
         "Leaf repository tests do not certify participant runtime integration, native publication behavior or production-KDF startup budgets. Node integration must retain validate_participant_request before constructors and the existing delivery journal, use pure removal predicates under the SQL lock, and continue deadline pagination until an empty page rather than a short page.",
         "Actual consumer cutover requires affected history/search, delivery recovery, exact local deletion, snapshot export/restore and loopback/restart evidence; bounded repository APIs alone do not establish bounded startup memory."
+      ]
+    },
+    {
+      "id": "core-selected-reaction-summaries",
+      "paths": [
+        "crates/mesh-talk-core/src/node/reactions/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::reactions::selected::tests::",
+            "reaction_account_reduction::"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node"
+      ],
+      "capability": {
+        "summary": "Project selected reaction targets into exact SQL counts and page summaries without author-list materialization.",
+        "guide": "docs/module-boundaries.md",
+        "invariants": [
+          {
+            "name": "Selected requests bind account generation, targets and authenticated source revisions; pending responses contain no partial rows and always carry a continuation.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Retained bodies and summary strings are selected by key and byte budgets before allocation; latest action is reduced per principal with unsigned clocks and remove-wins ties.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Modern-channel causal preparation still requires the shared resumable checkpoint boundary; native/frontend adoption and removal of legacy collecting views require their own consumer checks before an end-to-end bounded-reaction claim."
       ]
     }
   ]

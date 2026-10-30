@@ -95,9 +95,7 @@ impl Node {
         self.my_dm_reactions
             .lock()
             .expect("reactions mutex")
-            .remove_where(|c, _, payload| {
-                c == conv && (payload.target == target || aliases.contains(&payload.target))
-            })?;
+            .remove_matching(|c, _, id| Ok(c == conv && (id == target || aliases.contains(&id))))?;
         if delivery.cancel(conv, target)? {
             self.privacy
                 .generation

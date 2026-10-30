@@ -1512,6 +1512,25 @@ impl NodeRuntime {
             .await
     }
 
+    /// Prepare or read a bounded summary for the currently visible targets.
+    pub fn reaction_summaries(
+        &self,
+        conversation: crate::eventlog::event::ConversationId,
+        targets: &[crate::eventlog::event::EventId],
+        cursor: Option<&str>,
+    ) -> Result<crate::node::ReactionSummaryPage, NodeError> {
+        self.node.reaction_summaries(conversation, targets, cursor)
+    }
+
+    pub fn account_reaction_summaries(
+        &self,
+        peer: &str,
+        targets: &[crate::eventlog::event::EventId],
+        cursor: Option<&str>,
+    ) -> Result<crate::node::ReactionSummaryPage, NodeError> {
+        self.node.account_reaction_summaries(peer, targets, cursor)
+    }
+
     /// Aggregated reactions in the DM with `peer`.
     pub fn reactions_dm(
         &self,

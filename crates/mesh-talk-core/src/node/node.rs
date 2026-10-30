@@ -354,6 +354,7 @@ pub struct Node {
     pub(in crate::node) channel_membership_commit: Mutex<()>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
     pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
+    pub(in crate::node) pending_channel_files: Mutex<Option<super::files::ChannelFileTurn>>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
     pub(in crate::node) group_metadata_cache: Mutex<super::group_metadata::MetadataCache>,
@@ -471,6 +472,7 @@ pub struct Node {
     pub(in crate::node) profile_receive_work:
         Mutex<super::profile_receive_work::ProfileReceiveWork>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
+    pub(in crate::node) reaction_queries: Mutex<super::reactions::ReactionQueryWork>,
     pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::IndexedReactionStore>,
     // Declared last so every legacy handle drops before the connection and lease.
     pub(in crate::node) storage: Arc<crate::storage::profile::context::ProfileStorage>,
@@ -1254,6 +1256,7 @@ impl Node {
             channel_membership_commit: Mutex::new(()),
             channels: Mutex::new(channels),
             pending_channel_plaintext: Mutex::new(Default::default()),
+            pending_channel_files: Mutex::new(None),
             archived_channels,
             recovery_origins,
             recovery_contacts,
@@ -1322,6 +1325,7 @@ impl Node {
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
+            reaction_queries: Mutex::default(),
             my_dm_reactions: Mutex::new(my_dm_reactions),
         };
         node.reconcile_account_profiles_on_open().map_err(|error| {

@@ -1151,9 +1151,20 @@ async fn owned_read_failure_retains_untracked_group_chunks_and_existing_media() 
     let encrypted_before = std::fs::read(&path).unwrap();
     let chunks_before = receiver.log.lock().unwrap().events(&file).unwrap().len();
     assert!(chunks_before > 0);
+    assert_eq!(receiver.completion_candidates(file).unwrap().len(), 1);
+    // Current group reception reserves completion evidence. The fallback still
+    // has to preserve older/imported cards that lack this optional binding.
+    assert_eq!(
+        receiver
+            .delivery
+            .lock()
+            .unwrap()
+            .omit_file_completion_binding_for_test(file),
+        1
+    );
     assert!(
         receiver.completion_candidates(file).unwrap().is_empty(),
-        "group reception uses the untracked fallback"
+        "legacy group reception uses the untracked fallback"
     );
     let mut reached_completion = false;
     let result =
@@ -1171,6 +1182,9 @@ async fn owned_read_failure_retains_untracked_group_chunks_and_existing_media() 
         result,
         Err(super::NodeError::Log(crate::eventlog::LogError::Io(_)))
     ));
+    // Inspect durable state only after the simulated storage outage has ended.
+    // Indexed reads correctly observe the same failure as the failed reclaim.
+    receiver.log.lock().unwrap().fail_reads(false);
     assert_eq!(
         receiver.log.lock().unwrap().events(&file).unwrap().len(),
         chunks_before
@@ -1186,7 +1200,6 @@ async fn owned_read_failure_retains_untracked_group_chunks_and_existing_media() 
     let checks_before_retry = receiver
         .untracked_chunk_validations
         .load(std::sync::atomic::Ordering::Relaxed);
-    receiver.log.lock().unwrap().fail_reads(false);
     receiver
         .save_file(file, &chain._dir.path().join("export-retry.png"))
         .unwrap();

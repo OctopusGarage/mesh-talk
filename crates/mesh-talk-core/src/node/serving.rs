@@ -3,7 +3,7 @@
 use super::*;
 use crate::discovery::roster::PeerRecord;
 use crate::eventlog::LogError;
-use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
+use crate::eventlog::event::{Author, ConversationId, EventId};
 use crate::node::conversation::account_conversation_id;
 use crate::node::session::{
     Served, SessionError, request_round_paged as request_round, serve_one_paged as serve_one,
@@ -762,6 +762,9 @@ impl Node {
     pub(in crate::node) fn retry_file_receives(&self) {
         let result = (|| -> Result<(), NodeError> {
             self.discover_file_receives()?;
+            if let Some(channel) = self.pending_channel_file() {
+                self.process_channel_file_reception(channel, "catch_up")?;
+            }
             let conversations = self
                 .files
                 .lock()
@@ -783,33 +786,28 @@ impl Node {
         context: &'static str,
     ) {
         let result = (|| -> Result<(), NodeError> {
-            let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-            // Is this a channel conversation? If so, open with its group key.
-            let is_channel = {
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                book.state(&conv).is_some()
-            };
             self.discover_file_receives()?;
-            let candidates: Vec<EventId> = if is_channel {
-                // The channel checkpoint producer replaces this legacy branch
-                // with its receiver-position scheduler during integration.
-                self.log
-                    .lock()
-                    .expect("log lock")
-                    .events(&conv)?
-                    .into_iter()
-                    .filter(|event| {
-                        event.kind == EventKind::FileManifest && event.author != self_author
-                    })
-                    .map(|event| event.id)
-                    .collect()
-            } else {
+            let is_channel = self
+                .channels
+                .lock()
+                .expect("channels lock")
+                .state(&conv)
+                .is_some();
+            if is_channel {
+                // Rotate a fixed generic-discovery page even when channel keys
+                // are unavailable, so other conversations retain a fair turn.
                 self.files.lock().expect("files lock").receive_candidates(
                     conv,
-                    128,
+                    8,
                     8 * 1024 * 1024,
-                )?
-            };
+                )?;
+                return self.process_channel_file_reception(conv, context);
+            }
+            let candidates = self.files.lock().expect("files lock").receive_candidates(
+                conv,
+                128,
+                8 * 1024 * 1024,
+            )?;
             if candidates.is_empty() {
                 if self.files.lock().expect("files lock").contains_file(conv)? {
                     self.persist_media_if_complete(conv);
@@ -817,17 +815,6 @@ impl Node {
                 }
                 return Ok(());
             }
-            if is_channel
-                && !self
-                    .pending_channel_plaintext
-                    .lock()
-                    .expect("pending plaintext lock not poisoned")
-                    .channel
-                    .is_none()
-            {
-                return Ok(());
-            }
-            let mut surfaced: Vec<ReceivedFile> = Vec::new();
             for id in candidates {
                 let selected = match self.log.lock().expect("log lock").get(&id) {
                     Err(LogError::ConversationRetiring) => None,
@@ -840,147 +827,55 @@ impl Node {
                 if self
                     .account_suppression
                     .lock()
-                    .expect("account suppression lock not poisoned")
+                    .expect("suppression lock")
                     .contains(conv, event.id)?
+                    || self.files.lock().expect("files lock").processed(event.id)?
                 {
                     continue;
                 }
-                if !self.channel_content_visible(conv, event.id)? {
+                let Some(proof) = self.historical_author(event.author.ed25519_pub()) else {
                     continue;
-                }
-                if self
-                    .files
-                    .lock()
-                    .expect("files mutex not poisoned")
-                    .processed(event.id)?
-                {
-                    continue;
-                }
-                if !is_channel
-                    && self
-                        .historical_author(event.author.ed25519_pub())
-                        .is_some_and(|proof| self.certified_sibling(&proof.public()))
-                {
-                    // Sibling file metadata and bytes use the category-negotiated account path.
-                    continue;
-                }
-                // NB: we mark emitted only AFTER a successful open+decode (below), so a
-                // manifest we can't open yet — e.g. a DM whose sender isn't in the roster
-                // until discovery catches up — is retried on a later sync, not lost.
-                let plaintext = if is_channel {
-                    let mut book = self.channels.lock().expect("channels mutex not poisoned");
-                    match book.state_mut(&conv).and_then(|s| {
-                        if s.is_accepted_member(&event.author.user_id()) {
-                            s.open_sender_message(&event.author.user_id(), &event.ciphertext)
-                        } else {
-                            None
-                        }
-                    }) {
-                        Some(p) => p,
-                        None => continue,
-                    }
-                } else {
-                    let sender_x25519 = {
-                        match self.historical_author(event.author.ed25519_pub()) {
-                            Some(p)
-                                if conv
-                                    == super::conversation::dm_conversation_id(
-                                        &self.identity.public(),
-                                        &p.public(),
-                                    ) =>
-                            {
-                                p.x25519_pub
-                            }
-                            _ => continue, // unknown author or incorrect device pair
-                        }
-                    };
-                    match crate::dm::open(&self.identity, &sender_x25519, &event.ciphertext) {
-                        Ok(p) => p,
-                        Err(_) => continue,
-                    }
                 };
-                let own_device = self
-                    .linked_devices()
-                    .iter()
-                    .any(|device| device.public.user_id() == event.author.user_id());
+                if self.certified_sibling(&proof.public())
+                    || conv
+                        != super::conversation::dm_conversation_id(
+                            &self.identity.public(),
+                            &proof.public(),
+                        )
+                {
+                    continue;
+                }
+                let Ok(plaintext) =
+                    crate::dm::open(&self.identity, &proof.x25519_pub, &event.ciphertext)
+                else {
+                    continue;
+                };
                 if self.recipient_expired(&plaintext, event.id, event.wall_clock) {
                     self.files
                         .lock()
-                        .expect("files mutex not poisoned")
+                        .expect("files lock")
                         .mark_processed(event.id)?;
                     continue;
                 }
                 let Some(manifest) = super::files::validated_manifest(&plaintext) else {
                     continue;
                 };
-                if !self
-                    .files
-                    .lock()
-                    .expect("files lock not poisoned")
-                    .accepts(&manifest)?
+                if !self.files.lock().expect("files lock").accepts(&manifest)?
+                    || self
+                        .delivery
+                        .lock()
+                        .expect("delivery lock")
+                        .manifest_event_erased(event.id)
                 {
                     continue;
                 }
-                let received = ReceivedFile {
-                    protection: manifest.protection(),
-                    expires_at_ms: crate::expiry::deadline(&plaintext),
-                    conv,
-                    is_channel,
-                    from: event.author.user_id(),
-                    name: if manifest.protection().is_some() {
-                        "Protected image".into()
-                    } else {
-                        manifest.name().to_string()
-                    },
-                    size: manifest.size(),
-                    mime: manifest.mime().to_string(),
-                    file_conv: manifest.file_conv(),
-                    media: crate::node::media_store::manifest_is_media(&manifest),
-                    event_id: event.id,
-                    authored_at: event.wall_clock,
-                    received_at: super::node::now_millis(),
-                    arrival_kind: context,
-                    own_device,
-                    batch_id: None,
-                    batch_complete: true,
-                    batch_size: 1,
-                };
-                // The conversation to FILE this manifest under for history. A channel manifest
-                // stays in the channel conv (which is the UI's conversation id). A DM manifest
-                // is account-addressed in this app: map it to the ACCOUNT conversation with the
-                // author's certified account (mirroring `emit_new_messages`), so it lines up
-                // with the account-keyed conversation view on both sides. A DM author with no
-                // known account (or a self-synced copy from our own device) falls back to the
-                // raw conv — it still shows in the tray, just not folded into account history.
-                let host_conv = if is_channel {
-                    conv
-                } else {
-                    let peer_account = self
-                        .historical_author(event.author.ed25519_pub())
-                        .and_then(|p| p.account_id());
-                    let my_account = self.account.account_id();
-                    match peer_account {
-                        Some(acct) if acct != my_account => {
-                            account_conversation_id(&my_account, &acct)
-                        }
-                        _ => conv,
+                let my_account = self.account.account_id();
+                let host_conv = match proof.account_id() {
+                    Some(account) if account != my_account => {
+                        account_conversation_id(&my_account, &account)
                     }
+                    _ => conv,
                 };
-                if self
-                    .delivery
-                    .lock()
-                    .expect("delivery lock not poisoned")
-                    .manifest_event_erased(event.id)
-                {
-                    continue;
-                }
-                // Persist the surfaced manifest durably so the file book's emitted set + this
-                // manifest survive a restart — WITHOUT the old bug of marking never-opened
-                // manifests emitted (which lost the file). Best-effort: a failure here at worst
-                // re-surfaces the file after restart, never loses it.
-                // Key by the HOST (DM/channel/account) conversation, not the per-file conv, so
-                // `conversation_files` can list a conversation's files in time order for
-                // history. Startup FileBook seeding iterates all entries regardless of key.
                 let entry = super::received_log::ReceivedEntry {
                     event_id: event.id,
                     conversation: host_conv,
@@ -988,75 +883,13 @@ impl Node {
                     wall_clock: event.wall_clock,
                     plaintext,
                 };
-                let installed = if is_channel {
-                    let recorded = self
-                        .received_files
-                        .lock()
-                        .expect("files lock not poisoned")
-                        .record_file_with_reception(&entry, Some(&event), None);
-                    recorded.and_then(|_| self.retain_group_file_completion(&event, &entry))
-                } else {
-                    match self.historical_author(event.author.ed25519_pub()) {
-                        Some(proof) => self.accept_manifest_event(&event, &proof, entry),
-                        None => continue,
-                    }
-                };
-                if installed.is_err() {
-                    continue;
+                // The existing direct-delivery journal owns publication after
+                // durable FILES/body/effect installation and receiver recovery.
+                self.accept_manifest_event(&event, &proof, entry)?;
+                if let Err(error) = self.complete_sticker_aliases(manifest.file_conv()) {
+                    log::warn!("sticker completion deferred: {error}");
                 }
-                if !is_channel {
-                    if let Err(error) = self.complete_sticker_aliases(manifest.file_conv()) {
-                        log::warn!("sticker completion deferred: {error}");
-                    }
-
-                    continue;
-                } // live journal recovery owns DM file publication
-                if !own_device {
-                    self.note_account_local_change();
-                }
-                self.remember_manifest_scope(manifest.file_conv(), conv, event.author, event.id);
-                surfaced.push(received);
             }
-            let total = surfaced.len();
-            let kind = if context == "live" && total > 1 {
-                "catch_up"
-            } else {
-                context
-            };
-            let batch = (kind == "catch_up")
-                .then(|| {
-                    surfaced
-                        .last()
-                        .map(|file| format!("file:{}", file.event_id.to_hex()))
-                })
-                .flatten();
-            for (index, mut rf) in surfaced.into_iter().enumerate() {
-                rf.arrival_kind = kind;
-                rf.batch_id = batch.clone();
-                rf.batch_complete = index + 1 == total;
-                rf.batch_size = total;
-                // We have the manifest; if its chunks haven't all arrived, queue a direct pull
-                // from peers (the sender's one-shot push may have raced our discovery, and on a
-                // PO-less LAN nothing else fetches them). Cleared once the file completes.
-                let fc = rf.file_conv;
-                if match self.attachment_consent_status(fc) {
-                    Ok(status) => status,
-                    Err(error) => {
-                        log::warn!("attachment consent lookup deferred: {error}");
-                        continue;
-                    }
-                } == Some(super::attachment_consent::ReceiveDecision::Accepted)
-                    && matches!(self.file_progress(fc)?, Some(p) if p.done < p.total)
-                {
-                    self.file_pull_notify.notify_one();
-                } else {
-                    // All chunks already arrived with the manifest (the push landed): if this is
-                    // a media file, persist it into the durable store now (and prune its chunks).
-                    self.persist_media_if_complete(fc);
-                }
-                let _ = self.file_incoming.send(rf);
-            }
-
             Ok(())
         })();
         if let Err(error) = result {

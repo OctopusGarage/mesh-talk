@@ -375,6 +375,45 @@ impl AccountDocumentStore {
     pub(super) fn meta(&self, key: &AccountDocumentKey) -> Option<AccountDocumentMeta> {
         self.current.get(key).cloned()
     }
+    pub(super) fn reaction_metadata_page(
+        &self,
+        peer: &str,
+        target: &str,
+        after: Option<&AccountDocumentKey>,
+    ) -> Result<Vec<AccountDocumentMeta>, LogError> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let first = AccountDocumentKey::DmReaction {
+            peer_account: peer.into(),
+            target: target.into(),
+            actor_account: String::new(),
+            emoji: String::new(),
+        };
+        if after.is_some_and(|key| !matches!(key, AccountDocumentKey::DmReaction {peer_account, target: selected, ..} if peer_account==peer && selected==target)) {
+            return Err(LogError::InvalidPageBudget);
+        }
+        let lower = after.map_or(Included(&first), Excluded);
+        let mut out = Vec::new();
+        let mut bytes = 0usize;
+        for (key, meta) in self.current.range((lower, Unbounded)) {
+            if !matches!(key, AccountDocumentKey::DmReaction {peer_account, target: selected, ..} if peer_account==peer && selected==target)
+            {
+                break;
+            }
+            let required = (meta.content_len as usize)
+                .checked_mul(3)
+                .and_then(|n| n.checked_add(1024))
+                .ok_or(LogError::RepositoryCounterExhausted)?;
+            if out.len() == 64 || bytes + required > 8 * 1024 * 1024 {
+                if out.is_empty() {
+                    return Err(LogError::PageBudgetTooSmall { required });
+                }
+                break;
+            }
+            bytes += required;
+            out.push(meta.clone());
+        }
+        Ok(out)
+    }
     pub(super) fn list(
         &self,
         domain: AccountDocumentDomain,
