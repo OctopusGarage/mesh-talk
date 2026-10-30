@@ -6927,6 +6927,10 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
     let alice_uid = alice.public().user_id();
     let bob_uid = bob.public().user_id();
     let dir = tempfile::tempdir().unwrap();
+    let alice_dir = dir.path().join("alice");
+    let bob_dir = dir.path().join("bob");
+    std::fs::create_dir(&alice_dir).unwrap();
+    std::fs::create_dir(&bob_dir).unwrap();
 
     // Both nodes listen so each can receive the other's pushed file events.
     let alice_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6950,8 +6954,8 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &alice_dir.join("events.log"),
+        &alice_dir.join("sent.log"),
         "pw",
     )
     .unwrap();
@@ -6961,8 +6965,8 @@ async fn two_nodes_transfer_a_file_in_a_channel() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &bob_dir.join("events.log"),
+        &bob_dir.join("sent.log"),
         "pw",
     )
     .unwrap();

@@ -6,10 +6,58 @@ use crate::eventlog::repository::order::{CausalOrder, OrderReadiness, OrderWorkB
 use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
 
+#[cfg(test)]
+thread_local! { static COLD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(super) fn cold_reads() -> usize {
+    COLD_READS.with(std::cell::Cell::get)
+}
+
 const DOMAIN: &[u8; 16] = b"MeshPartEventsV1";
 const SCHEMA: &str = "
 CREATE TABLE group_raw_control_views(channel BLOB PRIMARY KEY CHECK(length(channel)=32),revision INTEGER NOT NULL,fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),event_count INTEGER NOT NULL CHECK(event_count>=0),frontier BLOB NOT NULL CHECK(length(frontier)<=131104 AND length(frontier)%32=0)) WITHOUT ROWID;
 CREATE TABLE group_raw_control_marks(event BLOB PRIMARY KEY CHECK(length(event)=32)) WITHOUT ROWID;";
+
+const INPUT_SCHEMA: &str = "CREATE TABLE group_raw_control_inputs(channel BLOB PRIMARY KEY CHECK(length(channel)=32),source_key BLOB NOT NULL CHECK(length(source_key) IN(9,33))) WITHOUT ROWID;";
+const CONTROL_KINDS: [EventKind; 7] = [
+    EventKind::MembershipChange,
+    EventKind::ChannelOwnerTransfer,
+    EventKind::ChannelLeave,
+    EventKind::ChannelAccept,
+    EventKind::ChannelDissolve,
+    EventKind::ChannelAccountAuthority,
+    EventKind::ChannelDeviceInheritance,
+];
+/// A published causal generation changes for late parents and reordered sources.
+/// Its safe tail keeps the same job: ordinary message appends cannot change a
+/// frontier of retained controls. The tag prevents fallback revision values from
+/// ever colliding with the optimized key (including installed older caches).
+fn cache_key(
+    repository: &crate::eventlog::repository::EventRepository,
+    group: ConversationId,
+    revision: i64,
+) -> Result<Vec<u8>, crate::eventlog::LogError> {
+    if let Some(revisions) = repository.raw_kind_revisions(group)?
+        && let Some(generation) = repository.order_generation(&group, CausalOrder::Logical)?
+    {
+        let control = CONTROL_KINDS
+            .into_iter()
+            .map(|kind| revisions[kind as usize])
+            .max()
+            .unwrap_or(-1);
+        let destructive = repository.destructive_policy_revision()?;
+        let mut key = Vec::with_capacity(33);
+        key.push(1);
+        key.extend_from_slice(&generation.job);
+        key.extend_from_slice(&control.to_be_bytes());
+        key.extend_from_slice(&destructive.to_be_bytes());
+        return Ok(key);
+    }
+    let mut key = Vec::with_capacity(9);
+    key.push(0);
+    key.extend_from_slice(&revision.to_be_bytes());
+    Ok(key)
+}
 
 fn invalid() -> crate::eventlog::LogError {
     crate::eventlog::LogError::CorruptFile("invalid raw group control view".into())
@@ -41,11 +89,21 @@ pub(super) fn read(
         if !exists {
             c.execute_batch(SCHEMA)?;
         }
-        crate::storage::profile::manifest::validate_ddl(c, SCHEMA)
+        crate::storage::profile::manifest::validate_ddl(c, SCHEMA)?;
+        let inputs: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='group_raw_control_inputs')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !inputs {
+            c.execute_batch(INPUT_SCHEMA)?;
+        }
+        crate::storage::profile::manifest::validate_ddl(c, INPUT_SCHEMA)
     })?;
     if scope.is_none() {
+        let source_key = cache_key(repository, group, revision)?;
         let cached: Option<(Vec<u8>, i64, Vec<u8>)> = node.storage.database().read(|c| {
-            c.query_row("SELECT fingerprint,event_count,frontier FROM group_raw_control_views WHERE channel=?1 AND revision=?2", params![group.as_bytes().as_slice(),revision], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(Into::into)
+            c.query_row("SELECT v.fingerprint,v.event_count,v.frontier FROM group_raw_control_views v JOIN group_raw_control_inputs i ON i.channel=v.channel WHERE v.channel=?1 AND i.source_key=?2", params![group.as_bytes().as_slice(),source_key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(Into::into)
         })?;
         if let Some((fingerprint, count, bytes)) = cached {
             if bytes.len() % 32 != 0 || bytes.len() / 32 > MAX_ACCESS_FRONTIER + 1 {
@@ -64,22 +122,15 @@ pub(super) fn read(
             ));
         }
     }
+    #[cfg(test)]
+    COLD_READS.with(|value| value.set(value.get() + 1));
     // Compute the unchanged wire fingerprint in identifier order. Selection
     // happens before any event body is accessed; at most128 IDs are retained.
     let mut digest = Sha256::new();
     digest.update(b"mesh-talk-group-authorization-view-v1");
     let mut count = 0_usize;
     let mut after: Option<Vec<u8>> = None;
-    let kinds = [
-        EventKind::MembershipChange,
-        EventKind::ChannelOwnerTransfer,
-        EventKind::ChannelLeave,
-        EventKind::ChannelAccept,
-        EventKind::ChannelDissolve,
-        EventKind::ChannelAccountAuthority,
-        EventKind::ChannelDeviceInheritance,
-    ]
-    .map(|kind| kind as i64);
+    let kinds = CONTROL_KINDS.map(|kind| kind as i64);
     loop {
         let page: Vec<Vec<u8>> = node.storage.database().read(|c| {
             let mut query = c.prepare("SELECT id FROM retained_events INDEXED BY retained_events_ids WHERE domain=?1 AND conversation=?2 AND id>COALESCE(?3,x'') AND kind IN (?4,?5,?6,?7,?8,?9,?10) ORDER BY id LIMIT 128")?;
@@ -169,7 +220,9 @@ pub(super) fn read(
             .iter()
             .flat_map(|id| id.as_bytes().iter().copied())
             .collect();
+        let source_key = cache_key(repository, group, revision)?;
         node.storage.database().transaction(|c| {
+            c.execute("INSERT INTO group_raw_control_inputs VALUES(?1,?2) ON CONFLICT(channel) DO UPDATE SET source_key=excluded.source_key",params![group.as_bytes().as_slice(),source_key])?;
             c.execute("INSERT INTO group_raw_control_views VALUES(?1,?2,?3,?4,?5) ON CONFLICT(channel) DO UPDATE SET revision=excluded.revision,fingerprint=excluded.fingerprint,event_count=excluded.event_count,frontier=excluded.frontier",params![group.as_bytes().as_slice(),revision,stamp.0.as_slice(),i64::try_from(stamp.1).map_err(|_|invalid())?,bytes])?;
             Ok(())
         })?;

@@ -2427,7 +2427,9 @@
         "crates/mesh-talk-core/src/node/ui_state.rs",
         "crates/mesh-talk-core/src/node/host_reception.rs",
         "crates/mesh-talk-core/src/bin/mesh-talk-node/reception.rs",
-        "crates/mesh-talk-core/src/node/files/reception.rs"
+        "crates/mesh-talk-core/src/node/files/reception.rs",
+        "crates/mesh-talk-core/src/node/files/channel_receive.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/file_preview.rs"
       ],
       "rust": [
         {
@@ -2436,7 +2438,8 @@
             "node::reception_effects::tests::",
             "node::runtime_delivery::tests::",
             "node::host_reception::tests::",
-            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace"
+            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace",
+            "node::files::channel_receive::tests::"
           ]
         }
       ],
@@ -2532,6 +2535,14 @@
           },
           {
             "name": "Metadata-only identity and deadline selection, transactional physical deletion/counters, exact file aliases and 64-byte suppression keys survive restart without resident history sets; suppression export uses bounded keyset pages with no expiry or probabilistic lookup.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Manifest receive discovery qualifies account commit intervals before pending insertion; account-indexed bounded retries preserve oversized legal rows and returning-account work, while adoption generations reject stale reads, acknowledgements and message/file reception writes even after the account returns.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

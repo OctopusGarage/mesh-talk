@@ -3419,6 +3419,54 @@ async fn recalled_private_file_blocks_late_cards_and_stale_sibling_byte_release(
     receiver
         .apply_account_history_page(&cards, AccountSyncVersion::V2)
         .unwrap();
+    let selected = receiver
+        .received_files
+        .lock()
+        .unwrap()
+        .entry(target)
+        .unwrap()
+        .unwrap();
+    let original_proof = receiver
+        .account_file_proofs
+        .lock()
+        .unwrap()
+        .get(&target)
+        .unwrap()
+        .unwrap();
+    assert!(
+        receiver
+            .file_message_identities
+            .lock()
+            .unwrap()
+            .row_author_account(&selected)
+            .unwrap()
+            .is_none(),
+        "personal saved-file recall must not depend on an optional identity bundle"
+    );
+    assert_eq!(
+        receiver
+            .file_message_row_author_account(&selected, Some(&original_proof))
+            .unwrap(),
+        Some(original.account_id())
+    );
+    let mut forged = original_proof.clone();
+    forged.wall_clock = forged.wall_clock.wrapping_add(1);
+    assert!(
+        receiver
+            .file_message_row_author_account(&selected, Some(&forged))
+            .unwrap()
+            .is_none(),
+        "a matching claimed author cannot replace a valid original signature"
+    );
+    let mut misbound = selected.clone();
+    misbound.from = crate::identity::device::DeviceIdentity::generate().user_id();
+    assert!(
+        receiver
+            .file_message_row_author_account(&misbound, Some(&original_proof))
+            .unwrap()
+            .is_none(),
+        "the signed original must bind the selected row, not just a supplied sender string"
+    );
     restore_attachment_bytes(&stale, file, &path);
     original
         .recall_account(&original.account_id(), target)
@@ -3452,18 +3500,18 @@ async fn recalled_private_file_blocks_late_cards_and_stale_sibling_byte_release(
     let peer = sibling_peer(&receiver, &stale, listener.local_addr().unwrap());
     let stale_server = tokio::spawn(stale.clone().run_accept_loop(listener));
     let mut unsupported = false;
+    let result = receiver
+        .pull_account_attachment_optional(
+            &peer,
+            file,
+            AccountSyncVersion::V2,
+            true,
+            &mut unsupported,
+        )
+        .await;
     assert!(
-        receiver
-            .pull_account_attachment_optional(
-                &peer,
-                file,
-                AccountSyncVersion::V2,
-                true,
-                &mut unsupported
-            )
-            .await
-            .is_err(),
-        "known recall denies verified bytes from an offline stale sibling at final commit"
+        result.is_err(),
+        "known recall denies verified bytes from an offline stale sibling at final commit: {result:?}"
     );
     assert!(!receiver.media.contains(file));
     let (after, _, _) = original.export_sync_records(
@@ -3885,13 +3933,21 @@ async fn file_identity_repair_bounds_each_history_scan_and_advances_past_legacy_
         }
         rows.record_file_alias_durable(&row).unwrap();
     }
-    assert!(
-        receiver
-            .pending_file_message_identities(&sender.identity.public())
-            .unwrap()
-            .is_empty(),
-        "one pass must not parse beyond its256-row budget"
-    );
+    for _ in 0..16 {
+        let before = receiver.received_files.lock().unwrap().body_reads();
+        assert!(
+            receiver
+                .pending_file_message_identities(&sender.identity.public())
+                .unwrap()
+                .is_empty(),
+            "each pass examines at most16 legacy rows before retaining its cursor"
+        );
+        let after = receiver.received_files.lock().unwrap().body_reads();
+        assert!(
+            after - before <= 16,
+            "selected bodies must respect the row budget"
+        );
+    }
     assert_eq!(
         receiver
             .pending_file_message_identities(&sender.identity.public())

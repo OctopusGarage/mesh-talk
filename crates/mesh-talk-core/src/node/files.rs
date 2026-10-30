@@ -4,6 +4,8 @@
 //! the chunk events ride the normal bounded sync, which already re-requests only the
 //! events a peer is missing — so transfer RESUMES across reconnects for free.
 
+mod channel_receive;
+pub(in crate::node) use channel_receive::ChannelFileTurn;
 mod reception;
 
 use super::node::MAX_FILE_SIZE;

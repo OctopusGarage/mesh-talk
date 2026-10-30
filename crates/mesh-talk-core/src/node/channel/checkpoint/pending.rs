@@ -35,6 +35,23 @@ impl Default for ChannelReceiveBudget {
     }
 }
 impl ChannelReceiveBudget {
+    pub(in crate::node) fn page(&mut self) -> bool {
+        if self.exhausted() {
+            return false;
+        }
+        self.pages -= 1;
+        true
+    }
+    pub(in crate::node) fn admit(&mut self, stored_bytes: usize) -> Result<bool, LogError> {
+        let charge = pending_charge(stored_bytes)?;
+        if self.bodies == 0 || charge > self.bytes {
+            self.bodies = 0;
+            return Ok(false);
+        }
+        self.bodies -= 1;
+        self.bytes -= charge;
+        Ok(true)
+    }
     pub(in crate::node) fn exhausted(&self) -> bool {
         self.bodies == 0 || self.pages == 0
     }
@@ -121,7 +138,7 @@ impl ChannelCheckpointStore {
     ) -> Result<PendingChannelPage, LogError> {
         self.pending_page_excluding(channel, kind, None)
     }
-    fn pending_page_excluding(
+    pub(super) fn pending_page_excluding(
         &self,
         channel: ConversationId,
         kind: EventKind,
@@ -182,6 +199,9 @@ impl ChannelCheckpointStore {
                 // A malformed authenticated header cannot become decryptable.
                 // Retire generic discovery in the same definitive transaction.
                 crate::node::received_store::ReceivedStore::install_evidence_on(c,event.conversation_id,event.id)?;
+                if event.kind == EventKind::FileManifest {
+                    crate::node::filebook::indexed::mark_processed_on(c,event.id)?;
+                }
                 c.execute("INSERT OR IGNORE INTO channel_processed VALUES(?1,?2,3)",params![event.conversation_id.as_bytes().as_slice(),event.id.as_bytes().as_slice()])?;
                 c.execute("DELETE FROM channel_pending WHERE channel=?1 AND event=?2",params![event.conversation_id.as_bytes().as_slice(),event.id.as_bytes().as_slice()])?;
                 return Ok(());

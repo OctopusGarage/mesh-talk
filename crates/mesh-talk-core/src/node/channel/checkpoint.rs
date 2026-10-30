@@ -17,7 +17,9 @@ pub(in crate::node) mod activity;
 pub(in crate::node) mod causal;
 mod cleanup;
 mod current;
+mod file_preview;
 pub(in crate::node) use current::ChannelSource;
+pub(in crate::node) use file_preview::FileReceivePreview;
 mod pending;
 pub(in crate::node) use pending::ChannelReceiveBudget;
 mod recall;
@@ -119,6 +121,7 @@ impl ChannelCheckpointStore {
             sharing::initialize(c, !present)?;
             activity::initialize(c, !present)?;
             causal::initialize(c, !present)?;
+            file_preview::initialize(c)?;
             crate::node::join_history::initialize_indexed(c, !present)
         })?;
         let account = profile.database().read(active_account_on)?;
@@ -275,6 +278,17 @@ impl ChannelCheckpointStore {
         event: &Event,
         preceding: Option<&PreparedChannelReceive>,
     ) -> Result<Option<PreparedChannelReceive>, LogError> {
+        self.prepare_receive_with_checkpoint(
+            event,
+            preceding.map(|prior| (prior, &prior.candidate)),
+        )
+    }
+
+    fn prepare_receive_with_checkpoint(
+        &self,
+        event: &Event,
+        preceding: Option<(&PreparedChannelReceive, &PreparedChannelMessage)>,
+    ) -> Result<Option<PreparedChannelReceive>, LogError> {
         if !event.is_canonical() || !event.verify_integrity() || !event.verify_signature() {
             return Err(invalid("unauthenticated channel receiver source"));
         }
@@ -297,14 +311,14 @@ impl ChannelCheckpointStore {
             let Some((revision,key_revision,bytes))=row else { return Ok(None); };
             attempt=Some((Some(epoch),key_revision,source_job,source_revision,None));
             let bytes=Zeroizing::new(bytes);
-            let (revision,checkpoint) = if let Some(prior) = preceding.filter(|prior|
+            let (revision,checkpoint) = if let Some((prior,private)) = preceding.filter(|(prior,_)|
                 prior.channel==event.conversation_id && prior.candidate.author==author && prior.candidate.epoch==epoch
             ) {
                 if prior.event==event.id || prior.account!=self.account || prior.source_job!=source_job
                     || prior.source_revision!=source_revision || prior.revision!=revision {
                     return Err(LogError::StaleCursor);
                 }
-                (revision.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?,prior.candidate.checkpoint.as_slice())
+                (revision.checked_add(1).ok_or(LogError::RepositoryCounterExhausted)?,private.checkpoint.as_slice())
             } else { (revision,bytes.as_slice()) };
             let candidate=match ChannelState::prepare_checkpoint_message(&author,checkpoint,&event.ciphertext) {
                 Ok(candidate)=>candidate,
