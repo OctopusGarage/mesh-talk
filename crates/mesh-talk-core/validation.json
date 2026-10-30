@@ -1666,6 +1666,7 @@
       "id": "core-sticker-media",
       "paths": [
         "crates/mesh-talk-core/src/file/sticker.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/sticker_media.rs",
         "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
         "crates/mesh-talk-core/src/node/recall.rs",
@@ -1686,6 +1687,7 @@
             "node::files::",
             "node::recall::",
             "node::file_completion::",
+            "node::delivery_runtime_tests::failed_media_completion_metadata_keeps_durable_bytes_pending",
             "node::session::tests::"
           ]
         }
@@ -1697,6 +1699,10 @@
         "summary": "Deliver immutable encrypted sticker media without requiring recipient pack installation and reuse verified transfer bytes only within the same conversation and deadline.",
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
         "invariants": [
+          {
+            "name": "Completed local group or own media retires recovery without repeated decoding or recipient receipts; failed bound completion metadata and missing media remain retryable",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
           {
             "name": "Pack installation and message media retention are independent; exact image identity is the authenticated attachment checksum",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"

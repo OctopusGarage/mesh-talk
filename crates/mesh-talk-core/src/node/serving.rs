@@ -1047,7 +1047,7 @@ impl Node {
                         .remove(&fc);
                     return;
                 }
-                if self.media.contains(fc) && self.has_verified_file_completion(fc) {
+                if self.local_media_recovery_complete(fc) {
                     let progressed = self.complete_sticker_aliases(fc);
                     let pending = self.pending_sticker_aliases(fc);
                     if !pending {
@@ -1134,9 +1134,7 @@ impl Node {
                         .expect("files lock not poisoned")
                         .manifest(&fc)
                         .is_some_and(super::media_store::manifest_is_media);
-                    if !managed
-                        || (self.media.contains(fc) && self.has_verified_file_completion(fc))
-                    {
+                    if !managed || self.local_media_recovery_complete(fc) {
                         self.pending_files
                             .lock()
                             .expect("pending files mutex not poisoned")
