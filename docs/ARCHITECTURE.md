@@ -1470,9 +1470,20 @@ received body or exact suppression evidence, reception provenance and batch
 progress commit in one SQL transaction before any in-memory publication. Failed
 writes leave the key usable. Replaying old distributions or reordered controls
 cannot roll consumed keys back. The owner provides separate message and file
-batch terminal facts. Channel file producers still await adoption of this
-prepared receiver transaction boundary; the checkpoint seam alone does not
-complete that runtime cutover.
+batch terminal facts. Channel file reception installs the receiver, FILES row,
+validated FileBook offer, reception fact and file-role batch progress in that
+same transaction. Its existing group-completion reservation precedes the
+transaction; reservation failure leaves the ciphertext and consuming key pending.
+
+File provenance counts surfaced valid cards, excluding malformed, expired,
+suppressed and conflicting transfer bindings. One bounded continuation retains a
+first candidate and a private receiver checkpoint while it crosses rejected
+plaintext. Existing pending rows hold its speculative progress; at most 64 bodies
+and 64 selector turns share a 16 MiB charge budget. Source changes discard the
+private keys, and restart or resolution resets speculative marks in bounded pages.
+Authenticated rejected plaintext is consumed with exact evidence. Production hosts
+receive only durable facts and coalesced wakes; the explicit legacy SDK retains
+one admitted manifest for its final callback and rechecks visibility before delivery.
 
 Pending channel work is selected by bounded indexed pages. One message producer
 invocation examines at most 64 bodies and 64 selector pages, sharing a 16 MiB
@@ -1528,9 +1539,10 @@ Returning to an account resumes both undiscovered and pending work without admit
 intervening accounts' events. Adoption generations reject old handles and ACKs even
 when the same account returns. Rows are admitted by count and decoded allocation
 cost before body reads; an oversized legal row remains pending for a larger budget.
-The direct-file producer and idle retry worker use this index; the channel receiver
-must use its independent checkpoint/CAS scheduler before channel FILES can share
-these bounded guarantees. Consent changes restart a persisted metadata scan, and failed media or
+The direct-file producer and idle retry worker use this index; channel FILES use
+the independent checkpoint/CAS scheduler and rotate a bounded discovery prefix
+so a stalled channel cannot starve another conversation. Consent changes restart
+a persisted metadata scan, and failed media or
 completion writes leave pending work retryable across restart. Sent fanout scopes
 reuse source 9 publication and bounded metadata pages; the sync owner still checks
 each exact signed parent permission. Ordinary scope reads require a live validated

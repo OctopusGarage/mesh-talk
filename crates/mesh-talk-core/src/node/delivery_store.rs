@@ -604,6 +604,22 @@ struct DeliveryProfile {
 }
 
 impl DeliveryStore {
+    /// Reproduce an imported legacy card whose optional completion proof was
+    /// never reserved, without changing its retained manifest or ciphertext.
+    #[cfg(test)]
+    pub(crate) fn omit_file_completion_binding_for_test(
+        &mut self,
+        conversation: ConversationId,
+    ) -> usize {
+        let mut omitted = 0;
+        for file in self.files.values_mut() {
+            if file.file_conversation == conversation && file.completion_binding.take().is_some() {
+                omitted += 1;
+            }
+        }
+        omitted
+    }
+
     #[cfg(test)]
     pub(crate) fn fail_journal_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
         self.journal.fail_appends_for_test(enabled)
