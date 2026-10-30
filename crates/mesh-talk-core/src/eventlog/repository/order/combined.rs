@@ -78,6 +78,15 @@ impl EventRepository {
             }
         }
         if let Some((job, ..)) = previous {
+            // Retirement commits in chunks. A failure or restart must not let a
+            // reverted visibility token reuse this partially retired generation.
+            self.database.transaction(|c| {
+                c.execute(
+                    "UPDATE history_order_jobs SET ready=0 WHERE job=?1 AND ready=1",
+                    [job.as_slice()],
+                )?;
+                Ok(())
+            })?;
             // Obsolete metadata is retired in bounded transactions, never in a
             // history-sized Vec or cascading deletion.
             loop {
