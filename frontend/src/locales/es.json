@@ -396,7 +396,13 @@
     "waiting": "Esperando archivo…",
     "receivingProgress": "Recibiendo archivo: {{percent}}%",
     "sending": "Enviando archivo…",
-    "saving": "Guardando archivo…"
+    "saving": "Guardando archivo…",
+    "imageWaiting": "Esperando imagen",
+    "imageReceiving": "Recibiendo imagen",
+    "imageReceivingProgress": "Recibiendo imagen · {{percent}}%",
+    "imagePreparing": "Preparando imagen",
+    "imageDetails": "Foto · {{size}}",
+    "image": "Foto"
   },
   "composer": {
     "expireAfterSend": "Caducar tras enviar",

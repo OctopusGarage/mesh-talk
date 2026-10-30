@@ -1956,7 +1956,11 @@
         "frontend/e2e/media-scroll.spec.ts",
         "frontend/e2e/media-recovery.spec.ts",
         "frontend/e2e/media-lifecycle.spec.ts",
-        "frontend/e2e/media-hook-harness.tsx"
+        "frontend/e2e/media-hook-harness.tsx",
+        "frontend/src/features/chat/MediaPreview.test.ts",
+        "frontend/src/features/chat/ReceiveProgress.tsx",
+        "frontend/src/features/chat/ReceiveProgress.test.ts",
+        "frontend/e2e/image-receiving.spec.ts"
       ],
       "frontend": [
         "src/features/chat/MediaPreview.test.ts",
@@ -1964,7 +1968,8 @@
         "src/features/chat/mediaFileRead.test.ts",
         "src/features/chat/mediaFile.test.ts",
         "src/features/chat/useConversationViewport.test.ts",
-        "src/features/chat/protectedImage.test.ts"
+        "src/features/chat/protectedImage.test.ts",
+        "src/features/chat/ReceiveProgress.test.ts"
       ],
       "capability": {
         "summary": "Fit decoded images to their original proportions within bounded thumbnails, reuse known geometry on virtualized remounts within bounded session ownership, and support bounded full-size image zoom and pan.",
@@ -1980,6 +1985,10 @@
           },
           {
             "name": "Ordinary media reuse shares admitted reads and URLs, bounds idle Blob bytes and entries, expires idle URLs, and revokes on owner/runtime retirement; protected reveals remain ephemeral.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
+          {
+            "name": "Image receipt keeps an opaque, bounded frame with measured radial progress and phase-only announcements; preparation lasts until the current source loads, cached remounts skip it, and stale callbacks or a previous source failure cannot affect a replacement.",
             "reference": "docs/module-boundaries.md#inline-media-presentation"
           }
         ]
@@ -2160,8 +2169,12 @@
         "guide": "docs/help/topics/channels.md#file-delivery",
         "invariants": [
           {
-            "name": "A known zero chunk count remains accessible as zero percent and uses waiting language; receiving language starts after a positive chunk count.",
+            "name": "A known zero chunk count remains accessible as zero percent and uses waiting language; receiving language starts after a positive chunk count. Image presentation omits visible zero, announces phases separately from percentage updates, and treats readiness or complete counts as preparing until the preview can display.",
             "reference": "docs/help/topics/channels.md#file-delivery"
+          },
+          {
+            "name": "Image progress uses existing theme tokens and reduced-motion preferences, exposes no unsupported transfer actions, and preserves ordinary file progress and consent semantics.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
           }
         ]
       }
@@ -2829,7 +2842,10 @@
         "frontend/e2e/media-scroll.spec.ts",
         "frontend/e2e/media-recovery.spec.ts",
         "frontend/e2e/media-lifecycle.spec.ts",
-        "frontend/e2e/media-hook-harness.tsx"
+        "frontend/e2e/media-hook-harness.tsx",
+        "frontend/src/features/chat/ReceiveProgress.tsx",
+        "frontend/src/features/chat/ReceiveProgress.test.ts",
+        "frontend/e2e/image-receiving.spec.ts"
       ],
       "browser": [
         "e2e/media-scroll.spec.ts",
@@ -2837,7 +2853,9 @@
         "e2e/media-lifecycle.spec.ts",
         "e2e/chat.spec.ts",
         "e2e/protected-messages.spec.ts",
-        "e2e/ui-visual-regression.spec.ts"
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/image-receiving.spec.ts",
+        "e2e/file-receive-controls.spec.ts"
       ],
       "native": ["host"]
     },

@@ -208,6 +208,14 @@ check all invalidating conditions; an earlier successful check is insufficient.
 Compensation must identify the stale operation's own effects and must not erase
 newer valid state.
 
+Scope presentation readiness and failure flags to the resource that produced
+them, too. A component-wide decode failure can suppress a replacement image,
+and a retired load callback can publish stale geometry. The
+[inline media owner](module-boundaries.md#inline-media-presentation) binds both
+outcomes to the current URL and session; the replacement-source and retired-load
+regressions in [MediaPreview tests](../frontend/src/features/chat/MediaPreview.test.ts)
+exercise recovery and rejection of stale callbacks.
+
 **Evidence:** pause at the real commit seam; replace the session with the same
 owner, change the relevant policy revision, or remove the source; then resume.
 Assert no stale mutation or plaintext publication, plus a valid positive path.

@@ -113,6 +113,19 @@ access. Decoded image geometry is cached by live Blob URL (at most 64 entries)
 so virtualized remounts can reserve the known size; initial decode may resize
 a row, with reader anchors and live-edge intent owned by the viewport. Transfer readiness
 must not swap an ordinary preview from a compact file card to an image row.
+
+Image receipt uses an opaque theme surface and the image presentation of
+`ReceiveProgress.tsx`. Waiting is static; a known zero remains accessible without
+a visible percentage. Positive incomplete chunk counts drive a small radial
+indicator, with phase-only live announcements. Complete chunk counts, local reads
+and image loading retain a preparing state; file readiness alone does not reveal
+the image. A current-source load reveals it with a brief opacity transition,
+reduced with the user's motion preference. Cached geometry skips preparation on
+remount. Load/error callbacks require current source and session ownership, and
+preview failure belongs to its Blob URL so a replacement can recover. No receive
+speed, stall cause, cancel action or thumbnail is inferred from chunk counts.
+Ordinary file progress and attachment consent retain their existing presentation.
+
 The ordinary-image lightbox owns pointer-anchored wheel zoom (1–8 times the
 window-fit size), double-click zoom, bounded pointer dragging, fit reset and
 keyboard zoom (+/−/0). Resize clamps the current position; reopening resets it.

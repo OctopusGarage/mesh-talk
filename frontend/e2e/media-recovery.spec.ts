@@ -139,7 +139,7 @@ test("received media recovers when bytes become available with stable fileConv",
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
   await expect(
-    page.getByRole("progressbar", { name: "Receiving file…" }),
+    page.getByRole("progressbar", { name: "Receiving image" }),
   ).toHaveAttribute("aria-valuenow", "50");
   const messageRow = page.locator(
     '[data-message-id="early-media-stable-message"]',

@@ -396,7 +396,13 @@
     "waiting": "等待文件…",
     "receivingProgress": "正在接收文件：{{percent}}%",
     "sending": "正在发送文件…",
-    "saving": "正在保存文件…"
+    "saving": "正在保存文件…",
+    "imageWaiting": "等待图片",
+    "imageReceiving": "正在接收图片",
+    "imageReceivingProgress": "正在接收图片 · {{percent}}%",
+    "imagePreparing": "正在准备图片",
+    "imageDetails": "照片 · {{size}}",
+    "image": "照片"
   },
   "composer": {
     "expireAfterSend": "发送后到期",

@@ -2,11 +2,19 @@
 import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { FileStatus } from "@/lib/types";
 
 const state = vi.hoisted(() => ({
   mac: true,
   current: true,
   confirm: false,
+  url: "blob:ordinary-image" as string | null,
+  status: {
+    file_conv: "ordinary-image",
+    done: 4,
+    total: 4,
+    ready: true,
+  } as FileStatus,
   setError: vi.fn(),
   writeText: vi.fn(async (_text: string) => {}),
   writeSelection: vi.fn((_type: string, _value: string) => {}),
@@ -57,12 +65,13 @@ vi.mock("@/store/settings", () => ({
   },
 }));
 vi.mock("@/store/fileAvailability", () => ({
-  useFileStatus: () => ({ ready: true }),
+  useFileStatus: () => state.status,
   markUnavailableFileError: () => false,
 }));
 vi.mock("./mediaFile", () => ({
   blobMime: () => "image/png",
-  useFileObjectUrl: () => "blob:ordinary-image",
+  useFileObjectUrl: (_fileConv: string, enabled: boolean) =>
+    enabled ? state.url : null,
   useVideoPoster: () => ({ poster: null, failed: false }),
   withinInlineCap: () => true,
 }));
@@ -71,6 +80,7 @@ import { MediaPreview } from "./MediaPreview";
 let host: HTMLDivElement;
 let root: Root;
 const ancestorMenu = vi.fn();
+let imageSequence = 0;
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal(
@@ -85,6 +95,13 @@ beforeEach(() => {
   state.mac = true;
   state.current = true;
   state.confirm = false;
+  state.url = `blob:ordinary-image-${++imageSequence}`;
+  state.status = {
+    file_conv: "ordinary-image",
+    done: 4,
+    total: 4,
+    ready: true,
+  };
   state.setError.mockReset();
   state.writeText.mockReset().mockResolvedValue(undefined);
   state.writeSelection.mockReset();
@@ -103,7 +120,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
-async function openImage() {
+async function renderImage(readOnly = false) {
   await act(async () =>
     root.render(
       createElement(MediaPreview, {
@@ -111,8 +128,22 @@ async function openImage() {
         name: "photo.png",
         size: 100,
         mime: "image/png",
+        readOnly,
       }),
     ),
+  );
+}
+async function loadImage(image: HTMLImageElement, width = 800, height = 600) {
+  Object.defineProperties(image, {
+    naturalWidth: { configurable: true, value: width },
+    naturalHeight: { configurable: true, value: height },
+  });
+  await act(async () => image.dispatchEvent(new Event("load")));
+}
+async function openImage() {
+  await renderImage();
+  await loadImage(
+    host.querySelector<HTMLImageElement>('[data-testid="file-image"]')!,
   );
   await act(async () =>
     host
@@ -125,6 +156,94 @@ async function openImage() {
     '[data-testid="file-image-lightbox"] img',
   )!;
 }
+
+it("keeps the preparing state until the received image can actually display", async () => {
+  state.url = null;
+  await renderImage();
+  expect(host.textContent).toContain("transfer.imagePreparing");
+  state.url = `blob:pending-image-${imageSequence}`;
+  await renderImage();
+  const image = host.querySelector<HTMLImageElement>(
+    '[data-testid="file-image"]',
+  )!;
+  const trigger = image.closest("button")!;
+  expect(host.textContent).toContain("transfer.imagePreparing");
+  expect(trigger.disabled).toBe(true);
+  expect(image.style.opacity).toBe("0");
+  await loadImage(image);
+  expect(trigger.disabled).toBe(false);
+  expect(image.style.opacity).toBe("1");
+  expect(host.textContent).not.toContain("transfer.imagePreparing");
+});
+
+it("reuses decoded geometry without replaying preparation on remount", async () => {
+  await renderImage();
+  const image = host.querySelector<HTMLImageElement>(
+    '[data-testid="file-image"]',
+  )!;
+  await loadImage(image, 1600, 200);
+  expect(
+    image.closest<HTMLElement>("[data-inline-image]")!.style.aspectRatio,
+  ).toBe("1600 / 200");
+  await act(async () => root.render(null));
+  await renderImage();
+  const reused = host.querySelector<HTMLImageElement>(
+    '[data-testid="file-image"]',
+  )!;
+  expect(reused.style.opacity).toBe("1");
+  expect(
+    reused.closest<HTMLElement>("[data-inline-image]")!.style.aspectRatio,
+  ).toBe("1600 / 200");
+  expect(host.textContent).not.toContain("transfer.imagePreparing");
+});
+
+it("prepares a replacement URL and does not carry an old decode failure forward", async () => {
+  await renderImage();
+  const image = host.querySelector<HTMLImageElement>(
+    '[data-testid="file-image"]',
+  )!;
+  await act(async () => image.dispatchEvent(new Event("error")));
+  expect(host.textContent).toContain("files.imageUnsupported");
+  const failure = host.querySelector('[role="status"]');
+  expect(failure?.textContent).toBe("files.imageUnsupported");
+  expect(failure?.querySelector("button")).toBeNull();
+  state.url = `blob:replacement-${imageSequence}`;
+  await renderImage();
+  expect(host.textContent).not.toContain("files.imageUnsupported");
+  expect(host.textContent).toContain("transfer.imagePreparing");
+  const replacement = host.querySelector<HTMLImageElement>(
+    '[data-testid="file-image"]',
+  )!;
+  await loadImage(replacement, 200, 800);
+  expect(
+    replacement.closest<HTMLElement>("[data-inline-image]")!.style.aspectRatio,
+  ).toBe("200 / 800");
+});
+
+it("ignores image load and failure events after the captured session retires", async () => {
+  await renderImage();
+  const image = host.querySelector<HTMLImageElement>(
+    '[data-testid="file-image"]',
+  )!;
+  state.current = false;
+  await loadImage(image);
+  await act(async () => image.dispatchEvent(new Event("error")));
+  expect(image.style.opacity).toBe("0");
+  expect(host.textContent).not.toContain("files.imageUnsupported");
+});
+
+it("keeps history images noninteractive through preparation and display", async () => {
+  await renderImage(true);
+  expect(host.querySelector("button")).toBeNull();
+  expect(host.textContent).toContain("transfer.imagePreparing");
+  const image = host.querySelector<HTMLImageElement>(
+    '[data-testid="file-image"]',
+  )!;
+  await loadImage(image);
+  expect(host.textContent).not.toContain("transfer.imagePreparing");
+  expect(image.style.opacity).toBe("1");
+  expect(host.querySelector("button")).toBeNull();
+});
 async function copySelection(image: HTMLImageElement, text = "图片里的文字") {
   // WebKit's UA image overlay exposes its selected text through this public API.
   // The native probe separately exercises real recognition and drag selection.
