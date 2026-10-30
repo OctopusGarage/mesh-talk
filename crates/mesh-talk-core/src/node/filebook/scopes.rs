@@ -133,7 +133,7 @@ impl IndexedManifestScopes {
         }
         Ok(())
     }
-    pub(crate) fn insert(
+    pub(in crate::node) fn insert(
         &self,
         file: ConversationId,
         scope: ManifestScope,
@@ -159,7 +159,7 @@ impl IndexedManifestScopes {
             u64::try_from(value).map_err(|_|invalid("invalid file scope revision"))
         })
     }
-    pub(crate) fn page(
+    pub(in crate::node) fn page(
         &self,
         file: ConversationId,
         after: Option<EventId>,
@@ -173,7 +173,7 @@ impl IndexedManifestScopes {
             Ok(result)
         })
     }
-    pub(crate) fn scopes(
+    pub(in crate::node) fn scopes(
         &self,
         file: ConversationId,
     ) -> impl Iterator<Item = Result<ManifestScope, LogError>> + use<> {

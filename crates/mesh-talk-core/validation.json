@@ -2506,6 +2506,10 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
+            "name": "Manifest receive discovery qualifies account commit intervals before pending insertion; account-indexed bounded retries preserve oversized legal rows and returning-account work, while adoption generations reject stale reads and acknowledgements.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
             "name": "Metadata-only identity and deadline selection, transactional physical deletion/counters, exact file aliases and 64-byte suppression keys survive restart without resident history sets; suppression export uses bounded keyset pages with no expiry or probabilistic lookup.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }

@@ -164,6 +164,14 @@ impl PreparedParticipant {
                 let mut roster = node.roster.lock().expect("roster lock not poisoned").subscribe_changes();
                 let mut delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS);
                 loop {
+                    let Some(permit) = node.runtime_work.admit() else { break; };
+                    let receiving = Arc::clone(&node);
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        receiving.retry_file_receives();
+                    }).await {
+                        log::warn!("file receive worker failed: {error}");
+                    }
                     let pending = node.files.lock().expect("files lock").download_work_pending().unwrap_or_else(|error| {log::warn!("download scheduling observation failed: {error}");true}) || node.group_file_work_pending();
                     tokio::select! {
                         _ = node.pull_pending_files() => {},

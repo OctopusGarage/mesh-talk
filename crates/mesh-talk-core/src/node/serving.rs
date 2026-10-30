@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::discovery::roster::PeerRecord;
+use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::node::conversation::account_conversation_id;
 use crate::node::session::{
@@ -741,6 +742,41 @@ impl Node {
         self.process_file_events_reception(conv, "live");
     }
 
+    fn discover_file_receives(&self) -> Result<(), NodeError> {
+        let files = self.files.lock().expect("files lock").clone();
+        let after = files.receive_after()?;
+        let headers = self
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .committed_headers_page(after, 128)?;
+        files.discover_receives(
+            after,
+            &headers,
+            Author::from_ed25519(self.identity.public().ed25519_pub),
+        )?;
+        Ok(())
+    }
+
+    pub(in crate::node) fn retry_file_receives(&self) {
+        let result = (|| -> Result<(), NodeError> {
+            self.discover_file_receives()?;
+            let conversations = self
+                .files
+                .lock()
+                .expect("files lock")
+                .receive_conversations()?;
+            for conversation in conversations {
+                self.process_file_events_reception(conversation, "catch_up");
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            log::warn!("file receive discovery deferred: {error}");
+        }
+    }
+
     pub(in crate::node) fn process_file_events_reception(
         &self,
         conv: ConversationId,
@@ -748,31 +784,39 @@ impl Node {
     ) {
         let result = (|| -> Result<(), NodeError> {
             let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
-            let all_events: Vec<Event> = {
-                let log = self.log.lock().expect("log mutex not poisoned");
-                let events = log.events(&conv)?;
-                if !events.iter().any(|event| {
-                    event.kind == EventKind::FileManifest && event.author != self_author
-                }) {
-                    drop(log);
-                    let file = self
-                        .files
-                        .lock()
-                        .expect("files lock not poisoned")
-                        .contains_file(conv)?;
-                    if file {
-                        self.persist_media_if_complete(conv);
-                        self.note_file_change();
-                    }
-                    return Ok(());
-                }
-                events
-            };
             // Is this a channel conversation? If so, open with its group key.
             let is_channel = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 book.state(&conv).is_some()
             };
+            self.discover_file_receives()?;
+            let candidates: Vec<EventId> = if is_channel {
+                // The channel checkpoint producer replaces this legacy branch
+                // with its receiver-position scheduler during integration.
+                self.log
+                    .lock()
+                    .expect("log lock")
+                    .events(&conv)?
+                    .into_iter()
+                    .filter(|event| {
+                        event.kind == EventKind::FileManifest && event.author != self_author
+                    })
+                    .map(|event| event.id)
+                    .collect()
+            } else {
+                self.files.lock().expect("files lock").receive_candidates(
+                    conv,
+                    128,
+                    8 * 1024 * 1024,
+                )?
+            };
+            if candidates.is_empty() {
+                if self.files.lock().expect("files lock").contains_file(conv)? {
+                    self.persist_media_if_complete(conv);
+                    self.note_file_change();
+                }
+                return Ok(());
+            }
             if is_channel
                 && !self
                     .pending_channel_plaintext
@@ -784,9 +828,15 @@ impl Node {
                 return Ok(());
             }
             let mut surfaced: Vec<ReceivedFile> = Vec::new();
-            for event in all_events.into_iter().filter(|event| {
-                event.kind == EventKind::FileManifest && event.author != self_author
-            }) {
+            for id in candidates {
+                let selected = match self.log.lock().expect("log lock").get(&id) {
+                    Err(LogError::ConversationRetiring) => None,
+                    result => result?,
+                };
+                let Some(event) = selected else {
+                    self.files.lock().expect("files lock").forget_receive(id)?;
+                    continue;
+                };
                 if self
                     .account_suppression
                     .lock()

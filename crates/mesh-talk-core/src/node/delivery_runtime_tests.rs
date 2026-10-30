@@ -8076,6 +8076,25 @@ fn indexed_file_runtime_warm_open_does_not_hydrate_retained_manifest_history() {
             0,
             "warm startup must use file eligibility and pending-work metadata for {count} retained cards"
         );
+        let before = reopened
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        reopened.process_file_events(conversation);
+        assert_eq!(
+            reopened
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before,
+            "unchanged file receive turns must not load {count} processed signed manifests"
+        );
     }
 }
 

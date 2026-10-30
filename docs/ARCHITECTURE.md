@@ -1516,7 +1516,15 @@ retained erasure keys without hydrating file-card history. Download scheduling i
 account-scoped SQL work installed with each new validated offer. Metadata discovery
 pages contain at most 128 IDs and each worker turn admits eight files. A completion
 acknowledges the observed work revision, so a newer offer cannot lose its sole retry
-fact. Consent changes restart a persisted metadata scan, and failed media or
+fact. Manifest receive discovery scans at most 128 committed headers per turn;
+only commits owned by the captured account enter that account's pending index.
+Returning to an account resumes both undiscovered and pending work without admitting
+intervening accounts' events. Adoption generations reject old handles and ACKs even
+when the same account returns. Rows are admitted by count and decoded allocation
+cost before body reads; an oversized legal row remains pending for a larger budget.
+The direct-file producer and idle retry worker use this index; the channel receiver
+must use its independent checkpoint/CAS scheduler before channel FILES can share
+these bounded guarantees. Consent changes restart a persisted metadata scan, and failed media or
 completion writes leave pending work retryable across restart. Sent fanout scopes
 reuse source 9 publication and bounded metadata pages; the sync owner still checks
 each exact signed parent permission. Ordinary scope reads require a live validated
