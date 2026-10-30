@@ -425,8 +425,8 @@ pub struct Node {
     /// restart (unlike own reactions).
     pub(in crate::node) recalls: Mutex<crate::node::recall::IndexedRecallLog>,
     /// Owns profile journals, local publication and coordinated account transitions.
-    pub(in crate::node) trust_cards: Mutex<super::trust_card::TrustCardStore>,
-    pub(in crate::node) profiles: Mutex<super::account_profile_data::AccountProfileStore>,
+    pub(in crate::node) trust_cards: Mutex<super::trust_card::IndexedTrustCardStore>,
+    pub(in crate::node) profiles: Mutex<super::account_profile_data::IndexedAccountProfileStore>,
     pub(in crate::node) account_profiles: super::account_profile::AccountProfiles,
     /// Live stream of received peer profiles (avatar updates), surfaced to the app. The
     /// node owns BOTH ends (created in `open_with_account`) so the constructor signature
@@ -709,7 +709,11 @@ impl Node {
                 s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::received_log::ReceivedEntry>(&storage,&dir.join("received_files.log"),password,super::transcript_repository::FILES,b"MTRECV"));
             // Durable store of avatars peers propagated to us (one per account, newest-wins).
             let h_profiles = s.spawn(|| {
-                crate::node::profile_store::ProfileStore::open(&dir.join("profiles.log"), password)
+                crate::node::profile_store::IndexedProfileStore::authenticate_legacy(
+                    &storage,
+                    &dir.join("profiles.log"),
+                    password,
+                )
             });
             // Durable record of OUR OWN recalls: our recall payloads are sealed to peers (we
             // can't open them from our own log), so this is how `history` knows which of our
@@ -767,16 +771,17 @@ impl Node {
         let mut channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let account_profiles = super::account_profile::AccountProfiles::new(&account, profiles);
-        let trust_cards = Mutex::new(super::trust_card::TrustCardStore::open(
+        profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        super::trust_card::IndexedTrustCardStore::authenticate_legacy(
+            &storage,
             &dir.join("trust-cards.log"),
             password,
-        )?);
-        let profiles = Mutex::new(super::account_profile_data::AccountProfileStore::open(
+        )?;
+        super::account_profile_data::IndexedAccountProfileStore::authenticate_legacy(
+            &storage,
             &dir.join("account-profiles.log"),
             password,
-        )?);
+        )?;
         recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -883,6 +888,25 @@ impl Node {
         )?;
         let account_document_updates = tokio::sync::watch::channel(0).0;
         storage.complete_participant(password, legacy_previous.as_deref())?;
+        let avatars = super::profile_store::IndexedProfileStore::from_profile(
+            storage.clone(),
+            &dir.join("profiles.log"),
+            password,
+        )?;
+        let account_profiles = super::account_profile::AccountProfiles::new(&account, avatars)?;
+        let trust_cards = Mutex::new(super::trust_card::IndexedTrustCardStore::from_profile(
+            storage.clone(),
+            &dir.join("trust-cards.log"),
+            password,
+        )?);
+        let profiles = Mutex::new(
+            super::account_profile_data::IndexedAccountProfileStore::from_profile(
+                storage.clone(),
+                &dir.join("account-profiles.log"),
+                password,
+            )?,
+        );
+
         let profile_receive_work =
             super::profile_receive_work::ProfileReceiveWork::open(storage.clone())?;
         let reception_effects = super::reception_effects::ReceptionEffects::open(storage.clone())?;
@@ -1314,19 +1338,8 @@ impl Node {
 
     /// The avatar a peer ACCOUNT propagated to us (data-URL bytes), or `None` if unknown
     /// or cleared. Durable across restart.
-    pub fn peer_avatar(&self, account_id: &str) -> Option<Vec<u8>> {
+    pub fn peer_avatar(&self, account_id: &str) -> Result<Option<Vec<u8>>, LogError> {
         self.account_profiles.avatar(account_id)
-    }
-
-    /// Every peer avatar we hold, as `account_id -> data-URL bytes`. For seeding the UI
-    /// on startup so received avatars survive a relaunch.
-    pub fn peer_avatars(&self) -> HashMap<String, Vec<u8>> {
-        self.account_profiles.avatars()
-    }
-
-    /// Durable signed profile state, including clear tombstones for startup reconciliation.
-    pub fn peer_profile_states(&self) -> HashMap<String, Option<Vec<u8>>> {
-        self.account_profiles.avatar_states()
     }
 
     /// Summaries of all channels this node is a member of.

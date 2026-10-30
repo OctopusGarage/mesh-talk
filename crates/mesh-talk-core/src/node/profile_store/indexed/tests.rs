@@ -1,3 +1,4 @@
+use super::super::ProfileStore;
 use super::super::tests::profile;
 use super::*;
 use crate::identity::{account::Account, device::DeviceIdentity};

@@ -1,17 +1,18 @@
 //! Durable ordinary profiles and automatic authenticated publication.
-use super::account_profile_data::AccountProfileStore;
+use super::account_profile_data::IndexedAccountProfileStore;
 use super::*;
 use crate::discovery::roster::PeerRecord;
+use crate::eventlog::LogError;
 use crate::node::profile::ProfilePayload;
 
 impl Node {
     /// Best known presentation name for an account, including offline contacts.
     /// Names are descriptive and may be shared by different account identities.
-    pub fn account_display_name(&self, account_id: &str) -> Option<String> {
-        if let Some(profile) = self.account_profile(account_id)
+    pub fn account_display_name(&self, account_id: &str) -> Result<Option<String>, LogError> {
+        if let Some(profile) = self.account_profile(account_id)?
             && !profile.display_name.trim().is_empty()
         {
-            return Some(profile.display_name);
+            return Ok(Some(profile.display_name));
         }
         let live = self
             .roster
@@ -27,20 +28,21 @@ impl Node {
             })
             .max_by_key(|peer| (peer.last_seen, peer.public.user_id()))
         {
-            return Some(peer.name);
+            return Ok(Some(peer.name));
         }
         // Historical signed announcements remain descriptive after presence expires.
         // With no current profile or live device, choose a stable known name.
-        self.historical_dm_peers()
+        Ok(self
+            .historical_dm_peers()
             .into_iter()
             .filter(|proof| {
                 proof.account_id().as_deref() == Some(account_id) && !proof.name.trim().is_empty()
             })
             .map(|proof| proof.name)
-            .min()
+            .min())
     }
 
-    pub fn account_profile(&self, account_id: &str) -> Option<AccountProfile> {
+    pub fn account_profile(&self, account_id: &str) -> Result<Option<AccountProfile>, LogError> {
         #[cfg(test)]
         if let Some(hook) = self.profile_read_hook.lock().unwrap().take() {
             hook();
@@ -52,7 +54,7 @@ impl Node {
     }
 
     /// Frozen compatibility records are readable for old events and backups only.
-    pub fn trust_card(&self, account_id: &str) -> Option<TrustCard> {
+    pub fn trust_card(&self, account_id: &str) -> Result<Option<TrustCard>, LogError> {
         self.trust_cards
             .lock()
             .expect("legacy cards mutex not poisoned")
@@ -80,20 +82,37 @@ impl Node {
     pub(super) fn prepare_current_profile_delivery(
         &self,
         peer: &PeerRecord,
-    ) -> Option<crate::eventlog::event::ConversationId> {
-        // Delivery acquires channel state; retain only an owned profile snapshot.
-        let profile = self.account_profile(&self.account_id());
-        if let Some(profile) = profile {
-            return self.prepare_account_profile_delivery(peer, &profile);
+    ) -> Result<Option<crate::eventlog::event::ConversationId>, NodeError> {
+        if let Some(profile) = self.account_profile(&self.account_id())? {
+            return Ok(self.prepare_account_profile_delivery(peer, &profile));
         }
-        self.prepare_profile_delivery(peer, &self.account_profiles.current()?.encode())
+        let Some(profile) = self.account_profiles.current() else {
+            return Ok(None);
+        };
+        Ok(self.prepare_profile_delivery(peer, &profile.encode()))
     }
-
+    /// A pending current row survives failed projection and unrelated successful
+    /// updates. The exact source change revision is acknowledged only afterwards.
+    pub(super) fn project_account_profile(
+        &self,
+        store: &IndexedAccountProfileStore,
+        profile: &AccountProfile,
+    ) -> Result<bool, LogError> {
+        let account = profile.account_id();
+        let pending = store.projection_revision(&account)?;
+        let applied = self.account_profiles.receive_account_profile(profile)?;
+        if let Some(revision) = pending {
+            store.acknowledge_projection(&account, revision)?;
+        }
+        // An earlier attempt may have committed the avatar and failed its ACK.
+        // Successful repair still owes consumers a coalesced invalidation.
+        Ok(applied || pending.is_some())
+    }
     /// Called under the publication lock. The profile is the durable intent;
     /// projection failures are repairable on retry/reopen before fanout resumes.
     fn save_profile_local(
         &self,
-        store: &mut AccountProfileStore,
+        store: &mut IndexedAccountProfileStore,
         display_name: String,
         bio: String,
     ) -> Result<AccountProfile, NodeError> {
@@ -105,22 +124,18 @@ impl Node {
                 "profile text exceeds limits or has an empty name".into(),
             ));
         }
-        let old = store.get(&self.account_id());
+        let old = store.get(&self.account_id())?;
         if let Some(profile) = &old {
-            self.account_profiles
-                .receive_account_profile(profile)
-                .map_err(NodeError::Log)?;
+            self.project_account_profile(store, profile)?;
         }
-        let avatar = self.account_profiles.avatar(&self.account_id());
+        let avatar = self.account_profiles.avatar(&self.account_id())?;
         if let Some(profile) = &old
             && profile.display_name == display_name
             && profile.bio == bio
             && profile.avatar == avatar
             && profile.created_at_ms == self.account.created_at_ms()
         {
-            self.account_profiles
-                .receive_account_profile(profile)
-                .map_err(NodeError::Log)?;
+            self.project_account_profile(store, profile)?;
             return Ok(profile.clone());
         }
         let last = old.as_ref().map_or(0, |value| value.revision).max(
@@ -138,9 +153,7 @@ impl Node {
                 "incompatible or over-budget account profile".into(),
             ));
         }
-        self.account_profiles
-            .receive_account_profile(&profile)
-            .map_err(NodeError::Log)?;
+        self.project_account_profile(store, &profile)?;
         let _ = self.profile_incoming.send(ReceivedProfile {
             account_id: self.account_id(),
             avatar: profile.avatar.clone(),
@@ -153,9 +166,9 @@ impl Node {
     pub fn set_profile_display_name(&self, display_name: &str) -> Result<(), NodeError> {
         let mut store = self.profiles.lock().expect("profiles mutex not poisoned");
         let bio = store
-            .get(&self.account_id())
+            .get(&self.account_id())?
             .map(|profile| profile.bio)
-            .or_else(|| self.trust_card(&self.account_id()).map(|card| card.bio))
+            .or(self.trust_card(&self.account_id())?.map(|card| card.bio))
             .unwrap_or_default();
         self.save_profile_local(&mut store, display_name.to_string(), bio)?;
         Ok(())
@@ -220,13 +233,12 @@ impl Node {
         let mut deliveries = Vec::new();
         authorize(&mut || {
             let mut store = self.profiles.lock().expect("profiles mutex not poisoned");
+            let current_name = store
+                .get(&self.account_id())?
+                .map(|profile| profile.display_name);
             let name = display_name
                 .clone()
-                .or_else(|| {
-                    store
-                        .get(&self.account_id())
-                        .map(|profile| profile.display_name)
-                })
+                .or(current_name)
                 .or_else(|| initial_display_name.clone())
                 .ok_or_else(|| {
                     NodeError::InvalidInput("account profile is not initialized".into())
@@ -261,15 +273,12 @@ impl Node {
         }
         let mut store = self.profiles.lock().expect("profiles mutex not poisoned");
         let applied = store.record(profile.clone()).map_err(NodeError::Log)?;
-        if applied || store.get(&profile.account_id()).as_ref() == Some(profile) {
-            let projected = self
-                .account_profiles
-                .receive_account_profile(profile)
-                .map_err(NodeError::Log)?;
+        if applied || store.get(&profile.account_id())?.as_ref() == Some(profile) {
+            let projected = self.project_account_profile(&store, profile)?;
             if applied || projected {
                 let _ = self.profile_incoming.send(ReceivedProfile {
                     account_id: profile.account_id(),
-                    avatar: self.account_profiles.avatar(&profile.account_id()),
+                    avatar: self.account_profiles.avatar(&profile.account_id())?,
                 });
             }
         }
@@ -282,7 +291,8 @@ impl Node {
             .lock()
             .expect("legacy cards mutex not poisoned");
         let applied = store.record(card.clone()).map_err(NodeError::Log)?;
-        let current = store.get(&card.account_id()).as_ref() == Some(card);
+        let current = store.get(&card.account_id())?.as_ref() == Some(card);
+        let pending = store.projection_revision(&card.account_id())?;
         drop(store);
         if applied || current {
             let mut profiles = self.profiles.lock().expect("profiles mutex not poisoned");
@@ -293,13 +303,19 @@ impl Node {
             if card.account_id() == self.account_id() {
                 self.update_profile_avatar(
                     &mut profiles,
-                    self.account_profiles.avatar(&self.account_id()),
+                    self.account_profiles.avatar(&self.account_id())?,
                 )?;
             }
-            if applied || projected {
+            if let Some(revision) = pending {
+                self.trust_cards
+                    .lock()
+                    .expect("legacy cards mutex")
+                    .acknowledge_projection(&card.account_id(), revision)?;
+            }
+            if applied || projected || pending.is_some() {
                 let _ = self.profile_incoming.send(ReceivedProfile {
                     account_id: card.account_id(),
-                    avatar: self.account_profiles.avatar(&card.account_id()),
+                    avatar: self.account_profiles.avatar(&card.account_id())?,
                 });
             }
         }
@@ -319,41 +335,57 @@ impl Node {
         if payload.account_id() == self.account_id() {
             self.update_profile_avatar(
                 &mut store,
-                self.account_profiles.avatar(&self.account_id()),
+                self.account_profiles.avatar(&self.account_id())?,
             )?;
         }
         Ok(applied)
     }
 
     pub(super) fn reconcile_account_profiles_on_open(&self) -> Result<(), NodeError> {
-        // Read old records solely to preserve avatars. New dates are never derived
-        // from old cards, login time, file timestamps, or backup creation time.
-        for card in self
-            .trust_cards
-            .lock()
-            .expect("legacy cards mutex not poisoned")
-            .all()
+        // Independent current-value sources keep their failed projection bits.
+        // Ordinary warm opens find no pending keys and never scan peer payloads.
         {
-            self.account_profiles
-                .receive_trust_card(&card)
-                .map_err(NodeError::Log)?;
+            let store = self.trust_cards.lock().expect("legacy cards mutex");
+            loop {
+                let pending = store.pending_projection()?;
+                if pending.is_empty() {
+                    break;
+                }
+                for (account, revision) in pending {
+                    let card = store.get(&account)?.ok_or_else(|| {
+                        LogError::CorruptFile("pending trust card missing".into())
+                    })?;
+                    self.account_profiles.receive_trust_card(&card)?;
+                    store.acknowledge_projection(&account, revision)?;
+                }
+            }
         }
-        let mut store = self.profiles.lock().expect("profiles mutex not poisoned");
-        for profile in store.all() {
-            self.account_profiles
-                .receive_account_profile(&profile)
-                .map_err(NodeError::Log)?;
+        let mut store = self.profiles.lock().expect("profiles mutex");
+        loop {
+            let pending = store.pending_projection()?;
+            if pending.is_empty() {
+                break;
+            }
+            for (account, _) in pending {
+                let profile = store
+                    .get(&account)?
+                    .ok_or_else(|| LogError::CorruptFile("pending profile missing".into()))?;
+                self.project_account_profile(&store, &profile)?;
+            }
         }
-        self.update_profile_avatar(&mut store, self.account_profiles.avatar(&self.account_id()))?;
+        self.update_profile_avatar(
+            &mut store,
+            self.account_profiles.avatar(&self.account_id())?,
+        )?;
         Ok(())
     }
 
     pub(super) fn update_profile_avatar(
         &self,
-        store: &mut AccountProfileStore,
+        store: &mut IndexedAccountProfileStore,
         avatar: Option<Vec<u8>>,
     ) -> Result<Option<AccountProfile>, NodeError> {
-        let Some(mut profile) = store.get(&self.account_id()) else {
+        let Some(mut profile) = store.get(&self.account_id())? else {
             return Ok(None);
         };
         if profile.avatar != avatar {
@@ -377,9 +409,7 @@ impl Node {
                 ));
             }
         }
-        self.account_profiles
-            .receive_account_profile(&profile)
-            .map_err(NodeError::Log)?;
+        self.project_account_profile(store, &profile)?;
         Ok(Some(profile))
     }
 }

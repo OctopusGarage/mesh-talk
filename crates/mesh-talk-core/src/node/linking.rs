@@ -464,6 +464,17 @@ impl Node {
         }
         // Serialize durable enrollment with privacy changes. A second request
         // authenticated before the transition cannot enroll under a stale guard.
+        let profile = if access.is_some() {
+            match self.account_profile(&self.account_id()) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    eprintln!("[pairing] profile read failed: {error}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let transition = self.privacy.gate.write().await;
         if !channel.io_admitted() {
             return;
@@ -543,7 +554,7 @@ impl Node {
                 account: resp,
                 access,
                 created_at_ms: self.account.created_at_ms(),
-                profile: self.account_profile(&self.account_id()),
+                profile,
             }
             .send(channel)
             .await

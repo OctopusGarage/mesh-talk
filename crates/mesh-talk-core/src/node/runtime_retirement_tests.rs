@@ -434,7 +434,7 @@ async fn startup_identity_precedes_blocked_durable_store_and_matches_runtime() {
                 identity_tx.send(identity).unwrap();
                 Ok(())
             },
-            |launch| Ok(launch("Owner")),
+            |launch| launch("Owner"),
         )
         .await
     });
@@ -598,7 +598,7 @@ async fn canceled_startup_completion_waits_for_later_privacy_writer() {
             },
         );
         completion_tx.send(request.completion()).ok().unwrap();
-        NodeRuntime::start_owned(request, |_| Ok(()), |launch| Ok(launch("Owner"))).await
+        NodeRuntime::start_owned(request, |_| Ok(()), |launch| launch("Owner")).await
     });
     let completion = completion_rx.await.unwrap();
     tokio::time::timeout(Duration::from_secs(15), started)

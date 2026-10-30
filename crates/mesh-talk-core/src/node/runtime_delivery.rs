@@ -279,7 +279,7 @@ mod tests {
                 candidate_source: None,
             }),
             |_| Ok(()),
-            |launch| Ok(launch("Owner")),
+            |launch| launch("Owner"),
         )
         .await
         .unwrap();

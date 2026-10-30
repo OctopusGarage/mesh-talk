@@ -34,7 +34,7 @@ impl Default for ReceptionLimit {
     }
 }
 impl Node {
-    pub fn current_profile_revision(&self) -> u64 {
+    pub fn current_profile_revision(&self) -> Result<u64, crate::eventlog::LogError> {
         self.account_profiles.revision()
     }
     pub fn current_profiles_page(

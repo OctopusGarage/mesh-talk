@@ -330,7 +330,9 @@ impl Node {
                     let account_id = &member.account_id;
                     member.name = account_id
                         .as_ref()
-                        .and_then(|account| self.account_profile(account))
+                        .map(|account| self.account_profile(account))
+                        .transpose()?
+                        .flatten()
                         .map(|profile| profile.display_name)
                         .or_else(|| {
                             self.historical_author(&public.ed25519_pub)

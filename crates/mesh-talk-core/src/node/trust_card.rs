@@ -1,19 +1,33 @@
 //! Account-signed, self-declared profile claims and independent signed receipts.
 use super::profile::MAX_AVATAR_BYTES;
+#[cfg(test)]
 use crate::eventlog::LogError;
 use crate::identity::{
     account::{Account, AccountPublic},
     device::DeviceIdentity,
 };
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::{collections::HashMap, path::Path};
 
+const MAX_ACCOUNTS: usize = 1024;
+const MAX_STORE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PROOFS: usize = 16;
 const MAX_TEXT: usize = 2048;
 const MAX_WIRE: usize = MAX_AVATAR_BYTES + 96 * 1024;
 mod indexed;
+#[cfg(test)]
+pub(crate) fn reset_indexed_body_reads() {
+    indexed::reset_body_reads();
+}
+#[cfg(test)]
+pub(crate) fn indexed_body_reads() -> usize {
+    indexed::body_reads()
+}
+
 pub(super) use indexed::IndexedTrustCardStore;
 
 const MAGIC: &[u8; 6] = b"MTTRST";
@@ -231,11 +245,13 @@ impl TrustCard {
     }
 }
 /// Latest signed card per account; invalid/stale records never become current.
+#[cfg(test)]
 pub(super) struct TrustCardStore {
     file: EncryptedRecordLog<TrustCard>,
     cards: HashMap<String, TrustCard>,
     records: usize,
 }
+#[cfg(test)]
 impl TrustCardStore {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, cards) = EncryptedRecordLog::<TrustCard>::open(path, password, MAGIC)?;
@@ -271,7 +287,7 @@ impl TrustCardStore {
             {
                 return false;
             }
-        } else if self.cards.len() >= 1024 {
+        } else if self.cards.len() >= MAX_ACCOUNTS {
             return false;
         }
         let size: usize = self
@@ -280,7 +296,7 @@ impl TrustCardStore {
             .filter(|(key, _)| **key != id)
             .map(|(_, c)| c.encode().len())
             .sum();
-        size.saturating_add(card.encode().len()) <= 32 * 1024 * 1024
+        size.saturating_add(card.encode().len()) <= MAX_STORE_BYTES
     }
     pub fn record(&mut self, card: TrustCard) -> Result<bool, LogError> {
         if !self.accepts(&card) {

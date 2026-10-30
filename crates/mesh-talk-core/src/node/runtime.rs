@@ -278,7 +278,7 @@ impl NodeRuntime {
             on_file,
             on_profile,
             on_call_signal,
-            |launch| Ok(launch(display_name)),
+            |launch| launch(display_name),
         )
         .await
     }
@@ -289,7 +289,7 @@ impl NodeRuntime {
         events: RuntimeEvents,
     ) -> Result<NodeRuntime, RuntimeError> {
         let display_name = config.display_name.to_owned();
-        Self::start_configured_guarded(config, events, |launch| Ok(launch(&display_name))).await
+        Self::start_configured_guarded(config, events, |launch| launch(&display_name)).await
     }
 
     /// Prepare stores without launching producers; the host authorizes the final
@@ -306,7 +306,7 @@ impl NodeRuntime {
         on_profile: impl Fn(crate::node::ReceivedProfile) + Send + 'static,
         on_call_signal: impl Fn(crate::node::ReceivedCallSignal) + Send + 'static,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         Self::start_configured_guarded(
@@ -341,7 +341,7 @@ impl NodeRuntime {
         config: RuntimeConfig<'_>,
         events: RuntimeEvents,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         Self::start_configured_guarded_with_network(
@@ -359,7 +359,7 @@ impl NodeRuntime {
         events: RuntimeEvents,
         network: RuntimeNetworkOptions,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         Self::start_configured_guarded_with_network_observed(
@@ -380,7 +380,7 @@ impl NodeRuntime {
         network: RuntimeNetworkOptions,
         observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         Self::start_configured_guarded_with_network_cost_observed(
@@ -403,7 +403,7 @@ impl NodeRuntime {
         network_cost: super::NetworkCost,
         observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         Self::start_owned(
@@ -422,7 +422,7 @@ impl NodeRuntime {
         startup: super::RuntimeStartup<'_>,
         observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         let super::RuntimeStartup {
@@ -457,7 +457,7 @@ impl NodeRuntime {
         startup_work: Arc<super::runtime_work::RuntimeWork>,
         observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         let RuntimeConfig {
@@ -593,7 +593,7 @@ impl NodeRuntime {
                                 },
                                 targets,
                             )?;
-                            if node.account_profile(&node.account_id()).is_none()
+                            if node.account_profile(&node.account_id())?.is_none()
                                 && node.linked_devices().len() == 1
                             {
                                 node.set_profile_display_name(&initial_display_name)
@@ -664,7 +664,7 @@ impl NodeRuntime {
             // A persisted account claim survives host-local nicknames and adoption.
             // A rename committed while startup prepared still takes precedence.
             let canonical_name = node
-                .account_profile(&node.account_id())
+                .account_profile(&node.account_id())?
                 .map(|card| card.display_name)
                 .filter(|name| {
                     crate::identity::user::User::validate_display_name(name).as_ref() == Some(name)
@@ -765,7 +765,7 @@ impl NodeRuntime {
                                         );
                                     }
                                 }
-                                let Some(revision) = node.public_profile_revision() else { continue; };
+                                let revision = match node.public_profile_revision() { Ok(Some(revision)) => revision, Ok(None) => continue, Err(error) => { eprintln!("[profile] revision read failed: {error}"); continue; } };
                                 for peer in profile_republish_targets(&mut published, &peers, revision) {
                                     if attempts.len() >= MAX_PROFILE_PUBLICATIONS { break; }
                                     let uid = peer.public.user_id();
@@ -773,7 +773,7 @@ impl NodeRuntime {
                                     let conversation = match published.get(&uid) {
                                         Some(publication) if publication.revision == revision => publication.conversation,
                                         _ => {
-                                            let Some(conversation) = node.prepare_current_profile_delivery(&peer) else { continue; };
+                                            let conversation = match node.prepare_current_profile_delivery(&peer) { Ok(Some(conversation)) => conversation, Ok(None) => continue, Err(error) => { eprintln!("[profile] publication read failed: {error}"); continue; } };
                                             published.insert(uid.clone(), ProfilePublication { revision, conversation, complete: false, last_attempt: None });
                                             conversation
                                         }
@@ -796,7 +796,7 @@ impl NodeRuntime {
                 participant.register_host_task(task);
             }
 
-            NodeRuntime {
+            Ok(NodeRuntime {
                 node,
                 roster,
                 names,
@@ -807,13 +807,20 @@ impl NodeRuntime {
                 participant,
                 account_path: dir.join("account.keystore"),
                 password: password.to_string(),
-            }
+            })
         });
         let runtime = authorize_launch(&mut |name| {
             launch.take().expect("runtime launch is single-use")(name)
         })?;
         // Authorization may supply a name changed while stores were opening.
-        if (runtime.node.account_profile(runtime.account_id()).is_some()
+        let has_profile = match runtime.node.account_profile(runtime.account_id()) {
+            Ok(profile) => profile.is_some(),
+            Err(error) => {
+                runtime.stop().await;
+                return Err(error.into());
+            }
+        };
+        if (has_profile
             || runtime.node.linked_devices().len() == 1
             || runtime.display_name() != display_name)
             && let Err(error) = runtime
@@ -970,7 +977,9 @@ impl NodeRuntime {
     }
 
     /// Verified historical names for offline account rows; never supplies presence.
-    pub fn known_account_names(&self) -> std::collections::HashMap<String, Vec<String>> {
+    pub fn known_account_names(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, LogError> {
         let proofs = self.node.historical_dm_peers();
         // Record actual observed renames before projecting any UI surface. Old,
         // unchanged sibling announcements cannot displace the latest account name.
@@ -1050,27 +1059,33 @@ impl NodeRuntime {
         // public cards may still contain an old login/display label from before
         // nickname edits updated those claims. A stale card must not rename a
         // contact. Its name is a fallback only if no nickname is known.
-        for card in self
-            .node
-            .profiles
-            .lock()
-            .expect("profiles mutex not poisoned")
-            .all()
-        {
-            if crate::identity::user::User::validate_display_name(&card.display_name).as_ref()
-                == Some(&card.display_name)
-            {
-                let account = card.account_id();
-                let values = names.entry(account.clone()).or_default();
-                if account == self.account_id() {
-                    values.retain(|name| *name != card.display_name);
-                    values.insert(0, card.display_name);
-                } else if values.is_empty() {
-                    values.push(card.display_name);
+        let mut after = None;
+        loop {
+            let page = self
+                .node
+                .profiles
+                .lock()
+                .expect("profiles mutex")
+                .names_page(after.as_deref())?;
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().map(|(account, _)| account.clone());
+            for (account, display_name) in page {
+                if crate::identity::user::User::validate_display_name(&display_name).as_ref()
+                    == Some(&display_name)
+                {
+                    let values = names.entry(account.clone()).or_default();
+                    if account == self.account_id() {
+                        values.retain(|name| *name != display_name);
+                        values.insert(0, display_name);
+                    } else if values.is_empty() {
+                        values.push(display_name);
+                    }
                 }
             }
         }
-        names
+        Ok(names)
     }
 
     /// The display name for a device `user_id`: the live roster's (freshest) if the peer is
@@ -1151,17 +1166,11 @@ impl NodeRuntime {
     }
 
     /// The avatar a peer account propagated to us (data-URL bytes), or `None`.
-    pub fn peer_avatar(&self, account_id: &str) -> Option<Vec<u8>> {
+    pub fn peer_avatar(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<Vec<u8>>, crate::eventlog::LogError> {
         self.node.peer_avatar(account_id)
-    }
-
-    /// Every peer avatar we hold, `account_id -> data-URL bytes` (for seeding the UI).
-    pub fn peer_avatars(&self) -> std::collections::HashMap<String, Vec<u8>> {
-        self.node.peer_avatars()
-    }
-
-    pub fn peer_profile_states(&self) -> std::collections::HashMap<String, Option<Vec<u8>>> {
-        self.node.peer_profile_states()
     }
 
     /// The session password held for re-encrypting the keystore — used only to

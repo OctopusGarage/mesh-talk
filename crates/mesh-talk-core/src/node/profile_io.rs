@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::discovery::roster::PeerRecord;
+use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventKind};
 use crate::node::conversation::dm_conversation_id;
 use crate::node::profile::ProfilePayload;
@@ -37,12 +38,10 @@ impl Node {
         let mut delivery = Vec::new();
         authorize(&mut || {
             let mut store = self.profiles.lock().expect("profiles mutex not poisoned");
-            if let Some(mut profile) = store.get(&self.account_id()) {
+            if let Some(mut profile) = store.get(&self.account_id())? {
                 if profile.avatar == avatar {
                     // Repair a previous committed intent before acknowledging a retry.
-                    self.account_profiles
-                        .receive_account_profile(&profile)
-                        .map_err(NodeError::Log)?;
+                    self.project_account_profile(&store, &profile)?;
                     return Ok(());
                 }
                 let last = profile.revision.max(
@@ -63,9 +62,7 @@ impl Node {
                         "invalid or over-budget account profile".into(),
                     ));
                 }
-                self.account_profiles
-                    .receive_account_profile(&profile)
-                    .map_err(NodeError::Log)?;
+                self.project_account_profile(&store, &profile)?;
                 // Keep the durable edit atomic, then release before channel/log work.
                 drop(store);
                 for peer in self.profile_fanout_targets() {
@@ -91,18 +88,17 @@ impl Node {
     }
 
     /// Revision of the current public profile, including an avatar clear.
-    pub(in crate::node) fn public_profile_revision(&self) -> Option<u64> {
+    pub(in crate::node) fn public_profile_revision(&self) -> Result<Option<u64>, LogError> {
         let card = self
             .profiles
             .lock()
             .expect("profiles mutex not poisoned")
-            .get(&self.account_id())
-            .map(|card| card.revision);
+            .version(&self.account_id())?;
         let avatar = self
             .account_profiles
             .current()
             .map(|profile| profile.updated_at);
-        card.into_iter().chain(avatar).max()
+        Ok(card.into_iter().chain(avatar).max())
     }
 
     /// Report whether direct reconciliation or relay publication completed, so

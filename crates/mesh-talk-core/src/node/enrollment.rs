@@ -623,7 +623,10 @@ mod tests {
                 } else {
                     &serving.account
                 };
-                let mut profile = serving.account_profile(&serving.account_id()).unwrap();
+                let mut profile = serving
+                    .account_profile(&serving.account_id())
+                    .unwrap()
+                    .unwrap();
                 if !wrong_account {
                     profile.display_name = "Unsigned edit".into();
                 }

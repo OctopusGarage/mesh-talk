@@ -1,6 +1,6 @@
 //! Current avatar values on the participant connection. The legacy source is
 //! independently authenticated and retired by the shared history publisher.
-use super::{AvatarPage, MAGIC, ProfileEntry, ProfileStore};
+use super::{AvatarPage, MAGIC, ProfileEntry, avatar_order};
 use crate::eventlog::LogError;
 use crate::node::profile::MAX_AVATAR_BYTES;
 use crate::node::transcript_repository::{AVATAR_PROFILES, publication::PublishedHistorySource};
@@ -122,8 +122,8 @@ impl IndexedProfileStore {
     }
     fn put_on(c: &Connection, entry: &ProfileEntry) -> Result<bool, LogError> {
         if Self::read_on(c, &entry.account_id)?.is_some_and(|old| {
-            ProfileStore::order(old.updated_at, &old.avatar)
-                >= ProfileStore::order(entry.updated_at, &entry.avatar)
+            avatar_order(old.updated_at, &old.avatar)
+                >= avatar_order(entry.updated_at, &entry.avatar)
         }) {
             return Ok(false);
         }

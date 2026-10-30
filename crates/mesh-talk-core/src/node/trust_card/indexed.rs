@@ -1,6 +1,6 @@
 //! Selected current signed values. Version admission stays with this profile
 //! domain; the shared publisher only owns encrypted source retirement.
-use super::{MAGIC, TrustCard};
+use super::{MAGIC, MAX_ACCOUNTS, MAX_STORE_BYTES, TrustCard};
 use crate::eventlog::LogError;
 use crate::node::transcript_repository::{TRUST_CARDS, publication::PublishedHistorySource};
 use crate::storage::{profile::context::ProfileStorage, record_log::EncryptedRecordLog};
@@ -10,14 +10,19 @@ use std::{path::Path, sync::Arc};
 
 const PAGE_ROWS: usize = 16;
 const PAGE_BYTES: usize = 1024 * 1024;
-const MAX_ACCOUNTS: usize = 1024;
-const MAX_STORE_BYTES: usize = 32 * 1024 * 1024;
 const SCHEMA: &str = "
 CREATE TABLE current_trust_card_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),revision INTEGER NOT NULL DEFAULT 0 CHECK(typeof(revision)='integer' AND revision>=0),records INTEGER NOT NULL DEFAULT 0 CHECK(records>=0),wire_bytes INTEGER NOT NULL DEFAULT 0 CHECK(wire_bytes>=0));
-CREATE TABLE current_trust_card_headers(account TEXT PRIMARY KEY CHECK(length(account)=32),version BLOB NOT NULL CHECK(length(version)=8),created BLOB CHECK(created IS NULL OR length(created)=8),encoded_bytes INTEGER NOT NULL CHECK(encoded_bytes>=0)) WITHOUT ROWID;
+CREATE TABLE current_trust_card_headers(account TEXT PRIMARY KEY CHECK(length(account)=32),version BLOB NOT NULL CHECK(length(version)=8),created BLOB CHECK(created IS NULL OR length(created)=8),encoded_bytes INTEGER NOT NULL CHECK(encoded_bytes>=0),change_revision INTEGER NOT NULL CHECK(change_revision>0),projection_pending INTEGER NOT NULL CHECK(projection_pending IN (0,1))) WITHOUT ROWID;
+CREATE INDEX current_trust_card_pending ON current_trust_card_headers(projection_pending,account) WHERE projection_pending=1;
 CREATE TABLE current_trust_card_bodies(account TEXT PRIMARY KEY REFERENCES current_trust_card_headers(account) ON DELETE CASCADE,body BLOB NOT NULL) WITHOUT ROWID;
 ";
 
+struct CurrentHeader {
+    version: Vec<u8>,
+    created: Option<Vec<u8>>,
+    size: i64,
+    actual: Option<i64>,
+}
 pub(crate) struct IndexedTrustCardStore {
     source: PublishedHistorySource,
 }
@@ -25,7 +30,6 @@ pub(crate) struct TrustCardPage {
     pub rows: Vec<TrustCard>,
     pub after: Option<String>,
     pub complete: bool,
-    pub revision: u64,
 }
 impl IndexedTrustCardStore {
     pub(crate) fn authenticate_legacy(
@@ -93,8 +97,14 @@ impl IndexedTrustCardStore {
         Ok(Self { source })
     }
     fn read_on(c: &Connection, account: &str) -> Result<Option<TrustCard>, LogError> {
-        let header: Option<(Vec<u8>,Option<Vec<u8>>,i64,Option<i64>)> = c.query_row("SELECT h.version,h.created,h.encoded_bytes,length(b.body) FROM current_trust_card_headers h LEFT JOIN current_trust_card_bodies b USING(account) WHERE h.account=?1",[account],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-        let Some((version, created, size, actual)) = header else {
+        let header:Option<CurrentHeader>=c.query_row("SELECT h.version,h.created,h.encoded_bytes,length(b.body) FROM current_trust_card_headers h LEFT JOIN current_trust_card_bodies b USING(account) WHERE h.account=?1",[account],|r|Ok(CurrentHeader {version:r.get(0)?,created:r.get(1)?,size:r.get(2)?,actual:r.get(3)?})).optional()?;
+        let Some(CurrentHeader {
+            version,
+            created,
+            size,
+            actual,
+        }) = header
+        else {
             return Ok(None);
         };
         let size = usize::try_from(size).map_err(|_| invalid("invalid current profile size"))?;
@@ -157,6 +167,11 @@ impl IndexedTrustCardStore {
             return Ok(false);
         }
         let account = value.account_id();
+        let change_revision = state_on(c)?
+            .0
+            .checked_add(1)
+            .and_then(|n| i64::try_from(n).ok())
+            .ok_or(LogError::RepositoryCounterExhausted)?;
         let previous: Option<i64> = c
             .query_row(
                 "SELECT encoded_bytes FROM current_trust_card_headers WHERE account=?1",
@@ -166,12 +181,40 @@ impl IndexedTrustCardStore {
             .optional()?;
         let body = bincode::serialize(value).map_err(|e| LogError::Serialization(e.to_string()))?;
         let bytes = i64::try_from(body.len()).map_err(|_| LogError::RepositoryCounterExhausted)?;
-        c.execute("INSERT INTO current_trust_card_headers VALUES(?1,?2,?3,?4) ON CONFLICT(account) DO UPDATE SET version=excluded.version,created=excluded.created,encoded_bytes=excluded.encoded_bytes",params![account,value.revision.to_be_bytes().as_slice(),value.created_at_ms.map(|n|n.to_be_bytes().to_vec()),bytes])?;
+        c.execute("INSERT INTO current_trust_card_headers VALUES(?1,?2,?3,?4,?5,1) ON CONFLICT(account) DO UPDATE SET version=excluded.version,created=excluded.created,encoded_bytes=excluded.encoded_bytes,change_revision=excluded.change_revision,projection_pending=1",params![account,value.revision.to_be_bytes().as_slice(),value.created_at_ms.map(|n|n.to_be_bytes().to_vec()),bytes,change_revision])?;
         c.execute("INSERT INTO current_trust_card_bodies VALUES(?1,?2) ON CONFLICT(account) DO UPDATE SET body=excluded.body",params![account,body])?;
         // Wire encoding adds the existing four-byte version tag to the stored
         // bincode payload. Admission counts wire bytes exactly as the legacy owner.
         c.execute("UPDATE current_trust_card_state SET revision=revision+1,records=records+?1,wire_bytes=wire_bytes+?2 WHERE singleton=1",params![i64::from(previous.is_none()),bytes+4-previous.map_or(0,|n|n+4)])?;
         Ok(true)
+    }
+    /// One durable pending bit per current value, independent of later writes
+    /// to other accounts. Exact change revisions prevent stale acknowledgements.
+    pub(crate) fn projection_revision(&self, account: &str) -> Result<Option<u64>, LogError> {
+        self.source.profile().database().read(|c| {
+            let revision: Option<i64> = c.query_row("SELECT change_revision FROM current_trust_card_headers WHERE account=?1 AND projection_pending=1",[account],|r|r.get(0)).optional()?;
+            revision.map(|n|u64::try_from(n).map_err(|_|invalid("invalid projection revision"))).transpose()
+        })
+    }
+    pub(crate) fn pending_projection(&self) -> Result<Vec<(String, u64)>, LogError> {
+        self.source.profile().database().read(|c| {
+            let mut statement=c.prepare_cached("SELECT account,change_revision FROM current_trust_card_headers WHERE projection_pending=1 ORDER BY account LIMIT 16")?;
+            let mut rows=statement.query([])?;let mut pending=Vec::with_capacity(16);
+            while let Some(row)=rows.next()? {pending.push((row.get(0)?,u64::try_from(row.get::<_,i64>(1)?).map_err(|_|invalid("invalid projection revision"))?));}
+            Ok(pending)
+        })
+    }
+    pub(crate) fn acknowledge_projection(
+        &self,
+        account: &str,
+        revision: u64,
+    ) -> Result<(), LogError> {
+        let revision =
+            i64::try_from(revision).map_err(|_| invalid("invalid projection revision"))?;
+        self.source.check_write()?;
+        self.source.profile().database().transaction(|c| {
+            c.execute("UPDATE current_trust_card_headers SET projection_pending=0 WHERE account=?1 AND change_revision=?2",params![account,revision])?;Ok(())
+        })
     }
     pub(crate) fn get(&self, account: &str) -> Result<Option<TrustCard>, LogError> {
         self.source
@@ -179,6 +222,7 @@ impl IndexedTrustCardStore {
             .database()
             .read(|c| Self::read_on(c, account))
     }
+    #[cfg(test)]
     pub(crate) fn accepts(&self, value: &TrustCard) -> Result<bool, LogError> {
         self.source
             .profile()
@@ -192,6 +236,7 @@ impl IndexedTrustCardStore {
             .database()
             .transaction(|c| Self::put_on(c, &value))
     }
+    #[cfg(test)]
     pub(crate) fn revision(&self) -> Result<u64, LogError> {
         self.source
             .profile()
@@ -200,7 +245,6 @@ impl IndexedTrustCardStore {
     }
     pub(crate) fn page(&self, after: Option<&str>) -> Result<TrustCardPage, LogError> {
         self.source.profile().database().read(|c| {
-            let revision=state_on(c)?.0;
             let mut statement=c.prepare_cached("SELECT account,encoded_bytes FROM current_trust_card_headers WHERE (?1 IS NULL OR account>?1) ORDER BY account LIMIT 17")?;
             let mut rows=statement.query([after])?;
             let mut selected=Vec::with_capacity(PAGE_ROWS);
@@ -218,9 +262,10 @@ impl IndexedTrustCardStore {
             drop(rows); drop(statement);
             let mut values=Vec::with_capacity(selected.len());
             for account in &selected { values.push(Self::read_on(c,account)?.ok_or_else(||invalid("selected profile disappeared"))?); }
-            Ok(TrustCardPage {rows:values,after:selected.last().cloned(),complete,revision})
+            Ok(TrustCardPage {rows:values,after:selected.last().cloned(),complete})
         })
     }
+    #[cfg(test)]
     pub(crate) fn visit(
         &self,
         mut visit: impl FnMut(TrustCard) -> Result<(), LogError>,

@@ -1061,21 +1061,58 @@ impl Node {
                 })?;
             }
         }
-        for (account_id, updated_at, avatar) in self.account_profiles.snapshot() {
-            emit(SnapshotRecordV1::Profile {
-                account_id,
-                updated_at,
-                avatar,
-            })?;
+        let mut output_error = None;
+        let visited = self
+            .account_profiles
+            .visit(|account_id, updated_at, avatar| {
+                emit(SnapshotRecordV1::Profile {
+                    account_id,
+                    updated_at,
+                    avatar,
+                })
+                .map_err(|error| {
+                    output_error = Some(error);
+                    LogError::Io(std::io::Error::other("snapshot output failed"))
+                })
+            });
+        if let Some(error) = output_error {
+            return Err(error);
         }
+        visited.map_err(io)?;
         emit(SnapshotRecordV1::AccountCreation {
             created_at_ms: self.account.created_at_ms(),
         })?;
-        for profile in self.profiles.lock().expect("profiles mutex").all() {
-            emit(SnapshotRecordV1::AccountProfile { profile })?;
+        let mut after = None;
+        loop {
+            let page = self
+                .profiles
+                .lock()
+                .expect("profiles mutex")
+                .page(after.as_deref())
+                .map_err(io)?;
+            for profile in page.rows {
+                emit(SnapshotRecordV1::AccountProfile { profile })?;
+            }
+            if page.complete {
+                break;
+            }
+            after = page.after;
         }
-        for card in self.trust_cards.lock().expect("trust cards mutex").all() {
-            emit(SnapshotRecordV1::PeerTrustCard { card })?;
+        let mut after = None;
+        loop {
+            let page = self
+                .trust_cards
+                .lock()
+                .expect("trust cards mutex")
+                .page(after.as_deref())
+                .map_err(io)?;
+            for card in page.rows {
+                emit(SnapshotRecordV1::PeerTrustCard { card })?;
+            }
+            if page.complete {
+                break;
+            }
+            after = page.after;
         }
         let now = self.expiry_now();
         let favorites = self.favorites.lock().expect("favorites mutex");

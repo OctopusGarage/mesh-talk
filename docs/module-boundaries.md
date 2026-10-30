@@ -319,8 +319,12 @@ construction reads metadata only; current pages admit at most 16 keys and 1 MiB
 before loading bodies, and selected lookups propagate storage errors. Signed
 account profiles preserve clear-avatar tie ordering and immutable creation dates;
 frozen trust cards keep the first accepted equal revision. Existing signed-owner
-account and wire-byte quotas remain unchanged. These owner APIs do not themselves
-certify Node producer/startup or warm projection integration.
+account and wire-byte quotas remain unchanged. Node authenticates cold sources before publication and opens these indexes after
+participant authority completes. Accepted signed values atomically mark their
+current row for avatar projection; an exact change-revision acknowledgement clears
+that marker only after projection succeeds. Startup resumes bounded pending keys,
+so an unrelated successful write cannot hide failed work and unchanged warm opens
+do not scan peer payloads. Own publication retains only the current local avatar.
 Nickname-only edits preserve other profile fields and use the same revision ordering. `src-tauri/src/runtime_bootstrap.rs` projects accepted own
 account nicknames into local credentials, live presence and frontend state under
 exact session/installation authority. Its runtime-owned producer retires with the

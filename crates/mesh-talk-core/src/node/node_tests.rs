@@ -1094,7 +1094,10 @@ fn recovery_snapshot_carries_history_without_reusing_device_identity() {
             .from_me,
         "a file sent from the backed-up device remains mine after restore"
     );
-    assert_eq!(restored.peer_avatar("peer"), Some(b"avatar".to_vec()));
+    assert_eq!(
+        restored.peer_avatar("peer").unwrap(),
+        Some(b"avatar".to_vec())
+    );
     let mut restored_media = Vec::new();
     restored
         .media
@@ -9466,7 +9469,9 @@ async fn accept_loop_compacts_received_profiles_without_desktop_runtime() {
         "the CLI accept loop must reclaim superseded profiles"
     );
     assert_eq!(
-        bob_node.peer_avatar(&alice_node.account.account_id()),
+        bob_node
+            .peer_avatar(&alice_node.account.account_id())
+            .unwrap(),
         Some(vec![9])
     );
     // The live indexed writer remains usable after incremental compaction.
@@ -9626,7 +9631,7 @@ async fn signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp()
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             receiver.drain_from_post_office().await;
-            if receiver.peer_avatar(&alice_account_id).as_ref() == Some(&avatar)
+            if receiver.peer_avatar(&alice_account_id).unwrap().as_ref() == Some(&avatar)
                 && receiver.log.lock().unwrap().has(&events[1].id).unwrap()
             {
                 break;
@@ -9655,7 +9660,11 @@ async fn signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp()
     .await
     .expect("the recipient receipt must return through the relay without direct TCP");
     assert_eq!(
-        receiver.account_profile(&alice_account_id).unwrap().avatar,
+        receiver
+            .account_profile(&alice_account_id)
+            .unwrap()
+            .unwrap()
+            .avatar,
         Some(avatar)
     );
     relay_task.abort();
@@ -9766,7 +9775,7 @@ async fn signed_avatar_retries_after_relay_publication_is_reenabled() {
     .await
     .expect("the runtime must attempt its first profile publication");
     receiver.drain_from_post_office().await;
-    assert_eq!(receiver.peer_avatar(&sender.account_id()), None);
+    assert_eq!(receiver.peer_avatar(&sender.account_id()).unwrap(), None);
     let prepared_ids: Vec<_> = sender
         .log
         .lock()
@@ -9795,7 +9804,7 @@ async fn signed_avatar_retries_after_relay_publication_is_reenabled() {
     let recovered = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             receiver.drain_from_post_office().await;
-            if receiver.peer_avatar(&sender.account_id()).as_ref() == Some(&avatar) {
+            if receiver.peer_avatar(&sender.account_id()).unwrap().as_ref() == Some(&avatar) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -9813,12 +9822,23 @@ async fn signed_avatar_retries_after_relay_publication_is_reenabled() {
     sender.set_post_office_permissions(false, true);
     sender.set_avatar(None).await.unwrap();
     receiver.drain_from_post_office().await;
-    assert_eq!(receiver.peer_avatar(&sender.account_id()), Some(avatar));
+    assert_eq!(
+        receiver.peer_avatar(&sender.account_id()).unwrap(),
+        Some(avatar)
+    );
     sender.set_post_office_permissions(true, true);
     let cleared = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             receiver.drain_from_post_office().await;
-            if receiver.peer_profile_states().get(&sender.account_id()) == Some(&None) {
+            if receiver
+                .current_profiles_page(None, None)
+                .unwrap()
+                .profiles
+                .iter()
+                .any(|profile| {
+                    profile.account_id == sender.account_id() && profile.avatar.is_none()
+                })
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -9900,7 +9920,7 @@ async fn setting_an_avatar_propagates_to_a_peer_account_over_loopback() {
     // Bob ends up with Alice's avatar keyed by Alice's ACCOUNT id.
     let mut got = None;
     for _ in 0..50 {
-        got = bob_node.peer_avatar(&alice_acct.account_id());
+        got = bob_node.peer_avatar(&alice_acct.account_id()).unwrap();
         if got.is_some() {
             break;
         }
@@ -9937,7 +9957,12 @@ async fn setting_an_avatar_propagates_to_a_peer_account_over_loopback() {
     alice_node.set_avatar(Some(newer.clone())).await.unwrap();
     let mut converged = false;
     for _ in 0..50 {
-        if bob_node.peer_avatar(&alice_acct.account_id()).as_deref() == Some(newer.as_slice()) {
+        if bob_node
+            .peer_avatar(&alice_acct.account_id())
+            .unwrap()
+            .as_deref()
+            == Some(newer.as_slice())
+        {
             converged = true;
             break;
         }
@@ -9961,7 +9986,7 @@ async fn setting_an_avatar_propagates_to_a_peer_account_over_loopback() {
         .unwrap();
     assert!(!applied, "a stale update must be rejected");
     assert_eq!(
-        bob_node.peer_avatar(&alice_acct.account_id()),
+        bob_node.peer_avatar(&alice_acct.account_id()).unwrap(),
         Some(newer),
         "the newer avatar is preserved"
     );
@@ -10005,9 +10030,12 @@ async fn own_signed_profile_and_clear_survive_restart_for_new_peers() {
     let profile = node.account_profiles.current().unwrap();
     assert_eq!(profile.avatar, None);
     assert!(profile.verify());
-    assert_eq!(
-        node.peer_profile_states().get(&account.account_id()),
-        Some(&None)
+    assert!(
+        node.current_profiles_page(None, None)
+            .unwrap()
+            .profiles
+            .iter()
+            .any(|profile| profile.account_id == account.account_id() && profile.avatar.is_none())
     );
 }
 
@@ -10065,10 +10093,13 @@ async fn disabled_profile_sync_defers_sibling_avatar_until_enabled() {
     );
     node.log.lock().unwrap().append(event).unwrap();
     node.process_profile_events(conversation);
-    assert_eq!(node.peer_avatar(&account.account_id()), None);
+    assert_eq!(node.peer_avatar(&account.account_id()).unwrap(), None);
     node.set_device_sync_category(crate::node::SyncCategory::Profile, true)
         .unwrap();
-    assert_eq!(node.peer_avatar(&account.account_id()), Some(avatar));
+    assert_eq!(
+        node.peer_avatar(&account.account_id()).unwrap(),
+        Some(avatar)
+    );
     assert_eq!(node.account_profiles.current().unwrap().updated_at, 42);
 }
 
@@ -11099,7 +11130,7 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
         .unwrap();
     let mut got = None;
     for _ in 0..50 {
-        got = bob_node.account_profile(&alice_acct.account_id());
+        got = bob_node.account_profile(&alice_acct.account_id()).unwrap();
         if got.is_some() {
             break;
         }
@@ -11109,7 +11140,12 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
     assert!(card.verify());
     assert_eq!(card.bio, "Self-declared bio");
     assert_eq!(card.created_at_ms, alice_acct.created_at_ms());
-    assert!(bob_node.account_profile(&bob_acct.account_id()).is_none());
+    assert!(
+        bob_node
+            .account_profile(&bob_acct.account_id())
+            .unwrap()
+            .is_none()
+    );
     alice_node
         .save_account_profile_if("Alice updated".into(), "Updated bio".into(), |commit| {
             commit()
@@ -11119,6 +11155,7 @@ async fn account_profile_propagates_signed_claims_over_loopback() {
     assert_eq!(
         alice_node
             .account_profile(&alice_acct.account_id())
+            .unwrap()
             .unwrap()
             .created_at_ms,
         alice_acct.created_at_ms()
@@ -11145,7 +11182,11 @@ async fn account_profile_projection_retry_and_restart_preserve_avatar_and_identi
         )
     };
     let node = open();
-    assert!(node.account_profile(&account.account_id()).is_none());
+    assert!(
+        node.account_profile(&account.account_id())
+            .unwrap()
+            .is_none()
+    );
     let card = crate::node::AccountProfile::new(
         &account,
         1,
@@ -11156,18 +11197,21 @@ async fn account_profile_projection_retry_and_restart_preserve_avatar_and_identi
     node.account_profiles.fail_appends_for_test(true);
     assert!(node.receive_account_profile(&card).is_err());
     assert_eq!(
-        node.account_profile(&account.account_id()),
+        node.account_profile(&account.account_id()).unwrap(),
         Some(card.clone())
     );
     node.account_profiles.fail_appends_for_test(false);
     node.receive_account_profile(&card).unwrap();
     assert_eq!(
-        node.peer_avatar(&account.account_id()),
+        node.peer_avatar(&account.account_id()).unwrap(),
         Some(b"avatar".to_vec())
     );
     node.set_avatar(Some(b"edited".to_vec())).await.unwrap();
     assert_eq!(
-        node.account_profile(&account.account_id()).unwrap().avatar,
+        node.account_profile(&account.account_id())
+            .unwrap()
+            .unwrap()
+            .avatar,
         Some(b"edited".to_vec())
     );
     drop(node);
@@ -11175,11 +11219,12 @@ async fn account_profile_projection_retry_and_restart_preserve_avatar_and_identi
     assert_eq!(
         node.account_profile(&account.account_id())
             .unwrap()
+            .unwrap()
             .created_at_ms,
         account.created_at_ms()
     );
     assert_eq!(
-        node.peer_avatar(&account.account_id()),
+        node.peer_avatar(&account.account_id()).unwrap(),
         Some(b"edited".to_vec())
     );
     drop(node);
@@ -11188,18 +11233,20 @@ async fn account_profile_projection_retry_and_restart_preserve_avatar_and_identi
     // public-card journal into the replacement profile to test its own lifetime.
     let replacement_dir = dir.path().join("replacement");
     std::fs::create_dir_all(&replacement_dir).unwrap();
-    std::fs::copy(
-        dir.path().join("account-profiles.log"),
-        replacement_dir.join("account-profiles.log"),
+    let mut portable = super::super::account_profile_data::AccountProfileStore::open(
+        &replacement_dir.join("account-profiles.log"),
+        "pw",
     )
     .unwrap();
+    portable.record(card).unwrap();
+    drop(portable);
     let node = personal_message_node(
         &replacement_dir,
         DeviceIdentity::generate(),
         Account::from_secret_bytes_with_created_at(other.secret_bytes(), other.created_at_ms())
             .unwrap(),
     );
-    assert!(node.account_profile(&other.account_id()).is_none());
+    assert!(node.account_profile(&other.account_id()).unwrap().is_none());
     assert!(node.account_profiles.current().is_none());
 }
 
@@ -11217,14 +11264,20 @@ async fn account_profile_reconciles_newer_sibling_legacy_avatar() {
     node.save_account_profile_if("Alice".into(), "keep bio".into(), |commit| commit())
         .await
         .unwrap();
-    let old = node.account_profile(&account.account_id()).unwrap();
+    let old = node
+        .account_profile(&account.account_id())
+        .unwrap()
+        .unwrap();
     let legacy = crate::node::ProfilePayload::new(
         &account,
         Some(b"sibling avatar".to_vec()),
         old.revision + 1,
     );
     assert!(node.receive_legacy_profile(&legacy).unwrap());
-    let card = node.account_profile(&account.account_id()).unwrap();
+    let card = node
+        .account_profile(&account.account_id())
+        .unwrap()
+        .unwrap();
     assert_eq!(card.avatar, legacy.avatar);
     assert_eq!(card.bio, "keep bio");
     assert_eq!(card.created_at_ms, account.created_at_ms());
@@ -11254,8 +11307,14 @@ async fn account_profile_exhausted_avatar_revision_rejects_before_either_store_m
     let avatars_before = std::fs::read(dir.path().join("profiles.log")).unwrap();
     let cards_before = std::fs::read(dir.path().join("account-profiles.log")).unwrap();
     assert!(node.set_avatar(Some(b"edit".to_vec())).await.is_err());
-    assert_eq!(node.peer_avatar(&account.account_id()), card.avatar);
-    assert_eq!(node.account_profile(&account.account_id()), Some(card));
+    assert_eq!(
+        node.peer_avatar(&account.account_id()).unwrap(),
+        card.avatar
+    );
+    assert_eq!(
+        node.account_profile(&account.account_id()).unwrap(),
+        Some(card)
+    );
     assert_eq!(
         std::fs::read(dir.path().join("profiles.log")).unwrap(),
         avatars_before
@@ -11297,7 +11356,10 @@ async fn account_profile_terminal_legacy_avatar_reconciles_on_restart() {
     assert!(node.account_profiles.receive(&legacy).unwrap());
     drop(node);
     let node = open();
-    let card = node.account_profile(&account.account_id()).unwrap();
+    let card = node
+        .account_profile(&account.account_id())
+        .unwrap()
+        .unwrap();
     assert_eq!(card.revision, u64::MAX);
     assert_eq!(card.avatar, legacy.avatar);
     assert_eq!(card.created_at_ms, account.created_at_ms());
@@ -11406,13 +11468,17 @@ async fn account_profile_linked_device_pair_preserves_metadata_and_requires_card
         .save_account_profile_if("Alice".into(), "new bio".into(), |commit| commit())
         .await
         .unwrap();
-    let received = bob_node.account_profile(&alice_acct.account_id()).unwrap();
+    let received = bob_node
+        .account_profile(&alice_acct.account_id())
+        .unwrap()
+        .unwrap();
     assert_eq!(received.bio, "new bio");
     assert_eq!(received.avatar, Some(b"new avatar".to_vec()));
     assert_eq!(
         received,
         alice_node
             .account_profile(&alice_acct.account_id())
+            .unwrap()
             .unwrap()
     );
 

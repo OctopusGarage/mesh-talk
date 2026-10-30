@@ -1,18 +1,27 @@
-//! A local, password-encrypted store of the avatars peers PROPAGATED to us, keyed by the
-//! sender's account id. One current avatar per account (newest `updated_at` wins);
-//! obsolete versions are periodically compacted on disk. Survives restart.
-//!
-//! On-disk framing is the shared [`EncryptedRecordLog`] (append-only); on load and on
-//! `record` we collapse to the newest record per account, so reads are O(1) and an old
-//! update that arrived after a newer one never overwrites it. Never synced or served.
+//! Current compatibility avatars, selected from the participant's encrypted index.
+//! The legacy encrypted record writer remains available to migration fixtures;
+//! live readers use bounded pages or one account lookup and preserve clear ties.
 
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
+#[cfg(test)]
 use crate::{eventlog::LogError, node::profile::MAX_AVATAR_BYTES};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 
 mod indexed;
+#[cfg(test)]
+pub(crate) fn reset_indexed_body_reads() {
+    indexed::reset_body_reads();
+}
+#[cfg(test)]
+pub(crate) fn indexed_body_reads() -> usize {
+    indexed::body_reads()
+}
+
 pub(super) use indexed::IndexedProfileStore;
 
 const MAGIC: &[u8; 6] = b"MTPROF";
@@ -26,8 +35,13 @@ struct ProfileEntry {
     avatar: Option<Vec<u8>>,
 }
 
+fn avatar_order(revision: u64, avatar: &Option<Vec<u8>>) -> (u64, bool, Option<&[u8]>) {
+    (revision, avatar.is_none(), avatar.as_deref())
+}
+
 /// The received-profiles store: append-only on disk, collapsed to newest-per-account
 /// in memory.
+#[cfg(test)]
 pub struct ProfileStore {
     file: EncryptedRecordLog<ProfileEntry>,
     by_account: HashMap<String, ProfileEntry>,
@@ -42,11 +56,8 @@ pub(super) struct AvatarPage {
     pub revision: u64,
 }
 
+#[cfg(test)]
 impl ProfileStore {
-    #[cfg(test)]
-    pub(super) fn fail_appends_for_test(&mut self, enabled: bool) {
-        self.file.fail_appends_for_test(enabled).unwrap();
-    }
     /// Open (or create) the store at `path`, collapsing stored records to the newest
     /// per account.
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
@@ -71,16 +82,13 @@ impl ProfileStore {
 
     /// Signed revisions order profiles; equal revisions use a deterministic
     /// content order, with clear tombstones winning so replay cannot resurrect them.
-    fn order(revision: u64, avatar: &Option<Vec<u8>>) -> (u64, bool, Option<&[u8]>) {
-        (revision, avatar.is_none(), avatar.as_deref())
-    }
 
     /// Use the same total order during journal replay and live admission.
     fn merge(by_account: &mut HashMap<String, ProfileEntry>, entry: ProfileEntry) {
         match by_account.get(&entry.account_id) {
             Some(cur)
-                if Self::order(cur.updated_at, &cur.avatar)
-                    >= Self::order(entry.updated_at, &entry.avatar) => {}
+                if avatar_order(cur.updated_at, &cur.avatar)
+                    >= avatar_order(entry.updated_at, &entry.avatar) => {}
             _ => {
                 by_account.insert(entry.account_id.clone(), entry);
             }
@@ -103,7 +111,7 @@ impl ProfileStore {
             return Ok(false);
         }
         // Stale/duplicate? Don't write — keeps the log from growing on a replay.
-        if matches!(self.by_account.get(account_id), Some(cur) if Self::order(cur.updated_at, &cur.avatar) >= Self::order(updated_at, &avatar))
+        if matches!(self.by_account.get(account_id), Some(cur) if avatar_order(cur.updated_at, &cur.avatar) >= avatar_order(updated_at, &avatar))
         {
             return Ok(false);
         }

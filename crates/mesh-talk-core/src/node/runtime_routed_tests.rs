@@ -411,6 +411,7 @@ async fn start_opens_a_node_and_exposes_its_identity() {
     let card = runtime
         .handle()
         .account_profile(runtime.account_id())
+        .unwrap()
         .unwrap();
     assert_eq!(card.display_name, "Alice");
     assert!(card.created_at_ms.is_some());
@@ -494,6 +495,7 @@ async fn existing_account_without_creation_evidence_stays_unknown() {
             .handle()
             .account_profile(&account.account_id())
             .unwrap()
+            .unwrap()
             .created_at_ms
             .is_none()
     );
@@ -527,6 +529,7 @@ async fn set_display_name_updates_advertised_name_and_own_record() {
         runtime
             .handle()
             .account_profile(runtime.account_id())
+            .unwrap()
             .unwrap()
             .display_name,
         "Alice Renamed 🐻"
@@ -573,7 +576,7 @@ async fn startup_network_options_precede_discovery_and_delivery_launch() {
         crate::node::NetworkCost::Unknown,
         |_| Ok(()),
         |launch| {
-            let runtime = launch("Scoped");
+            let runtime = launch("Scoped")?;
             let node = runtime.handle();
             let relay = crate::identity::device::DeviceIdentity::generate().public();
             assert!(node.physical_lan_only());
@@ -633,27 +636,27 @@ async fn contact_nickname_survives_a_stale_signed_card_name_and_restart() {
     );
     runtime.handle().cached_peer_snapshot().unwrap();
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Duncan"
     );
     // Reading a profile must neither rename the contact nor mutate its claims.
     assert_eq!(
-        runtime.handle().trust_card(&account.account_id()),
+        runtime.handle().trust_card(&account.account_id()).unwrap(),
         Some(stale_card.clone())
     );
     runtime.roster.lock().unwrap().evict_stale(Duration::ZERO);
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Duncan"
     );
     runtime.stop().await;
     let reopened = start().await.unwrap();
     assert_eq!(
-        reopened.known_account_names()[&account.account_id()][0],
+        reopened.known_account_names().unwrap()[&account.account_id()][0],
         "Duncan"
     );
     assert_eq!(
-        reopened.handle().trust_card(&account.account_id()),
+        reopened.handle().trust_card(&account.account_id()).unwrap(),
         Some(stale_card)
     );
     reopened.stop().await;
@@ -687,7 +690,7 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
     );
     runtime.handle().cached_peer_snapshot().unwrap();
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Old name"
     );
     let proof = crate::discovery::Announce::new_with_account(&device, &account, "Messi10", 1);
@@ -698,7 +701,7 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
         .update(&proof, "127.0.0.1".parse().unwrap(), runtime.user_id());
     runtime.handle().cached_peer_snapshot().unwrap();
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Messi10"
     );
     runtime.roster.lock().unwrap().update(
@@ -708,13 +711,13 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
     );
     runtime.handle().cached_peer_snapshot().unwrap();
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Messi10"
     );
     runtime.roster.lock().unwrap().evict_stale(Duration::ZERO);
     assert!(runtime.peers().is_empty());
     assert_eq!(
-        runtime.known_account_names()[&account.account_id()][0],
+        runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Messi10"
     );
     drop(runtime);
@@ -733,7 +736,7 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
     .await
     .unwrap();
     assert_eq!(
-        reopened.known_account_names()[&account.account_id()][0],
+        reopened.known_account_names().unwrap()[&account.account_id()][0],
         "Messi10"
     );
     assert!(
@@ -776,6 +779,7 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
     let old = runtime
         .handle()
         .account_profile(runtime.account_id())
+        .unwrap()
         .unwrap();
     let joining_dir = root.path().join("accounts/joining");
     crate::identity::account_keystore::save(
@@ -814,6 +818,7 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
     let card = runtime
         .handle()
         .account_profile(runtime.account_id())
+        .unwrap()
         .unwrap();
     assert_eq!(card.bio, old.bio);
     assert_eq!(card.avatar, old.avatar);
@@ -823,6 +828,7 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
         while joining
             .handle()
             .account_profile(joining.account_id())
+            .unwrap()
             .as_ref()
             != Some(&card)
         {
@@ -838,11 +844,13 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
     let shared = joining
         .handle()
         .account_profile(joining.account_id())
+        .unwrap()
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         while runtime
             .handle()
             .account_profile(runtime.account_id())
+            .unwrap()
             .as_ref()
             != Some(&shared)
         {
@@ -874,6 +882,7 @@ async fn account_nickname_preserves_bio_and_wins_over_host_name_on_restart() {
         reopened
             .handle()
             .account_profile(reopened.account_id())
+            .unwrap()
             .unwrap()
             .bio,
         "Personal signature"
@@ -1074,13 +1083,13 @@ async fn historical_account_name_does_not_follow_a_retained_devices_new_account(
         .unwrap()
         .update(&new, "127.0.0.2".parse().unwrap(), runtime.user_id());
     assert_eq!(
-        runtime.known_account_names()[&old_account.account_id()][0],
+        runtime.known_account_names().unwrap()[&old_account.account_id()][0],
         "Old principal"
     );
     runtime.stop().await;
     let reopened = start().await.unwrap();
     assert_eq!(
-        reopened.known_account_names()[&old_account.account_id()][0],
+        reopened.known_account_names().unwrap()[&old_account.account_id()][0],
         "Old principal",
         "an unscoped durable device nickname cannot rename its old account after restart"
     );

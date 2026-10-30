@@ -156,3 +156,39 @@ fn indexed_signed_profile_wire_quota_keeps_existing_value_replaceable() {
     assert_eq!(count, 256);
     assert!(bytes <= MAX_STORE_BYTES);
 }
+
+#[test]
+fn indexed_profile_projection_ack_is_exact_and_names_need_no_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = profile(
+        dir.path(),
+        &DeviceIdentity::generate(),
+        &Account::generate(),
+    );
+    let mut store =
+        IndexedAccountProfileStore::from_profile(owner, &dir.path().join("profiles"), "pw")
+            .unwrap();
+    let account = Account::generate();
+    let id = account.account_id();
+    store
+        .record(value(&account, 1, Some(vec![7; 8192])))
+        .unwrap();
+    let old = store.projection_revision(&id).unwrap().unwrap();
+    store.record(value(&account, 2, None)).unwrap();
+    let current = store.projection_revision(&id).unwrap().unwrap();
+    assert_ne!(old, current);
+    reset_body_reads();
+    store.acknowledge_projection(&id, old).unwrap();
+    assert_eq!(
+        store.pending_projection().unwrap(),
+        vec![(id.clone(), current)]
+    );
+    assert_eq!(
+        store.names_page(None).unwrap(),
+        vec![(id.clone(), "Person".into())]
+    );
+    assert_eq!(store.version(&id).unwrap(), Some(2));
+    assert_eq!(body_reads(), 0);
+    store.acknowledge_projection(&id, current).unwrap();
+    assert!(store.pending_projection().unwrap().is_empty());
+}

@@ -6,7 +6,10 @@
       "paths": [
         "crates/mesh-talk-core/src/node/profile_store/",
         "crates/mesh-talk-core/src/node/account_profile_data/",
-        "crates/mesh-talk-core/src/node/trust_card/"
+        "crates/mesh-talk-core/src/node/trust_card/",
+        "crates/mesh-talk-core/src/node/account_profile.rs",
+        "crates/mesh-talk-core/src/node/account_profile_io.rs",
+        "crates/mesh-talk-core/src/node/account_profile_io_tests.rs"
       ],
       "rust": [
         {
@@ -15,7 +18,10 @@
             "warm_open_reads_no_avatar_payloads",
             "node::profile_store::indexed::tests::",
             "node::account_profile_data::indexed::tests::",
-            "node::trust_card::indexed::tests::"
+            "node::trust_card::indexed::tests::",
+            "node::account_profile::tests::",
+            "node::account_profile_io::tests::",
+            "account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime"
           ]
         }
       ],
@@ -33,11 +39,15 @@
           {
             "name": "A failed import preserves the legacy source; failed writes do not change current values or revision. Published missing authority is an error, not an empty store.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Node authenticates all legacy sources before publication and resumes only exact pending current-value projections. Unrelated successful writes cannot acknowledge a failed avatar projection; unchanged warm opens fetch no peer payloads.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
       "escalation": [
-        "Repository owner tests do not certify Node startup, producer projection, warm reconciliation or host avatar cache integration; those boundaries require their own focused acceptance."
+        "Host selected-profile/error adapters and frontend avatar-cache lifetime need their own native/browser acceptance; repository and core Node tests do not certify those consumers."
       ]
     },
     {

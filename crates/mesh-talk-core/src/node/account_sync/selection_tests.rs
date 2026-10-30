@@ -1113,7 +1113,12 @@ async fn account_sync_sibling_profile_remains_live_when_history_ancestor_is_paus
     let server = tokio::spawn(receiver.clone().run_accept_loop(listener));
     source.deliver_direct(&peer, conv).await.unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
-        while receiver.peer_avatar(&receiver.account_id()).as_ref() != Some(&avatar) {
+        while receiver
+            .peer_avatar(&receiver.account_id())
+            .unwrap()
+            .as_ref()
+            != Some(&avatar)
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -2063,8 +2068,8 @@ async fn linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback(
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if joining.account_profile(&source.account_id())
-                == source.account_profile(&source.account_id())
+            if joining.account_profile(&source.account_id()).unwrap()
+                == source.account_profile(&source.account_id()).unwrap()
             {
                 break;
             }
@@ -2078,14 +2083,23 @@ async fn linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback(
         .unwrap();
     let conversation = joining
         .prepare_current_profile_delivery(&to_source)
+        .unwrap()
         .unwrap();
     joining
         .deliver_direct(&to_source, conversation)
         .await
         .unwrap();
-    let card = joining.account_profile(&joining.account_id()).unwrap();
+    let card = joining
+        .account_profile(&joining.account_id())
+        .unwrap()
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while source.account_profile(&source.account_id()).as_ref() != Some(&card) {
+        while source
+            .account_profile(&source.account_id())
+            .unwrap()
+            .as_ref()
+            != Some(&card)
+        {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -2099,14 +2113,15 @@ async fn linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback(
     // The original device also publishes exactly the accepted account claim.
     let conversation = source
         .prepare_current_profile_delivery(&to_joining)
+        .unwrap()
         .unwrap();
     source
         .deliver_direct(&to_joining, conversation)
         .await
         .unwrap();
     assert_eq!(
-        source.account_profile(&source.account_id()),
-        joining.account_profile(&joining.account_id())
+        source.account_profile(&source.account_id()).unwrap(),
+        joining.account_profile(&joining.account_id()).unwrap()
     );
     source_task.abort();
     joining_task.abort();

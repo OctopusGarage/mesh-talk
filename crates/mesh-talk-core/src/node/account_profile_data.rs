@@ -1,17 +1,29 @@
 //! Ordinary account profiles; signing and replication are implementation details.
 
 use super::profile::MAX_AVATAR_BYTES;
+#[cfg(test)]
 use crate::eventlog::LogError;
 use crate::identity::{
     account::{Account, AccountPublic},
     device::DeviceIdentity,
 };
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::{collections::HashMap, path::Path};
 
 mod indexed;
+#[cfg(test)]
+pub(crate) fn reset_indexed_body_reads() {
+    indexed::reset_body_reads();
+}
+#[cfg(test)]
+pub(crate) fn indexed_body_reads() -> usize {
+    indexed::body_reads()
+}
+
 pub(super) use indexed::IndexedAccountProfileStore;
 
 const MAGIC: &[u8; 6] = b"MTAPRF";
@@ -116,13 +128,26 @@ impl AccountProfile {
     }
 }
 
+fn profile_order(profile: &AccountProfile) -> (u64, bool, Option<&[u8]>, &[u8; 64]) {
+    // Keep avatar tie-breaking identical to the legacy avatar projection;
+    // signature ordering resolves metadata-only ties after that shared order.
+    (
+        profile.revision,
+        profile.avatar.is_none(),
+        profile.avatar.as_deref(),
+        &profile.signature,
+    )
+}
+
 /// One bounded current profile per account. Equal revisions converge by signature
 /// ordering; an established creation date cannot be replaced by another device.
+#[cfg(test)]
 pub(super) struct AccountProfileStore {
     file: EncryptedRecordLog<AccountProfile>,
     profiles: HashMap<String, AccountProfile>,
     records: usize,
 }
+#[cfg(test)]
 impl AccountProfileStore {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::open(path, password, MAGIC)?;
@@ -147,16 +172,7 @@ impl AccountProfileStore {
     pub fn all(&self) -> Vec<AccountProfile> {
         self.profiles.values().cloned().collect()
     }
-    fn order(profile: &AccountProfile) -> (u64, bool, Option<&[u8]>, &[u8; 64]) {
-        // Keep avatar tie-breaking identical to the legacy avatar projection;
-        // signature ordering resolves metadata-only ties after that shared order.
-        (
-            profile.revision,
-            profile.avatar.is_none(),
-            profile.avatar.as_deref(),
-            &profile.signature,
-        )
-    }
+
     pub(super) fn accepts(&self, profile: &AccountProfile) -> bool {
         if !profile.verify() {
             return false;
@@ -166,7 +182,7 @@ impl AccountProfileStore {
             if old.created_at_ms.is_some() && old.created_at_ms != profile.created_at_ms {
                 return false;
             }
-            if Self::order(profile) <= Self::order(old) {
+            if profile_order(profile) <= profile_order(old) {
                 return false;
             }
         } else if self.profiles.len() >= MAX_ACCOUNTS {

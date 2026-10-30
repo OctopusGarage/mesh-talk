@@ -1522,8 +1522,10 @@ state, channel, profile and file-progress invalidations share that gate. It
 retains only page cursor/token metadata and at most 64 current progress hints.
 Current profile values occupy at most 16 rows and 1 MiB raw per page; their walk
 restarts on a new revision or renderer replacement. Alongside receipt and call
-budgets, their conservative serialization charge remains below 64 MiB. These
-presentation-page limits do not claim the legacy current-avatar store is indexed.
+budgets, their conservative serialization charge remains below 64 MiB. Backend current-value payloads use the encrypted participant indexes; Node warm
+reconciliation visits only exact pending source changes. Display-name inventories
+read bounded header pages and never hydrate avatars. Host cache lifetime remains
+a separate acceptance boundary from these backend query limits.
 Native alerts start at launch high-water, sample at most eight live observations
 per second and intentionally coalesce excess alarms. They never retire durable
 unread work or replay old unread backlog as live notifications.
