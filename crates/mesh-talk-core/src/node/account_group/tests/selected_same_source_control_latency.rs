@@ -164,24 +164,94 @@ pub(super) struct ControlTestPage {
     pub origin: String,
     pub request: crate::node::account_documents::wire::DocumentRequest,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ControlTestDispatch {
+    pub paired: bool,
+    pub protected: bool,
+    pub resumed: bool,
+    pub replacement: bool,
+    pub hint: bool,
+}
+impl ControlTestDispatch {
+    pub fn natural_origin(self) -> bool {
+        !self.resumed && !self.replacement
+    }
+    fn turn_origin(self) -> String {
+        format!(
+            "control_turn_origin resumed={} replacement={}",
+            self.resumed, self.replacement
+        )
+    }
+}
 impl ControlTestPage {
+    pub fn dispatch(&self) -> Option<ControlTestDispatch> {
+        let flag = |name: &str| {
+            let prefix = format!("{name}=");
+            let mut values = self
+                .origin
+                .split_ascii_whitespace()
+                .filter_map(|token| token.strip_prefix(&prefix));
+            let value = match values.next()? {
+                "true" => true,
+                "false" => false,
+                _ => return None,
+            };
+            values.next().is_none().then_some(value)
+        };
+        Some(ControlTestDispatch {
+            paired: flag("paired")?,
+            protected: flag("protected")?,
+            resumed: flag("resumed")?,
+            replacement: flag("replacement")?,
+            hint: flag("hint")?,
+        })
+    }
     pub fn contains_demand(&self, id: AccountGroupOperationId) -> bool {
         self.origin.contains(&format!("{id:?}"))
     }
 }
+#[derive(Clone, Debug)]
+struct ControlTestOrigin {
+    task: tokio::task::Id,
+    event: String,
+    dispatched_at: std::time::Instant,
+    lifetime: Option<std::sync::Weak<()>>,
+}
 #[derive(Default, Debug)]
 pub(super) struct ControlTestPages {
-    origins: std::collections::VecDeque<(tokio::task::Id, String, std::time::Instant)>,
+    origins: std::collections::VecDeque<ControlTestOrigin>,
     pages: std::collections::VecDeque<ControlTestPage>,
+    active: std::collections::HashSet<tokio::task::Id>,
 }
 impl ControlTestPages {
     pub fn observe(&mut self, event: &str) {
         if event.starts_with("control_task ") {
-            if self.origins.len() == 64 {
-                self.origins.pop_front();
+            if self.origins.len() == 64
+                && let Some(origin) = self.origins.pop_front()
+            {
+                self.active.remove(&origin.task);
             }
-            self.origins
-                .push_back((tokio::task::id(), event.into(), std::time::Instant::now()));
+            self.active.insert(tokio::task::id());
+            self.origins.push_back(ControlTestOrigin {
+                task: tokio::task::id(),
+                event: event.into(),
+                dispatched_at: std::time::Instant::now(),
+                lifetime: super::super::super::account_session::observed_control_task_lifetime(),
+            });
+        }
+        if event.starts_with("page_end ") {
+            self.active.remove(&tokio::task::id());
+        }
+        if event.starts_with("control_cancel task=") {
+            let ended: Vec<_> = self
+                .active
+                .iter()
+                .copied()
+                .filter(|task| event.starts_with(&format!("control_cancel task={task:?} ")))
+                .collect();
+            for task in ended {
+                self.active.remove(&task);
+            }
         }
         if let Some(body) = event.strip_prefix("control_request_body=") {
             let request = crate::node::account_documents::wire::DocumentRequest::decode(
@@ -189,11 +259,11 @@ impl ControlTestPages {
             )
             .unwrap();
             let task = tokio::task::id();
-            let Some((_, origin, dispatched_at)) = self
+            let Some(origin) = self
                 .origins
                 .iter()
                 .rev()
-                .find(|(id, _, _)| *id == task)
+                .find(|origin| origin.task == task)
                 .cloned()
             else {
                 // Hooks can attach after a task starts, and this bounded ledger
@@ -205,11 +275,28 @@ impl ControlTestPages {
             }
             self.pages.push_back(ControlTestPage {
                 task,
-                dispatched_at,
-                origin,
+                dispatched_at: origin.dispatched_at,
+                origin: origin.event,
                 request,
             });
         }
+    }
+    pub fn is_active(&self, task: tokio::task::Id) -> bool {
+        self.active.contains(&task)
+            && self
+                .origins
+                .iter()
+                .rev()
+                .find(|origin| origin.task == task)
+                .and_then(|origin| origin.lifetime.as_ref())
+                .is_some_and(|lifetime| lifetime.upgrade().is_some())
+    }
+    pub fn live_request(
+        &self,
+        request: &crate::node::account_documents::wire::DocumentRequest,
+    ) -> Option<ControlTestPage> {
+        let page = self.request(request)?;
+        self.is_active(page.task).then_some(page)
     }
     pub fn request(
         &self,
@@ -263,6 +350,147 @@ impl ControlTestPages {
 }
 
 #[tokio::test]
+async fn control_page_observer_rejects_retired_children_and_preserves_exact_dispatch() {
+    use crate::node::account_documents::wire::{DocumentRequest, OperationProbe};
+    let directory = tempfile::tempdir().unwrap();
+    let source = node(directory.path(), &Account::generate());
+    for outcome in ["return", "abort", "panic"] {
+        let pages = Arc::new(Mutex::new(ControlTestPages::default()));
+        *source.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let pages = pages.clone();
+            move |_, event| pages.lock().unwrap().observe(&event)
+        }));
+        let request = DocumentRequest {
+            version: 7,
+            account_id: source.account_id(),
+            domain: AccountDocumentDomain::GroupControl,
+            after: None,
+            known_digest: [0; 32],
+            operation: Some(OperationProbe {
+                version: 1,
+                nonce: [1; 32],
+                after: None,
+                known_digest: [0; 32],
+                asset: None,
+                legacy_leave: true,
+                personal: true,
+            }),
+        };
+        assert!(
+            DocumentRequest::decode(&serde_json::to_vec(&request).unwrap()).is_some(),
+            "the observer fixture must use an owner-valid version-7 request"
+        );
+        let (arrived, observed) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let child_source = source.clone();
+        let child_request = request.clone();
+        let child = tokio::spawn(async move {
+            let lifetime = Arc::new(());
+            child_source.trace_control_task(&child_source.identity.public(),
+                "control_task paired=true protected=true requests={} resumed=true replacement=false hint=false".into(), Arc::downgrade(&lifetime));
+            child_source.trace_account_client(&child_source.identity.public(), || {
+                format!(
+                    "control_request_body={}",
+                    hex::encode(serde_json::to_vec(&child_request).unwrap())
+                )
+            });
+            arrived.send(()).unwrap();
+            released.await.unwrap();
+            if outcome == "panic" {
+                panic!("deliberate child panic");
+            }
+            child_source.trace_account_client(&child_source.identity.public(), || {
+                "page_end outcome=ok".into()
+            });
+            drop(lifetime);
+        });
+        observed.await.unwrap();
+        let original = pages.lock().unwrap().live_request(&request).unwrap();
+        assert_eq!(original.task, child.id());
+        let dispatch = original.dispatch().unwrap();
+        assert!(dispatch.protected && dispatch.resumed && !dispatch.replacement && !dispatch.hint);
+        let newer_source = source.clone();
+        let mut newer_request = request.clone();
+        newer_request.operation.as_mut().unwrap().nonce = [2; 32];
+        tokio::spawn(async move {
+            let lifetime = Arc::new(());
+            newer_source.trace_control_task(&newer_source.identity.public(),
+                "control_task paired=false protected=false requests={} resumed=false replacement=false hint=true".into(), Arc::downgrade(&lifetime));
+            newer_source.trace_account_client(&newer_source.identity.public(), || format!("control_request_body={}", hex::encode(serde_json::to_vec(&newer_request).unwrap())));
+        }).await.unwrap();
+        let exact = pages.lock().unwrap().live_request(&request).unwrap();
+        assert_eq!(exact.task, original.task);
+        assert_eq!(exact.dispatch(), Some(dispatch));
+        if outcome == "abort" {
+            child.abort();
+        } else {
+            release.send(()).unwrap();
+        }
+        let result = child.await;
+        match outcome {
+            "return" => result.unwrap(),
+            "abort" => assert!(result.unwrap_err().is_cancelled()),
+            "panic" => assert!(result.unwrap_err().is_panic()),
+            _ => unreachable!(),
+        }
+        assert!(
+            pages.lock().unwrap().request(&request).is_some(),
+            "historical continuation evidence is retained"
+        );
+        assert!(
+            pages.lock().unwrap().live_request(&request).is_none(),
+            "retired exact nonce cannot establish a held read"
+        );
+    }
+    *source.account_client_test_hook.lock().unwrap() = None;
+}
+
+#[test]
+fn control_page_dispatch_flags_are_complete_and_orthogonal() {
+    let request = crate::node::account_documents::wire::DocumentRequest {
+        version: 5,
+        account_id: Account::generate().account_id(),
+        domain: AccountDocumentDomain::GroupControl,
+        after: None,
+        known_digest: [0; 32],
+        operation: None,
+    };
+    // Missing or duplicated fields cannot impersonate a natural false/false origin.
+    for origin in [
+        "control_task paired=true protected=true requests={} hint=true",
+        "control_task paired=true protected=true requests={} resumed=false replacement=false hint=true resumed=false",
+    ] {
+        let parsed = |origin: &str| {
+            // A real task ID is unnecessary for flag parsing; use a short scoped runtime.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let origin = origin.to_owned();
+            let request = request.clone();
+            runtime.block_on(async {
+                tokio::spawn(async move {
+                    ControlTestPage {
+                        task: tokio::task::id(),
+                        dispatched_at: std::time::Instant::now(),
+                        origin,
+                        request,
+                    }
+                    .dispatch()
+                })
+                .await
+                .unwrap()
+            })
+        };
+        assert!(parsed(origin).is_none());
+        let dispatch = parsed("control_task paired=true protected=true requests={} resumed=false replacement=false hint=true").unwrap();
+        assert!(
+            dispatch.natural_origin() && dispatch.protected && dispatch.hint,
+            "natural origin does not mean unprotected"
+        );
+    }
+}
+
+#[tokio::test]
 async fn control_page_observer_requires_an_observed_dispatch_without_poisoning_late_hooks() {
     let pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let observed = pages.clone();
@@ -287,6 +515,14 @@ async fn control_page_observer_requires_an_observed_dispatch_without_poisoning_l
         observed.lock().unwrap().observe(&body);
         let page = observed.lock().unwrap().task(tokio::task::id()).unwrap();
         assert_eq!(page.origin, origin);
+        assert!(
+            !observed.lock().unwrap().is_active(page.task),
+            "a dispatch without a child lifetime fails closed"
+        );
+        assert!(
+            observed.lock().unwrap().live_request(&request).is_none(),
+            "a request without an operation nonce fails closed"
+        );
         assert_eq!(
             serde_json::to_value(&page.request).unwrap(),
             serde_json::to_value(&request).unwrap()
@@ -503,7 +739,6 @@ struct PaidBoundaryEvidence {
     resume_paid: bool,
     source_aborts: usize,
     pair_retirements: usize,
-    last_origin: String,
     requester_wake: bool,
     ready_requester_hint: Option<String>,
     requester_control: Option<(u128, String)>,
@@ -535,6 +770,7 @@ struct PaidPairBoundary {
     resume: Arc<Semaphore>,
     continuation: Arc<Semaphore>,
     evidence: Arc<Mutex<PaidBoundaryEvidence>>,
+    pages: Arc<Mutex<ControlTestPages>>,
 }
 impl Drop for PaidPairBoundary {
     fn drop(&mut self) {
@@ -590,12 +826,14 @@ async fn hold_original_pair_resume(
     })
     .await
     .expect("the executor's unrelated scope must settle before the deterministic fault");
+    let pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let gates = PaidPairBoundary {
         original: Arc::new(Semaphore::new(0)),
         prefix: Arc::new(Semaphore::new(0)),
         resume: Arc::new(Semaphore::new(0)),
         continuation: Arc::new(Semaphore::new(0)),
         evidence: Arc::new(Mutex::new(PaidBoundaryEvidence::default())),
+        pages: pages.clone(),
     };
     let arrived = Arc::new(Semaphore::new(0));
     let prefix_arrived = Arc::new(Semaphore::new(0));
@@ -603,7 +841,6 @@ async fn hold_original_pair_resume(
     let phase = Arc::new(AtomicUsize::new(0));
     let aborted = Arc::new(AtomicBool::new(false));
     let seed_pending = Arc::new(AtomicBool::new(true));
-    let pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let previous_client = executor.account_client_test_hook.lock().unwrap().clone();
     *executor.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let exact = source.identity.public();
@@ -666,9 +903,6 @@ async fn hold_original_pair_resume(
                     let mut data = evidence.lock().unwrap();
                     if event == "negotiation_begin domain=Some(GroupControl)" {
                         data.active_page = tokio::task::try_id();
-                    }
-                    if event.starts_with("control_turn_origin") {
-                        data.last_origin = event.clone();
                     }
                     if data.natural_page.is_some_and(|task| {
                         event == format!("control_cancel task={task:?} reason=same_source")
@@ -749,11 +983,12 @@ async fn hold_original_pair_resume(
                 if request.domain != AccountDocumentDomain::GroupControl {
                     return;
                 }
-                let page = pages
-                    .lock()
-                    .unwrap()
-                    .request(&request)
-                    .expect("the authenticated request nonce identifies its client task");
+                let Some(page) = pages.lock().unwrap().live_request(&request) else {
+                    return;
+                };
+                let dispatch = page
+                    .dispatch()
+                    .expect("the exact child carries complete dispatch flags");
                 let after = request
                     .operation
                     .as_ref()
@@ -878,7 +1113,7 @@ async fn hold_original_pair_resume(
                             // to finish that same request and must run normally.
                             if data.requester_control.is_some() {
                                 if data.post_handoff_pages.len() < 8 {
-                                    let origin = data.last_origin.clone();
+                                    let origin = dispatch.turn_origin();
                                     data.post_handoff_pages.push((
                                         clock.elapsed().as_millis(),
                                         page.task,
@@ -898,14 +1133,14 @@ async fn hold_original_pair_resume(
                                 data.invalid = Some(format!(
                                     "continuation did not retain the same fully-paid pair: protected={} origin={}",
                                     page.origin.contains("protected=true"),
-                                    data.last_origin
+                                    dispatch.turn_origin()
                                 ));
                                 data.record(clock, "invalid_boundary_not_trapped");
                                 return;
                             }
                             data.continuation_trapped = true;
                             data.trapped_protected = Some(page.origin.contains("protected=true"));
-                            data.trapped_origin = Some(data.last_origin.clone());
+                            data.trapped_origin = Some(dispatch.turn_origin());
                             data.trapped_after_requester = data.requester_control.is_some();
                             data.trapped_page = Some(page.task);
                             data.trapped_nonce =
@@ -1200,6 +1435,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     // yield to authenticated publication before either operation is admitted.
     let abort_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let active_a_page = Arc::new(Mutex::new(None::<tokio::task::Id>));
+    let control_pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let classes = Arc::new(Mutex::new(Vec::new()));
     let aborts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let held_pages = Arc::new(Mutex::new(Vec::<(tokio::task::Id, usize)>::new()));
@@ -1221,7 +1457,11 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
         let b_active = b_active.clone();
         let abort_trace = abort_trace.clone();
         let active_a_page = active_a_page.clone();
+        let control_pages = control_pages.clone();
         move |peer, phase| {
+            if peer == exact_owner {
+                control_pages.lock().unwrap().observe(&phase);
+            }
             let side = if peer == exact_owner {
                 Some("requester_to_A")
             } else if exact_other.as_ref() == Some(&peer) {
@@ -1300,19 +1540,15 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                 rows.push(phase);
             } else if phase == "control_pair_retired" {
                 retired.store(true, std::sync::atomic::Ordering::Relaxed);
-            } else if phase.starts_with("control_owned_abort reason=")
+            } else if phase.starts_with("control_cancel task=")
                 && abort_window.load(std::sync::atomic::Ordering::Acquire)
+                && let Some((_, count)) =
+                    held_pages.lock().unwrap().iter_mut().find(|(task, _)| {
+                        phase.starts_with(&format!("control_cancel task={task:?} "))
+                    })
             {
-                let active = *active_a_page.lock().unwrap();
-                if let Some((_, count)) = held_pages
-                    .lock()
-                    .unwrap()
-                    .iter_mut()
-                    .find(|(task, _)| Some(*task) == active)
-                {
-                    *count += 1;
-                    aborts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
+                *count += 1;
+                aborts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
     }));
@@ -1379,7 +1615,6 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     *owner.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let release = release.clone();
         let checkpoints = checkpoints.clone();
-        let classes = classes.clone();
         let exact_reference = reference.identity.public();
         let owner_id = owner.user_id();
         let source = Arc::downgrade(&owner);
@@ -1390,9 +1625,9 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
         let partial_keys = partial_keys.clone();
         let seeded = seeded.clone();
         let abort_trace = abort_trace.clone();
-        let active_a_page = active_a_page.clone();
         let abort_window = abort_window.clone();
         let held_pages = held_pages.clone();
+        let control_pages = control_pages.clone();
         move |peer, frame| {
             let owner_id = owner_id.clone();
             let source = source.clone();
@@ -1403,14 +1638,13 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
             let partial_keys = partial_keys.clone();
             let seeded = seeded.clone();
             let abort_trace = abort_trace.clone();
-            let active_a_page = active_a_page.clone();
             let abort_window = abort_window.clone();
             let held_pages = held_pages.clone();
             let release = release.clone();
             let arrived = arrived.clone();
             let checkpoints = checkpoints.clone();
-            let classes = classes.clone();
             let exact_reference = exact_reference.clone();
+            let control_pages = control_pages.clone();
             Box::pin(async move {
                 if peer != exact_reference {
                     return;
@@ -1432,20 +1666,16 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                         result_snapshot(&source, group, *active_operation.lock().unwrap()),
                     );
                 }
-                // Historical natural turns do not qualify a current protected
-                // resume/replacement. Let cold work finish; fault only the
-                // currently observed natural page before accepting the operation.
-                if arrived.lock().unwrap().is_some() {
-                    let current = classes.lock().unwrap();
-                    let natural = current
-                        .last()
-                        .is_some_and(|phase| phase.starts_with("control_dispatch protected=false"))
-                        && current.iter().rev().take(2).any(|phase| {
-                            phase == "control_turn_origin resumed=false replacement=false"
-                        });
-                    if !natural {
-                        return;
-                    }
+                let Some(page) = control_pages.lock().unwrap().live_request(&request) else {
+                    return;
+                };
+                let Some(dispatch) = page.dispatch() else {
+                    return;
+                };
+                if arrived.lock().unwrap().is_some()
+                    && (dispatch.protected || !dispatch.natural_origin())
+                {
+                    return;
                 }
                 let effective_after = request.operation.as_ref().and_then(|probe| probe.after.as_ref()).map(|after| {
                     if after.legacy_leave {
@@ -1489,11 +1719,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                 }
                 if partial
                     && effective_after.is_none()
-                    && classes
-                        .lock()
-                        .unwrap()
-                        .last()
-                        .is_some_and(|phase| phase.starts_with("control_dispatch protected=false"))
+                    && !dispatch.protected
                     && !seeded.swap(true, std::sync::atomic::Ordering::Relaxed)
                 {
                     // Insert before this natural request's immutable snapshot;
@@ -1540,19 +1766,14 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                             "the original case captures a fresh background comparison"
                         );
                     }
-                    let task = active_a_page.lock().unwrap().expect(
-                        "held natural request must belong to the observed current Control task",
-                    );
+                    let task = page.task;
                     held_pages.lock().unwrap().push((task, 0));
                     abort_window.store(true, std::sync::atomic::Ordering::Release);
                     record_b_trace(
                         &abort_trace,
                         b_clock,
                         "fixture",
-                        format!(
-                            "A_original_read_held page_task={:?}",
-                            *active_a_page.lock().unwrap()
-                        ),
+                        format!("A_original_read_held page_task={:?}", Some(page.task)),
                     );
                     let _ = signal.send(());
                     let _ = release.acquire().await;
@@ -1575,14 +1796,10 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                     let signal = resumed_signal.lock().unwrap().take();
                     if let Some(signal) = signal {
                         assert!(
-                            classes.lock().unwrap().last().is_some_and(
-                                |phase| phase.starts_with("control_dispatch protected=true")
-                            ),
+                            dispatch.protected,
                             "the paired background page must be protected from publication hints"
                         );
-                        let task = active_a_page.lock().unwrap().expect(
-                            "held paired resume must belong to the observed current Control task",
-                        );
+                        let task = page.task;
                         {
                             let mut pages = held_pages.lock().unwrap();
                             assert!(
@@ -1595,10 +1812,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                             &abort_trace,
                             b_clock,
                             "fixture",
-                            format!(
-                                "A_paired_resume_held page_task={:?}",
-                                *active_a_page.lock().unwrap()
-                            ),
+                            format!("A_paired_resume_held page_task={:?}", Some(page.task)),
                         );
                         let _ = signal.send(());
                         let _ = resumed_release.acquire().await;
@@ -1637,7 +1851,19 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
             AccountGroupOperation::Rename {
                 name: "After same-source hold".into(),
             },
-            |commit| commit(),
+            |commit| {
+                let task = held_pages
+                    .lock()
+                    .unwrap()
+                    .first()
+                    .expect("the exact natural page is held")
+                    .0;
+                assert!(
+                    control_pages.lock().unwrap().is_active(task),
+                    "the exact held natural task must be live at admission"
+                );
+                commit()
+            },
         )
         .unwrap();
     record_b_trace(&abort_trace, b_clock, "fixture", "A_admitted".into());
@@ -1821,7 +2047,32 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                     AccountGroupOperation::Rename {
                         name: "Other executor overtook background".into(),
                     },
-                    |commit| commit(),
+                    |commit| {
+                        if let Some(boundary) = &executor_boundary {
+                            let task = boundary
+                                .evidence
+                                .lock()
+                                .unwrap()
+                                .resume_page
+                                .expect("the exact executor resume is held");
+                            assert!(
+                                boundary.pages.lock().unwrap().is_active(task),
+                                "the exact executor resume must be live at B admission"
+                            );
+                        } else {
+                            let task = held_pages
+                                .lock()
+                                .unwrap()
+                                .last()
+                                .expect("the exact paired resume is held")
+                                .0;
+                            assert!(
+                                control_pages.lock().unwrap().is_active(task),
+                                "the exact paired resume must be live at B admission"
+                            );
+                        }
+                        commit()
+                    },
                 )
                 .unwrap();
             record_b_trace(&b_trace, b_clock, "fixture", "B_admitted".into());

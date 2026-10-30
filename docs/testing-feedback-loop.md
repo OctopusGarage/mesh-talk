@@ -615,13 +615,13 @@ The standalone `scripts/check-health.sh` still runs the full local gate before
 requesting review. Hosted workflows divide the same responsibilities so that
 independent checks run concurrently and heavy suites are not repeated by health.
 
-| Owner                                 | Checks                                                                                                                                                                                                                 |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-health.yml` platform jobs      | Complete frontend units, help and diagnostic/Python regressions on Linux/macOS/Windows; unit coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                                                                                      |
-| `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                  |
+| Owner                                 | Checks                                                                                                                                                                                                                                                                |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check-health.yml` platform jobs      | Complete frontend units, help and diagnostic/Python regressions on Linux/macOS/Windows; unit coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                |
+| `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                                                                 |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
-| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit and scheduled extended scenarios                                                                       |
-| Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                        |
+| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit and scheduled extended scenarios                                                                              |
+| Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                                                                       |
 
 Health is called by the UI workflow for every PR base and merge candidate, with
 its own weekly/manual entry points. Direct source and platform checks are required
@@ -793,7 +793,6 @@ in `owner_commands::tests` exercises this setup path. Shared-fixture changes kee
 the existing `desktop-session` selector over all owner-command tests and require
 their consumers to run; they do not change production discovery guarantees.
 
-
 To assess performance after deployment, compare at least several unchanged-scope
 runs with warm caches and a cold-cache run. Record time from PR update to all
 required checks passing, queue delay, slowest browser shard, native build/test
@@ -864,6 +863,17 @@ registered send/search wiring. Delivery timing spans distinguish card preparatio
 from restart fairness and transfer completion. These changes must retain timeout,
 resource-release, identity and immutable-byte assertions.
 
+Control scheduling fixtures bind each authenticated request nonce to its exact
+client task, immutable dispatch attributes and a non-owning lifetime witness.
+Live hold gates reject completed or cancelled tasks; the latest peer-level trace
+is diagnostic history, not evidence that a particular request is still active.
+Check the intended held task again inside the operation-admission callback, then
+retain the scenario's permitted preemption, continuation and receipt assertions.
+Natural origin, protection and wake hints remain independent attributes.
+Lifetime observation is scoped to synchronous test hooks and expires on return,
+abort or panic without calling fixture code during destruction. The delayed-server
+regression uses a real signed sibling publication to retire an older request and
+requires a fresh live request before measuring the existing receipt deadline.
 
 ## Measure feedback before tuning capacity
 

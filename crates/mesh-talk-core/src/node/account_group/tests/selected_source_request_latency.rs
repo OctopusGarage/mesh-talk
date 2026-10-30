@@ -1,4 +1,5 @@
 //! Explicit control receipts must not wait behind a held account directory page.
+use super::selected_same_source_control_latency::ControlTestPages;
 use super::*;
 use crate::node::account_sync_wire::AccountHistoryFrame;
 use std::time::Duration;
@@ -174,9 +175,9 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     assert!(reference.channel_members(group).is_empty());
 
     let received_wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let passive_dispatch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pages = Arc::new(Mutex::new(ControlTestPages::default()));
+    let held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let held_passive = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let natural_origin = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sender = reference.identity.public();
     *owner.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let received = received_wakes.clone();
@@ -190,9 +191,8 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     let diagnostic_started = std::time::Instant::now();
     let diagnostic_tail = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
     *owner.account_client_test_hook.lock().unwrap() = Some(Arc::new({
-        let passive = passive_dispatch.clone();
+        let pages = pages.clone();
         let other_public = other.identity.public();
-        let natural_origin = natural_origin.clone();
         let reference_public = reference.identity.public();
         let diagnostic_tail = diagnostic_tail.clone();
         move |peer, event| {
@@ -217,21 +217,7 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
             if peer != other_public {
                 return;
             }
-            if event.starts_with("control_turn_origin") {
-                natural_origin.store(
-                    event == "control_turn_origin resumed=false replacement=false",
-                    std::sync::atomic::Ordering::SeqCst,
-                );
-            }
-            if event.starts_with("control_dispatch") {
-                let eligible = if naturally_hinted {
-                    natural_origin.load(std::sync::atomic::Ordering::SeqCst)
-                        && event.ends_with("hint=true")
-                } else {
-                    event == "control_dispatch protected=false hint=false"
-                };
-                passive.store(eligible, std::sync::atomic::Ordering::SeqCst);
-            }
+            pages.lock().unwrap().observe(&event);
         }
     }));
     let release = Arc::new(Semaphore::new(0));
@@ -243,13 +229,15 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
     *other.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let release = release.clone();
         let checkpoints = checkpoints.clone();
-        let passive = passive_dispatch.clone();
+        let pages = pages.clone();
+        let held_task = held_task.clone();
         let held_passive = held_passive.clone();
         move |peer, frame| {
             let release = release.clone();
             let arrived = arrived.clone();
             let checkpoints = checkpoints.clone();
-            let passive = passive.clone();
+            let pages = pages.clone();
+            let held_task = held_task.clone();
             let held_passive = held_passive.clone();
             let exact_reference = exact_reference.clone();
             Box::pin(async move {
@@ -262,9 +250,18 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
                 let request = crate::node::account_documents::wire::DocumentRequest::decode(&body)
                     .expect("authenticated request must decode");
                 if request.domain == AccountDocumentDomain::GroupControl {
-                    if arrived.lock().unwrap().is_some()
-                        && !passive.load(std::sync::atomic::Ordering::SeqCst)
-                    {
+                    let Some(page) = pages.lock().unwrap().live_request(&request) else {
+                        return;
+                    };
+                    let Some(dispatch) = page.dispatch() else {
+                        return;
+                    };
+                    let eligible = if naturally_hinted {
+                        dispatch.natural_origin() && dispatch.hint
+                    } else {
+                        !dispatch.protected && !dispatch.hint
+                    };
+                    if arrived.lock().unwrap().is_some() && !eligible {
                         return;
                     }
                     checkpoints.lock().unwrap().push((
@@ -275,6 +272,7 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
                     ));
                     let signal = arrived.lock().unwrap().take();
                     if let Some(signal) = signal {
+                        *held_task.lock().unwrap() = Some(page.task);
                         held_passive.store(true, std::sync::atomic::Ordering::SeqCst);
                         let _ = signal.send(());
                         // SessionReady was sent; hold only the unselected sibling control response.
@@ -349,7 +347,17 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
             AccountGroupOperation::Rename {
                 name: "After directory hold".into(),
             },
-            |commit| commit(),
+            |commit| {
+                let task = held_task
+                    .lock()
+                    .unwrap()
+                    .expect("the exact passive request is held");
+                assert!(
+                    pages.lock().unwrap().is_active(task),
+                    "the exact passive Control task must be live at admission"
+                );
+                commit()
+            },
         )
         .unwrap();
     let converged = tokio::time::timeout(Duration::from_secs(8), async {

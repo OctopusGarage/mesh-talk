@@ -81,15 +81,20 @@ fn install_owner_group(owner: &Node, external: &Node, group: ConversationId) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page() {
-    Box::pin(run_queued_source(false)).await;
+    Box::pin(run_queued_source(false, false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newer_terminal_reuses_completed_background_before_stale_foreground_suffix() {
-    Box::pin(run_queued_source(true)).await;
+    Box::pin(run_queued_source(true, false)).await;
 }
 
-async fn run_queued_source(gate_terminal: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_source_ignores_retired_natural_request_before_capturing_live_resume() {
+    Box::pin(run_queued_source(true, true)).await;
+}
+
+async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let a = node(&dir.path().join("a"), &account);
@@ -196,7 +201,12 @@ async fn run_queued_source(gate_terminal: bool) {
     let first_tx = Arc::new(Mutex::new(Some(first_tx)));
     let (resume_tx, resume_rx) = oneshot::channel();
     let resume_tx = Arc::new(Mutex::new(Some(resume_tx)));
+    let resumed_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let b_partial = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let delayed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let retired_request_rejected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (rejected_tx, rejected_rx) = oneshot::channel();
+    let rejected_tx = Arc::new(Mutex::new(Some(rejected_tx)));
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saved_after = Arc::new(Mutex::new(None));
     let b_requests = Arc::new(Mutex::new(Vec::new()));
@@ -426,87 +436,116 @@ async fn run_queued_source(gate_terminal: bool) {
             }
         }
     }));
-    *a.account_session_test_hook.lock().unwrap() =
-        Some(Arc::new({
-            let expected = reference.identity.public();
+    *a.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let expected = reference.identity.public();
+        let release = release.clone();
+        let first_tx = first_tx.clone();
+        let resume_tx = resume_tx.clone();
+        let b_partial = b_partial.clone();
+        let a_requests = a_requests.clone();
+        let pages = pages.clone();
+        let b_unpaired_settled = b_unpaired_settled.clone();
+        let delayed_once = delayed_once.clone();
+        let publisher = Arc::downgrade(&b);
+        let resumed_task = resumed_task.clone();
+        let retired_request_rejected = retired_request_rejected.clone();
+        let rejected_tx = rejected_tx.clone();
+        move |peer, frame| {
+            let expected = expected.clone();
             let release = release.clone();
             let first_tx = first_tx.clone();
             let resume_tx = resume_tx.clone();
             let b_partial = b_partial.clone();
-            let origins = origins.clone();
             let a_requests = a_requests.clone();
             let pages = pages.clone();
             let b_unpaired_settled = b_unpaired_settled.clone();
-            move |peer, frame| {
-                let expected = expected.clone();
-                let release = release.clone();
-                let first_tx = first_tx.clone();
-                let resume_tx = resume_tx.clone();
-                let b_partial = b_partial.clone();
-                let origins = origins.clone();
-                let a_requests = a_requests.clone();
-                let pages = pages.clone();
-                let b_unpaired_settled = b_unpaired_settled.clone();
-                Box::pin(async move {
-                    if peer != expected {
-                        return;
+            let delayed_once = delayed_once.clone();
+            let publisher = publisher.clone();
+            let resumed_task = resumed_task.clone();
+            let retired_request_rejected = retired_request_rejected.clone();
+            let rejected_tx = rejected_tx.clone();
+            Box::pin(async move {
+                if peer != expected {
+                    return;
+                }
+                let AccountHistoryFrame::DocumentsRequest { body } = frame else {
+                    return;
+                };
+                let Some(request) = DocumentRequest::decode(&body)
+                    .filter(|request| request.domain == AccountDocumentDomain::GroupControl)
+                else {
+                    return;
+                };
+                let first_pending = first_tx.lock().unwrap().is_some();
+                if first_pending
+                    && (!b_unpaired_settled.load(std::sync::atomic::Ordering::Acquire)
+                        || !pages.lock().unwrap().request(&request).is_some_and(|page| {
+                            page.dispatch()
+                                .is_some_and(|dispatch| !dispatch.paired && !dispatch.protected)
+                        }))
+                {
+                    return;
+                }
+                let mut delayed_this_request = false;
+                if first_pending
+                    && delay_retired_request
+                    && !delayed_once.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    let page = pages.lock().unwrap().request(&request).unwrap();
+                    // A real authenticated publication cancels this exact old
+                    // client while its acknowledged server callback is delayed.
+                    // The head is one of the same 66 later published below.
+                    let publisher = publisher.upgrade().unwrap();
+                    crate::node::account_documents::sync::publish_legacy_control_page_for_test(
+                        &publisher, 1,
+                    );
+                    while pages.lock().unwrap().is_active(page.task) {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
                     }
-                    let AccountHistoryFrame::DocumentsRequest { body } = frame else {
-                        return;
-                    };
-                    let Some(request) = DocumentRequest::decode(&body)
-                        .filter(|request| request.domain == AccountDocumentDomain::GroupControl)
-                    else {
-                        return;
-                    };
-                    let first_pending = first_tx.lock().unwrap().is_some();
-                    if first_pending
-                        && (!b_unpaired_settled.load(std::sync::atomic::Ordering::Acquire)
-                            || !pages.lock().unwrap().request(&request).is_some_and(|page| {
-                                page.origin
-                                    .starts_with("control_task paired=false protected=false ")
-                            }))
-                    {
-                        return;
-                    }
-                    a_requests.lock().unwrap().push((
-                        request.version,
-                        effective_after(&request),
-                        request.known_digest,
-                        request.operation.as_ref().map(|probe| probe.known_digest),
-                    ));
-                    let first = first_tx.lock().unwrap().take();
-                    if let Some(first) = first {
-                        assert!(effective_after(&request).is_none());
-                        let _ = first.send(());
-                        let _ = release.acquire().await;
-                    } else if b_partial.load(std::sync::atomic::Ordering::Relaxed)
-                        && origins.lock().unwrap().iter().rev().take(2).any(|phase| {
-                            phase == "control_turn_origin resumed=true replacement=false"
-                        })
-                        && origins.lock().unwrap().last().is_some_and(|phase| {
-                            phase.starts_with("control_dispatch protected=true")
-                        })
-                    {
-                        let resumed = resume_tx.lock().unwrap().take();
-                        if let Some(resumed) = resumed {
-                            assert!(
-                                origins
-                                    .lock()
-                                    .unwrap()
-                                    .iter()
-                                    .rev()
-                                    .take(2)
-                                    .any(|phase| phase
-                                        == "control_turn_origin resumed=true replacement=false")
-                            );
-                            let _ = resumed.send(());
-                            let _ = release.acquire().await;
+                    delayed_this_request = true;
+                }
+                let Some(page) = pages.lock().unwrap().live_request(&request) else {
+                    if delayed_this_request {
+                        retired_request_rejected.store(true, std::sync::atomic::Ordering::Release);
+                        if let Some(rejected) = rejected_tx.lock().unwrap().take() {
+                            let _ = rejected.send(());
                         }
                     }
-                })
-            }
-        }));
+                    return;
+                };
+                assert!(
+                    !delayed_this_request,
+                    "a retired child must not establish the natural-read hold"
+                );
+                let Some(dispatch) = page.dispatch() else {
+                    return;
+                };
+                a_requests.lock().unwrap().push((
+                    request.version,
+                    effective_after(&request),
+                    request.known_digest,
+                    request.operation.as_ref().map(|probe| probe.known_digest),
+                ));
+                let first = first_tx.lock().unwrap().take();
+                if let Some(first) = first {
+                    assert!(effective_after(&request).is_none());
+                    let _ = first.send(());
+                    let _ = release.acquire().await;
+                } else if b_partial.load(std::sync::atomic::Ordering::Relaxed)
+                    && dispatch.resumed
+                    && !dispatch.replacement
+                    && dispatch.protected
+                {
+                    let resumed = resume_tx.lock().unwrap().take();
+                    if let Some(resumed) = resumed {
+                        *resumed_task.lock().unwrap() = Some(page.task);
+                        let _ = resumed.send(());
+                        let _ = release.acquire().await;
+                    }
+                }
+            })
+        }
+    }));
     *b.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let expected = reference.identity.public();
         let admitted = admitted.clone();
@@ -633,10 +672,20 @@ async fn run_queued_source(gate_terminal: bool) {
         }
     }));
     reference.account_sync_notify.notify_one();
-    super::cold_account_setup(first_rx)
+    super::cold_account_setup(async {
+        first_rx.await?;
+        if delay_retired_request { rejected_rx.await?; }
+        Ok::<(), oneshot::error::RecvError>(())
+    })
         .await
         .unwrap_or_else(|error| panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={} B_partial={}; pages={:?}", b_unpaired_settled.load(std::sync::atomic::Ordering::Acquire), b_partial.load(std::sync::atomic::Ordering::Acquire), pages.lock().unwrap().summary()))
         .unwrap();
+    if delay_retired_request {
+        assert!(
+            retired_request_rejected.load(std::sync::atomic::Ordering::Acquire),
+            "the delayed historical request is rejected before canonical publication"
+        );
+    }
     let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
     super::cold_account_setup(resume_rx)
         .await
@@ -681,7 +730,17 @@ async fn run_queued_source(gate_terminal: bool) {
             AccountGroupOperation::Rename {
                 name: "Queued foreground".into(),
             },
-            |commit| commit(),
+            |commit| {
+                let task = resumed_task
+                    .lock()
+                    .unwrap()
+                    .expect("the exact protected resume is held");
+                assert!(
+                    pages.lock().unwrap().is_active(task),
+                    "the exact held resume must be live at admission"
+                );
+                commit()
+            },
         )
         .unwrap();
     admitted.store(true, std::sync::atomic::Ordering::Release);
