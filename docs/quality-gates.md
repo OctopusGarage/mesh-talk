@@ -8,9 +8,16 @@ Keep implementation plans and transient verification logs outside the repository
 
 Prefer independently reviewable PRs with one feature or mechanism. Record the exact
 tested commit, executed commands, failing-baseline evidence, native runner links,
-and limitations in the PR. Before requesting review run `make test` and
-`CI=1 MT_TARGET_CLEAN=0 ./scripts/check-health.sh`. The full health gate builds
-frontend assets before Tauri compilation, including on a fresh checkout.
+and limitations in the PR. Follow the [validation stages](testing-feedback-loop.md#validation-stages-and-agent-responsibilities)
+for affected feedback and boundary evidence; comprehensive local preparation is
+optional, and current-candidate protected CI remains required before merge.
+Use the existing [PR preparation entry point](testing-feedback-loop.md#fast-pr-creation-and-optional-full-local-preparation)
+when comprehensive local evidence is needed. The full health gate builds frontend
+assets before Tauri compilation, including on a fresh checkout.
+
+[CI maintenance](ci-maintenance.md) owns efficiency and reliability decisions.
+Gate scope, evidence requirements and release acceptance remain owned here;
+an optimization proposal does not itself authorize reducing them.
 
 For each applicable scenario, assert externally observable outcomes. A test should
 fail with the old implementation or a deliberate incorrect mutation. Do not weaken

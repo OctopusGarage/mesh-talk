@@ -611,8 +611,12 @@ settings; browser timeouts must not be masked by a retry after idle sleep.
 
 ## CI ownership and browser sharding
 
-The standalone `scripts/check-health.sh` still runs the full local gate before
-requesting review. Hosted workflows divide the same responsibilities so that
+For decisions about adding, reusing, splitting or retiring CI work, follow
+[CI maintenance](ci-maintenance.md). This section owns the current execution
+arrangement; the measurement section below owns timing commands and interpretation.
+
+The standalone `scripts/check-health.sh` runs the full local gate when comprehensive
+local verification is requested. Hosted workflows divide the responsibilities so that
 independent checks run concurrently and heavy suites are not repeated by health.
 
 | Owner                                 | Checks                                                                                                                                                                                                                                                                |
