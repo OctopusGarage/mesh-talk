@@ -339,6 +339,410 @@ fn apply_records(file: &mut FavoritesFile, records: Vec<FavoriteInfo>) -> Result
 #[cfg(test)]
 mod batch_tests {
     use super::*;
+    use std::time::Duration;
+    use tauri::Manager;
+
+    struct CommandFixture {
+        root: tempfile::TempDir,
+        profile: tempfile::TempDir,
+        host: tauri::App<tauri::test::MockRuntime>,
+        owner: String,
+    }
+
+    fn command_fixture() -> CommandFixture {
+        // Exercise the command's real path selection without sharing a profile
+        // with another test or any installed account. TempDir owns cleanup.
+        let accounts = crate::data_dir().join("accounts");
+        std::fs::create_dir_all(&accounts).unwrap();
+        let profile = tempfile::Builder::new()
+            .prefix("favorites-test-")
+            .tempdir_in(accounts)
+            .unwrap();
+        let owner = profile
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let (root, app, mut user) = session_fixture();
+        user.user_id = owner.clone();
+        app.session()
+            .set("command-session".into(), user, "pw".into());
+        let host = tauri::test::mock_builder()
+            .manage(app)
+            .manage(FavoritesState::default())
+            .manage(crate::chat_commands::NodeState::empty())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        CommandFixture {
+            root,
+            profile,
+            host,
+            owner,
+        }
+    }
+
+    async fn install_command_runtime(fixture: &CommandFixture) -> String {
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            fixture.root.path(),
+            &fixture.owner,
+            "Owner",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let account = runtime.account_id().to_owned();
+        *fixture
+            .host
+            .state::<crate::chat_commands::NodeState>()
+            .0
+            .write()
+            .await = Some(runtime);
+        account
+    }
+
+    struct BlockedFavoritesLane {
+        release: std::sync::mpsc::Sender<()>,
+        holder: std::thread::JoinHandle<bool>,
+    }
+
+    impl BlockedFavoritesLane {
+        fn hold(state: &FavoritesState) -> Self {
+            let state = state.clone();
+            let (entered, started) = std::sync::mpsc::channel();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _guard = state.0.lock().unwrap();
+                entered.send(()).unwrap();
+                // A synchronous-lock regression must release the test scheduler
+                // even when its async timeout can no longer be polled.
+                blocked.recv_timeout(Duration::from_secs(5)).is_ok()
+            });
+            started.recv_timeout(Duration::from_secs(2)).unwrap();
+            Self { release, holder }
+        }
+
+        fn release(self) -> bool {
+            let _ = self.release.send(());
+            self.holder.join().unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn favorite_commands_preserve_independent_fields_and_prune_only_empty_records() {
+        let CommandFixture {
+            profile,
+            host,
+            owner,
+            root: _root,
+        } = command_fixture();
+        let id = "a".repeat(64);
+        set_favorite(host.state(), host.state(), owner.clone(), id.clone(), true)
+            .await
+            .unwrap();
+        set_alias(
+            host.state(),
+            host.state(),
+            owner.clone(),
+            id.clone(),
+            Some("  Alice  ".into()),
+        )
+        .await
+        .unwrap();
+        set_channel_hidden(host.state(), host.state(), owner.clone(), id.clone(), true)
+            .await
+            .unwrap();
+        set_favorite(host.state(), host.state(), owner.clone(), id.clone(), false)
+            .await
+            .unwrap();
+        let rows = get_favorites(host.state(), host.state(), owner.clone())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert!(!rows[0].pinned);
+        assert_eq!(rows[0].custom_alias.as_deref(), Some("Alice"));
+        assert!(rows[0].hidden);
+        let stored: FavoritesFile =
+            config_store::read_account(&profile.path().join(FAVORITES_FILE));
+        assert_eq!(stored.contacts[&id].custom_alias.as_deref(), Some("Alice"));
+
+        set_alias(
+            host.state(),
+            host.state(),
+            owner.clone(),
+            id.clone(),
+            Some(" \t ".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_favorites(host.state(), host.state(), owner.clone())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        set_channel_hidden(host.state(), host.state(), owner.clone(), id, false)
+            .await
+            .unwrap();
+        assert!(
+            get_favorites(host.state(), host.state(), owner)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let stored: FavoritesFile =
+            config_store::read_account(&profile.path().join(FAVORITES_FILE));
+        assert!(stored.contacts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_favorite_commands_yield_and_reject_retired_authority() {
+        let CommandFixture {
+            profile,
+            host,
+            owner,
+            root: _root,
+        } = command_fixture();
+        let id = "b".repeat(64);
+        set_favorite(host.state(), host.state(), owner.clone(), id.clone(), true)
+            .await
+            .unwrap();
+        let before = std::fs::read(profile.path().join(FAVORITES_FILE)).unwrap();
+        // Both reads and edits must yield while waiting for favorites, release
+        // session authority, and reject same-owner relogin or lock revision changes.
+        for (read, replace_session) in [(true, false), (false, false), (true, true), (false, true)]
+        {
+            let lane = BlockedFavoritesLane::hold(&host.state::<FavoritesState>());
+            let operation = async {
+                if read {
+                    get_favorites(host.state(), host.state(), owner.clone())
+                        .await
+                        .map(|_| ())
+                } else {
+                    set_alias(
+                        host.state(),
+                        host.state(),
+                        owner.clone(),
+                        id.clone(),
+                        Some("stale".into()),
+                    )
+                    .await
+                }
+            };
+            tokio::pin!(operation);
+            let initial_result =
+                tokio::time::timeout(Duration::from_millis(50), &mut operation).await;
+            let pending = initial_result.is_err();
+            let app = host.state::<AppState>().inner().clone();
+            let (observed, observation) = std::sync::mpsc::channel();
+            let observer = std::thread::spawn(move || {
+                if replace_session {
+                    let user = app.session().get().unwrap().user;
+                    app.session().set("replacement".into(), user, "pw".into());
+                } else {
+                    app.app_lock().clear();
+                }
+                let _ = observed.send(());
+            });
+            let responsive = observation.recv_timeout(Duration::from_millis(300)).is_ok();
+            let released = lane.release();
+            let result = match initial_result {
+                Ok(result) => result,
+                Err(_) => tokio::time::timeout(Duration::from_secs(2), operation)
+                    .await
+                    .expect("favorites command must finish after lane release"),
+            };
+            observer.join().unwrap();
+            assert!(released, "the blocked lane needed its emergency release");
+            assert!(
+                pending,
+                "the runtime must poll timers while favorites are busy"
+            );
+            assert!(responsive, "session retirement must not wait for favorites");
+            assert!(matches!(result, Err(CommandError::Authorization(_))));
+            assert_eq!(
+                std::fs::read(profile.path().join(FAVORITES_FILE)).unwrap(),
+                before
+            );
+        }
+        assert!(matches!(
+            get_favorites(host.state(), host.state(), "another-owner".into()).await,
+            Err(CommandError::Authorization(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn linked_favorite_command_checks_account_and_preserves_newer_local_edits() {
+        let fixture = command_fixture();
+        let account = install_command_runtime(&fixture).await;
+        let CommandFixture {
+            profile,
+            host,
+            owner,
+            root: _root,
+        } = fixture;
+        let local_id = "c".repeat(64);
+        set_alias(
+            host.state(),
+            host.state(),
+            owner.clone(),
+            local_id.clone(),
+            Some("Local".into()),
+        )
+        .await
+        .unwrap();
+        let path = profile.path().join(FAVORITES_FILE);
+        let before = std::fs::read(&path).unwrap();
+        let imported_id = "d".repeat(32);
+        let records = || {
+            vec![FavoriteInfo {
+                id: imported_id.clone(),
+                pinned: true,
+                custom_alias: Some("  Remote  ".into()),
+                hidden: true,
+            }]
+        };
+        let expected = HashMap::from([(imported_id.clone(), None)]);
+        let wrong_account = set_favorite_records(
+            host.state(),
+            host.state(),
+            host.state(),
+            owner.clone(),
+            "another-account".into(),
+            records(),
+            expected.clone(),
+        )
+        .await;
+        let after_wrong_account = std::fs::read(&path).unwrap();
+        let imported = set_favorite_records(
+            host.state(),
+            host.state(),
+            host.state(),
+            owner.clone(),
+            account.clone(),
+            records(),
+            expected.clone(),
+        )
+        .await;
+        let stored: FavoritesFile = config_store::read_account(&path);
+        let after_import = std::fs::read(&path).unwrap();
+        let stale_expected = set_favorite_records(
+            host.state(),
+            host.state(),
+            host.state(),
+            owner,
+            account,
+            records(),
+            expected,
+        )
+        .await;
+        let after_stale_expected = std::fs::read(&path).unwrap();
+        host.state::<crate::chat_commands::NodeState>()
+            .0
+            .write()
+            .await
+            .take()
+            .unwrap()
+            .stop()
+            .await;
+
+        assert!(matches!(wrong_account, Err(CommandError::Authorization(_))));
+        assert_eq!(after_wrong_account, before);
+        imported.unwrap();
+        assert_eq!(stored.contacts.len(), 2);
+        assert_eq!(
+            stored.contacts[&local_id].custom_alias.as_deref(),
+            Some("Local")
+        );
+        assert_eq!(
+            stored.contacts[&imported_id],
+            FavoriteRecord {
+                pinned: true,
+                custom_alias: Some("Remote".into()),
+                hidden: true,
+            }
+        );
+        assert!(matches!(stale_expected, Err(CommandError::Internal(_))));
+        assert_eq!(after_stale_expected, after_import);
+    }
+
+    #[tokio::test]
+    async fn cancelled_linked_favorite_command_retains_runtime_until_worker_rejects_retirement() {
+        let fixture = command_fixture();
+        let account = install_command_runtime(&fixture).await;
+        let CommandFixture {
+            profile,
+            host,
+            owner,
+            root: _root,
+        } = fixture;
+        let node = host.state::<crate::chat_commands::NodeState>();
+        let lane = BlockedFavoritesLane::hold(&host.state::<FavoritesState>());
+        let id = "e".repeat(32);
+        let mut operation = Box::pin(set_favorite_records(
+            host.state(),
+            host.state(),
+            host.state(),
+            owner,
+            account,
+            vec![FavoriteInfo {
+                id: id.clone(),
+                pinned: true,
+                custom_alias: None,
+                hidden: false,
+            }],
+            HashMap::from([(id, None)]),
+        ));
+        let pending = tokio::time::timeout(Duration::from_millis(50), &mut operation)
+            .await
+            .is_err();
+        drop(operation);
+        let observation_available = node.0.try_read().is_ok();
+        let retirement_blocked = node.0.try_write().is_err();
+        let app = host.state::<AppState>().inner().clone();
+        let (retired, retirement) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            app.app_lock().clear();
+            let _ = retired.send(());
+        });
+        let responsive = retirement.recv_timeout(Duration::from_millis(300)).is_ok();
+        let released = lane.release();
+        let runtime = tokio::time::timeout(Duration::from_secs(2), node.0.write())
+            .await
+            .unwrap()
+            .take()
+            .unwrap();
+        observer.join().unwrap();
+        runtime.stop().await;
+
+        assert!(released, "the blocked lane needed its emergency release");
+        assert!(pending, "the runtime must poll timers during linked import");
+        assert!(
+            observation_available,
+            "an import must permit unrelated runtime observations"
+        );
+        assert!(
+            retirement_blocked,
+            "cancelling IPC must not release the worker's runtime lease"
+        );
+        assert!(
+            responsive,
+            "session retirement must not wait for linked import"
+        );
+        assert!(
+            !profile.path().join(FAVORITES_FILE).exists(),
+            "retired import must not publish"
+        );
+    }
 
     fn session_fixture() -> (tempfile::TempDir, AppState, crate::services::user::User) {
         let root = tempfile::tempdir().unwrap();
