@@ -643,33 +643,22 @@ async fn reference_message_action(recall: bool) {
     }
     let external_runtime = external_runtime.expect("the external peer owns its runtime");
     source.publish_account_group_access(&mut None);
-    pull_reference_action_control(&reference, &source, addresses[0], group).await;
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
+            super::has_account_group_operation_support(
+                &reference,
+                &source,
+                Some(AccountGroupOperationKind::Text),
+            ) && super::has_account_group_operation_support(&source, &reference, None)
+        }),
+        pull_reference_action_control(&reference, &source, addresses[0], group),
+    )
+    .await;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
     );
     assert!(reference.channel_members(group).is_empty());
-    wait_action_fixture(
-        || {
-            reference
-                .group_operation_versions
-                .lock()
-                .unwrap()
-                .get(&source.user_id())
-                .is_some_and(|support| {
-                    support.public == source.identity.public()
-                        && support.kinds & AccountGroupOperationKind::Text.capability_bit() != 0
-                })
-                && source
-                    .group_operation_versions
-                    .lock()
-                    .unwrap()
-                    .get(&reference.user_id())
-                    .is_some_and(|support| support.public == reference.identity.public())
-        },
-        "real Noise capability negotiation must precede explicit send admission",
-    )
-    .await;
 
     let send_id = reference
         .new_account_group_operation_id(&account.account_id())

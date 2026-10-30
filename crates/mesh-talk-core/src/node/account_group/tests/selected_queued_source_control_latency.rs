@@ -149,23 +149,9 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     }
     a.publish_account_group_access(&mut None);
     b.publish_account_group_access(&mut None);
-    super::message_action_reference::pull_reference_action_control(
-        &reference,
-        &a,
-        endpoints[0],
-        group_a,
-    )
-    .await;
-    super::message_action_reference::pull_reference_action_control(
-        &reference,
-        &b,
-        endpoints[1],
-        group_b,
-    )
-    .await;
-    super::cold_account_setup(async {
-        loop {
-            if [
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
+            [
                 (&reference, &a),
                 (&a, &reference),
                 (&reference, &b),
@@ -173,22 +159,31 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             ]
             .into_iter()
             .all(|(node, peer)| {
-                node.group_operation_versions
-                    .lock()
-                    .unwrap()
-                    .get(&peer.user_id())
-                    .is_some_and(|proof| {
-                        proof.public == peer.identity.public()
-                            && proof.kinds & AccountGroupOperationKind::Rename.capability_bit() != 0
-                    })
-            }) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("cold real capabilities must precede queued-source admission");
+                super::has_account_group_operation_support(
+                    node,
+                    peer,
+                    Some(AccountGroupOperationKind::Rename),
+                )
+            })
+        }),
+        async {
+            super::message_action_reference::pull_reference_action_control(
+                &reference,
+                &a,
+                endpoints[0],
+                group_a,
+            )
+            .await;
+            super::message_action_reference::pull_reference_action_control(
+                &reference,
+                &b,
+                endpoints[1],
+                group_b,
+            )
+            .await;
+        },
+    )
+    .await;
     assert_eq!(
         reference.account_group_access(group_b).unwrap().role,
         AccountGroupRole::Owner

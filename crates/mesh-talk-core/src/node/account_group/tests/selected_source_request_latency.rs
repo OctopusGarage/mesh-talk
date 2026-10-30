@@ -125,49 +125,48 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
         }
     }
     owner.publish_account_group_access(&mut None);
-    super::message_action_reference::pull_reference_action_control(
-        &reference,
-        &owner,
-        addresses[0],
-        group,
+    super::cold_account_control_setup(
+        async {
+            if naturally_hinted {
+                // These servers intentionally have no producers. Drive each
+                // existing setup direction before observing its real capability.
+                for (node, source) in [(&reference, &owner), (&owner, &reference)] {
+                    let peer = node.routing_peer(&source.user_id()).unwrap();
+                    let mut cursor =
+                        crate::node::account_documents::sync::DocumentSyncCursor::control();
+                    node.pull_account_documents_page(&peer, &mut cursor)
+                        .await
+                        .unwrap();
+                    assert!(
+                        cursor.error.is_none() && !cursor.requires_upgrade,
+                        "cold capability setup must not hide a protocol rejection"
+                    );
+                }
+            }
+            super::observe_account_fixture_condition(|| {
+                super::has_account_group_operation_support(
+                    &reference,
+                    &owner,
+                    Some(AccountGroupOperationKind::Rename),
+                ) && super::has_account_group_operation_support(
+                    &owner,
+                    &reference,
+                    Some(AccountGroupOperationKind::Rename),
+                )
+            })
+            .await;
+        },
+        async {
+            super::message_action_reference::pull_reference_action_control(
+                &reference,
+                &owner,
+                addresses[0],
+                group,
+            )
+            .await;
+        },
     )
     .await;
-    if naturally_hinted {
-        let peer = owner.routing_peer(&reference.user_id()).unwrap();
-        owner
-            .pull_account_documents_page(
-                &peer,
-                &mut crate::node::account_documents::sync::DocumentSyncCursor::control(),
-            )
-            .await
-            .unwrap();
-    }
-    super::cold_account_setup(async {
-        loop {
-            let ready = [&owner, &reference].into_iter().all(|node| {
-                let peer = if node.user_id() == owner.user_id() {
-                    &reference
-                } else {
-                    &owner
-                };
-                node.group_operation_versions
-                    .lock()
-                    .unwrap()
-                    .get(&peer.user_id())
-                    .is_some_and(|support| {
-                        support.public == peer.identity.public()
-                            && support.kinds & AccountGroupOperationKind::Rename.capability_bit()
-                                != 0
-                    })
-            });
-            if ready {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("both certified devices must bootstrap real operation support");
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner
@@ -458,19 +457,22 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
         "selected-request before_teardown errors={:?}",
         error_snapshot()
     );
-    for node in [&owner, &reference, &external, &other] {
-        node.runtime_work.close();
-    }
-    servers.shutdown().await;
-    for server in inbound_servers {
-        server.abort();
-        let _ = server.await;
-    }
-    for node in [&owner, &reference, &external, &other] {
-        tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
-            .await
-            .expect("the released fixture must drain its owned work");
-    }
+    let sync_snapshot = super::capture_account_sync_before_cleanup(&owner, async {
+        for node in [&owner, &reference, &external, &other] {
+            node.runtime_work.close();
+        }
+        servers.shutdown().await;
+        for server in inbound_servers {
+            server.abort();
+            let _ = server.await;
+        }
+        for node in [&owner, &reference, &external, &other] {
+            tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
+                .await
+                .expect("the released fixture must drain its owned work");
+        }
+    })
+    .await;
     eprintln!(
         "selected-request after_teardown errors={:?} bounded_peer_domain_outcomes={:?}",
         error_snapshot(),
@@ -505,13 +507,7 @@ async fn incoming_request_over_held_control(naturally_hinted: bool) {
         preserved_checkpoint,
         "preemption must retain the exact protocol scope, cursor and digests"
     );
-    assert!(
-        owner
-            .device_sync_status()
-            .iter()
-            .all(|status| status.document_error.is_none()),
-        "owned preemption is not a network failure"
-    );
+    super::assert_no_account_document_errors(&sync_snapshot);
     assert!(
         source_while_held
             .as_ref()

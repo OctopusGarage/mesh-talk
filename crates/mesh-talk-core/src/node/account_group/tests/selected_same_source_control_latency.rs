@@ -1347,53 +1347,46 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
         });
     }
     owner.publish_account_group_access(&mut None);
-    super::message_action_reference::pull_reference_action_control(
-        &reference,
-        &owner,
-        endpoints[0],
-        group,
-    )
-    .await;
     if let Some(other) = &other {
         other.publish_account_group_access(&mut None);
-        super::message_action_reference::pull_reference_action_control(
-            &reference,
-            other,
-            endpoints[3],
-            other_group,
-        )
-        .await;
     }
-    super::cold_account_setup(async {
-        loop {
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
             let mut required = vec![(&owner, &reference), (&reference, &owner)];
             if let Some(other) = &other {
                 required.extend([(other, &reference), (&reference, other)]);
             }
-            let ready = required.into_iter().all(|(node, peer)| {
-                let capabilities = node.group_operation_versions
-                    .lock()
-                    .unwrap()
-                    .get(&peer.user_id())
-                    .is_some_and(|support| {
-                        support.public == peer.identity.public()
-                            && support.kinds & AccountGroupOperationKind::Rename.capability_bit()
-                                != 0
-                    });
-                let documents_settled = node.device_sync_status().into_iter().any(|status| {
+            required.into_iter().all(|(node, peer)| {
+                super::has_account_group_operation_support(
+                    node,
+                    peer,
+                    Some(AccountGroupOperationKind::Rename),
+                ) && node.device_sync_status().into_iter().any(|status| {
                     status.device_id == peer.user_id()
                         && status.document_phase == crate::node::SyncPhase::UpToDate
-                });
-                capabilities && documents_settled
-            });
-            if ready {
-                break;
+                })
+            })
+        }),
+        async {
+            super::message_action_reference::pull_reference_action_control(
+                &reference,
+                &owner,
+                endpoints[0],
+                group,
+            )
+            .await;
+            if let Some(other) = &other {
+                super::message_action_reference::pull_reference_action_control(
+                    &reference,
+                    other,
+                    endpoints[3],
+                    other_group,
+                )
+                .await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("real capabilities and cold document comparisons must settle before the natural-read fault is installed");
+        },
+    )
+    .await;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner

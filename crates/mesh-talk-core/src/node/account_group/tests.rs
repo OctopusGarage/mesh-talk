@@ -28,6 +28,64 @@ async fn cold_account_setup<T>(
     tokio::time::timeout(std::time::Duration::from_secs(30), future).await
 }
 
+fn has_account_group_operation_support(
+    node: &Node,
+    peer: &Node,
+    kind: Option<AccountGroupOperationKind>,
+) -> bool {
+    node.group_operation_versions
+        .lock()
+        .unwrap()
+        .get(&peer.user_id())
+        .is_some_and(|support| {
+            support.public == peer.identity.public()
+                && kind.is_none_or(|kind| support.kinds & kind.capability_bit() != 0)
+        })
+}
+
+// Callers include explicit setup work, if any, and this observation in the same
+// cold budget. This observer neither starts producers nor drives extra requests.
+async fn observe_account_fixture_condition(mut ready: impl FnMut() -> bool) {
+    while !ready() {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+fn cold_account_control_setup(
+    readiness: impl std::future::Future<Output = ()>,
+    role_pages: impl std::future::Future<Output = ()>,
+) -> impl std::future::Future<Output = ()> {
+    // Box before constructing the returned future: callers must not retain both
+    // large protocol states inline even while neither future has been polled.
+    let readiness = Box::pin(readiness);
+    let role_pages = Box::pin(role_pages);
+    async move {
+        cold_account_setup(readiness)
+            .await
+            .expect("real capabilities and required cold state must precede role-page bootstrap");
+        role_pages.await;
+    }
+}
+
+// Keep cleanup completion separate from the health evidence it can invalidate.
+async fn capture_account_sync_before_cleanup(
+    node: &Node,
+    cleanup: impl std::future::Future<Output = ()>,
+) -> Vec<crate::node::DeviceSyncStatus> {
+    let snapshot = node.device_sync_status();
+    cleanup.await;
+    snapshot
+}
+
+fn assert_no_account_document_errors(snapshot: &[crate::node::DeviceSyncStatus]) {
+    assert!(
+        snapshot
+            .iter()
+            .all(|status| status.document_error.is_none()),
+        "owned preemption is not a network failure: {snapshot:?}"
+    );
+}
+
 fn node(path: &Path, account: &Account) -> Arc<Node> {
     let (dm, _) = mpsc::unbounded_channel();
     let (channel, _) = mpsc::unbounded_channel();
