@@ -1381,18 +1381,7 @@ impl Node {
             return Err(NodeError::Authorization("invalid signed file card".into()));
         }
         if let Some(peer) = &record.peer_account {
-            let own = self.account_id();
-            let author =
-                if self.identity.public().ed25519_pub == *payload.proof.author.ed25519_pub()
-                    || self.linked_devices().iter().any(|device| {
-                        device.public.ed25519_pub == *payload.proof.author.ed25519_pub()
-                    })
-                {
-                    Some(own)
-                } else {
-                    self.historical_author(payload.proof.author.ed25519_pub())
-                        .and_then(|proof| proof.account_id())
-                };
+            let author = self.file_message_row_author_account(&row, Some(&payload.proof))?;
             if author
                 .as_deref()
                 .map(|author| self.private_dm_message_recalled(peer, event_id, author))
@@ -1655,11 +1644,7 @@ impl Node {
                         .expect("proofs mutex")
                         .get(&row.event_id)?,
                 };
-                let author = self
-                    .file_message_identities
-                    .lock()
-                    .expect("identities mutex")
-                    .row_author_account(&row)?;
+                let author = self.file_message_row_author_account(&row, proof.as_ref())?;
                 if self.message_recalled_selected(
                     row.conversation,
                     row.event_id,
@@ -1724,11 +1709,7 @@ impl Node {
                 else {
                     continue;
                 };
-                let author = self
-                    .file_message_identities
-                    .lock()
-                    .expect("identities mutex")
-                    .row_author_account(&row)?;
+                let author = self.file_message_row_author_account(&row, None)?;
                 if self.message_recalled_selected(
                     row.conversation,
                     row.event_id,
@@ -2283,6 +2264,11 @@ impl Node {
             })
             .collect();
         if policy.history {
+            for record in &admitted {
+                if let HistoryRecord::Direct(record) = record {
+                    self.import_account_backfill(std::slice::from_ref(record))?;
+                }
+            }
             for record in &admitted {
                 if let HistoryRecord::Channel(record) = record {
                     self.record_private_channel_plaintext(&super::received_log::ReceivedEntry {

@@ -288,6 +288,67 @@ impl FileMessageIdentities {
 }
 
 impl Node {
+    /// Resolve one authenticated manifest author. Supplemental logical identity
+    /// is optional for deployed/personal cards; their retained signed original
+    /// and certified device binding remain valid evidence for recall checks.
+    pub(in crate::node) fn file_message_row_author_account(
+        &self,
+        row: &ReceivedEntry,
+        original: Option<&Event>,
+    ) -> Result<Option<String>, LogError> {
+        if let Some(account) = self
+            .file_message_identities
+            .lock()
+            .expect("file identity mutex")
+            .row_author_account(row)?
+        {
+            return Ok(Some(account));
+        }
+        let retained;
+        let original = match original {
+            Some(original) => Some(original),
+            None => {
+                let selected = self.log.lock().expect("log mutex").get(&row.event_id)?;
+                retained = match selected {
+                    Some(event) => Some(event),
+                    None => self
+                        .account_file_proofs
+                        .lock()
+                        .expect("file proofs mutex")
+                        .get(&row.event_id)?,
+                };
+                retained.as_ref()
+            }
+        };
+        let Some(original) = original else {
+            return Ok(None);
+        };
+        if super::files::eligible_manifest_row(row, Some(original), None).is_none() {
+            return Ok(None);
+        }
+        let own = self.account_id();
+        if super::files::is_personal_file_proof(original)
+            && row.conversation != account_conversation_id(&own, &own)
+        {
+            return Ok(None);
+        }
+        let author = original.author.ed25519_pub();
+        if author == &self.identity.public().ed25519_pub
+            || self.linked_devices().iter().any(|device| {
+                &device.public.ed25519_pub == author
+                    && device.certificate.verify()
+                    && device.certificate.account_id() == own
+                    && device.certificate.device_ed25519_pub == device.public.ed25519_pub
+            })
+        {
+            return Ok(Some(own));
+        }
+        Ok(self
+            .historical_author(author)
+            .filter(|proof| proof.valid_presence() && !proof.post_office)
+            .and_then(|proof| proof.account_id()))
+    }
+
     pub(in crate::node) fn has_file_message_identity(
         &self,
         host: ConversationId,
