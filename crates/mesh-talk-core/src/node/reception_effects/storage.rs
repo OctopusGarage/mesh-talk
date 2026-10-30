@@ -130,7 +130,7 @@ pub(crate) fn install_on(
 
 impl ReceptionEffects {
     pub(crate) fn open(profile: Arc<ProfileStorage>) -> Result<Self, LogError> {
-        let account=profile.database().transaction(|c| {
+        let (account, owner)=profile.database().transaction(|c| {
             let present: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='reception_stream')",[],|row|row.get(0))?;
             if !present {
                 let partial: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('reception_identities','reception_pending','reception_consumers'))",[],|row|row.get(0))?;
@@ -141,23 +141,33 @@ impl ReceptionEffects {
             let account=active_account_on(c)?;
             ensure_stream_on(c,&account)?;
             state_on(c,&account)?;
-            Ok(account)
+            let loaded=crate::identity::account::AccountPublic {ed25519_pub:account};
+            let owner=match event_ownership::capture_event_owner_on(c,&loaded) {
+                Ok(owner)=>Some(owner),
+                Err(LogError::StaleCursor)=>None,
+                Err(error)=>return Err(error),
+            };
+            Ok((account,owner))
         })?;
         Ok(Self {
             profile,
             account,
+            owner,
             #[cfg(test)]
             body_reads: std::sync::atomic::AtomicUsize::new(0),
         })
     }
+    pub(super) fn state_on(&self, c: &Connection) -> Result<StreamState, LogError> {
+        let owner = self.owner.as_ref().ok_or(LogError::StaleCursor)?;
+        event_ownership::check_event_owner_on(c, owner)?;
+        state_on(c, &self.account)
+    }
     pub(crate) fn head(&self) -> Result<ReceptionCursor, LogError> {
-        self.profile
-            .database()
-            .read(|c| Ok(state_on(c, &self.account)?.head))
+        self.profile.database().read(|c| Ok(self.state_on(c)?.head))
     }
     pub(crate) fn oldest(&self) -> Result<ReceptionCursor, LogError> {
         self.profile.database().read(|c| {
-            let state = state_on(c, &self.account)?;
+            let state = self.state_on(c)?;
             Ok(ReceptionCursor {
                 sequence: state.retired,
                 ..state.head
@@ -170,7 +180,7 @@ impl ReceptionEffects {
         consumer: ReceptionConsumer,
     ) -> Result<Option<ReceptionCursor>, LogError> {
         self.profile.database().read(|c| {
-            let state = state_on(c, &self.account)?;
+            let state = self.state_on(c)?;
             let sequence: Option<i64> = c
                 .query_row(
                     "SELECT acknowledged FROM reception_consumers WHERE account=?1 AND kind=?2",
@@ -196,7 +206,7 @@ impl ReceptionEffects {
         baseline: ReceptionCursor,
     ) -> Result<ReceptionCursor, LogError> {
         self.profile.database().transaction(|c| {
-            let state = state_on(c, &self.account)?;
+            let state = self.state_on(c)?;
             if baseline.epoch != state.head.epoch {
                 return Err(LogError::StaleCursor);
             }
@@ -234,7 +244,7 @@ impl ReceptionEffects {
         next: ReceptionCursor,
     ) -> Result<(), LogError> {
         self.profile.database().transaction(|c| {
-            let state = state_on(c,&self.account)?;
+            let state = self.state_on(c)?;
             validate_cursor(&state, expected)?;
             validate_cursor(&state, next)?;
             if next.sequence < expected.sequence {
@@ -261,7 +271,7 @@ impl ReceptionEffects {
             return Err(LogError::InvalidPageBudget);
         }
         self.profile.database().transaction(|c| {
-            state_on(c,&self.account)?;
+            self.state_on(c)?;
             let floor: Option<i64> = c.query_row("SELECT MIN(acknowledged) FROM reception_consumers WHERE account=?1",[self.account.as_slice()],|row|row.get(0))?;
             let Some(floor) = floor else { return Ok(0) };
             let sequences = {
