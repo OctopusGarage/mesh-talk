@@ -206,6 +206,7 @@ impl ReceivedStore {
         }
         self.check_write()?;
         let inserted = self.repository.profile.database().transaction(|c| {
+            self.repository.profile.check_participant_account_on(c)?;
             Self::install_received_on(
                 c,
                 entry,
@@ -248,6 +249,7 @@ impl ReceivedStore {
         }
         self.check_write()?;
         let inserted = self.repository.profile.database().transaction(|c| {
+            self.repository.profile.check_participant_account_on(c)?;
             let stored;
             let original = match original {
                 Some(original) => original,

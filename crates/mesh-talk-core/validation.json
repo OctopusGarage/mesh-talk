@@ -29,6 +29,7 @@
     {
       "id": "core-reception-effects",
       "paths": [
+        "crates/mesh-talk-core/src/storage/profile/context.rs",
         "crates/mesh-talk-core/src/node/reception_effects/",
         "crates/mesh-talk-core/src/node/runtime_delivery.rs",
         "crates/mesh-talk-core/src/node/runtime_startup.rs",
@@ -43,7 +44,8 @@
           "filters": [
             "node::reception_effects::tests::",
             "node::runtime_delivery::tests::",
-            "node::host_reception::tests::"
+            "node::host_reception::tests::",
+            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace"
           ]
         }
       ],
