@@ -164,6 +164,10 @@ adoption remain separate. See [storage ownership and budgets](ARCHITECTURE.md#st
 
 `core/storage/profile/participant.rs` owns participant control metadata, explicit
 source locators and recoverable account-adoption intent on the shared connection.
+Its `participant/event_ownership.rs` owner commits account-qualified event ordinal
+ranges and a monotonic captured-owner generation with adoption; receive schedulers
+derive indexed namespace selectors from those exact ranges rather than inferring
+ownership from conversation IDs or replacing an older account's pending work.
 `core/node/delivery_runtime.rs` remains the account-adoption decision owner and
 coordinates its existing delivery journal with that intent.
 `core/storage/profile/participant_events.rs` owns independent event-source

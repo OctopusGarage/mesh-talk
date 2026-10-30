@@ -202,6 +202,79 @@ fn open_profile(
 }
 
 #[test]
+fn participant_event_ranges_preserve_commits_across_account_return() {
+    use crate::storage::profile::participant::{
+        event_ownership::*, finish_adoption, prepare_adoption,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let first = Account::generate();
+    let first_public = first.public();
+    let next = Account::generate().public();
+    let node = open_profile(directory.path(), DeviceIdentity::generate(), first).unwrap();
+    let append = |seed| {
+        let event = Event::new(
+            &node.identity,
+            ConversationId::new([seed; 32]),
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Profile,
+            vec![seed],
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(event.clone())
+            .unwrap();
+        node.storage
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT commit_ordinal FROM retained_events WHERE id=?1",
+                    [event.id.as_bytes().as_slice()],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let original_owner = node
+        .storage
+        .database()
+        .read(|c| capture_event_owner_on(c, &first_public))
+        .unwrap();
+    let old = append(201);
+    prepare_adoption(node.storage.database(), &first_public, &next).unwrap();
+    finish_adoption(node.storage.database(), &next).unwrap();
+    let foreign = append(202);
+    prepare_adoption(node.storage.database(), &next, &first_public).unwrap();
+    finish_adoption(node.storage.database(), &first_public).unwrap();
+    let returned = append(203);
+    node.storage.database().read(|c| {
+        assert!(matches!(check_event_owner_on(c, &original_owner), Err(LogError::StaleCursor)));
+        let owner = capture_event_owner_on(c, &first_public)?;
+        assert_eq!(owner.account(), &first_public.ed25519_pub);
+        assert_eq!(owner.namespace(), first_public.account_id());
+        assert!(participant_event_owned_on(c, &owner, old)?);
+        assert!(!participant_event_owned_on(c, &owner, foreign)?);
+        assert!(participant_event_owned_on(c, &owner, returned)?);
+        let present: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='participant_event_ranges')",
+            [], |row| row.get(0),
+        )?;
+        assert!(present, "account adoption retained no event commit ownership boundaries");
+        for (ordinal, expected) in [(old, &first_public), (foreign, &next), (returned, &first_public)] {
+            let owner: Vec<u8> = c.query_row(
+                "SELECT n.account FROM participant_event_ranges r JOIN participant_account_namespaces n USING(account_id) WHERE r.start_commit<=?1 AND (r.end_commit IS NULL OR ?1<r.end_commit) ORDER BY r.start_commit DESC LIMIT 1",
+                [ordinal], |row| row.get(0),
+            )?;
+            assert_eq!(owner, expected.ed25519_pub, "commit {ordinal} changed account on return");
+        }
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
 fn legacy_exact_prepared_account_adoption_bootstraps_control_metadata() {
     let directory = tempfile::tempdir().unwrap();
     let identity = DeviceIdentity::generate();
@@ -1118,5 +1191,244 @@ fn identity_preflight_rejects_reaction_delivery_and_opaque_names() {
             "identity occupied {leaf}"
         );
         assert!(!directory.path().join(leaf).exists());
+    }
+}
+
+#[test]
+fn participant_event_ranges_rollback_cancel_and_empty_return_fence_old_handles() {
+    use crate::storage::profile::participant::{
+        event_ownership::*, finish_adoption, prepare_adoption,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let node = open_profile(dir.path(), DeviceIdentity::generate(), Account::generate()).unwrap();
+    let active = node.account.public();
+    let next = Account::generate().public();
+    let db = node.storage.database();
+    let original = db.read(|c| capture_event_owner_on(c, &active)).unwrap();
+    prepare_adoption(db, &active, &next).unwrap();
+    finish_adoption(db, &active).unwrap();
+    db.read(|c| check_event_owner_on(c, &original)).unwrap();
+    prepare_adoption(db, &active, &next).unwrap();
+    db.transaction(|c| { c.execute_batch("CREATE TEMP TRIGGER fail_event_adoption BEFORE UPDATE OF account ON participant_profile BEGIN SELECT RAISE(ABORT,'event adoption fault'); END;")?; Ok(()) }).unwrap();
+    assert!(finish_adoption(db, &next).is_err());
+    db.read(|c| {
+        check_event_owner_on(c, &original)?;
+        let count: i64 = c.query_row("SELECT count(*) FROM participant_event_ranges", [], |r| {
+            r.get(0)
+        })?;
+        assert_eq!(count, 1);
+        let pending: Vec<u8> =
+            c.query_row("SELECT next_account FROM participant_profile", [], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(pending, next.ed25519_pub);
+        let introduced: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM participant_account_namespaces WHERE account=?1)",
+            [next.ed25519_pub.as_slice()],
+            |r| r.get(0),
+        )?;
+        assert!(!introduced, "failed adoption leaked the new namespace");
+        Ok(())
+    })
+    .unwrap();
+    db.transaction(|c| {
+        c.execute_batch("DROP TRIGGER fail_event_adoption")?;
+        Ok(())
+    })
+    .unwrap();
+    finish_adoption(db, &next).unwrap();
+    let next_owner = db.read(|c| capture_event_owner_on(c, &next)).unwrap();
+    finish_adoption(db, &next).unwrap();
+    db.read(|c| check_event_owner_on(c, &next_owner)).unwrap();
+    prepare_adoption(db, &next, &active).unwrap();
+    finish_adoption(db, &active).unwrap();
+    db.read(|c| {
+        assert!(matches!(
+            check_event_owner_on(c, &original),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            check_event_owner_on(c, &next_owner),
+            Err(LogError::StaleCursor)
+        ));
+        let count: i64 = c.query_row("SELECT count(*) FROM participant_event_ranges", [], |r| {
+            r.get(0)
+        })?;
+        assert_eq!(
+            count, 1,
+            "empty switches must not fabricate commit intervals"
+        );
+        assert_ne!(capture_event_owner_on(c, &active)?, original);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn participant_event_ranges_legacy_import_and_crash_retry_keep_previous_prefix() {
+    use crate::storage::profile::{participant::event_ownership::*, publication::tests::CUT};
+    for cut in [
+        "participant-events-publication-transaction",
+        "participant-events-published",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let keys = identity.secret_bytes();
+        let previous = Account::generate();
+        let next = Account::generate();
+        let next_secret = next.secret_bytes();
+        let path = dir.path().join("messages.log");
+        let event = Event::new(
+            &identity,
+            ConversationId::new([211; 32]),
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Profile,
+            b"legacy retained event".to_vec(),
+        );
+        {
+            let mut log = PersistentEventLog::open(&path, "pw").unwrap();
+            log.append_durable(event.clone()).unwrap();
+        }
+        {
+            let mut delivery =
+                super::super::delivery_store::DeliveryStore::open_for_log(&path, "pw").unwrap();
+            delivery
+                .bind_profile(&path, "pw", &identity.public(), &previous.account_id())
+                .unwrap();
+            delivery
+                .prepare_profile_adoption(&next.account_id())
+                .unwrap();
+        }
+        CUT.with(|value| value.replace(Some(cut)));
+        let failed = open_profile(dir.path(), identity, next);
+        CUT.with(|value| value.replace(None));
+        assert!(failed.is_err(), "{cut} did not interrupt publication");
+        let node = open_profile(
+            dir.path(),
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+            Account::from_secret_bytes(next_secret),
+        )
+        .unwrap();
+        assert!(node.log.lock().unwrap().get(&event.id).unwrap().is_some());
+        node.storage.database().read(|c| {
+            assert_eq!(participant_event_namespace_on(c, 0)?, previous.account_id());
+            let owner = capture_event_owner_on(c, &node.account.public())?;
+            assert!(!participant_event_owned_on(c, &owner, 0)?);
+            let (start,namespace):(i64,String)=c.query_row("SELECT start_commit,account_id FROM participant_event_ranges WHERE end_commit IS NULL",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(start,1);
+            assert_eq!(namespace,node.account_id());
+            Ok(())
+        }).unwrap();
+        drop(node);
+        let node = open_profile(
+            dir.path(),
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+            Account::from_secret_bytes(next_secret),
+        )
+        .unwrap();
+        node.storage
+            .database()
+            .read(|c| {
+                assert_eq!(participant_event_namespace_on(c, 0)?, previous.account_id());
+                let generation: i64 = c.query_row(
+                    "SELECT generation FROM participant_event_ownership",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(generation, 1, "reopen repeated the initial ownership split");
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn participant_event_ranges_upgrade_only_unambiguous_existing_namespace() {
+    use crate::storage::{
+        database::EncryptedDatabase,
+        profile::{
+            ProfileStorageLease,
+            participant::{binding, event_ownership::*},
+        },
+    };
+    for ambiguous in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let public = identity.public();
+        let keys = identity.secret_bytes();
+        let account = Account::generate();
+        let secret = account.secret_bytes();
+        let node = open_profile(dir.path(), identity, account).unwrap();
+        let event = Event::new(
+            &node.identity,
+            ConversationId::new([212; 32]),
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::Profile,
+            b"retained experimental event".to_vec(),
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(event.clone())
+            .unwrap();
+        node.storage
+            .database()
+            .transaction(|c| {
+                c.execute_batch(
+                    "DROP TABLE participant_event_ranges; DROP TABLE participant_event_ownership;",
+                )?;
+                if ambiguous {
+                    let previous = Account::generate().public();
+                    c.execute(
+                        "INSERT INTO participant_account_namespaces VALUES(?1,?2)",
+                        rusqlite::params![previous.account_id(), previous.ed25519_pub.as_slice()],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        drop(node);
+        let reopened = open_profile(
+            dir.path(),
+            DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+            Account::from_secret_bytes(secret),
+        );
+        if ambiguous {
+            let error = reopened
+                .err()
+                .expect("an ambiguous old prefix was assigned to the current account");
+            assert!(
+                error
+                    .to_string()
+                    .contains("ownership boundaries are unavailable"),
+                "{error}"
+            );
+            let _lease = ProfileStorageLease::acquire(dir.path()).unwrap();
+            let db =
+                EncryptedDatabase::open(&dir.path().join("profile.db"), "pw", &binding(&public))
+                    .unwrap();
+            db.read(|c| {
+                let retained:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM retained_events WHERE id=?1)",[event.id.as_bytes().as_slice()],|r|r.get(0))?;
+                let installed:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='participant_event_ranges')",[],|r|r.get(0))?;
+                assert!(retained);assert!(!installed);
+                Ok(())
+            }).unwrap();
+        } else {
+            let node = reopened.unwrap();
+            node.storage
+                .database()
+                .read(|c| {
+                    let owner = capture_event_owner_on(c, &node.account.public())?;
+                    assert!(participant_event_owned_on(c, &owner, 0)?);
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 }
