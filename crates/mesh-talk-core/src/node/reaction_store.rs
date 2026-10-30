@@ -305,31 +305,6 @@ impl ReactionStore {
         }
         self.record_channel_with_certificate(conversation, source, effect_id, wall, payload, None)
     }
-    pub(in crate::node) fn record_channel_bound(
-        &mut self,
-        conversation: ConversationId,
-        source: PublicIdentity,
-        effect_id: EventId,
-        wall: u64,
-        payload: ReactionPayload,
-        source_certificate: DeviceCertificate,
-    ) -> Result<(), LogError> {
-        if !source_certificate.verify()
-            || source_certificate.device_ed25519_pub != source.ed25519_pub
-        {
-            return Err(LogError::CorruptFile(
-                "invalid bound channel reaction certificate".into(),
-            ));
-        }
-        self.record_channel_with_certificate(
-            conversation,
-            source,
-            effect_id,
-            wall,
-            payload,
-            Some(source_certificate),
-        )
-    }
     fn record_channel_with_certificate(
         &mut self,
         conversation: ConversationId,
@@ -395,26 +370,6 @@ impl ReactionStore {
             })
             .collect()
     }
-    pub(in crate::node) fn channel_entries_with_account(
-        &self,
-        conversation: ConversationId,
-    ) -> Vec<RetainedChannelReaction> {
-        self.channels
-            .values()
-            .filter(|row| row.conversation == conversation)
-            .map(|row| {
-                (
-                    row.source.clone(),
-                    row.effect_id,
-                    row.wall,
-                    row.payload.clone(),
-                    row.certificate
-                        .as_ref()
-                        .map(|certificate| certificate.account_ed25519_pub),
-                )
-            })
-            .collect()
-    }
     pub(super) fn iter(&self) -> impl Iterator<Item = (&ReactionKey, &ReactionValue)> {
         self.entries.iter()
     }
@@ -461,10 +416,6 @@ impl ReactionStore {
                     .map(channel_record),
             )
             .collect()
-    }
-    #[cfg(test)]
-    pub(super) fn fail_appends_for_test(&mut self) {
-        self.file.fail_appends_for_test(true).unwrap();
     }
     #[cfg(test)]
     fn open_fail_migration(path: &Path, password: &str) -> Result<Self, LogError> {

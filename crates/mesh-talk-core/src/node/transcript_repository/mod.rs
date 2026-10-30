@@ -91,12 +91,14 @@ impl Default for TranscriptPageLimit {
         }
     }
 }
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TranscriptCursor {
     pub wall_clock: u64,
     pub sequence: u64,
     pub ordinal: i64,
 }
+#[cfg(test)]
 pub(crate) struct TranscriptPage<T> {
     pub rows: Vec<T>,
     pub next: Option<TranscriptCursor>,
@@ -111,7 +113,6 @@ pub(crate) struct TranscriptDeadline {
     pub conversation: ConversationId,
     pub event_id: Option<EventId>,
     pub logical_id: Option<EventId>,
-    pub sequence: u64,
     pub sender: String,
     pub wall_clock: u64,
 }
@@ -128,8 +129,6 @@ pub(crate) struct TranscriptRepository {
     rewrite_revision: u64,
     #[cfg(test)]
     fail_writes: bool,
-    #[cfg(test)]
-    fail_next: std::cell::Cell<bool>,
     #[cfg(test)]
     body_reads: std::sync::atomic::AtomicUsize,
 }
@@ -263,14 +262,12 @@ impl TranscriptRepository {
             #[cfg(test)]
             fail_writes: false,
             #[cfg(test)]
-            fail_next: std::cell::Cell::new(false),
-            #[cfg(test)]
             body_reads: std::sync::atomic::AtomicUsize::new(0),
         })
     }
     pub(super) fn check_write(&self) -> Result<(), LogError> {
         #[cfg(test)]
-        if self.fail_writes || self.fail_next.replace(false) {
+        if self.fail_writes {
             return Err(std::io::Error::other("injected transcript write failure").into());
         }
         self.check_publication()
@@ -296,10 +293,6 @@ impl TranscriptRepository {
         self.fail_writes = enabled;
         Ok(())
     }
-    #[cfg(test)]
-    pub(crate) fn fail_next_append_rollback_for_test(&mut self, _bytes: usize) {
-        self.fail_next.set(true);
-    }
     pub(crate) fn usage(&self) -> Result<TranscriptUsage, LogError> {
         self.profile.database().read(|c| {
             let (records, bytes): (i64, i64) = c.query_row("SELECT record_count,body_bytes FROM transcript_sources WHERE kind=?1 AND published=1", [self.kind], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -319,6 +312,7 @@ impl TranscriptRepository {
         };
         usize::try_from(n).map_err(|_| invalid("transcript record count exceeds address space"))
     }
+    #[cfg(test)]
     pub(crate) fn conversation_page(
         &self,
         after: Option<ConversationId>,
@@ -529,6 +523,7 @@ impl TranscriptRepository {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn remove_where(
         &mut self,
         mut should_remove: impl FnMut(StoredRow) -> Result<bool, LogError>,

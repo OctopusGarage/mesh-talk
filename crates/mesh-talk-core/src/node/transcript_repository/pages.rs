@@ -9,6 +9,7 @@ pub(super) fn take_header_reads() -> usize {
     HEADER_READS.with(|reads| reads.replace(0))
 }
 
+#[cfg(test)]
 impl Header {
     fn cursor(&self) -> TranscriptCursor {
         TranscriptCursor {
@@ -52,6 +53,7 @@ fn admit(
     Ok((selected, false))
 }
 impl TranscriptRepository {
+    #[cfg(test)]
     pub(in crate::node) fn page(
         &self,
         conversation: Option<&ConversationId>,
@@ -60,6 +62,7 @@ impl TranscriptRepository {
     ) -> Result<TranscriptPage<StoredRow>, LogError> {
         self.history_page(conversation, after, limit, false)
     }
+    #[cfg(test)]
     pub(in crate::node) fn recent_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -68,6 +71,7 @@ impl TranscriptRepository {
     ) -> Result<TranscriptPage<StoredRow>, LogError> {
         self.history_page(conversation, before, limit, true)
     }
+    #[cfg(test)]
     fn history_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -89,6 +93,7 @@ impl TranscriptRepository {
         })
     }
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn select_history_on(
         &self,
         c: &Connection,
@@ -170,6 +175,7 @@ impl TranscriptRepository {
         admit(&mut rows, limit, true)
     }
     /// Metadata-only page; each fixed-width header is charged 256 bytes.
+    #[cfg(test)]
     pub(crate) fn header_page(
         &self,
         conversation: Option<&ConversationId>,

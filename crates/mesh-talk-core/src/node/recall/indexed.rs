@@ -196,22 +196,6 @@ impl IndexedRecallLog {
             }Ok(result)
         })
     }
-    pub(crate) fn visit(
-        &self,
-        mut visit: impl FnMut(RecallMark) -> Result<(), LogError>,
-    ) -> Result<(), LogError> {
-        let mut after = None;
-        loop {
-            let page = self.page(None, after, 128)?;
-            if page.is_empty() {
-                return Ok(());
-            }
-            for mark in page {
-                after = Some((mark.conversation, mark.target));
-                visit(mark)?;
-            }
-        }
-    }
 }
 
 #[cfg(test)]

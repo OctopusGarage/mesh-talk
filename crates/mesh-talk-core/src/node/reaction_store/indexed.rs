@@ -410,6 +410,7 @@ impl IndexedReactionStore {
         )?;
         Ok(())
     }
+    #[cfg(test)]
     pub(in crate::node) fn record_channel(
         &mut self,
         conversation: ConversationId,
@@ -559,24 +560,6 @@ impl IndexedReactionStore {
             }
         }
         Ok(())
-    }
-    #[cfg(test)]
-    pub(in crate::node) fn channel_entries_with_account(
-        &self,
-        conversation: ConversationId,
-    ) -> Vec<super::RetainedChannelReaction> {
-        let mut out = Vec::new();
-        let mut after = None;
-        loop {
-            let page = self
-                .channel_page(conversation, after, 128, 8 * 1024 * 1024)
-                .unwrap();
-            if page.rows.is_empty() {
-                return out;
-            }
-            after = page.next;
-            out.extend(page.rows);
-        }
     }
     #[cfg(test)]
     pub(in crate::node) fn channel_entries(

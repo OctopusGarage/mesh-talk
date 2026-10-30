@@ -169,7 +169,7 @@ impl TranscriptRepository {
                 let sender=row.get_ref(0)?.as_str().map_err(|_|invalid("invalid deadline sender"))?;
                 if sender.len()!=h.sender_bytes {return Err(invalid("deadline sender disagrees with byte count"));}
                 let event_id=if self.kind==SENT {None}else {Some(EventId::new(h.key.as_slice().try_into().map_err(|_|invalid("invalid received deadline event id"))?))};
-                Ok(TranscriptDeadline{cursor:TranscriptDeadlineCursor{deadline,ordinal:h.ordinal},conversation:h.conversation,event_id,logical_id,sequence:h.sequence,sender:sender.to_owned(),wall_clock:h.wall_clock})
+                Ok(TranscriptDeadline{cursor:TranscriptDeadlineCursor{deadline,ordinal:h.ordinal},conversation:h.conversation,event_id,logical_id,sender:sender.to_owned(),wall_clock:h.wall_clock})
             }).collect()
         })
     }
