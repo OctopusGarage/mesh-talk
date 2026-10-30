@@ -181,6 +181,12 @@ Recheck conditions with the synchronization primitive's correct waiter protocol;
 a notification alone is not the durable condition. Preserve startup, wake,
 shutdown and missed-notification recovery behavior.
 
+Keep independent reasons for continuing work separate. A worker can finish a
+history page and then fail an optional favorites exchange; reporting that error
+must not discard unfinished history or a refresh received during the exchange.
+Consume a coalesced wake only when its follow-up remains scheduled after every
+error branch. A failure without pending work must still avoid a busy retry loop.
+
 Keep count, byte, task and concurrency budgets intact. Fair scheduling does not
 guarantee a successful write into a full store, justify eviction of durable intent
 or permit increasing capacity without reviewing consumers.
@@ -189,6 +195,10 @@ or permit increasing capacity without reviewing consumers.
 terminal history, and include a failed item, cancellation and newly arriving work.
 Assert progress and budget preservation across turns. See publication rotation
 tests in the [group journal](../crates/mesh-talk-core/src/node/account_group/operations/journal.rs).
+The `account_history_after_favorites_*` regressions in
+[account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
+cover successful and failed optional exchanges, retained refreshes, unfinished
+history pages and failure without pending work.
 
 ## R06: Exact authority and stale completions
 

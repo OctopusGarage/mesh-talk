@@ -2828,6 +2828,278 @@ async fn account_history_wake_during_active_page_retains_an_immediate_follow_up(
     outcome.expect("an authenticated wake during an old page must schedule another pull before periodic repair");
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistoryAfterFavorites {
+    Wake,
+    Continuation,
+    Idle,
+}
+
+async fn history_progress_after_held_favorites(case: HistoryAfterFavorites, fail_favorites: bool) {
+    use futures_util::FutureExt;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+
+    let (_dir, source, receiver) = sibling_nodes();
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let wake_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let wake_peer = sibling_peer(&source, &receiver, wake_listener.local_addr().unwrap());
+    sibling_peer(&receiver, &source, source_listener.local_addr().unwrap());
+    let history_requests = Arc::new(AtomicUsize::new(0));
+    let (favorite_started, favorite_waiting) = tokio::sync::oneshot::channel();
+    let (release_favorite, favorite_released) = tokio::sync::oneshot::channel();
+    let serving = source.clone();
+    let requests = history_requests.clone();
+    let source_server = tokio::spawn(async move {
+        let mut favorite_started = Some(favorite_started);
+        let mut favorite_released = Some(favorite_released);
+        let mut favorites = 0;
+        let mut held = tokio::task::JoinSet::new();
+        loop {
+            let (mut io, version, frame) =
+                accept_account_test_request(&source_listener, &serving).await;
+            while let Some(result) = held.try_join_next() {
+                result.unwrap();
+            }
+            match frame {
+                AccountHistoryFrame::Request {
+                    account_id,
+                    cursor,
+                    known_digest,
+                    wanted,
+                    ..
+                } => {
+                    let request = requests.fetch_add(1, Ordering::SeqCst) + 1;
+                    if request == 1 || (request == 2 && case != HistoryAfterFavorites::Continuation)
+                    {
+                        // First warm the supported favorites path. The second
+                        // snapshot predates the message published during favorites.
+                        send_frame(
+                            &mut io,
+                            version,
+                            &AccountHistoryFrame::Complete {
+                                next_cursor: None,
+                                digest: archive::empty_history_digest(),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    } else {
+                        assert!(
+                            serving
+                                .serve_account_history(
+                                    &mut io,
+                                    version,
+                                    &account_id,
+                                    cursor,
+                                    known_digest,
+                                    wanted,
+                                )
+                                .await
+                        );
+                    }
+                }
+                AccountHistoryFrame::FavoritesRequest { .. } => {
+                    favorites += 1;
+                    let digest = serving.favorites.lock().unwrap().digest();
+                    if favorites == 2 {
+                        favorite_started.take().unwrap().send(()).unwrap();
+                        let release = favorite_released.take().unwrap();
+                        // Keep accepting other lanes while this authenticated
+                        // one-shot response is paused. Closing it after support
+                        // was established models a transient transport failure.
+                        held.spawn(async move {
+                            release.await.unwrap();
+                            if !fail_favorites {
+                                send_frame(
+                                    &mut io,
+                                    version,
+                                    &AccountHistoryFrame::FavoritesComplete { next: None, digest },
+                                )
+                                .await
+                                .unwrap();
+                            }
+                        });
+                    } else {
+                        send_frame(
+                            &mut io,
+                            version,
+                            &AccountHistoryFrame::FavoritesComplete { next: None, digest },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+                // Like the legacy history fixture, this endpoint deliberately
+                // closes optional document probes. They cannot generate a
+                // successful import or another data-change wake in this test.
+                AccountHistoryFrame::DocumentsRequest { .. } => {}
+                _ => panic!("unexpected request in history/favorites fixture"),
+            }
+        }
+    });
+
+    let wake_seen = Arc::new(AtomicBool::new(false));
+    let (refresh_observed, refresh_ready) = tokio::sync::oneshot::channel();
+    let refresh_observed = Arc::new(std::sync::Mutex::new(Some(refresh_observed)));
+    let observed = refresh_observed.clone();
+    let expected_source = source.identity.public();
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+        if peer != expected_source {
+            return;
+        }
+        if phase == "wake_received revision=9" {
+            wake_seen.store(true, Ordering::SeqCst);
+        }
+        if phase.starts_with("control_refresh ")
+            && wake_seen.load(Ordering::SeqCst)
+            && let Some(observed) = observed.lock().unwrap().take()
+        {
+            // This enqueue-all pass inserts pending_refresh for the active
+            // history worker before its next await, so no sleep is needed.
+            let _ = observed.send(());
+        }
+    }));
+    let waking = receiver.clone();
+    let wake_server = tokio::spawn(async move {
+        let (mut io, version, frame) = accept_account_test_request(&wake_listener, &waking).await;
+        let AccountHistoryFrame::Wake {
+            account_id,
+            epoch,
+            revision,
+        } = frame
+        else {
+            panic!("expected authenticated wake");
+        };
+        assert!(
+            waking
+                .serve_account_wake(&mut io, version, &account_id, epoch, revision)
+                .await
+        );
+    });
+    // No worker exists yet. Replace any setup notification with one explicit
+    // warmup turn. Periodic repair is absent, so it cannot rescue lost work.
+    let _ = receiver.account_sync_notify.notified().now_or_never();
+    receiver.account_sync_notify.notify_one();
+    let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
+    // Bootstrap has its own watchdog. The latency assertion starts only after
+    // support, the held response, and any authenticated wake are coordinated.
+    let preparation = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if receiver.device_sync_status().iter().any(|status| {
+                status.device_id == source.user_id() && status.phase == SyncPhase::UpToDate
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(history_requests.load(Ordering::SeqCst), 1);
+        let expected_messages = if case == HistoryAfterFavorites::Continuation {
+            for index in 0..=RECORDS_PER_PAGE {
+                source
+                    .enqueue_to_account(
+                        &source.account_id(),
+                        format!("history-{index}").as_bytes(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            RECORDS_PER_PAGE + 1
+        } else {
+            1
+        };
+        // Start exactly one comparison after the warmup has fully completed.
+        receiver.account_sync_notify.notify_one();
+        favorite_waiting.await.unwrap();
+        assert_eq!(history_requests.load(Ordering::SeqCst), 2);
+        if case == HistoryAfterFavorites::Wake {
+            source
+                .enqueue_to_account(
+                    &source.account_id(),
+                    b"saved while favorites is in flight",
+                    None,
+                )
+                .await
+                .unwrap();
+            source.send_account_wake(&wake_peer, 9).await.unwrap();
+            refresh_ready.await.unwrap();
+        } else if case == HistoryAfterFavorites::Continuation {
+            assert_eq!(
+                receiver.account_history(&receiver.account_id(), 100).len(),
+                RECORDS_PER_PAGE
+            );
+        }
+        expected_messages
+    })
+    .await;
+    let outcome = match preparation {
+        Err(_) => Err("favorites fixture did not reach its coordinated observation point"),
+        Ok(expected_messages) => {
+            release_favorite.send(()).unwrap();
+            let progress = async {
+                if case == HistoryAfterFavorites::Idle {
+                    loop {
+                        if receiver.device_sync_status().iter().any(|status| {
+                            status.device_id == source.user_id() && status.phase == SyncPhase::Error
+                        }) {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    assert_eq!(
+                        history_requests.load(Ordering::SeqCst),
+                        2,
+                        "a favorite failure with no pending history must not create a hot retry loop"
+                    );
+                } else {
+                    loop {
+                        if receiver.account_history(&receiver.account_id(), 100).len()
+                            == expected_messages
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    assert!(history_requests.load(Ordering::SeqCst) >= 3);
+                }
+            };
+            tokio::time::timeout(RETRY_INTERVAL / 2, progress)
+                .await
+                .map_err(|_| "retained history work did not resume after favorites without periodic repair")
+        }
+    };
+    *receiver.account_client_test_hook.lock().unwrap() = None;
+    worker.abort();
+    source_server.abort();
+    wake_server.abort();
+    let _ = worker.await;
+    let _ = source_server.await;
+    let _ = wake_server.await;
+    outcome.expect("history/favorites progress contract");
+}
+
+#[tokio::test]
+async fn account_history_after_favorites_success_retains_wake() {
+    history_progress_after_held_favorites(HistoryAfterFavorites::Wake, false).await;
+}
+
+#[tokio::test]
+async fn account_history_after_favorites_failure_retains_wake() {
+    history_progress_after_held_favorites(HistoryAfterFavorites::Wake, true).await;
+}
+
+#[tokio::test]
+async fn account_history_after_favorites_failure_retains_continuation() {
+    history_progress_after_held_favorites(HistoryAfterFavorites::Continuation, true).await;
+}
+
+#[tokio::test]
+async fn account_history_after_favorites_failure_waits_without_history_work() {
+    history_progress_after_held_favorites(HistoryAfterFavorites::Idle, true).await;
+}
+
 #[tokio::test]
 async fn manifest_only_sibling_reports_waiting_for_files_without_transport_error() {
     use tokio::net::TcpListener;

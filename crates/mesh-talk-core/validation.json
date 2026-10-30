@@ -1288,7 +1288,7 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Sibling history wakes during active pulls retain a bounded immediate follow-up instead of waiting for periodic retry or reporting premature completion",
+            "name": "Sibling history wakes during active pulls retain a bounded immediate follow-up instead of waiting for periodic retry or reporting premature completion. Optional favorites failures preserve that refresh and unfinished history pages; without pending history work, failure does not create an immediate retry loop.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {

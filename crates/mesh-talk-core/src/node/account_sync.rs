@@ -2700,6 +2700,17 @@ impl Node {
     }
 
     pub(in crate::node) async fn run_account_history_loop(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(RETRY_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        self.run_account_history_loop_with_tick(Some(tick)).await;
+    }
+
+    // Tests can exclude periodic repair to prove that retained work itself
+    // schedules progress, without coupling fixture setup to the first tick.
+    async fn run_account_history_loop_with_tick(
+        self: Arc<Self>,
+        mut tick: Option<tokio::time::Interval>,
+    ) {
         use std::collections::VecDeque;
         // Partition the existing four slots: one each for control, directory,
         // optional documents, and history/favorites. Each lane retains its page
@@ -2707,8 +2718,6 @@ impl Node {
         const HISTORY_WORKERS: usize = 1;
         const DOCUMENT_WORKERS: usize = DocumentLane::ALL.len();
         const ATTACHMENT_WORKERS: usize = 2;
-        let mut tick = tokio::time::interval(RETRY_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursors: HashMap<String, PeerCursor> = HashMap::new();
         let mut queue: VecDeque<(String, PeerRecord)> = VecDeque::new();
         let mut active = HashSet::new();
@@ -3354,7 +3363,12 @@ impl Node {
                         std::future::pending::<()>().await;
                     }
                 } => {}
-                _ = tick.tick() => { enqueue_all = true; }
+                _ = async {
+                    match tick.as_mut() {
+                        Some(tick) => { tick.tick().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => { enqueue_all = true; }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
                     let completion = match result {
@@ -3516,13 +3530,20 @@ impl Node {
                                     let history_complete = state.complete_page(next, digest);
                                     if history_complete && !favorites_pending && !favorites_waiting { status.phase = SyncPhase::UpToDate; }
                                     else { continuation |= !history_complete; }
+                                    if let Some(error) = &state.favorite_error {
+                                        status.phase = SyncPhase::Error;
+                                        status.error = Some(error.chars().take(160).collect());
+                                        // A favorites failure alone must not request another turn.
+                                        // Preserve unfinished history and the coalesced refresh below;
+                                        // consuming that wake before clearing continuation loses work.
+                                        continuation = !history_complete;
+                                    }
                                     // Finish retained history/favorite pages before consuming
                                     // one coalesced wake as a fresh comparison sweep.
                                     if refresh && history_complete && state.favorite_next.is_none() {
                                         pending_refresh.remove(&id);
                                         continuation = true;
                                     }
-                                    if let Some(error)=&state.favorite_error {status.phase=SyncPhase::Error;status.error=Some(error.chars().take(160).collect());continuation=false;}
                                 }
                                 Err(error) if local_sync_capacity_busy(&error) => {
                                     // Admission never began an exchange. Retain history and

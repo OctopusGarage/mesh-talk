@@ -1368,9 +1368,13 @@ semantics.
 Sibling history invalidations that arrive while an older page is active retain
 one coalesced follow-up per active worker (at most four). The worker immediately
 queues that follow-up and cannot report UpToDate while it is pending; policy
-replacement/cancellation and worker failure clear the pending marker. Saved
-Messages participates in the same bounded UI history reconciliation even when
-the own account is absent from the contact roster.
+replacement, cancellation or a terminated worker retire its pending marker.
+A failed optional favorites response does not retire the history worker:
+unfinished archive pages and any coalesced refresh still schedule immediate
+history work while retaining the favorites error. Without pending history work,
+that error waits for the next normal wake or repair tick instead of creating a
+busy retry loop. Saved Messages participates in the same bounded UI history
+reconciliation even when the own account is absent from the contact roster.
 
 Every account-target enqueue persists verified recipient and sibling fanout
 bindings before constructing immutable delivery destinations. Acceptance cannot
