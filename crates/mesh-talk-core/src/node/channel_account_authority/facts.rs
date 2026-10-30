@@ -154,26 +154,20 @@ impl AuthorityHistory {
         event: EventId,
         graph: &impl AuthorityGraph,
     ) -> Result<bool, LogError> {
-        let mut after: Option<Vec<u8>> = None;
-        loop {
-            let page:Vec<(Vec<u8>,EventId)>=self.profile.database().read(|c| {
+        let mut key = vec![1];
+        key.extend_from_slice(&account);
+        Ok(!crate::node::channel::graph::any_fact(
+            graph,
+            &key,
+            |after| {
+                self.profile.database().read(|c| {
                 self.guard_on(c)?;
-                let mut statement=c.prepare("SELECT key,value FROM channel_authority_facts WHERE job=?1 AND channel=?2 AND kind=2 AND account=?3 AND (?4 IS NULL OR key>?4) ORDER BY key LIMIT 64")?;
-                let mut rows=statement.query(params![self.job.as_slice(),self.channel.as_bytes().as_slice(),account.as_slice(),after])?;
-                let mut result=Vec::new();
-                while let Some(row)=rows.next()? {let bytes:Vec<u8>=row.get(1)?;result.push((row.get(0)?,decode(&bytes)?));}
-                Ok(result)
-            })?;
-            if page.is_empty() {
-                return Ok(true);
-            }
-            for (key, removed) in page {
-                if !graph.descends(event, removed)? {
-                    return Ok(false);
-                }
-                after = Some(key);
-            }
-        }
+                let row:Option<(Vec<u8>,Vec<u8>)>=c.query_row("SELECT key,value FROM channel_authority_facts WHERE job=?1 AND channel=?2 AND kind=2 AND account=?3 AND key>COALESCE(?4,x'') ORDER BY key LIMIT 1",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),account.as_slice(),after],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                row.map(|(key,value)|Ok((key,decode::<EventId>(&value)?))).transpose()
+            })
+            },
+            |removed| Ok(!graph.descends(event, removed)?),
+        )?)
     }
 }
 impl AccountAuthority {
@@ -666,29 +660,21 @@ impl AccountAuthority {
         let Some(history) = &self.history else {
             return Ok(false);
         };
-        let mut after: Option<Vec<u8>> = None;
-        loop {
-            let page:Vec<Vec<u8>>=history.profile.database().read(|c| {
+        let lifetime = encode(&key)?;
+        let mut predicate = vec![3];
+        predicate.extend_from_slice(&lifetime);
+        Ok(crate::node::channel::graph::any_fact(
+            graph,
+            &predicate,
+            |after| {
+                history.profile.database().read(|c| {
                 history.guard_on(c)?;
-                let mut statement=c.prepare("SELECT event FROM channel_legacy_candidates WHERE job=?1 AND channel=?2 AND lifetime=?3 AND (?4 IS NULL OR event>?4) ORDER BY event LIMIT 64")?;
-                statement.query_map(params![history.source_job.as_slice(),history.channel.as_bytes().as_slice(),encode(&key)?,after],|r|r.get(0))?.collect::<Result<_,_>>().map_err(Into::into)
-            })?;
-            if page.is_empty() {
-                return Ok(false);
-            }
-            for bytes in page {
-                let id = EventId::new(
-                    bytes
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| invalid("invalid legacy candidate identity"))?,
-                );
-                if graph.descends(event, id)? {
-                    return Ok(true);
-                }
-                after = Some(bytes);
-            }
-        }
+                let row:Option<Vec<u8>>=c.query_row("SELECT event FROM channel_legacy_candidates WHERE job=?1 AND channel=?2 AND lifetime=?3 AND event>COALESCE(?4,x'') ORDER BY event LIMIT 1",params![history.source_job.as_slice(),history.channel.as_bytes().as_slice(),&lifetime,after],|r|r.get(0)).optional()?;
+                row.map(|bytes| {let id=EventId::new(bytes.as_slice().try_into().map_err(|_|invalid("invalid legacy candidate identity"))?);Ok((bytes,id))}).transpose()
+            })
+            },
+            |id| graph.descends(event, id),
+        )?)
     }
 }
 
@@ -709,28 +695,23 @@ impl AccountAuthority {
         let Some(history) = &self.history else {
             return Ok(false);
         };
-        let mut after: Option<Vec<u8>> = None;
-        loop {
-            let page:Vec<(Vec<u8>,Option<EventId>)>=history.profile.database().read(|c| {
+        let mut predicate = vec![4];
+        predicate.extend_from_slice(&encode(&id)?);
+        Ok(crate::node::channel::graph::any_fact(
+            graph,
+            &predicate,
+            |after| {
+                history.profile.database().read(|c| {
                 history.guard_on(c)?;
-                let mut statement=c.prepare("SELECT key,value FROM channel_authority_facts WHERE job=?1 AND channel=?2 AND kind=?3 AND account=?4 AND (?5 IS NULL OR key>?5) ORDER BY key LIMIT 64")?;
-                let mut rows=statement.query(params![history.job.as_slice(),history.channel.as_bytes().as_slice(),ACCEPTANCE,id.account_pub.as_slice(),after])?;
-                let mut result=Vec::new();
-                while let Some(row)=rows.next()? {let key:Vec<u8>=row.get(0)?;let (stored,_):(AccountGrantId,EventId)=decode(&key)?;let bytes:Vec<u8>=row.get(1)?;result.push((key,if stored==id {Some(decode::<EventId>(&bytes)?)}else{None}));}
-                Ok(result)
-            })?;
-            if page.is_empty() {
-                return Ok(false);
-            }
-            for (key, accepted) in page {
-                if let Some(accepted) = accepted
-                    && graph.descends(event, accepted)?
-                {
-                    return Ok(true);
-                }
-                after = Some(key);
-            }
-        }
+                let row:Option<(Vec<u8>,Vec<u8>)>=c.query_row("SELECT key,value FROM channel_authority_facts WHERE job=?1 AND channel=?2 AND kind=?3 AND account=?4 AND key>COALESCE(?5,x'') ORDER BY key LIMIT 1",params![history.job.as_slice(),history.channel.as_bytes().as_slice(),ACCEPTANCE,id.account_pub.as_slice(),after],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                row.map(|(key,bytes)| {let (stored,_):(AccountGrantId,EventId)=decode(&key)?;let event=if stored==id {Some(decode::<EventId>(&bytes)?)}else{None};Ok((key,event))}).transpose()
+            })
+            },
+            |accepted| match accepted {
+                Some(accepted) => graph.descends(event, accepted),
+                None => Ok(false),
+            },
+        )?)
     }
 }
 

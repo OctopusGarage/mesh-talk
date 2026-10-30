@@ -11,6 +11,8 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, params};
 
 mod authority;
+mod preparation;
+pub(in crate::node) use preparation::{OwnerAuthorizationQuery, OwnerAuthorizationStep};
 mod controls;
 mod receive;
 mod send;
@@ -25,13 +27,27 @@ pub(super) fn initialize(c: &Connection, fresh: bool) -> Result<(), LogError> {
     controls::initialize(c, fresh)?;
     send::initialize(c, fresh)
 }
-struct IndexedView<'a> {
+pub(in crate::node) struct IndexedView<'a> {
     checkpoints: &'a ChannelCheckpointStore,
     repository: &'a EventRepository,
     me: &'a DeviceIdentity,
     source: ChannelSource,
 }
-impl IndexedView<'_> {
+impl<'a> IndexedView<'a> {
+    pub(in crate::node) fn new(
+        checkpoints: &'a ChannelCheckpointStore,
+        repository: &'a EventRepository,
+        me: &'a DeviceIdentity,
+        source: ChannelSource,
+    ) -> Self {
+        Self {
+            checkpoints,
+            repository,
+            me,
+            source,
+        }
+    }
+
     fn before(&self, event: EventId) -> Result<Option<crate::channel::ChannelState>, LogError> {
         self.checkpoints.check_source(&self.source)?;
         let state =

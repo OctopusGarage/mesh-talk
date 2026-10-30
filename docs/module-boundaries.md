@@ -180,9 +180,14 @@ SQL authorization IDs, causal closure, and bounded retirement cleanup.
 `core/node/privacy_sync/principal/` and `principal.rs` own current principal state
 and resumable preparation; historical IDs, departures and ancestry stay on disk.
 `core/node/session.rs` releases the store lock and yields between preparation
-turns. Ready views use scalar source/proof checks. Channel-control authority still
-uses the checkpoint owner; its individual ancestry queries remain a separate
-bounded-work integration requirement.
+turns, including exact Durable-Have requests. Ready views use scalar source/proof
+checks. `core/node/channel/graph/preparing.rs` owns suspended graph decisions and
+historical predicate cursors for the existing channel reducer; unresolved answers
+cannot publish authority. `checkpoint/causal/query.rs` composes budgeted ancestry
+and reducer steps into a leased result, while `join_history/indexed/preparation.rs`
+retains the existing canonical, strict-causal and future ownership-loss rules.
+These query owners share the repository ancestry implementation and its incremental
+retirement; callers must resume Pending work without synchronously draining it.
 `core/node/channel/checkpoint/` owns indexed current membership, canonical authority,
 receiver checkpoints, exact processing evidence, activity pages and pending retries.
 Ordinary warm channel opens load current metadata and the active sending epoch;

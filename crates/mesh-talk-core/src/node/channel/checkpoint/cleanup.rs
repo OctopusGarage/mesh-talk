@@ -14,6 +14,8 @@ impl ChannelCheckpointStore {
             // Exactly one table and at most 128 identities are reclaimed per
             // turn. No cascading delete or unbounded SQLite temporary set.
             for (table,key) in [
+                ("channel_decision_answers","key"),
+                ("channel_decision_work","channel"),
                 ("channel_event_authority","event"),
                 ("channel_departure_facts","member,event"),
                 ("channel_membership_snapshots","rank"),
@@ -31,6 +33,9 @@ impl ChannelCheckpointStore {
                 ("channel_legacy_candidates","event"),
                 ("channel_legacy_scan","channel"),
             ] {
+                if table=="channel_decision_work" {
+                    super::super::graph::preparing::retire_selection_on(c,&job,channel.as_bytes().as_slice())?;
+                }
                 let sql=format!("DELETE FROM {table} WHERE job=?1 AND channel=?2 AND ({key}) IN (SELECT {key} FROM {table} WHERE job=?1 AND channel=?2 LIMIT 128)");
                 if c.execute(&sql,params![&job,channel.as_bytes().as_slice()])?!=0 {return Ok(true);}
             }

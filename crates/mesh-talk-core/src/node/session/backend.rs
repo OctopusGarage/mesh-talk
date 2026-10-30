@@ -79,6 +79,16 @@ pub(super) trait SessionBackend {
     fn apply(&self, events: &[Event]) -> Result<ApplyReport, LogError>;
     fn admission_denied(&self) -> bool;
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError>;
+    fn durable_have_in_view(
+        &self,
+        view: &Self::View,
+        conversation: &ConversationId,
+        id: &EventId,
+    ) -> Result<bool, LogError> {
+        self.validate_view(view)?;
+        self.durable_have(conversation, id)
+    }
+
     fn file_consent(
         &self,
         conversation: &ConversationId,
@@ -419,6 +429,17 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .lock()
             .expect("store mutex not poisoned")
             .durable_have(c, id)
+    }
+    fn durable_have_in_view(
+        &self,
+        view: &S::View,
+        conversation: &ConversationId,
+        id: &EventId,
+    ) -> Result<bool, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .durable_have_in_view(view, conversation, id)
     }
     fn file_consent(
         &self,

@@ -2022,10 +2022,26 @@ Large legal parent lists resume at an exact edge cursor. An undersized budget
 returns an explicit error without discarding the event. Have-dependent export
 closure stages the admitted peer Have in bounded batches and resumes its vertex
 and edge together; replacing Have also retires old rows incrementally.
-Channel checkpoint projection remains the authority for signed controls. Its
-individual synchronous ancestry query still needs the preparing-graph integration;
-outer preparation turns alone do not establish a complete control-work bound.
-The explicit collecting SyncStore compatibility API is separate from this runtime.
+Channel checkpoint projection remains the authority for signed controls. A private
+reducer suspends when an exact graph answer or historical predicate is unfinished.
+The existing encrypted ancestry owner advances caller-budgeted vertices and edges;
+quantified predicates retain their last fully checked fact key. Partial decisions
+never publish receiver state, transcripts, reception effects or authority. Decision
+progress is fenced by the exact control as well as its source generation.
+
+Causal query handles return Pending with charged work or one complete leased
+projection. Owner queries additionally retain the validated strict-causal state
+until later ownership-loss checks finish. Runtime-owned ancestor selections retire
+incrementally after cancellation or restart; transferring a walk to a durable
+checkpoint reference is atomic. Captured account generations reject old receiver,
+source and query handles after an account is adopted again. The initial query API
+still conservatively invalidates on same-channel source revisions, including safe
+tails. Canonical outer work accounting and startup/runtime callers that drain steps
+remain separate integration work; these primitives alone do not establish bounded
+whole-call startup latency. The explicit collecting SyncStore compatibility API is
+separate from the paged runtime. Durable-Have requests prepare a finite view through
+the same yielding session loop and test exact selected membership before syncing;
+they do not collect the conversation's historical payloads.
 
 Selection lifetimes use the existing eight-connection exchange limit and admitted
 remote-Have budget. Each connection may hold its primary selection and one

@@ -447,6 +447,38 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
         SyncStore::durable_have(self, conversation, id)
     }
+    fn durable_have_in_view(
+        &self,
+        view: &Self::View,
+        conversation: &ConversationId,
+        id: &EventId,
+    ) -> Result<bool, LogError> {
+        if *conversation != view.conversation {
+            return Err(LogError::StaleCursor);
+        }
+        self.validate_view(view)?;
+        let retained = {
+            let preparation = view.preparation.lock().expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            let log = self.node.log.lock().expect("log lock");
+            let selected = log
+                .repository()?
+                .selected_contains(preparation.selection()?, *id)?;
+            if selected {
+                log.sync()?;
+            }
+            selected
+        };
+        let stored = retained
+            || (!self.denied
+                && self
+                    .node
+                    .historical_file_completion(*conversation, *id, &self.peer)?);
+        self.validate_view(view)?;
+        Ok(stored)
+    }
     fn file_consent(
         &self,
         file: &ConversationId,
@@ -1890,5 +1922,83 @@ mod control_publication_tests {
             NetworkSyncStore::validate_view(&*store, &empty),
             Err(LogError::StaleCursor)
         ));
+    }
+    #[tokio::test]
+    async fn participant_durable_have_request_uses_no_historical_bodies() {
+        use crate::{
+            node::session::{request_durable_have, serve_one_paged},
+            transport::SecureChannel,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let mut selected = None;
+        for seq in 1..=128 {
+            let event = Event::new(
+                &node.identity,
+                conversation,
+                seq,
+                vec![],
+                seq,
+                0,
+                EventKind::Message,
+                vec![7; 2048],
+            );
+            selected = Some(event.id);
+            node.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        let (client, server) = tokio::io::duplex(65536);
+        let server_node = node.clone();
+        let remote = peer.public();
+        let task = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(server, &server_node.identity)
+                .await
+                .unwrap();
+            let store = server_node.sync_store(&remote);
+            for _ in 0..2 {
+                serve_one_paged(&mut channel, &store).await.unwrap();
+            }
+        });
+        let mut channel = SecureChannel::connect(client, &peer, Some(&node.identity.public()))
+            .await
+            .unwrap();
+        assert!(
+            request_durable_have(&mut channel, conversation, selected.unwrap())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !request_durable_have(&mut channel, conversation, EventId::new([93; 32]))
+                .await
+                .unwrap()
+        );
+        task.await.unwrap();
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before,
+            "a selected custody probe must not decode retained history"
+        );
     }
 }

@@ -5,11 +5,37 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
 };
+pub(super) mod preparing;
+
+/// A historical predicate resumes after its last completely checked fact.
+/// The pure graph has no persistent cursor; the production preparing graph does.
+pub(crate) enum PredicateProgress {
+    Scan(Option<Vec<u8>>),
+    Complete(bool),
+    Pending,
+}
 
 pub(crate) trait AuthorityGraph {
     fn event(&self, id: EventId) -> Result<Option<Cow<'_, Event>>, LogError>;
     /// Includes equality, matching signed account-authority ancestry checks.
     fn descends(&self, child: EventId, ancestor: EventId) -> Result<bool, LogError>;
+    fn pending(&self) -> bool {
+        false
+    }
+    fn predicate(&self, _key: &[u8]) -> Result<PredicateProgress, LogError> {
+        Ok(PredicateProgress::Scan(None))
+    }
+    fn save_predicate(
+        &self,
+        _key: &[u8],
+        _after: Option<&[u8]>,
+        _answer: Option<bool>,
+    ) -> Result<(), LogError> {
+        Ok(())
+    }
+    fn admit_fact(&self, _bytes: usize) -> Result<bool, LogError> {
+        Ok(true)
+    }
 }
 impl AuthorityGraph for HashMap<EventId, &Event> {
     fn event(&self, id: EventId) -> Result<Option<Cow<'_, Event>>, LogError> {
@@ -65,4 +91,37 @@ pub(in crate::node) fn require_source_on(
         return Err(LogError::StaleCursor);
     }
     Ok(())
+}
+
+/// A quantified historical predicate owns its last fully examined key. An
+/// unresolved graph answer never advances that cursor or publishes a result.
+pub(in crate::node) fn any_fact<T>(
+    graph: &impl AuthorityGraph,
+    key: &[u8],
+    mut next: impl FnMut(Option<&[u8]>) -> Result<Option<(Vec<u8>, T)>, LogError>,
+    mut matches: impl FnMut(T) -> Result<bool, LogError>,
+) -> Result<bool, LogError> {
+    let mut after = match graph.predicate(key)? {
+        PredicateProgress::Complete(answer) => return Ok(answer),
+        PredicateProgress::Pending => return Ok(false),
+        PredicateProgress::Scan(after) => after,
+    };
+    loop {
+        if !graph.admit_fact(256)? {
+            return Ok(false);
+        }
+        let Some((cursor, fact)) = next(after.as_deref())? else {
+            graph.save_predicate(key, after.as_deref(), Some(false))?;
+            return Ok(false);
+        };
+        let matched = matches(fact)?;
+        if graph.pending() {
+            return Ok(false);
+        }
+        graph.save_predicate(key, Some(&cursor), matched.then_some(true))?;
+        if matched {
+            return Ok(true);
+        }
+        after = Some(cursor);
+    }
 }
