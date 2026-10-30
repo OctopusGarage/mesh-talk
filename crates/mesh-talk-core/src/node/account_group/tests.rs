@@ -82,7 +82,7 @@ fn assert_no_account_document_errors(snapshot: &[crate::node::DeviceSyncStatus])
         snapshot
             .iter()
             .all(|status| status.document_error.is_none()),
-        "owned preemption is not a network failure: {snapshot:?}"
+        "owned preemption must not produce a document error"
     );
 }
 

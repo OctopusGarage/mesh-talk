@@ -569,10 +569,9 @@ async fn account_fixture_health_snapshot_precedes_real_peer_shutdown() {
     let after = teardown_error
         .unwrap()
         .expect("closing the real peer must publish a document failure");
-    eprintln!("teardown observation: captured={snapshot:?}, after_peer_close={after:?}");
-    assert_eq!(
-        after.document_error.as_deref(),
-        Some("account document exchange interrupted")
+    assert!(
+        after.document_error.as_deref() == Some("account document exchange interrupted"),
+        "closing the real peer must interrupt its document exchange"
     );
     assert!(
         snapshot

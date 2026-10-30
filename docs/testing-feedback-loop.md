@@ -453,7 +453,8 @@ Capture account document health before closing runtime admission or stopping
 peers. The test-local `capture_account_sync_before_cleanup` owns that observation
 boundary while still awaiting all caller-owned cleanup before the assertion.
 Never clear errors or wait for them to disappear. Validate the captured statuses
-with the unchanged no-document-error predicate and include them in failure output.
+with the unchanged no-document-error predicate; diagnostics follow the
+[sensitive diagnostic rules](../specifications/development_conventions.md#sensitive-diagnostics).
 `account_fixture_health_snapshot_precedes_real_peer_shutdown` holds an acknowledged
 real document request, stops its peer and observes the resulting real sync error;
 it verifies that teardown cannot replace the previously captured health evidence.
