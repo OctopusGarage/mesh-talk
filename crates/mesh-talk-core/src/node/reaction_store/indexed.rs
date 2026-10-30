@@ -249,51 +249,6 @@ impl IndexedReactionStore {
             Ok(out)
         })
     }
-    pub(in crate::node) fn remove_where(
-        &mut self,
-        remove: impl Fn(ConversationId, u64, &ReactionPayload) -> bool,
-    ) -> Result<(), LogError> {
-        self.try_remove_where(|conv, wall, payload| Ok(remove(conv, wall, payload)))
-    }
-    /// Predicates execute outside the connection mutex. Physical cleanup makes
-    /// bounded transactional progress; an error leaves remaining rows retryable.
-    pub(in crate::node) fn try_remove_where(
-        &mut self,
-        remove: impl Fn(ConversationId, u64, &ReactionPayload) -> Result<bool, LogError>,
-    ) -> Result<(), LogError> {
-        self.check_write()?;
-        let mut after = None;
-        loop {
-            let page = self.page_with_ordinals(None, None, after, 128, 8 * 1024 * 1024)?;
-            if page.is_empty() {
-                return Ok(());
-            }
-            after = page.last().map(|r| r.0);
-            let mut selected = Vec::new();
-            for (ordinal, row) in page {
-                if remove(row.conversation, row.wall, &row.payload)? {
-                    selected.push(ordinal);
-                }
-            }
-            self.source.profile().database().transaction(|c| {
-                self.check_account(c)?;
-                let mut removed = 0;
-                for ordinal in selected {
-                    removed += c.execute(
-                        "DELETE FROM authored_reaction_keys WHERE account=?1 AND ordinal=?2",
-                        params![self.account.as_slice(), ordinal],
-                    )?;
-                }
-                if removed > 0 {
-                    c.execute(
-                        "UPDATE authored_reaction_state SET revision=revision+1 WHERE account=?1",
-                        [self.account.as_slice()],
-                    )?;
-                }
-                Ok(())
-            })?;
-        }
-    }
     #[cfg(test)]
     pub(in crate::node) fn len(&self) -> usize {
         self.source
