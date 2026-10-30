@@ -173,10 +173,8 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
     })
     .await;
     let source_count = source.channel_custody_count(group, event);
-    let sibling_count = sibling.channel_custody_count(group, event);
     let external_has_original = external.log.lock().unwrap().get(&event).is_some();
     let source_meta = source.account_document_meta(&custody_key);
-    let sibling_meta = sibling.account_document_meta(&custody_key);
     release.close();
     source.note_account_local_change();
     let resumed = tokio::time::timeout(Duration::from_secs(8), async {
@@ -215,6 +213,6 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
     assert!(source_meta.is_some());
     assert!(
         converged.is_ok(),
-        "external custody waited behind held history: source_count={source_count:?}, sibling_count={sibling_count:?}, source_meta={source_meta:?}, sibling_meta={sibling_meta:?}"
+        "external custody must converge while history is held"
     );
 }

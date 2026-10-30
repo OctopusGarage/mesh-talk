@@ -26,11 +26,13 @@
         "crates/mesh-talk-core/src/node/channels/account_invitation.rs",
         "crates/mesh-talk-core/src/node/delivery_store/group_invitation.rs",
         "crates/mesh-talk-core/src/node/channel_account_controls.rs",
+        "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
         "crates/mesh-talk-core/src/node/outgoing_message.rs",
         "crates/mesh-talk-core/src/node/message_actions.rs",
         "crates/mesh-talk-core/src/node/reaction_store.rs",
         "crates/mesh-talk-core/src/node/reactions.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/delivery_store/group_file.rs",
         "crates/mesh-talk-core/src/node/channels/account_self_control.rs",
         "crates/mesh-talk-core/src/node/delivery_store/group_self_control.rs",
@@ -41,6 +43,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
+            "control_task_lifetime_scope_restores_outer_witness_after_panic",
             "local_cancel_ack_during_remote_commit_rolls_forward_without_action_required",
             "owner_decision_rejects_stale_rejoined_lifetime_with_current_acceptance",
             "owner_decision_rejects_matching_lifetime_with_false_role_or_wrong_proof",
@@ -97,6 +100,8 @@
             "node::channel::tests::modern_owner_or_unregistered_leave_never_creates_a_departure_route",
             "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route",
             "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
+            "selected_source_cold_capability_setup_precedes_role_page_budget",
+            "account_fixture_health_snapshot_precedes_real_peer_shutdown",
             "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
             "incoming_request_overtakes_a_naturally_hinted_control_and_repays_its_background_turn",
             "incoming_wake_yields_one_natural_turn_but_protects_replacement_and_resume",
@@ -154,6 +159,10 @@
           {
             "name": "Modern self controls bind the original account intent to its exact grant incarnation and saved causal view; valid departure retains only the original source retry route and projects Left over stale sibling membership observations.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Reference self-control evidence asserts the actual admitted remote executor while holding requester-side public membership recovery; real private readiness, original action deadlines and recovery cleanup remain required.",
+            "reference": "docs/testing-feedback-loop.md#maintaining-standards-across-requirements"
           },
           {
             "name": "Group access and source observations capture privacy and identity state before the event-log mutex; log-held projection never reacquires privacy, roster or host-session locks.",
@@ -1232,7 +1241,7 @@
         }
       ],
       "escalation": [
-        "Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
+        "Profile publication changes require publishing_profile_projects_newer_sibling_profile_pulled_in_same_round, proving durable import and immediate authenticated projection without a reverse connection. Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
       ],
       "consumers": [
         "desktop-chat",
@@ -1473,12 +1482,45 @@
       ]
     },
     {
+      "id": "core-large-directory-enqueue",
+      "paths": [
+        "crates/mesh-talk-core/tests/large_directory_enqueue.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/file/manifest.rs",
+        "crates/mesh-talk-core/src/file/directory.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::delivery_runtime_tests::large_manifest_uses_compact_wire_format_before_staging_chunks"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Stage a real 110 MiB directory and persist its exact enqueued compact V4 manifest without exceeding the event frame limit.",
+        "guide": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding",
+        "invariants": [
+          {
+            "name": "The returned event ID resolves in the persisted event log after the writer stops; recipient decryption yields V4 with the matching file conversation, directory name/MIME and more than 2,000 chunks.",
+            "reference": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding"
+          }
+        ]
+      },
+      "escalation": [
+        "Run cargo test --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 separately, then validate the saved stdout/stderr with scripts/evals/backend-runner.mjs --validate-large-folder. The real 110 MiB fixture is explicit backend acceptance, not an ordinary affected-suite test; it proves enqueue/staging and persisted compact-manifest identity, not recipient transfer."
+      ]
+    },
+    {
       "id": "core-cli-harness",
       "paths": [
         "crates/mesh-talk-core/src/bin/",
         "crates/mesh-talk-core/tests/",
         "crates/mesh-talk-core/examples/",
         "specifications/deployment_guide.md"
+      ],
+      "excludePaths": [
+        "crates/mesh-talk-core/tests/large_directory_enqueue.rs"
       ],
       "rust": [
         {
@@ -1629,6 +1671,7 @@
       "id": "core-sticker-media",
       "paths": [
         "crates/mesh-talk-core/src/file/sticker.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/sticker_media.rs",
         "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
         "crates/mesh-talk-core/src/node/recall.rs",
@@ -1649,6 +1692,8 @@
             "node::files::",
             "node::recall::",
             "node::file_completion::",
+            "node::delivery_runtime_tests::failed_media_completion_metadata_keeps_durable_bytes_pending",
+            "node::delivery_runtime_tests::untracked_channel_media_local_export_verifies_retained_row_and_managed_bytes",
             "node::session::tests::"
           ]
         }
@@ -1660,6 +1705,10 @@
         "summary": "Deliver immutable encrypted sticker media without requiring recipient pack installation and reuse verified transfer bytes only within the same conversation and deadline.",
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
         "invariants": [
+          {
+            "name": "Completed local group or own media retires recovery without repeated decoding or recipient receipts; failed bound completion metadata and missing media remain retryable",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
           {
             "name": "Pack installation and message media retention are independent; exact image identity is the authenticated attachment checksum",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"

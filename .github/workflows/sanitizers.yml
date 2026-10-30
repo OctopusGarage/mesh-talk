@@ -52,6 +52,7 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: sanitizers
 
       # Run the core lib tests instrumented with AddressSanitizer. LeakSanitizer

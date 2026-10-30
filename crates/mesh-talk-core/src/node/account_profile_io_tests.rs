@@ -377,3 +377,108 @@ fn account_display_name_prefers_signed_profile_and_retains_offline_discovery_nam
         None
     );
 }
+
+#[tokio::test]
+async fn publishing_profile_projects_newer_sibling_profile_pulled_in_same_round() {
+    use crate::eventlog::EventKind;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let alice = open(&directory.path().join("alice"), &account);
+    let bob = open(&directory.path().join("bob"), &account);
+    let old = AccountProfile::new(
+        &account,
+        10,
+        "Original".into(),
+        "Preserved biography".into(),
+        Some(b"old avatar".to_vec()),
+    );
+    let latest = AccountProfile::new(
+        &account,
+        13,
+        "Edited on sibling".into(),
+        "Preserved biography".into(),
+        Some(b"new avatar".to_vec()),
+    );
+    alice.receive_account_profile(&old).unwrap();
+    bob.receive_account_profile(&old).unwrap();
+    bob.receive_account_profile(&latest).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bob_port = listener.local_addr().unwrap().port();
+    for (receiver, sender, name, port) in [
+        (&alice, &bob, "Bob", bob_port),
+        (&bob, &alice, "Alice", 4000),
+    ] {
+        receiver.roster.lock().unwrap().update(
+            &sender.signed_announce(name, port),
+            "127.0.0.1".parse().unwrap(),
+            &receiver.user_id(),
+        );
+        receiver
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(crate::node::account_devices::AccountDevice {
+                public: sender.identity.public(),
+                certificate: account.certify(&sender.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    let alice_peer = bob.routing_peer(&alice.user_id()).unwrap();
+    let bob_peer = alice.routing_peer(&bob.user_id()).unwrap();
+    let conversation = bob
+        .prepare_account_profile_delivery(&alice_peer, &latest)
+        .unwrap();
+    assert_eq!(
+        alice.prepare_account_profile_delivery(&bob_peer, &old),
+        Some(conversation)
+    );
+    let remote_profile_ids: Vec<_> = bob
+        .log
+        .lock()
+        .unwrap()
+        .events(&conversation)
+        .into_iter()
+        .filter(|event| event.kind == EventKind::Profile && event.author.user_id() == bob.user_id())
+        .map(|event| event.id)
+        .collect();
+    assert_eq!(remote_profile_ids.len(), 2);
+
+    // Only Bob accepts connections. No runtime, discovery, periodic drain, or
+    // reverse connection can accidentally project Alice's newly pulled events.
+    let server_node = Arc::clone(&bob);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let channel = server_node.privacy_accept(stream).await.unwrap();
+        server_node.serve_connection(channel).await;
+    });
+    let delivered = tokio::time::timeout(
+        Duration::from_secs(5),
+        alice.deliver_profile_to(&bob_peer, conversation),
+    )
+    .await;
+    // Recycled channels can leave the responder waiting for another round.
+    // Retire and join it BEFORE assertions, including the deliberate red one.
+    server.abort();
+    let _ = server.await;
+
+    assert!(delivered.expect("one loopback publication finishes within its setup budget"));
+    {
+        let log = alice.log.lock().unwrap();
+        assert!(
+            remote_profile_ids.iter().all(|id| log.get(id).is_some()),
+            "the outbound round durably pulls both sibling profile events"
+        );
+    }
+    assert_eq!(
+        alice.account_profile(&account.account_id()),
+        Some(latest.clone()),
+        "successful publication must project the newer profile pulled in that round"
+    );
+    assert_eq!(alice.peer_avatar(&account.account_id()), latest.avatar);
+    assert_eq!(latest.bio, old.bio);
+    assert_eq!(latest.created_at_ms, old.created_at_ms);
+}

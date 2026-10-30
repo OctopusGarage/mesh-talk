@@ -3100,20 +3100,27 @@ impl Node {
                 #[cfg(test)]
                 let control_task_trace = (key.lane == DocumentLane::Control).then(|| {
                     format!(
-                        "control_task paired={} protected={} requests={:?}",
+                        "control_task paired={} protected={} requests={:?} resumed={} replacement={} hint={}",
                         control_pairs.contains_key(&key),
                         protected,
                         selected_requests
                             .get(&key.identity())
                             .cloned()
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        control_origin.0,
+                        control_origin.1,
+                        hints.iter().any(|hint| hint.public == key.public())
                     )
                 });
                 let task = documents.spawn(permit.track(async move {
                     #[cfg(test)]
-                    if let Some(event) = control_task_trace {
-                        node.trace_account_client(&peer.public, || event);
-                    }
+                    let _lifetime = control_task_trace.map(|event| {
+                        // Only the child owns this token across the pull future.
+                        // Abort, return and panic drop it without fixture callbacks.
+                        let lifetime = Arc::new(());
+                        node.trace_control_task(&peer.public, event, Arc::downgrade(&lifetime));
+                        lifetime
+                    });
                     let _ = node.pull_account_documents_page(&peer, &mut state).await;
                     (key, peer, state)
                 }));
