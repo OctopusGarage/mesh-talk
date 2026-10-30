@@ -163,6 +163,7 @@ impl IndexedRecallLog {
     pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
+    #[cfg(test)]
     pub(crate) fn len(&self) -> Result<u64, LogError> {
         self.source.profile().database().read(|c| {
             Ok(c.query_row(

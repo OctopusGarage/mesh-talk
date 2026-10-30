@@ -32,6 +32,7 @@ pub struct ReceivedEntry {
 pub struct ReceivedLog {
     file: EncryptedRecordLog<ReceivedEntry>,
     by_conversation: HashMap<ConversationId, Vec<ReceivedEntry>>,
+    #[cfg(test)]
     allow_aliases: bool,
     /// First host for each event ID. Message logs reject another host; file-card
     /// logs may append a matching alias under another host.
@@ -56,10 +57,12 @@ pub(super) fn history_clone_bytes() -> usize {
 impl ReceivedLog {
     /// File cards can have a device-conversation row and an account-conversation
     /// row for the same signed manifest. Message logs keep event IDs unique.
+    #[cfg(test)]
     pub(crate) fn open_file_cards(path: &Path, password: &str) -> Result<Self, LogError> {
         Self::open_inner(path, password, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn record_file_alias_durable(
         &mut self,
         entry: &ReceivedEntry,
@@ -99,6 +102,7 @@ impl ReceivedLog {
     pub(crate) fn fail_next_append_rollback_for_test(&mut self, bytes: usize) {
         self.file.fail_next_append_rollback_for_test(bytes);
     }
+    #[cfg(test)]
     pub(crate) fn entry(&self, id: EventId) -> Option<&ReceivedEntry> {
         let (conversation, index) = self.seen.get(&id)?;
         self.by_conversation.get(conversation)?.get(*index)
@@ -158,6 +162,7 @@ impl ReceivedLog {
             file,
             by_conversation,
             seen,
+            #[cfg(test)]
             allow_aliases,
         })
     }
