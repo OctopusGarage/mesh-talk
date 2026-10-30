@@ -1442,7 +1442,7 @@ existing participants see an ordinary signed account/device author.
   - _Coverage-guided fuzzing_ (`fuzz/`, `fuzz.yml`, weekly + dispatch) of selected public
     untrusted wire and opened-payload decoders; the `decoder_smoke` test is the always-on
     stable complement. See [`fuzz/README.md`](../fuzz/README.md) for the current targets.
-  - _Mutation testing_ (`mutants.yml`, weekly + on PR-diff) — catches weak/missing assertions.
+  - _Mutation testing_ (`mutants.yml`, daily/manual workspace sampling; PR runner contracts) — catches weak/missing assertions. See [execution policy](testing-feedback-loop.md).
   - _Coverage_ (Codecov), _clippy `-D warnings`_, _cargo-deny_, _cargo-machete_, _CodeQL_, _gitleaks_.
   - _Delivery / AI regression smoke_ (`make eval-smoke`) keeps core smoke examples,
     prompt/agent contracts, local hooks, PR validation, and CI wiring from drifting.

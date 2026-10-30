@@ -172,27 +172,43 @@ test("browser and native dependency installation use the same Linux-only prepara
     ),
     "utf8",
   );
-  const preparations = ui
-    .split(/^      - name: Prepare Ubuntu archive source\n/m)
-    .slice(1);
-  assert.equal(
-    preparations.length,
-    4,
-    "every existing browser installer has its own guarded preparation",
+  const shards = await readFile(
+    new URL("../../.github/workflows/ui-shards.yml", import.meta.url),
+    "utf8",
   );
-  for (const section of preparations) {
-    const step = section.split(/^      - /m)[0];
-    assert.match(step, /if: runner\.os == 'Linux'/);
-    assert.match(
-      step,
-      /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS/,
-    );
-    assert.match(step, /\.\.\/scripts\/ci\/ubuntu-apt-source\.mjs/);
-    assert.match(
-      section.split(/^  [a-z][\w-]*:\n/m)[0],
-      /playwright install --with-deps/,
-    );
+  let installers = 0;
+  for (const [name, workflow] of [
+    ["UI caller", ui],
+    ["reusable shards", shards],
+  ]) {
+    for (const section of workflow.split(/^  [a-z][\w-]*:\n/m).slice(1)) {
+      const install = section.indexOf("playwright install --with-deps");
+      if (install === -1) continue;
+      installers++;
+      const preparations = section.split(
+        /^      - name: Prepare Ubuntu archive source\n/m,
+      );
+      assert.equal(
+        preparations.length,
+        2,
+        `${name}: every browser installer needs exactly one guarded preparation`,
+      );
+      const step = preparations[1].split(/^      - /m)[0];
+      assert.match(step, /if: runner\.os == 'Linux'/);
+      assert.match(
+        step,
+        /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS/,
+      );
+      assert.match(step, /\.\.\/scripts\/ci\/ubuntu-apt-source\.mjs/);
+      const prepare = section.indexOf("name: Prepare Ubuntu archive source");
+      assert.ok(
+        prepare > section.indexOf("uses: actions/setup-node@"),
+        `${name}: establish Node before preparing APT`,
+      );
+      assert.ok(prepare < install, `${name}: prepare APT before the installer`);
+    }
   }
+  assert.ok(installers > 0, "browser dependency installers must be discovered");
   assert.ok(
     native.indexOf("name: Prepare Ubuntu archive source") <
       native.indexOf("name: Linux native webview dependencies"),
@@ -220,7 +236,7 @@ test("browser and native dependency installation use the same Linux-only prepara
       /sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS.*scripts\/ci\/ubuntu-apt-source\.mjs/,
     );
   }
-  const baseline = ui.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
+  const baseline = shards.split("  e2e:\n")[1].split(/^  [a-z][\w-]*:\n/m)[0];
   assert.match(baseline, /timeout-minutes: 25/);
   assert.match(
     baseline,
@@ -412,4 +428,46 @@ test("a referenced mirror file cannot be a symlink", posixOnly, async (t) => {
     /regular file/,
   );
   assert.equal(await readFile(outside, "utf8"), original);
+});
+
+test("malformed active source rows reject regardless of hostname text", () => {
+  for (const row of ["deb", "deb-src", "deb [arch=amd64]"]) {
+    assert.throws(
+      () => rewriteUbuntuAptSource(`${row}\n`, false),
+      /Unsupported APT/,
+    );
+  }
+});
+
+test("host matching ignores Azure text in credentials, paths, queries and lookalike hosts", () => {
+  for (const uri of [
+    "https://azure.archive.ubuntu.com.example/ubuntu",
+    "https://notazure.archive.ubuntu.com/ubuntu",
+    "https://azure.archive.ubuntu.com@mirror.example/ubuntu",
+    "https://mirror.example/azure.archive.ubuntu.com",
+    "https://mirror.example/ubuntu?host=azure.archive.ubuntu.com",
+  ]) {
+    const source = `deb ${uri} noble main\n`;
+    assert.equal(rewriteUbuntuAptSource(source, false), source);
+    const deb822 = `URIs: ${uri}\n`;
+    assert.equal(rewriteUbuntuAptSource(deb822, true), deb822);
+    assert.equal(rewriteUbuntuAptMirrorList(`${uri}\n`), `${uri}\n`);
+  }
+});
+
+test("invalid URI tokens reject in source fields and mirror lists", () => {
+  for (const uri of ["not-a-url", "http://[invalid]/ubuntu"]) {
+    assert.throws(
+      () => rewriteUbuntuAptSource(`deb ${uri} noble main\n`, false),
+      /Unsupported APT URI/,
+    );
+    assert.throws(
+      () => rewriteUbuntuAptSource(`URIs: ${uri}\n`, true),
+      /Unsupported APT URI/,
+    );
+    assert.throws(
+      () => rewriteUbuntuAptMirrorList(`${uri}\n`),
+      /Unsupported APT URI/,
+    );
+  }
 });

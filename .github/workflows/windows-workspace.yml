@@ -1,0 +1,144 @@
+name: Windows workspace archive
+
+on:
+  workflow_call:
+    inputs:
+      diagnostic_timing:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  # Both producer and consumers keep the same ordinary Cargo profile inputs.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  RUST_TEST_THREADS: '1'
+  MESH_TALK_TEST_TIMING: ${{ inputs.diagnostic_timing && '1' || '0' }}
+
+jobs:
+  build:
+    name: Windows workspace build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      rust: ${{ steps.compiler.outputs.rust }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt, llvm-tools-preview
+      - name: Pin producer compiler for consumers
+        id: compiler
+        run: rustc --version | awk '{print "rust=" $2}' >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2
+        env:
+          CARGO_TERM_COLOR: always
+          RUST_TEST_THREADS: ''
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: . -> target
+          shared-key: workspace-checks-checks
+          cache-on-failure: true
+      - name: Frontend dependencies and structural checks
+        run: |
+          npm ci --prefix frontend
+          node scripts/validation/standards.mjs
+          node scripts/check-repository-hygiene.mjs
+      - uses: taiki-e/install-action@v2.87.31
+        with:
+          tool: cargo-nextest@0.9.148,cargo-llvm-cov@0.8.7
+      - name: Validate archive and coverage contracts
+        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm run build
+          npm run check:build-syntax
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build production workspace
+        run: cargo build --workspace --locked
+      - name: Workspace doctests
+        run: cargo test --workspace --doc --locked
+      - name: Build one instrumented workspace archive
+        run: |
+          eval "$(cargo llvm-cov show-env --sh)"
+          node scripts/ci/windows-coverage.mjs produce "$RUNNER_TEMP/windows-workspace-archive"
+      - name: Upload sealed workspace archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-workspace-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-workspace-archive/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+
+  tests:
+    name: Windows workspace tests (${{ matrix.shard }}/2)
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ needs.build.outputs.rust }}
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2.87.31
+        with:
+          tool: cargo-nextest@0.9.148,cargo-llvm-cov@0.8.7
+      # No Cargo cache, dependency fetch, frontend rebuild or test compilation.
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-workspace-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-workspace-archive
+      - name: Run validated serial shard and export partial coverage
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          eval "$(cargo llvm-cov show-env --sh)"
+          node scripts/ci/windows-coverage.mjs consume "${{ matrix.shard }}" "$RUNNER_TEMP/windows-workspace-archive" "$RUNNER_TEMP/windows-workspace-results"
+      - name: Preserve inventory, execution receipt and coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-workspace-results-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-workspace-results/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload validated partial coverage to Codecov
+        if: >-
+          !(github.event_name == 'pull_request' &&
+            github.base_ref == 'dev' &&
+            github.event.pull_request.user.login == 'dependabot[bot]')
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ runner.temp }}/windows-workspace-results/coverage.lcov
+          name: workspace-windows-${{ matrix.shard }}-${{ github.run_attempt }}
+          fail_ci_if_error: true

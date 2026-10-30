@@ -113,9 +113,16 @@ impl Node {
         conv: ConversationId,
     ) -> bool {
         let direct = async {
-            self.adaptive_control_timeout(&peer.public, self.deliver_direct(peer, conv))
+            let delivered = self
+                .adaptive_control_timeout(&peer.public, self.deliver_direct(peer, conv))
                 .await
-                .is_some_and(|result| result.is_ok())
+                .is_some_and(|result| result.is_ok());
+            if delivered {
+                // Reconciliation can pull a newer sibling profile while pushing
+                // ours. Apply it before recording this publication as complete.
+                self.process_profile_events(conv);
+            }
+            delivered
         };
         let relay = async {
             tokio::time::timeout(

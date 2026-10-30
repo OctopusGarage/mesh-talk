@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { waitForChatShell, enterChat, BOB, CHANNEL } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 async function observeBadge(page: import("@playwright/test").Page) {
   await page.evaluate(() => {
     const w = window as unknown as Window & {

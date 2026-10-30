@@ -130,17 +130,11 @@ export function validateScenarioIdentity(evidence, result) {
   assert.equal(evidence.scenario, result.scenarioTitle, "Scenario title substitution");
 }
 
-async function main() {
-  const reportPath = resolve(process.argv[2] ?? "frontend/eval-results/portable/chromium/core/results.json");
+export async function validateBrowserEvidence(reportPath, { tier = "core", browser = "chromium", sourceSha, platform = process.platform, expectedPaths = requiredBrowserPaths(tier) } = {}) {
+  reportPath = resolve(reportPath);
   const root = await realpath(dirname(reportPath));
-  const tier = process.env.EVAL_TIER ?? "core", browser = process.env.EVAL_BROWSER ?? "chromium";
-  assert.ok(["core", "extended"].includes(tier), "Unsupported portable tier");
-  assert.ok(["chromium", "webkit", "firefox"].includes(browser), "Unsupported portable browser");
-  const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   assert.match(sourceSha, /^[a-f0-9]{40}$/);
-  if (process.env.EVAL_SOURCE_SHA !== undefined) assert.equal(process.env.EVAL_SOURCE_SHA, sourceSha, "Source revision mismatch");
   const report = JSON.parse(await readFile(reportPath, "utf8"));
-  const expectedPaths = requiredBrowserPaths(tier);
   const results = validateBrowserReport(report, { count: expectedPaths.length, browser, expectedPaths });
   const scenarios = [];
   const canonicalFiles = new Set();
@@ -148,7 +142,7 @@ async function main() {
     const files = {};
     const digests = {};
     for (const name of EVIDENCE) {
-      const path = await realpath(result.attachments.find(attachment => attachment.name === name).path);
+      const path = await realpath(resolve(root, result.attachments.find(attachment => attachment.name === name).path));
       assert.ok(!canonicalFiles.has(path), "Evidence alias reused across scenarios");
       canonicalFiles.add(path);
       const local = relative(root, path);
@@ -159,7 +153,7 @@ async function main() {
     const evidence = JSON.parse(files["portable-browser-evidence"].toString("utf8"));
     validateScenarioIdentity(evidence, result);
     assert.equal(evidence.sourceSha, sourceSha, "Stale browser evidence");
-    assert.equal(evidence.platform, process.platform, "Wrong operating system evidence");
+    assert.equal(evidence.platform, platform, "Wrong operating system evidence");
     assert.equal(evidence.browser, browser, "Wrong browser evidence");
     assert.equal(evidence.mocked, true, "Browser IPC boundary must be disclosed");
     assert.equal(evidence.native, false, "Browser evidence cannot claim native coverage");
@@ -172,7 +166,17 @@ async function main() {
     const trace = inspectTrace(files.trace);
     scenarios.push({ scenario: evidence.scenario, scenarioPath: evidence.scenarioPath, passed: true, evidenceDigests: digests, screenshot: png, trace });
   }
-  await writeFile(resolve(root, "validated-report.json"), JSON.stringify({ schema: 1, sourceSha, platform: process.platform, browser, tier, native: false, mocked: true, scenarios }, null, 2));
-  console.log(`Validated ${scenarios.length} ${browser} ${process.platform} portable scenarios and their evidence`);
+  const validated = { schema: 1, sourceSha, platform, browser, tier, native: false, mocked: true, scenarios };
+  await writeFile(resolve(root, "validated-report.json"), JSON.stringify(validated, null, 2));
+  return validated;
+}
+async function main() {
+  const tier = process.env.EVAL_TIER ?? "core", browser = process.env.EVAL_BROWSER ?? "chromium";
+  assert.ok(["core", "extended"].includes(tier), "Unsupported portable tier");
+  assert.ok(["chromium", "webkit", "firefox"].includes(browser), "Unsupported portable browser");
+  const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (process.env.EVAL_SOURCE_SHA !== undefined) assert.equal(process.env.EVAL_SOURCE_SHA, sourceSha, "Source revision mismatch");
+  const result = await validateBrowserEvidence(process.argv[2] ?? "frontend/eval-results/portable/chromium/core/results.json", { tier, browser, sourceSha });
+  console.log(`Validated ${result.scenarios.length} ${browser} ${process.platform} portable scenarios and their evidence`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

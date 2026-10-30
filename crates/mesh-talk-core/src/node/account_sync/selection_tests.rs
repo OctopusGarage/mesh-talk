@@ -2199,6 +2199,7 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
         .into_iter()
         .map(|row| row.id)
         .collect();
+    assert_eq!(original.len(), 96);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     sibling_peer(&receiver, &source, listener.local_addr().unwrap());
     let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2235,20 +2236,47 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
         }
     });
     let worker = tokio::spawn(receiver.clone().run_account_history_loop());
+    let progress_started = std::time::Instant::now();
     let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let imported: HashSet<_> = receiver
-                .account_history(&receiver.account_id(), 20_000)
-                .into_iter()
-                .map(|row| row.id)
-                .collect();
-            if original.is_subset(&imported) {
-                break;
+            // Durable imports own this mutex while syncing each record. A full
+            // history projection on every poll blocks this current-thread runtime
+            // behind those writes and repeatedly rebuilds the growing history.
+            // Observe the exact committed IDs without waiting on the writer, then
+            // retain the public projection as the final acceptance assertion.
+            let ready = match receiver.received.try_lock() {
+                Ok(received) => original.iter().all(|id| received.entry(*id).is_some()),
+                Err(std::sync::TryLockError::WouldBlock) => false,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    panic!("received history mutex poisoned")
+                }
+            };
+            if ready {
+                let imported: HashSet<_> = receiver
+                    .account_history(&receiver.account_id(), 20_000)
+                    .into_iter()
+                    .map(|row| row.id)
+                    .collect();
+                if original.is_subset(&imported) {
+                    break;
+                }
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await;
+    let imported_originals = receiver.received.try_lock().ok().map(|received| {
+        original
+            .iter()
+            .filter(|id| received.entry(**id).is_some())
+            .count()
+    });
+    eprintln!(
+        "growing history: elapsed_ms={} pages={} original_count={} imported_original_count={imported_originals:?}",
+        progress_started.elapsed().as_millis(),
+        pages.load(std::sync::atomic::Ordering::SeqCst),
+        original.len(),
+    );
     worker.abort();
     server.abort();
     let _ = worker.await;

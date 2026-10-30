@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, BOB } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 type Diagnostic = {
   available: boolean;
   calls: Array<{ cmd: string; available: boolean; rejected: boolean }>;

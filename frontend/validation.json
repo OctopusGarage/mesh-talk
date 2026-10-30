@@ -1377,7 +1377,7 @@
             "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
           },
           {
-            "name": "The public language owner ships complete same-key locale resources; URL choice overrides saved/browser preferences. Article English fallback is explicit, commands and resource destinations remain unchanged, and failed or stale loads cannot partially translate the current page.",
+            "name": "The public language owner ships complete same-key locale resources; URL choice overrides saved/browser preferences. Article English fallback is explicit, commands and resource destinations remain unchanged, and failed or stale loads cannot partially translate the current page. Settlement observes the latest owned language change without replaying it or treating completion as success.",
             "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
           },
           {
@@ -2045,7 +2045,8 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/reply-preview.spec.ts",
         "frontend/src/features/chat/replyNavigation.ts",
-        "frontend/src/features/chat/replyNavigation.test.ts"
+        "frontend/src/features/chat/replyNavigation.test.ts",
+        "frontend/e2e/helpers/message-highlight.ts"
       ],
       "frontend": [
         "src/features/chat/ReplyPreview.test.ts",
@@ -2885,7 +2886,8 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/reply-preview.spec.ts",
         "frontend/src/features/chat/replyNavigation.ts",
-        "frontend/src/features/chat/replyNavigation.test.ts"
+        "frontend/src/features/chat/replyNavigation.test.ts",
+        "frontend/e2e/helpers/message-highlight.ts"
       ],
       "browser": ["e2e/reply-preview.spec.ts", "e2e/chat.spec.ts"]
     },

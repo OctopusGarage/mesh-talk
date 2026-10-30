@@ -107,6 +107,10 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 
 ## Maintaining standards as requirements change
 
+- Before changing tests, fixtures, dependencies or workflows in ways that affect
+  CI cost or reliability, read [CI maintenance](docs/ci-maintenance.md). Reuse
+  existing owners, measure the affected cost, and preserve acceptance evidence;
+  keep required-check policy in its existing owner.
 - Before implementation, identify the existing decision owner, authoritative rule,
   observable acceptance criteria, affected consumers and required boundary evidence.
   Extend the owning implementation and `validation.json`; new business capabilities

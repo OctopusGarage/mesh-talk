@@ -27,3 +27,26 @@ test("backend evaluates every independent suite after a failure and retains a fa
   assert.equal(recorded.channel_and_file_cli.passed, true);
   assert.equal(recorded.channel_and_file_cli.scenarios.length, 2);
 });
+
+test("filtered large-folder acceptance rejects zero, duplicate, failed and skipped execution", async () => {
+  const { LARGE_FOLDER_SCENARIO, validateBackendOutput } = await import("../evals/backend-runner.mjs");
+  assert.equal(LARGE_FOLDER_SCENARIO, "large_directory_enqueue_uses_compact_manifest_instead_of_frame_error");
+  const valid = `test ${LARGE_FOLDER_SCENARIO} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`;
+  const options = { allowFiltered: true };
+  assert.deepEqual(validateBackendOutput(valid, [LARGE_FOLDER_SCENARIO], options), [LARGE_FOLDER_SCENARIO]);
+  assert.deepEqual(validateBackendOutput(valid.replace("0 filtered out", "1 filtered out"), [LARGE_FOLDER_SCENARIO], options), [LARGE_FOLDER_SCENARIO]);
+  for (const output of [valid.split("\n")[1].replace("1 passed", "0 passed"), valid + `\ntest ${LARGE_FOLDER_SCENARIO} ... ok`, valid + `\n${valid.split("\n")[1]}`, valid.replace("0 failed", "1 failed"), valid.replace("... ok", "... ignored"), valid.replace(LARGE_FOLDER_SCENARIO, "other_case"), valid.replace(LARGE_FOLDER_SCENARIO, `node::delivery_runtime_tests::${LARGE_FOLDER_SCENARIO}`), valid.replace(LARGE_FOLDER_SCENARIO, `${LARGE_FOLDER_SCENARIO}_unrelated`)]) {
+    assert.throws(() => validateBackendOutput(output, [LARGE_FOLDER_SCENARIO], options));
+  }
+});
+
+test("instrumented backend execution preserves the exact ignored scenario selection", async () => {
+  const { backendCargoArgs } = await import("../evals/backend-runner.mjs");
+  const ordinary = backendCargoArgs("two_node_cli", false);
+  const covered = backendCargoArgs("two_node_cli", true);
+  assert.deepEqual(ordinary.slice(0, 2), ["test", "--locked"]);
+  assert.deepEqual(covered.slice(0, 3), ["llvm-cov", "--no-report", "--locked"]);
+  assert.deepEqual(covered.slice(3), ordinary.slice(2));
+  assert.deepEqual(covered.slice(-4), ["--", "--ignored", "--test-threads=1", "--nocapture"]);
+  assert.throws(() => backendCargoArgs("unknown", true), /Unknown backend/);
+});

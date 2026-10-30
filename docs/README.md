@@ -20,6 +20,7 @@ surfaces to their owners, change triggers, evidence and follow-up records.
 | Understand or change the protocol             | [Architecture](ARCHITECTURE.md)                              | [Domain glossary](../CONTEXT.md) · [DDD conventions](domain-design.md) · [Testing feedback loop](testing-feedback-loop.md)                       |
 | Contribute to the desktop app                 | [Contributing](../CONTRIBUTING.md)                           | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                           |
 | Implement or review a reliable change         | [AI coding reliability guide](ai-coding-reliability.md)      | [Module ownership](module-boundaries.md) · [Testing feedback loop](testing-feedback-loop.md)                                                     |
+| Keep CI fast and reliable                     | [CI maintenance](ci-maintenance.md)                           | [Testing feedback loop](testing-feedback-loop.md) · [Quality gates](quality-gates.md) |
 | Review security or past validation            | [Security policy](../SECURITY.md)                            | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Validation and evaluation](#validation-and-evaluation)            |
 
 For menu locations and everyday tasks, start with the [user guide](help/README.md).
@@ -76,6 +77,7 @@ subscriptions and incoming HTTP webhooks are later stages.
 | [`specifications/development_conventions.md`](../specifications/development_conventions.md)   | Coding standards, naming, error handling, performance, cross-platform conventions.                       |
 | [`specifications/testing_guidelines.md`](../specifications/testing_guidelines.md)             | The three test layers — inline unit, multi-process backend E2E, Playwright UI E2E.                       |
 | [`docs/testing-feedback-loop.md`](testing-feedback-loop.md)                                   | Focused local test commands, module boundaries, and full-gate triggers.                                  |
+| [`docs/ci-maintenance.md`](ci-maintenance.md)                                                   | CI cost and reliability decisions, safe reuse, coverage-preserving refactoring and regression prevention. |
 | [`docs/build-retention.md`](build-retention.md)                                               | Shared build archives, compiler-cache budget, worktree discovery, and cleanup coordination.              |
 | [`specifications/git_standards.md`](../specifications/git_standards.md)                       | Conventional-commit format, scopes, and GPG signing / hook enforcement.                                  |
 | [`specifications/task_completion_criteria.md`](../specifications/task_completion_criteria.md) | Definition of done — the `check-health.sh` gate + docs/security requirements.                            |
