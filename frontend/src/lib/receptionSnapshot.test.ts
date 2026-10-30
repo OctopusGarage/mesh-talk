@@ -4,7 +4,7 @@ import {
   saveReceptionSnapshot,
   type ReceptionSnapshot,
 } from "./receptionSnapshot";
-import type { ReceptionScope } from "@/store/receptionDelivery";
+import type { ReceptionScope } from "./types";
 const scope: ReceptionScope = {
   owner: "local",
   account_id: "account",

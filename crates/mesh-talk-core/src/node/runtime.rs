@@ -1342,7 +1342,8 @@ impl NodeRuntime {
         Ok(linked.account_id)
     }
 
-    /// Create a channel; returns its conversation id.
+    /// Create a legacy device-only channel; returns its conversation id.
+    /// Account-based desktop creation uses `Node::create_account_channel_invited_if`.
     pub async fn create_channel(
         &self,
         name: &str,

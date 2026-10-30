@@ -26,7 +26,31 @@ A central account service or replacement messaging stack would change the
 project's local-first trust model. A general CRDT engine is justified only by an
 actual concurrently editable document, not ordinary immutable message history.
 
-## Future private-state replication
+## Account and device decision boundaries
+
+| Concern            | Account decision                                                                      | Device responsibility                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Identity           | Login credentials, nickname, avatar and bio                                           | Local storage namespace, encrypted storage keys and active session                       |
+| Contacts           | Contact account, remarks, pins and visibility                                         | Reachable routes and individual device certificates                                      |
+| Groups             | Invitations, accepted membership, ownership, roles, removal and departure             | Signed event provenance, authenticated inheritance and independent sender keys           |
+| Group presentation | One member and avatar per verified account; shared group directory                    | Presence evidence and availability of retained copies                                    |
+| Messages           | Account conversation, own-message identity and authorized account actions             | Transport acknowledgements, original event signatures and verified attachment bytes      |
+| Preferences        | Portable account preferences and private libraries under their synchronization policy | Download paths, OS permissions, autostart, saved-login permission and local-agent grants |
+| Calls              | Ring the contact account                                                              | Authenticate the chosen answering device and bind its media session                      |
+
+Every user-facing entry point must reuse the owning account rule, including group
+creation. A selected device is only a route to authenticate the invited account;
+matching names do not prove matching accounts. New desktop groups commit the
+existing account-authority format at creation rather than waiting for a legacy
+migration. The older creation primitive remains available for compatibility
+fixtures and SDK consumers that explicitly use device-only groups.
+
+Reference member snapshots may supply names, avatars and member counts without
+manufacturing local membership or management rights. Missing or incomplete facts
+remain unknown. Account-private sync selection does not turn group ownership
+into a device permission, and an unavailable route does not revoke membership.
+
+## Private-state replication
 
 Portable contact remarks, pins/visibility and supported appearance choices use
 account-bound preference records. Shared login credentials use a separate private
@@ -34,8 +58,9 @@ account-access record and encrypted local credential envelopes. Message Favorite
 have their own bounded replay and tombstones. These owners must not be replaced
 by another generic synchronization engine.
 
-Read positions, drafts, custom group photos, installed sticker libraries and their private-use choices
-remain separate extensions to the messaging/files contract. Before implementing them:
+Read positions, drafts, custom group photos, installed sticker libraries and their
+private-use choices use separate account-private records alongside messaging and
+files. Maintain these contracts when extending their existing owners:
 
 - Define an account-private, versioned record and its authenticated writer,
   conflict rule, tombstone and import limits. Do not put private state into a

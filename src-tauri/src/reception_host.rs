@@ -281,7 +281,7 @@ pub(crate) async fn owner_reception_page(
             HostReception::File(file)=>Receipt::File(crate::events::file_event(file)),
         }).collect::<Vec<_>>();
         let mut profiles = delivery.gate.profiles.clone();
-        profiles.observe(handle.current_profile_revision());
+        profiles.observe(handle.current_profile_revision()?);
         if !profiles.complete {
             let current = handle.current_profiles_page(profiles.revision, profiles.after.as_deref())?;
             profiles.after = current.after;

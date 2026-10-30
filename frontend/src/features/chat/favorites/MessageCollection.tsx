@@ -9,10 +9,14 @@ export function CollectionToolbar({
   selected,
   onCancel,
   onCollect,
+  onForward,
+  forwardDisabled = false,
 }: {
   selected: ChatMessage[];
   onCancel: () => void;
   onCollect: () => void;
+  onForward?: () => void;
+  forwardDisabled?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -22,15 +26,29 @@ export function CollectionToolbar({
     >
       <ListChecks className="h-4 w-4 shrink-0 text-signal" aria-hidden="true" />
       <span role="status" className="flex-1 text-sm">
-        {t("messageFavorites.selected", {
-          count: selected.length,
-          max: MAX_FAVORITE_MESSAGES,
-        })}
+        {t(
+          onForward
+            ? "messageForwarding.selected"
+            : "messageFavorites.selected",
+          {
+            count: selected.length,
+            max: MAX_FAVORITE_MESSAGES,
+          },
+        )}
       </span>
       <Button size="sm" variant="ghost" onClick={onCancel}>
         <X className="mr-1 h-4 w-4" aria-hidden="true" />
         {t("common.cancel")}
       </Button>
+      {onForward && (
+        <Button
+          size="sm"
+          onClick={onForward}
+          disabled={!selected.length || forwardDisabled}
+        >
+          {t("messageForwarding.forward")}
+        </Button>
+      )}
       <Button size="sm" onClick={onCollect} disabled={selected.length === 0}>
         <Bookmark className="mr-1 h-4 w-4" aria-hidden="true" />
         {t("messageFavorites.collect")}

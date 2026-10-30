@@ -169,6 +169,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
                 .into_iter()
                 .flat_map(|p| p.events.iter()),
         ) {
+            metadata.channel_v5 |= event.kind == EventKind::ChannelMetadata;
             metadata.channel_v2 |= event.kind == EventKind::ChannelReplica;
             metadata.channel_v3 |= matches!(
                 event.kind,
@@ -252,10 +253,12 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             let events = self.visible_projection(&view.conversation, false)?;
             // Raw repository capability flags may include rejected controls.
             // Bind negotiated support to this principal's fresh authorization too.
-            let v4 = view.metadata.channel_v4;
+            let v5 = view.metadata.channel_v5;
+            let v4 = v5 || view.metadata.channel_v4;
             let v3 = v4 || view.metadata.channel_v3;
             let v2 = v3 || view.metadata.channel_v2;
             if events.iter().any(|event| match event.kind {
+                EventKind::ChannelMetadata => !v5,
                 EventKind::ChannelReplica => !v2,
                 EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory => !v3,
                 EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance => !v4,
@@ -979,7 +982,12 @@ mod tests {
         let store = owner.lock().unwrap();
         let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
         let metadata = NetworkSyncStore::metadata(&*store, &view).unwrap();
-        assert!(!metadata.channel_v2 && !metadata.channel_v3 && !metadata.channel_v4);
+        assert!(
+            !metadata.channel_v2
+                && !metadata.channel_v3
+                && !metadata.channel_v4
+                && !metadata.channel_v5
+        );
         let valid = Event::new(
             &node.identity,
             conversation,

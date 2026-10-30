@@ -7,6 +7,7 @@ import { captureChatOwner } from "./ownership";
 import {
   emptyReception,
   reconcileHistory,
+  expireReception,
   receptionPatch,
   type ReceptionState,
 } from "./reception";
@@ -81,7 +82,7 @@ type Snapshot =
 
 /** A successful snapshot advances coverage together with its receipt decisions. */
 function snapshotPatch(
-  state: ConversationHistoryState,
+  state: ConversationHistoryState & { expiryNow?: number },
   key: string,
   rows: HistoryItem[],
   snapshot: Snapshot,
@@ -98,7 +99,10 @@ function snapshotPatch(
             Object.prototype.hasOwnProperty.call(state.ledger, key),
         );
   return {
-    ...receptionPatch(state, next),
+    ...receptionPatch(
+      state,
+      expireReception(next, Math.max(Date.now(), state.expiryNow ?? 0)),
+    ),
     historyBaselines: [
       ...state.historyBaselines.filter((k) => k !== key),
       key,
@@ -539,6 +543,8 @@ function receptionRows(key: string, rows: HistoryItem[]) {
   return rows.map((row) => ({
     id: row.id,
     fileMessageAliases: row.file_message_aliases,
+    expiresAtMs: row.expires_at_ms,
+    suppressed: row.recalled,
     fromMe: row.from_me,
     mentioned:
       key.startsWith("channel:") &&

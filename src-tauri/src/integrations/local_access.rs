@@ -155,7 +155,7 @@ fn conversations(
     runtime: &mesh_talk_core::node::NodeRuntime,
 ) -> Result<Vec<AgentConversation>, CommandError> {
     let mut accounts = BTreeMap::new();
-    let names = runtime.known_account_names();
+    let names = runtime.known_account_names()?;
     for id in runtime
         .known_account_ids()
         .map_err(|e| CommandError::Internal(e.to_string()))?

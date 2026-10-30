@@ -311,7 +311,7 @@ async fn personal_file_store_requires_bound_local_owner() {
 #[test]
 fn personal_file_compact_manifest_reserves_proof_and_expiry_frame_overhead() {
     let identity = DeviceIdentity::generate();
-    let mut prospective = FileManifestV3 {
+    let prospective = FileManifestV3 {
         v2: FileManifestV2 {
             name: "frame-boundary.bin".into(),
             size: CHUNK_SIZE as u64,
@@ -351,19 +351,39 @@ fn personal_file_compact_manifest_reserves_proof_and_expiry_frame_overhead() {
         event.ciphertext = vec![0; sealed_overhead + plaintext.len() + proof_overhead];
         super::super::session::event_fits_frame(&event)
     };
-    let mut boundary = None;
-    for count in 1..3000 {
-        prospective.v2.chunk_count = count;
-        prospective.v2.size = u64::from(count) * CHUNK_SIZE as u64;
+    let manifest_at = |count: u32| {
         let mut manifest = prospective.clone();
+        manifest.v2.chunk_count = count;
+        manifest.v2.size = u64::from(count) * CHUNK_SIZE as u64;
         manifest.v2.chunk_hashes = vec![[0; 32]; count as usize];
-        let plaintext = manifest.encode();
-        if fits(&plaintext, false) && !fits(&crate::expiry::wrap(&plaintext, Some(1)), true) {
-            boundary = Some(prospective.clone());
-            break;
+        manifest
+    };
+    let personal_fits = |count| {
+        let plaintext = manifest_at(count).encode();
+        fits(&crate::expiry::wrap(&plaintext, Some(1)), true)
+    };
+    // Encoded length grows with the hash count. Locate the same real frame
+    // boundary without serializing every shorter hash list quadratically.
+    assert!(personal_fits(1));
+    assert!(!personal_fits(2999));
+    let (mut lower, mut upper) = (1, 2999);
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2;
+        if personal_fits(middle) {
+            lower = middle + 1;
+        } else {
+            upper = middle;
         }
     }
-    let boundary = boundary.expect("a hash-list frame boundary must exist");
+    assert!(lower > 1 && personal_fits(lower - 1));
+    assert!(!personal_fits(lower));
+    let mut boundary = manifest_at(lower);
+    assert!(
+        fits(&boundary.encode(), false),
+        "the first personal overflow must still fit the ordinary frame"
+    );
+    // Keep the original prospective (not yet hashed) input to the selector.
+    boundary.v2.chunk_hashes.clear();
     assert!(
         compact_manifest_needed(&identity, &boundary).unwrap(),
         "choose MFM4 before personal proof/expiry wrappers overflow the frame"

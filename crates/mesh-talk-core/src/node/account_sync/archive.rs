@@ -4,6 +4,21 @@ use crate::eventlog::LogError;
 use crate::node::transcript_repository::{FILES, RECEIVED, SENT, TranscriptPageLimit};
 use rusqlite::{OptionalExtension, params};
 
+#[cfg(test)]
+#[path = "read_entitlement_tests.rs"]
+mod read_entitlement_tests;
+
+/// The public lifetime behind an export, independent of a borrowed directory row.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct PrivateChannelScope {
+    channel: ConversationId,
+    genesis_owner: String,
+    membership: EventId,
+    acceptance: Option<EventId>,
+    authority: Option<EventId>,
+    epoch: u64,
+}
+
 const SCHEMA: &str = "
 CREATE TABLE account_archive_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),token BLOB NOT NULL,ready INTEGER NOT NULL CHECK(ready IN(0,1)),digest_xor BLOB NOT NULL CHECK(length(digest_xor)=32),records INTEGER NOT NULL CHECK(records>=0),sent_cursor INTEGER NOT NULL,received_cursor INTEGER NOT NULL,file_cursor INTEGER NOT NULL,deadline BLOB CHECK(deadline IS NULL OR length(deadline)=8));
 CREATE TABLE account_archive_rows(tag INTEGER NOT NULL CHECK(tag BETWEEN 0 AND 2),id BLOB NOT NULL CHECK(length(id)=32),kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 3),ordinal INTEGER NOT NULL REFERENCES transcript_rows(ordinal) ON DELETE CASCADE,conversation BLOB NOT NULL CHECK(length(conversation)=32),peer TEXT,charge INTEGER NOT NULL CHECK(charge>0),PRIMARY KEY(tag,id)) WITHOUT ROWID;
@@ -32,6 +47,7 @@ struct ArchiveKey {
     version: u16,
     revisions: [u64; 11],
     channels: Vec<ConversationId>,
+    channel_scopes: Vec<PrivateChannelScope>,
     accounts: Vec<String>,
     controls: (u64, [u8; 32]),
     recalls: u64,
@@ -43,6 +59,7 @@ impl ArchiveKey {
             && self.files == current.files
             && self.version == current.version
             && self.channels == current.channels
+            && self.channel_scopes == current.channel_scopes
             && self.accounts == current.accounts
             && self.controls == current.controls
             && self.recalls == current.recalls
@@ -70,6 +87,230 @@ struct ArchiveRow {
     charge: usize,
 }
 impl Node {
+    /// The paired full identity remains necessary even when this sibling has no
+    /// physical membership in the exported channel. A known binding replacement
+    /// wins over its retained pairing certificate.
+    fn retained_private_account_announcement(
+        &self,
+        device: &PublicIdentity,
+    ) -> Option<crate::discovery::Announce> {
+        // Do not use historical_author: its visibility filter can hide the very
+        // replacement proof which must invalidate an old pairing certificate.
+        let authenticated = {
+            self.privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned")
+                .as_ref()
+                .and_then(|state| state.proofs.by_author(&device.ed25519_pub))
+        };
+        authenticated.or_else(|| {
+            self.roster
+                .lock()
+                .expect("roster lock not poisoned")
+                .historical_by_author(&device.ed25519_pub)
+        })
+    }
+    pub(super) fn account_private_sibling_current(&self, requester: &PublicIdentity) -> bool {
+        self.certified_sibling(requester)
+            && self
+                .retained_private_account_announcement(requester)
+                .is_none_or(|proof| {
+                    proof.public() == *requester
+                        && proof.valid_presence()
+                        && !proof.post_office
+                        && self.account_group_binding_current(&proof)
+                })
+    }
+    /// Outbound and pooled channels need not repeat an inline announcement.
+    /// Its independently signed retained proof still has to match the exact
+    /// authenticated Noise peer and this account's current binding.
+    pub(super) fn account_private_source_announcement(
+        &self,
+        source: &PublicIdentity,
+    ) -> Option<crate::discovery::Announce> {
+        if !self.certified_sibling(source) {
+            return None;
+        }
+        self.retained_private_account_announcement(source)
+            .filter(|proof| {
+                proof.public() == *source
+                    && proof.valid_presence()
+                    && !proof.post_office
+                    && self.account_group_binding_current(proof)
+            })
+    }
+
+    fn private_channel_source_scope(
+        &self,
+        channel: ConversationId,
+        source: &crate::discovery::Announce,
+        require_sharing: bool,
+    ) -> Result<Option<PrivateChannelScope>, NodeError> {
+        if source.post_office
+            || !source.valid_presence()
+            || !self.account_group_binding_current(source)
+        {
+            return Ok(None);
+        }
+        // Only the established genesis pin is read from the mutable book. Roles,
+        // acceptance, departures, epochs and sharing come from signed events.
+        let pin = self
+            .channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .state(&channel)
+            .map(|state| state.genesis_owner().to_owned());
+        let log = self.log.lock().expect("log mutex not poisoned");
+        let owned = log.events(&channel)?;
+        let events: Vec<_> = owned.iter().collect();
+        let projection = super::super::channel::ChannelBook::project_membership(channel, &events);
+        let Some(state) = projection.state.as_ref() else {
+            return Ok(None);
+        };
+        let public = source.public();
+        if state.is_dissolved()
+            || pin.is_some_and(|pin| pin != state.genesis_owner())
+            || !state.members().contains(&public)
+            || !state.is_accepted_member(&public.user_id())
+        {
+            return Ok(None);
+        }
+        let (membership, acceptance) = if projection.authority.current_event().is_some() {
+            let Some(grant) = projection.authority.grant_for_device(&public, source) else {
+                return Ok(None);
+            };
+            (grant.membership_event, grant.acceptance_event)
+        } else {
+            let Some(member) = projection
+                .accepted
+                .iter()
+                .find(|member| member.public == public)
+            else {
+                return Ok(None);
+            };
+            (member.membership_event, member.acceptance_event)
+        };
+        if require_sharing
+            && events
+                .iter()
+                .filter(|event| {
+                    event.kind == crate::eventlog::EventKind::ChannelReplica
+                        && event.author.user_id() == public.user_id()
+                        && projection.authorized.contains(&event.id)
+                        && matches!(event.ciphertext.as_slice(), [0..=1])
+                })
+                .max_by_key(|event| (event.lamport, event.id))
+                .is_some_and(|event| event.ciphertext == [0])
+        {
+            return Ok(None);
+        }
+        Ok(Some(PrivateChannelScope {
+            channel,
+            genesis_owner: state.genesis_owner().to_owned(),
+            membership,
+            acceptance,
+            authority: projection.authority.current_event(),
+            epoch: state.epoch(),
+        }))
+    }
+
+    fn account_private_archive_scopes(
+        &self,
+        requester: &PublicIdentity,
+    ) -> Result<Vec<PrivateChannelScope>, NodeError> {
+        if !self.account_private_sibling_current(requester) {
+            return Ok(Vec::new());
+        }
+        let ids = self
+            .channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .channel_ids();
+        let source = self.own_group_proof();
+        let mut scopes = Vec::new();
+        for channel in ids {
+            if let Some(scope) = self.private_channel_source_scope(channel, &source, true)? {
+                scopes.push(scope);
+            }
+        }
+        scopes.sort_by_key(|scope| *scope.channel.as_bytes());
+        Ok(scopes)
+    }
+
+    pub(super) fn account_private_archive_channels(
+        &self,
+        requester: &PublicIdentity,
+    ) -> Result<Vec<ConversationId>, NodeError> {
+        Ok(self
+            .account_private_archive_scopes(requester)?
+            .into_iter()
+            .map(|scope| scope.channel)
+            .collect())
+    }
+
+    pub(super) fn account_private_channel_export_scope(
+        &self,
+        channel: ConversationId,
+        requester: &PublicIdentity,
+    ) -> Result<Option<PrivateChannelScope>, NodeError> {
+        if !self.account_private_sibling_current(requester) {
+            return Ok(None);
+        }
+        self.private_channel_source_scope(channel, &self.own_group_proof(), true)
+    }
+
+    pub(super) fn account_private_channel_export_allowed(
+        &self,
+        channel: ConversationId,
+        requester: &PublicIdentity,
+    ) -> bool {
+        self.account_private_sibling_current(requester)
+            && self
+                .private_channel_source_scope(channel, &self.own_group_proof(), true)
+                .is_ok_and(|scope| scope.is_some())
+    }
+
+    /// Private pages attest to the source's observations; they do not install
+    /// membership or keys. A current public negative always defeats a retained
+    /// positive source head. A reference without that DAG uses the existing
+    /// validated account-role source boundary, never inventory display facts.
+    pub(super) fn account_private_channel_import_allowed(
+        &self,
+        channel: ConversationId,
+        source: &crate::discovery::Announce,
+    ) -> bool {
+        let public = source.public();
+        if source.post_office
+            || !source.valid_presence()
+            || !self.certified_sibling(&public)
+            || !self.account_group_binding_current(source)
+        {
+            return false;
+        }
+        let has_public_state = self
+            .account_group_projection(channel)
+            .is_ok_and(|projection| projection.state.is_some());
+        if has_public_state {
+            return self
+                .private_channel_source_scope(channel, source, false)
+                .is_ok_and(|scope| scope.is_some());
+        }
+        use super::super::account_group::AccountGroupRole;
+        self.account_group_access(channel).is_ok_and(|access| {
+            matches!(
+                access.role,
+                AccountGroupRole::Member | AccountGroupRole::Owner
+            ) && access.sources.iter().any(|candidate| {
+                candidate.device == public
+                    && matches!(
+                        candidate.role,
+                        AccountGroupRole::Member | AccountGroupRole::Owner
+                    )
+            })
+        })
+    }
+
     fn archive_key(
         &self,
         requester: &PublicIdentity,
@@ -77,22 +318,8 @@ impl Node {
         files: bool,
         version: AccountSyncVersion,
     ) -> Result<ArchiveKey, NodeError> {
-        let me = self.user_id();
-        let requester_id = requester.user_id();
-        let mut channels = {
-            let book = self.channels.lock().expect("channels mutex");
-            book.channel_ids()
-                .into_iter()
-                .filter(|id| {
-                    book.state(id).is_some_and(|s| {
-                        !s.is_dissolved()
-                            && s.is_accepted_member(&me)
-                            && s.is_accepted_member(&requester_id)
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        channels.sort_by_key(|id| *id.as_bytes());
+        let channel_scopes = self.account_private_archive_scopes(requester)?;
+        let channels = channel_scopes.iter().map(|scope| scope.channel).collect();
         let sent = self.sentlog.lock().expect("sent mutex");
         let received = self.received.lock().expect("received mutex");
         let file = self.received_files.lock().expect("files mutex");
@@ -134,6 +361,7 @@ impl Node {
             version: version.number(),
             revisions,
             channels,
+            channel_scopes,
             accounts: if files {
                 self.known_account_ids()?
             } else {
@@ -302,6 +530,11 @@ impl Node {
         files: bool,
         version: AccountSyncVersion,
     ) -> Result<AccountExportPage, NodeError> {
+        if !self.account_private_sibling_current(requester) {
+            return Err(NodeError::Authorization(
+                "account archive requester binding changed".into(),
+            ));
+        }
         let mut cache = self
             .account_archive_cache
             .lock()

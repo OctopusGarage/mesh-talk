@@ -22,6 +22,9 @@ export default defineConfig(() => {
       },
     ],
     resolve: {
+      // Hooks and the renderer must share a runtime, including linked or
+      // accidentally duplicated dependency trees in build caches.
+      dedupe: ["react", "react-dom"],
       alias: {
         "@": fileURLToPath(new URL("./src", import.meta.url)),
       },

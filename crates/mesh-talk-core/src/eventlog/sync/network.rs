@@ -12,6 +12,7 @@ pub struct SyncMetadata {
     pub channel_v2: bool,
     pub channel_v3: bool,
     pub channel_v4: bool,
+    pub channel_v5: bool,
     pub fingerprint: Option<[u8; 32]>,
 }
 

@@ -284,7 +284,7 @@ pub async fn publish_legacy_conversation_drafts(
                 .ok_or_else(|| CommandError::Validation("invalid draft owner".into()))?;
             let (texts, protections) = read_legacy_drafts(&path, runtime.restart_password())?;
             let mut known: std::collections::BTreeSet<_> =
-                runtime.known_account_names().into_keys().collect();
+                runtime.known_account_names()?.into_keys().collect();
             known.extend(
                 runtime
                     .known_account_ids()

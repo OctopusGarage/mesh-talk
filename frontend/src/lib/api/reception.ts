@@ -1,16 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  ReceptionCursor,
-  ReceptionPage,
-  ReceptionScope,
-} from "@/store/receptionDelivery";
-import type {
   CallSignalEvent,
   ChannelMessageEvent,
   DmReceivedEvent,
   FileProgressEvent,
   FileReceivedEvent,
   ProfileReceivedEvent,
+  ReceptionCursor,
+  ReceptionPage,
+  ReceptionScope,
 } from "../types";
 
 export type HostReception =

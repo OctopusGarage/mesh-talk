@@ -23,6 +23,8 @@ enum Backend {
 pub struct PersistentEventLog {
     backend: Backend,
     #[cfg(test)]
+    fail_sync: bool,
+    #[cfg(test)]
     read_failure: bool,
     #[cfg(test)]
     read_failure_id: Option<EventId>,
@@ -47,6 +49,8 @@ impl PersistentEventLog {
     fn from_backend(backend: Backend) -> Self {
         Self {
             backend,
+            #[cfg(test)]
+            fail_sync: false,
             #[cfg(test)]
             read_failure: false,
             #[cfg(test)]
@@ -103,7 +107,15 @@ impl PersistentEventLog {
             Backend::Indexed(repository) => repository.append_with_precommit(&event, precommit),
         }
     }
+    #[cfg(test)]
+    pub(crate) fn fail_sync_for_test(&mut self, enabled: bool) {
+        self.fail_sync = enabled;
+    }
     pub fn sync(&self) -> Result<(), LogError> {
+        #[cfg(test)]
+        if self.fail_sync {
+            return Err(std::io::Error::other("injected event-log sync failure").into());
+        }
         match &self.backend {
             Backend::Legacy(log) => log.sync(),
             Backend::Indexed(repository) => repository.sync(),
@@ -275,6 +287,15 @@ impl PersistentEventLog {
                 .is_some_and(|m| m.channel_v3)),
         }
     }
+    pub fn requires_channel_v5(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        self.check_read(None)?;
+        match &self.backend {
+            Backend::Legacy(log) => Ok(log.requires_channel_v5(conversation)),
+            Backend::Indexed(repository) => {
+                repository.has_kind(conversation, super::EventKind::ChannelMetadata)
+            }
+        }
+    }
     pub fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
         self.check_read(None)?;
         match &self.backend {
@@ -365,6 +386,9 @@ impl PersistentEventLog {
 }
 
 impl SyncStore for PersistentEventLog {
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        self.requires_channel_v5(conversation)
+    }
     fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
         self.requires_channel_v2(conversation)
     }

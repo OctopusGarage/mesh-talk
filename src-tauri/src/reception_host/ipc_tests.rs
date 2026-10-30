@@ -62,7 +62,7 @@ impl Fixture {
                     authority.observe_identity(identity).unwrap();
                     Ok(())
                 },
-                |launch| Ok(launch("Owner")),
+                |launch| launch("Owner"),
             )
             .await
             .unwrap();
@@ -85,6 +85,7 @@ impl Fixture {
             .invoke_handler(tauri::generate_handler![
                 owner_reception_page,
                 owner_reception_ack,
+                crate::chat_commands::peer_profile_avatar,
                 crate::app_lock::lock_app
             ])
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -162,6 +163,44 @@ fn registered_pull_and_ack_keep_one_page_and_fence_replaced_owner_and_app_lock()
     assert!(fixture.ack(&second).is_err());
     fixture.app.session().clear();
     assert!(fixture.pull(second["next"].clone(), true).is_err());
+}
+
+#[test]
+fn selected_avatar_ipc_preserves_clear_and_rejects_retired_owner() {
+    let fixture = Fixture::new();
+    let body = json!({"owner":"owner","accountId":fixture.scope.account_id});
+    let absent = fixture
+        .invoke(
+            "peer_profile_avatar",
+            json!({"owner":"owner","accountId":"00".repeat(16)}),
+        )
+        .unwrap();
+    assert_eq!(absent, Value::Null);
+    for avatar in [Some(b"data:image/png;base64,selected".to_vec()), None] {
+        tauri::async_runtime::block_on(async {
+            fixture
+                .node
+                .0
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .handle()
+                .set_avatar(avatar.clone())
+                .await
+                .unwrap();
+        });
+        let selected = fixture.invoke("peer_profile_avatar", body.clone()).unwrap();
+        assert_eq!(selected["account_id"], fixture.scope.account_id);
+        assert_eq!(
+            selected["avatar"],
+            json!(avatar.map(|bytes| String::from_utf8(bytes).unwrap()))
+        );
+    }
+    fixture.invoke("lock_app", json!({})).unwrap();
+    assert!(fixture.invoke("peer_profile_avatar", body.clone()).is_err());
+    fixture.app.session().clear();
+    assert!(fixture.invoke("peer_profile_avatar", body).is_err());
 }
 
 #[test]

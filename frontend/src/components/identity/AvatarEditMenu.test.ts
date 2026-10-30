@@ -7,11 +7,16 @@ const mocks = vi.hoisted(() => ({
   save: vi.fn(),
   pick: vi.fn(),
   current: true,
+  local: {} as Record<string, string>,
 }));
 vi.mock("@/store/avatars", () => ({
   useAvatar: () => "saved-photo",
-  useAvatars: (select: (state: { setAvatar: typeof mocks.save }) => unknown) =>
-    select({ setAvatar: mocks.save }),
+  useAvatars: (
+    select: (state: {
+      setAvatar: typeof mocks.save;
+      local: Record<string, string>;
+    }) => unknown,
+  ) => select({ setAvatar: mocks.save, local: mocks.local }),
 }));
 vi.mock("@/store/ownership", () => ({
   captureRuntimeOwner: () => ({ current: () => mocks.current }),
@@ -36,11 +41,12 @@ vi.mock("@/features/chat/AvatarCropDialog", () => ({
 import { AvatarEditMenu } from "./AvatarEditMenu";
 let root: Root;
 let host: HTMLDivElement;
-const render = async (id = "contact") =>
+const render = async (id = "contact", category?: "group") =>
   act(async () => {
     root.render(
       createElement(AvatarEditMenu, {
         id,
+        category,
         ariaLabel: "Edit photo",
         children: createElement("span", null, "Photo"),
       }),
@@ -61,12 +67,27 @@ beforeEach(async () => {
     globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
   mocks.current = true;
+  mocks.local = {};
   mocks.save.mockReset().mockResolvedValue(undefined);
   mocks.pick.mockReset().mockResolvedValue(null);
   await i18n.changeLanguage("en");
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
+});
+it("labels group choices as private and does not offer removal for a shared photo", async () => {
+  await render("group", "group");
+  await open();
+  expect(button("Set my group photo…")).toBeTruthy();
+  expect(button("Use group photo")).toBeUndefined();
+  expect(document.body.textContent).toContain("Only for my account");
+});
+it("clears only an existing personal group photo to follow the shared photo", async () => {
+  mocks.local.group = "private";
+  await render("group", "group");
+  await open();
+  await act(async () => button("Use group photo").click());
+  expect(mocks.save).toHaveBeenCalledWith("group", null);
 });
 afterEach(async () => {
   await act(async () => root.unmount());

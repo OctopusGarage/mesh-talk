@@ -78,7 +78,7 @@ export function ScreenshotShortcutSettings({
     }
     setProblem(null);
     setRecording(null);
-    void c.update({ screenshot_shortcuts: candidate }, "general");
+    void c.update({ screenshot_shortcuts: candidate }, "shortcuts");
   };
   const record = (
     event: KeyboardEvent<HTMLButtonElement>,

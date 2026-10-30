@@ -116,6 +116,7 @@ impl EventRepository {
         database: Arc<EncryptedDatabase>,
         domain: EventDomainId,
     ) -> Result<Self, LogError> {
+        database.transaction(schema::upgrade)?;
         database.transaction(|tx| schema::register(tx, domain))?;
         Self::with_owner(RepositoryOwner::Fixture(database), domain)
     }
@@ -135,6 +136,7 @@ impl EventRepository {
         database: &EncryptedDatabase,
         domain: EventDomainId,
     ) -> Result<(), LogError> {
+        database.transaction(schema::upgrade)?;
         database.read(|c| schema::open_existing(c, domain))
     }
     pub(crate) fn from_profile(
@@ -144,6 +146,7 @@ impl EventRepository {
         Self::with_owner(RepositoryOwner::Profile(profile), domain)
     }
     fn with_owner(database: RepositoryOwner, domain: EventDomainId) -> Result<Self, LogError> {
+        database.transaction(schema::upgrade)?;
         let store_uuid = database.read(|tx| {
             schema::open_existing(tx, domain)?;
             let mut stmt =
@@ -491,6 +494,7 @@ fn read_header(row: &Row<'_>) -> Result<EventHeader, LogError> {
         16 => EventKind::ChannelJoinHistory,
         17 => EventKind::ChannelAccountAuthority,
         18 => EventKind::ChannelDeviceInheritance,
+        19 => EventKind::ChannelMetadata,
         _ => return Err(corrupt("unknown indexed event kind")),
     };
     Ok(EventHeader {

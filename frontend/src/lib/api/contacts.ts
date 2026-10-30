@@ -14,16 +14,33 @@ export const contactPolicy = {
       records,
       expected,
     }),
-  delete: (owner: string, account: string) =>
-    invoke<HiddenContactsSnapshot>("delete_contact", { owner, account }),
+  delete: (
+    owner: string,
+    expectedAccount: string,
+    account: string,
+    clearHistory = true,
+  ) =>
+    invoke<HiddenContactsSnapshot>("delete_contact", {
+      owner,
+      expectedAccount,
+      account,
+      clearHistory,
+    }),
   get: (owner: string) =>
     invoke<HiddenContactsSnapshot>("get_hidden_contacts", { owner }),
-  set: (owner: string, account: string, hidden: boolean, name: string) =>
+  set: (
+    owner: string,
+    account: string,
+    hidden: boolean,
+    name: string,
+    expectedAccount?: string,
+  ) =>
     invoke<HiddenContactsSnapshot>("set_contact_hidden", {
       owner,
       account,
       hidden,
       name,
+      ...(expectedAccount === undefined ? {} : { expectedAccount }),
     }),
 };
 
@@ -77,11 +94,12 @@ export const avatars = {
       owner,
       expectedAccount,
     }),
-  /**
-   * Every signed profile peers propagated, including null clear tombstones. The node
-   * persists them so a linked-device clear survives a relaunch.
-   */
-  peers: () => invoke<Record<string, string | null>>("peer_avatars"),
+  /** Exact current value distinguishes a clear tombstone from no signed profile. */
+  peer: (owner: string, accountId: string) =>
+    invoke<{ account_id: string; avatar: string | null } | null>(
+      "peer_profile_avatar",
+      { owner, accountId },
+    ),
   /**
    * Publish (or clear with null) THIS user's own avatar to peers as a signed profile.
    * Call when the user sets/removes their own photo; contacts then render it.

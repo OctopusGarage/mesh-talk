@@ -45,7 +45,7 @@ fn require_schema(tx: &Connection, initialize: bool) -> Result<(), LogError> {
         let mut rows = tx.prepare("SELECT singleton,version FROM event_repository_schema")?;
         let mut rows = rows.query([])?;
         let row = rows.next()?.ok_or(LogError::IncompatibleEventSchema)?;
-        if row.get::<_, i64>(0)? != 1 || row.get::<_, i64>(1)? != 1 || rows.next()?.is_some() {
+        if row.get::<_, i64>(0)? != 1 || row.get::<_, i64>(1)? != 2 || rows.next()?.is_some() {
             return Err(LogError::IncompatibleEventSchema);
         }
     } else {
@@ -78,7 +78,7 @@ fn require_schema(tx: &Connection, initialize: bool) -> Result<(), LogError> {
 // exact composite-PK and covering indexes contain only bounded metadata.
 pub(super) const SCHEMA: &str = "
 CREATE TABLE event_repository_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);
-INSERT INTO event_repository_schema VALUES(1,1);
+INSERT INTO event_repository_schema VALUES(1,2);
 CREATE TABLE event_domains(
  domain BLOB PRIMARY KEY CHECK(typeof(domain)='blob' AND length(domain)=16),
  next_commit INTEGER NOT NULL CHECK(typeof(next_commit)='integer' AND next_commit>=0),
@@ -132,7 +132,7 @@ CREATE TABLE retained_events(
  seq BLOB NOT NULL CHECK(typeof(seq)='blob' AND length(seq)=8),
  lamport BLOB NOT NULL CHECK(typeof(lamport)='blob' AND length(lamport)=8),
  wall_clock BLOB NOT NULL CHECK(typeof(wall_clock)='blob' AND length(wall_clock)=8),
- kind INTEGER NOT NULL CHECK(typeof(kind)='integer' AND kind BETWEEN 0 AND 18),
+ kind INTEGER NOT NULL CHECK(typeof(kind)='integer' AND kind BETWEEN 0 AND 19),
  parent_count INTEGER NOT NULL CHECK(typeof(parent_count)='integer' AND parent_count>=0),
  encoded_bytes INTEGER NOT NULL CHECK(typeof(encoded_bytes)='integer' AND encoded_bytes>=0),
  ciphertext_bytes INTEGER NOT NULL CHECK(typeof(ciphertext_bytes)='integer' AND ciphertext_bytes>=0),
@@ -471,7 +471,10 @@ fn require_owned_ddl(
     Ok(())
 }
 fn validate_owned_ddl(c: &Connection) -> Result<(), LogError> {
-    for statement in SCHEMA.split(';').map(str::trim) {
+    validate_owned_ddl_for(c, SCHEMA)
+}
+fn validate_owned_ddl_for(c: &Connection, schema: &str) -> Result<(), LogError> {
+    for statement in schema.split(';').map(str::trim) {
         if let Some(table) = statement.strip_prefix("CREATE TABLE ") {
             let name = table
                 .split_once('(')
@@ -489,4 +492,83 @@ fn validate_owned_ddl(c: &Connection) -> Result<(), LogError> {
         }
     }
     Ok(())
+}
+
+/// The sole v1 -> v2 change relaxes the event-kind CHECK from 18 to 19.
+/// SQLite documents this transactional schema-only procedure for relaxing
+/// CHECK constraints: https://sqlite.org/lang_altertable.html#otheralter .
+/// Require the entire exact owned v1 schema first; never repair damaged DDL.
+/// No retained rows, indexes, bodies or foreign-key definitions are rewritten.
+pub(super) fn upgrade(tx: &rusqlite::Transaction<'_>) -> Result<(), LogError> {
+    let marker: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='event_repository_schema')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !marker {
+        return Ok(());
+    }
+    require_owned_ddl(
+        tx,
+        "event_repository_schema",
+        "table",
+        SCHEMA
+            .split(';')
+            .next()
+            .ok_or(LogError::IncompatibleEventSchema)?,
+    )?;
+    let versions = {
+        let mut statement = tx.prepare("SELECT singleton,version FROM event_repository_schema")?;
+        let mut rows = statement.query([])?;
+        let first = rows.next()?.ok_or(LogError::IncompatibleEventSchema)?;
+        let pair = (first.get::<_, i64>(0)?, first.get::<_, i64>(1)?);
+        if rows.next()?.is_some() {
+            return Err(LogError::IncompatibleEventSchema);
+        }
+        pair
+    };
+    match versions {
+        (1, 2) => return Ok(()),
+        (1, 1) => {}
+        _ => return Err(LogError::IncompatibleEventSchema),
+    }
+    let previous = SCHEMA.replace("kind BETWEEN 0 AND 19", "kind BETWEEN 0 AND 18");
+    validate_owned_ddl_for(tx, &previous)?;
+    validate_objects(tx)?;
+    let desired = SCHEMA
+        .split(';')
+        .map(str::trim)
+        .find(|sql| sql.starts_with("CREATE TABLE retained_events("))
+        .ok_or(LogError::IncompatibleEventSchema)?;
+    let version: i64 = tx.pragma_query_value(None, "schema_version", |r| r.get(0))?;
+    let next = version
+        .checked_add(1)
+        .filter(|n| *n <= i64::from(i32::MAX))
+        .ok_or(LogError::RepositoryCounterExhausted)?;
+    tx.execute_batch("PRAGMA writable_schema=ON")?;
+    let result = (|| -> Result<(), LogError> {
+        if tx.execute(
+            "UPDATE sqlite_master SET sql=?1 WHERE type='table' AND name='retained_events'",
+            [desired],
+        )? != 1
+        {
+            return Err(LogError::IncompatibleEventSchema);
+        }
+        tx.execute(
+            "UPDATE event_repository_schema SET version=2 WHERE singleton=1 AND version=1",
+            [],
+        )?;
+        crate::storage::profile::publication::cut("event-schema-v2-before-commit")?;
+        tx.pragma_update(None, "schema_version", next)?;
+        crate::storage::profile::publication::cut("event-schema-v2-after-cookie")?;
+        Ok(())
+    })();
+    // This connection setting is not rolled back with SQL. Restore it even when
+    // the update fails; RESET also makes SQLite reparse the fixed known DDL.
+    let reset = tx.execute_batch("PRAGMA writable_schema=RESET");
+    reset?;
+    result?;
+    tx.flush_prepared_statement_cache();
+    validate_owned_ddl(tx)?;
+    validate_objects(tx)
 }

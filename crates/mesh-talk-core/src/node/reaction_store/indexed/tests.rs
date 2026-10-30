@@ -227,3 +227,135 @@ fn indexed_authored_reactions_write_rollback_and_removal_predicates_release_conn
         .unwrap();
     assert_eq!(store.len(), 0);
 }
+
+#[test]
+fn indexed_reactions_import_both_legacy_families_and_preserve_certified_sources() {
+    for versioned in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let key = account.public().ed25519_pub;
+        let path = dir.path().join("reactions");
+        let own = Record {
+            conversation: conversation(),
+            wall: 9,
+            payload: payload(2, true),
+        };
+        let source = DeviceIdentity::generate().public();
+        let source_account = Account::generate();
+        let effect = EventId::new([7; 32]);
+        if versioned {
+            let (mut log, _) = EncryptedRecordLog::<super::super::StoreRecord>::open(
+                &path,
+                "pw",
+                super::super::MAGIC,
+            )
+            .unwrap();
+            log.append_durable(&super::super::StoreRecord::OwnDm(own.clone()))
+                .unwrap();
+            log.append_durable(&super::super::StoreRecord::ChannelBound {
+                record: super::super::ChannelRecord {
+                    conversation: conversation(),
+                    source: source.clone(),
+                    effect_id: effect,
+                    wall: 10,
+                    payload: payload(3, false),
+                    certificate: None,
+                },
+                source_certificate: source_account.certify(&source.ed25519_pub),
+            })
+            .unwrap();
+        } else {
+            let (mut log, _) = EncryptedRecordLog::<Record>::open(&path, "pw", MAGIC).unwrap();
+            log.append_durable(&own).unwrap();
+        }
+        let profile = fixture(dir.path(), &account);
+        IndexedReactionStore::authenticate_legacy(&profile, &path, "pw", key).unwrap();
+        let mut store =
+            IndexedReactionStore::from_profile(profile.clone(), &path, "pw", key).unwrap();
+        assert!(
+            store
+                .page(Some(conversation()), None, None, 128, 8 * 1024 * 1024)
+                .unwrap()
+                .rows[0]
+                .payload
+                .remove
+        );
+        let private = store
+            .channel_page(conversation(), None, 128, 8 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(private.rows.len(), usize::from(versioned));
+        if versioned {
+            assert_eq!(private.rows[0].0, source);
+            assert_eq!(private.rows[0].4, Some(source_account.public().ed25519_pub));
+            assert!(
+                store
+                    .record_channel(
+                        conversation(),
+                        source.clone(),
+                        effect,
+                        11,
+                        payload(3, false)
+                    )
+                    .is_err(),
+                "same effect cannot change its signed clock"
+            );
+            assert!(matches!(
+                store.channel_page(conversation(), None, 1, 1),
+                Err(LogError::PageBudgetTooSmall { .. })
+            ));
+        }
+        drop(store);
+        let store = IndexedReactionStore::from_profile(profile, &path, "pw", key).unwrap();
+        assert_eq!(
+            store
+                .channel_page(conversation(), None, 128, 8 * 1024 * 1024)
+                .unwrap()
+                .rows
+                .len(),
+            usize::from(versioned)
+        );
+    }
+}
+
+#[test]
+fn indexed_reaction_erasure_uses_headers_for_both_families() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let key = account.public().ed25519_pub;
+    let profile = fixture(dir.path(), &account);
+    let path = dir.path().join("reactions");
+    let mut store = IndexedReactionStore::from_profile(profile, &path, "pw", key).unwrap();
+    let mut large = payload(4, false);
+    large.emoji = "x".repeat(3 * 1024 * 1024);
+    store.record(conversation(), 1, large.clone()).unwrap();
+    store
+        .record_channel(
+            conversation(),
+            DeviceIdentity::generate().public(),
+            EventId::new([9; 32]),
+            1,
+            large,
+        )
+        .unwrap();
+    assert!(matches!(
+        store.page(None, None, None, 128, 8 * 1024 * 1024),
+        Err(LogError::PageBudgetTooSmall { .. })
+    ));
+    assert!(matches!(
+        store.channel_page(conversation(), None, 128, 8 * 1024 * 1024),
+        Err(LogError::PageBudgetTooSmall { .. })
+    ));
+    BODY_READS.with(|n| n.set(0));
+    store
+        .remove_matching(|_, _, target| Ok(target == EventId::new([4; 32])))
+        .unwrap();
+    assert_eq!(BODY_READS.with(|n| n.get()), 0);
+    assert_eq!(store.len(), 0);
+    assert!(
+        store
+            .channel_page(conversation(), None, 128, 8 * 1024 * 1024)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+}

@@ -397,10 +397,10 @@ fn describe_destinations(
     destinations: &[Destination],
 ) -> Result<Vec<Value>, IntegrationError> {
     let channels = node.list_channels()?;
-    Ok(destinations.iter().map(|destination| match destination {
-        Destination::Account { id } => json!({"destination":destination,"name":short_name(node.account_display_name(id).as_deref().unwrap_or(id))}),
+    destinations.iter().map(|destination| Ok(match destination {
+        Destination::Account { id } => json!({"destination":destination,"name":short_name(node.account_display_name(id).map_err(mesh_talk_core::node::NodeError::Log)?.as_deref().unwrap_or(id))}),
         Destination::Channel { id } => json!({"destination":destination,"name":short_name(channels.iter().find(|channel| hex::encode(channel.id.as_bytes()) == *id).map(|channel| channel.name.as_str()).unwrap_or(id))}),
-    }).collect())
+    })).collect()
 }
 
 #[cfg(test)]

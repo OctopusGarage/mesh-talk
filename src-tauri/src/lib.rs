@@ -37,6 +37,7 @@ mod integrations;
 mod linked_account;
 pub mod logger;
 pub mod message_favorites;
+pub mod message_forwarding;
 mod network_cost;
 mod notifications;
 pub mod owner_commands;
@@ -347,6 +348,17 @@ pub fn run_tauri_configured(
                 reception_host::owner_reception_page,
                 reception_host::owner_reception_ack,
                 owner_commands::owner_startup_identity,
+                owner_commands::owner_create_channel,
+                owner_commands::owner_personal_conversation_states,
+                owner_commands::owner_delete_left_channel,
+                owner_commands::owner_new_account_group_operation_id,
+                owner_commands::owner_submit_account_group_control,
+                owner_commands::owner_submit_account_group_text,
+                owner_commands::owner_submit_account_group_sticker,
+                owner_commands::owner_submit_account_group_file,
+                owner_commands::owner_account_group_operation_status,
+                owner_commands::owner_list_account_group_operations,
+                owner_commands::owner_cancel_account_group_operation,
                 owner_commands::owner_enqueue_text,
                 owner_commands::owner_reveal_message,
                 owner_commands::owner_reveal_image,
@@ -410,7 +422,7 @@ pub fn run_tauri_configured(
                 crate::chat_commands::history,
                 crate::chat_commands::account_id,
                 crate::chat_commands::publish_avatar,
-                crate::chat_commands::peer_avatars,
+                crate::chat_commands::peer_profile_avatar,
                 crate::chat_commands::send_to_account,
                 crate::chat_commands::account_history,
                 crate::chat_commands::start_linking,
@@ -443,6 +455,9 @@ pub fn run_tauri_configured(
                 crate::chat_commands::set_channel_replica_enabled,
                 crate::chat_commands::set_group_file_sharing_override,
                 crate::chat_commands::set_channel_history_policy,
+                crate::chat_commands::channel_metadata,
+                crate::chat_commands::set_channel_cover,
+                crate::chat_commands::set_channel_announcement,
                 crate::chat_commands::channel_custody_statuses,
                 crate::chat_commands::channel_activity,
                 crate::chat_commands::send_channel_message,
@@ -469,6 +484,10 @@ pub fn run_tauri_configured(
                 crate::chat_commands::search,
                 crate::owner_commands::owner_search_recent,
                 crate::owner_commands::owner_search_context,
+                crate::message_forwarding::owner_inspect_forward_messages,
+                crate::message_forwarding::owner_list_forward_batches,
+                crate::message_forwarding::owner_forward_messages,
+                crate::message_forwarding::owner_export_forwarded_attachment,
                 crate::message_favorites::owner_list_message_favorites,
                 crate::message_favorites::owner_save_message_favorite,
                 crate::message_favorites::owner_edit_message_favorite,

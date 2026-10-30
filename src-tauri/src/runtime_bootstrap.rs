@@ -107,6 +107,7 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
                             "session replaced",
                         ))
                     })
+                    .and_then(std::convert::identity)
             },
         )
         .await
@@ -343,7 +344,7 @@ fn bind_account_profile(
     let recover_bound_legacy = bound.as_str() == Some(runtime.account_id())
         && runtime
             .handle()
-            .account_profile(runtime.account_id())
+            .account_profile(runtime.account_id())?
             .is_none();
     if recover_bound_legacy
         || (bound.as_str() != Some(runtime.account_id())
@@ -378,8 +379,15 @@ async fn reconcile_account_profile<R: tauri::Runtime>(
         let Some(runtime) = guard.as_ref() else {
             return;
         };
-        let Some(card) = runtime.handle().account_profile(runtime.account_id()) else {
-            continue;
+        let card = match runtime.handle().account_profile(runtime.account_id()) {
+            Ok(Some(card)) => card,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!(
+                    "Account profile reconciliation deferred after storage failure: {error}"
+                );
+                continue;
+            }
         };
         let name = card.display_name;
         if mesh_talk_core::identity::user::User::validate_display_name(&name).as_ref()
@@ -726,7 +734,7 @@ mod tests {
                     release_rx.recv().unwrap();
                     Ok(())
                 },
-                |launch| Ok(launch("Owner")),
+                |launch| launch("Owner"),
             )
             .await
         });
@@ -923,6 +931,7 @@ mod tests {
         let card = runtime
             .handle()
             .account_profile(runtime.account_id())
+            .unwrap()
             .unwrap();
         assert_eq!(card.display_name, "Current desktop nickname");
         assert_eq!(card.bio, "Personal signature");
@@ -935,6 +944,7 @@ mod tests {
             runtime
                 .handle()
                 .account_profile(runtime.account_id())
+                .unwrap()
                 .unwrap()
                 .display_name,
             "New signed name"
@@ -955,6 +965,7 @@ mod tests {
             runtime
                 .handle()
                 .account_profile(runtime.account_id())
+                .unwrap()
                 .map(|card| card.display_name),
             Some("Kept Mac nickname".into())
         );
@@ -971,6 +982,7 @@ mod tests {
                 runtime
                     .handle()
                     .account_profile(runtime.account_id())
+                    .unwrap()
                     .is_none()
             );
         }
@@ -984,6 +996,7 @@ mod tests {
                 .handle()
                 .account_profile(runtime.account_id())
                 .unwrap()
+                .unwrap()
                 .display_name,
             "Imported kept account"
         );
@@ -996,7 +1009,7 @@ mod tests {
         let runtime = legacy_linked_runtime_without_card(root.path()).await;
         let account_id = runtime.account_id().to_string();
         let handle = runtime.handle();
-        assert!(handle.account_profile(&account_id).is_none());
+        assert!(handle.account_profile(&account_id).unwrap().is_none());
         let auth = crate::services::auth_service::AuthService::new(std::sync::Arc::new(
             mesh_talk_core::identity::manager::IdentityManager::new(
                 mesh_talk_core::storage::file_manager::FileManager::new(root.path().to_owned()),
@@ -1036,7 +1049,7 @@ mod tests {
             .await
             .is_err()
         );
-        assert!(handle.account_profile(&account_id).is_none());
+        assert!(handle.account_profile(&account_id).unwrap().is_none());
         crate::account_profile::save_account_bio(
             app.state(),
             app.state(),
@@ -1045,7 +1058,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let profile = handle.account_profile(&account_id).unwrap();
+        let profile = handle.account_profile(&account_id).unwrap().unwrap();
         assert_eq!(profile.display_name, "Existing local name");
         assert_eq!(profile.bio, "New signature");
         state.session().clear();
@@ -1059,7 +1072,7 @@ mod tests {
             .await
             .is_err()
         );
-        assert_eq!(handle.account_profile(&account_id), Some(profile));
+        assert_eq!(handle.account_profile(&account_id).unwrap(), Some(profile));
         node.0.write().await.take().unwrap().stop().await;
     }
 
@@ -1080,21 +1093,21 @@ mod tests {
                 |_| {},
             )
         };
-        let runtime = start().await.unwrap();
-        let account_id = runtime.account_id().to_owned();
-        runtime.stop().await;
         let directory = root.join("accounts/owner");
-        for file in ["trust-cards.log", "account-profiles.log"] {
-            let path = directory.join(file);
-            if path.exists() {
-                std::fs::remove_file(path).unwrap();
-            }
-        }
-        let account = mesh_talk_core::identity::account_keystore::load(
+        std::fs::create_dir_all(&directory).unwrap();
+        mesh_talk_core::identity::keystore::load_or_create(
+            &directory.join("identity.keystore"),
+            "pw",
+        )
+        .unwrap();
+        // Build the actual legacy linked layout before its first indexed open.
+        // Published profile barriers must never be deleted to simulate no card.
+        let account = mesh_talk_core::identity::account_keystore::load_or_create(
             &directory.join("account.keystore"),
             "pw",
         )
         .unwrap();
+        let account_id = account.account_id();
         let other = mesh_talk_core::identity::device::DeviceIdentity::generate().public();
         let (mut roster, _) = mesh_talk_core::storage::record_log::EncryptedRecordLog::<
             mesh_talk_core::node::AccountDevice,
@@ -1117,6 +1130,7 @@ mod tests {
             runtime
                 .handle()
                 .account_profile(runtime.account_id())
+                .unwrap()
                 .is_none()
         );
         runtime
@@ -1185,6 +1199,7 @@ mod tests {
             joined
                 .handle()
                 .account_profile(&account_id)
+                .unwrap()
                 .unwrap()
                 .display_name,
             "Kept account"

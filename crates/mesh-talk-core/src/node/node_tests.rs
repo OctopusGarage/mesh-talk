@@ -251,14 +251,22 @@ async fn removing_account_uses_durable_bindings_and_controls_when_projection_is_
         .set_allowed(&account.account_id(), false)
         .await
         .unwrap();
-    owner.pending_channel_plaintext.lock().unwrap().retry_at =
-        Some(std::time::Instant::now() + Duration::from_secs(30));
+    let plaintext_retry = Some(std::time::Instant::now() + Duration::from_secs(30));
+    owner.pending_channel_plaintext.lock().unwrap().retry_at = plaintext_retry;
     owner
         .remove_channel_account_members_if(channel, &account.account_id(), |commit| commit())
         .await
         .unwrap();
-    // Plaintext persistence is blocked, so the older book may still show peers.
-    assert_eq!(owner.channel_members(channel).len(), 3);
+    // Canonical membership refresh is independent of the paused plaintext
+    // retry; removed accounts must disappear without waiting for body writes.
+    assert_eq!(
+        owner.channel_members(channel),
+        vec![owner.identity.public()]
+    );
+    assert_eq!(
+        owner.pending_channel_plaintext.lock().unwrap().retry_at,
+        plaintext_retry
+    );
     {
         let log = owner.log.lock().unwrap();
         let events = log.events(&channel).unwrap();
@@ -2154,6 +2162,22 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
         .create_channel("relay-secret-room", vec![bob_node.identity.public()])
         .await
         .unwrap();
+    alice_node.sessions.clear();
+    let held = alice_node
+        .sessions
+        .authentication_admission(alice_node.peer_endpoint_key(po_addr, &po_seed.public()))
+        .await
+        .unwrap();
+    let busy = alice_node
+        .replicate_to_post_office_targets_confirming(group, vec![bob_node.identity.public()], None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(busy, SessionError::Transport(error)
+        if crate::node::session_pool::local_capacity_busy(&error)),
+        "an unstarted relay exchange must retain admission backpressure for the existing retry owner"
+    );
+    drop(held);
     assert!(po_store.lock().unwrap().held_ids(&group).is_empty());
     let group_wrappers = po_store.lock().unwrap().held_events(&mailbox.id());
     assert!(group_wrappers.len() > stored.len());
@@ -3517,6 +3541,16 @@ async fn two_nodes_exchange_a_channel_message_over_loopback_tcp() {
     assert_eq!(alice_node.channel_owner(channel), owner);
 }
 
+// Every spawned fixture task is cancelled on assertion failure as well as normal cleanup.
+struct AbortStalledFixtureTasks(Vec<tokio::task::AbortHandle>);
+impl Drop for AbortStalledFixtureTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 #[tokio::test]
 async fn stalled_channel_peer_does_not_delay_healthy_member() {
     let alice = DeviceIdentity::generate();
@@ -3558,8 +3592,11 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
     let (alice_node, _alice_rx) = open(alice, alice_roster, "alice");
     let (slow_node, _slow_rx) = open(slow, Arc::new(Mutex::new(Roster::default())), "slow");
     let (fast_node, mut fast_rx) = open(fast, Arc::new(Mutex::new(Roster::default())), "fast");
+    let mut owned_tasks = AbortStalledFixtureTasks(Vec::new());
     let slow_task = tokio::spawn(Arc::clone(&slow_node).run_accept_loop(slow_listener));
+    owned_tasks.0.push(slow_task.abort_handle());
     let fast_task = tokio::spawn(Arc::clone(&fast_node).run_accept_loop(fast_listener));
+    owned_tasks.0.push(fast_task.abort_handle());
     let channel = alice_node
         .create_channel(
             "stalled-peer",
@@ -3568,11 +3605,21 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
         .await
         .unwrap();
 
+    // Reserve a distinct real endpoint while the preparation listener is still bound.
+    // The new signed route cannot reuse a preparation-phase cached connection.
+    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let stalled_port = stalled_listener.local_addr().unwrap().port();
+    assert_ne!(stalled_port, slow_port);
     slow_task.abort();
     let _ = slow_task.await;
-    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, slow_port))
-        .await
-        .unwrap();
+    slow_node.runtime_work.drain().await;
+    add_peer(
+        &alice_node.roster,
+        &slow_node.identity,
+        "Slow",
+        stalled_port,
+        &alice_node.user_id(),
+    );
     let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
     let stalled_task = tokio::spawn(async move {
         let (socket, _) = stalled_listener.accept().await.unwrap();
@@ -3581,6 +3628,7 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
         drop(socket);
     });
 
+    owned_tasks.0.push(stalled_task.abort_handle());
     let sender = tokio::spawn({
         let node = Arc::clone(&alice_node);
         async move {
@@ -3588,8 +3636,19 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
                 .await
         }
     });
-    tokio::time::timeout(Duration::from_secs(5), accepted_rx)
-        .await
+    owned_tasks.0.push(sender.abort_handle());
+    let contacted = tokio::time::timeout(Duration::from_secs(5), accepted_rx).await;
+    if !matches!(&contacted, Ok(Ok(()))) {
+        eprintln!(
+            "STALLED_SETUP channel_send sender_finished={} healthy_queue={} alice_pool={:?} slow_pool={:?} fast_pool={:?}",
+            sender.is_finished(),
+            fast_rx.len(),
+            alice_node.sessions.test_capacity_snapshot(),
+            slow_node.sessions.test_capacity_snapshot(),
+            fast_node.sessions.test_capacity_snapshot(),
+        );
+    }
+    contacted
         .expect("sender contacted the stalled peer")
         .expect("stalled listener accepted a connection");
     let received = tokio::time::timeout(Duration::from_secs(5), fast_rx.recv())
@@ -3601,6 +3660,7 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
         let node = Arc::clone(&alice_node);
         async move { node.set_channel_replica_enabled(channel, false).await }
     });
+    owned_tasks.0.push(status_sender.abort_handle());
     tokio::time::timeout(Duration::from_secs(5), async {
         while fast_node.channel_replica_enabled(channel, &alice_node.user_id()) {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -3609,9 +3669,12 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
     .await
     .expect("healthy peer must receive a control event despite the stalled peer");
     stalled_task.abort();
+    let _ = stalled_task.await;
     sender.await.unwrap().unwrap();
     status_sender.await.unwrap().unwrap();
     fast_task.abort();
+    let _ = fast_task.await;
+    fast_node.runtime_work.drain().await;
 }
 
 #[tokio::test]
@@ -3655,8 +3718,11 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
     let (alice_node, mut alice_rx) = open(alice, alice_roster, "alice");
     let (slow_node, _slow_rx) = open(slow, Arc::new(Mutex::new(Roster::default())), "slow");
     let (fast_node, _fast_rx) = open(fast, Arc::new(Mutex::new(Roster::default())), "fast");
+    let mut owned_tasks = AbortStalledFixtureTasks(Vec::new());
     let slow_task = tokio::spawn(Arc::clone(&slow_node).run_accept_loop(slow_listener));
+    owned_tasks.0.push(slow_task.abort_handle());
     let fast_task = tokio::spawn(Arc::clone(&fast_node).run_accept_loop(fast_listener));
+    owned_tasks.0.push(fast_task.abort_handle());
     let channel = alice_node
         .create_channel(
             "stalled-peer",
@@ -3665,19 +3731,56 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
         .await
         .unwrap();
 
+    // Both post-setup routes are fresh: no retained preparation socket may bypass
+    // either the stalled handshake or the healthy peer's real admission gate.
+    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let stalled_port = stalled_listener.local_addr().unwrap().port();
+    let healthy_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let healthy_port = healthy_listener.local_addr().unwrap().port();
+    assert_ne!(stalled_port, slow_port);
+    assert_ne!(healthy_port, fast_port);
     slow_task.abort();
     let _ = slow_task.await;
-    let stalled_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, slow_port))
-        .await
-        .unwrap();
+    slow_node.runtime_work.drain().await;
+    fast_task.abort();
+    let _ = fast_task.await;
+    fast_node.runtime_work.drain().await;
+    add_peer(
+        &alice_node.roster,
+        &slow_node.identity,
+        "Slow",
+        stalled_port,
+        &alice_node.user_id(),
+    );
+    add_peer(
+        &alice_node.roster,
+        &fast_node.identity,
+        "Fast",
+        healthy_port,
+        &alice_node.user_id(),
+    );
+    let (fault_tx, fault_rx) = tokio::sync::oneshot::channel();
+    let fast_task = tokio::spawn({
+        let node = Arc::clone(&fast_node);
+        async move {
+            // The bound TCP backlog is real, but healthy Noise/service cannot
+            // finish until the other listener has positively observed the fault.
+            if fault_rx.await.is_ok() {
+                Box::pin(node.run_accept_loop(healthy_listener)).await;
+            }
+        }
+    });
+    owned_tasks.0.push(fast_task.abort_handle());
     let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
     let stalled_task = tokio::spawn(async move {
         let (socket, _) = stalled_listener.accept().await.unwrap();
         let _ = accepted_tx.send(());
+        let _ = fault_tx.send(());
         tokio::time::sleep(Duration::from_secs(20)).await;
         drop(socket);
     });
 
+    owned_tasks.0.push(stalled_task.abort_handle());
     fast_node
         .send_channel_message(channel, b"recover promptly")
         .await
@@ -3686,10 +3789,19 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
         let node = Arc::clone(&alice_node);
         async move { node.pull_one_channel_from_member(0).await }
     });
-    tokio::time::timeout(Duration::from_secs(5), accepted_rx)
-        .await
-        .unwrap()
-        .unwrap();
+    owned_tasks.0.push(recovery.abort_handle());
+    let contacted = tokio::time::timeout(Duration::from_secs(5), accepted_rx).await;
+    if !matches!(&contacted, Ok(Ok(()))) {
+        eprintln!(
+            "STALLED_SETUP recovery task_finished={} healthy_queue={} alice_pool={:?} slow_pool={:?} fast_pool={:?}",
+            recovery.is_finished(),
+            alice_rx.len(),
+            alice_node.sessions.test_capacity_snapshot(),
+            slow_node.sessions.test_capacity_snapshot(),
+            fast_node.sessions.test_capacity_snapshot(),
+        );
+    }
+    contacted.unwrap().unwrap();
     let received = tokio::time::timeout(Duration::from_secs(5), alice_rx.recv())
         .await
         .expect("healthy recovery must progress before a stalled peer times out")
@@ -3700,7 +3812,10 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
         .expect("successful recovery must free its group lane before the stalled timeout")
         .unwrap();
     stalled_task.abort();
+    let _ = stalled_task.await;
     fast_task.abort();
+    let _ = fast_task.await;
+    fast_node.runtime_work.drain().await;
 }
 
 /// A restarted member recovers from another member when the author and post office
@@ -4763,13 +4878,78 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         resumed_addr.port(),
         &bob_uid,
     );
-    bob_node.retry_channel_departures().await;
+    let departure = bob_node
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ChannelLeave && event.author.user_id() == bob_uid)
+        .max_by_key(|event| (event.lamport, event.id))
+        .expect("the offline departure must retain its original signed event");
     assert!(
-        alice_node
-            .channel_members(channel)
-            .iter()
-            .all(|member| member.user_id() != bob_uid)
+        departure.ciphertext.is_empty()
+            && departure.verify_signature()
+            && departure.verify_integrity()
     );
+    // A retry is a best-effort exchange, not a remote acceptance receipt. Keep
+    // using the real retry owner until both canonical and displayed membership
+    // reflect the original signed leave after Alice's listener restarts.
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            bob_node.retry_channel_departures().await;
+            let canonical = alice_node.account_group_projection(channel).unwrap();
+            if canonical.authorized.contains(&departure.id)
+                && canonical
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| !state.is_member(&bob_uid))
+                && alice_node
+                    .channel_members(channel)
+                    .iter()
+                    .all(|member| member.user_id() != bob_uid)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    if recovered.is_err() {
+        let (raw_leave, parent_cut_present, canonical_leave, canonical_member) = {
+            let log = alice_node.log.lock().unwrap();
+            let projection = crate::node::channel::ChannelBook::project_membership(
+                channel,
+                &log.events(&channel).unwrap(),
+            );
+            (
+                log.get(&departure.id).unwrap().is_some(),
+                departure
+                    .parents
+                    .iter()
+                    .all(|parent| log.get(parent).unwrap().is_some()),
+                projection.authorized.contains(&departure.id),
+                projection
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.is_member(&bob_uid)),
+            )
+        };
+        let retry_pending = bob_node
+            .channels
+            .lock()
+            .unwrap()
+            .pending_departures(&bob_uid)
+            .iter()
+            .any(|(id, _)| *id == channel);
+        let resumed_route = bob_node.routing_peer(&alice_uid).is_some_and(|peer| {
+            peer.addr == resumed_addr && peer.public == alice_node.identity.public()
+        });
+        panic!(
+            "offline departure retry failed: raw_leave={raw_leave} parent_cut_present={parent_cut_present} canonical_leave={canonical_leave} canonical_member={canonical_member} retry_pending={retry_pending} resumed_route={resumed_route}"
+        );
+    }
     resumed_task.abort();
     assert!(resumed_task.await.unwrap_err().is_cancelled());
     alice_node.sessions.clear();
@@ -5430,10 +5610,17 @@ async fn media_lands_in_durable_store_survives_prune_and_restart() {
 
     // The transient chunks were pruned once the media was stored — but the durable copy
     // still reads back (the whole point: display no longer depends on the chunks).
-    assert_eq!(
-        bob_node.file_progress(file_conv).unwrap().map(|p| p.done),
-        Some(0)
+    assert!(
+        bob_node
+            .log
+            .lock()
+            .unwrap()
+            .events(&file_conv)
+            .unwrap()
+            .is_empty()
     );
+    let progress = bob_node.file_progress(file_conv).unwrap().unwrap();
+    assert!(progress.total > 0 && progress.done == progress.total);
     assert_eq!(
         bob_node.read_media(file_conv).as_deref(),
         Some(&payload[..])
@@ -6016,13 +6203,30 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
     std::fs::write(&src, &payload).unwrap();
 
     let bob_uid = bob_node.user_id();
-    let file_conv = alice_node
-        .send_file_dm(&bob_uid, &src, crate::file::FileKind::File)
-        .await
-        .unwrap();
+    // Keep the initial best-effort send unsuccessful without paying unrelated
+    // handshake deadlines. Authenticate each original direct attempt, then close
+    // before serving any application frame. These borrowed futures end before
+    // the normal accept workers below can import the durable file card/chunks.
+    let setup_eof = std::cell::Cell::new(0usize);
+    let file_conv = tokio::select! {
+        result = alice_node.send_file_dm(&bob_uid, &src, crate::file::FileKind::File) => result.unwrap(),
+        _ = async {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let channel = bob_node.privacy_accept(stream).await.unwrap();
+                assert_eq!(channel.peer_identity(), &alice_node.identity.public());
+                drop(channel);
+                setup_eof.set(setup_eof.get() + 1);
+            }
+        } => unreachable!("the scoped authenticated-EOF responder does not return"),
+    };
+    assert_eq!(
+        setup_eof.get(),
+        3,
+        "the card, receipt and file best-effort legs each close after real authentication"
+    );
 
-    // The initial best-effort dial has no accepting worker. Resume the durable
-    // pending work rather than depending on it fitting the 400ms operation.
+    // Resume the same durable pending work after those actual transport failures.
     assert_eq!(
         alice_node
             .delivery
@@ -8359,12 +8563,143 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             .unwrap(),
         1
     );
+    // Probe only generated fixture metadata; never attempt decryption or recovery.
+    let linked_plaintext_metadata = |current: &Arc<Node>, id: EventId| {
+        let authorized = current.log.try_lock().ok().map(|log| {
+            crate::node::channel::ChannelBook::project_membership(
+                channel,
+                &log.events(&channel).unwrap(),
+            )
+            .authorized
+            .contains(&id)
+        });
+        let stored = current.received.try_lock().ok().map(|received| {
+            received
+                .entries_ref(&channel)
+                .iter()
+                .any(|row| row.event_id == id)
+        });
+        let suppression = current
+            .account_suppression
+            .try_lock()
+            .ok()
+            .map(|suppression| {
+                (
+                    suppression.contains(channel, old_channel_id),
+                    suppression.contains(channel, id),
+                )
+            });
+        let crypto = current.channels.try_lock().ok().and_then(|book| {
+            let state = book.state(&channel)?;
+            let positions: Vec<_> = state
+                .current_receive_distributions()
+                .into_iter()
+                .map(|(author, epoch, mut distribution)| {
+                    let position = distribution.n;
+                    zeroize::Zeroize::zeroize(&mut distribution.chain_key);
+                    (author, epoch, position)
+                })
+                .collect();
+            Some((
+                state.epoch(),
+                state.pending_invite(),
+                state.is_accepted_member(&a1_node.user_id()),
+                positions,
+            ))
+        });
+        let retry_ms = current
+            .pending_channel_plaintext
+            .try_lock()
+            .ok()
+            .map(|pending| {
+                pending.retry_at.map(|deadline| {
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_millis()
+                })
+            });
+        format!(
+            "authorized={authorized:?} received={stored:?} suppression_old_new={suppression:?} crypto={crypto:?} plaintext_retry_ms={retry_ms:?}"
+        )
+    };
+    let before_new_send = linked_plaintext_metadata(&a2_node, old_channel_id);
+    let delivery_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let delivery_trace_started = std::time::Instant::now();
+    let delivery_trace_omitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for (label, current, peer) in [
+        ("source", &a1_node, a2_node.identity.public()),
+        ("sibling", &a2_node, a1_node.identity.public()),
+    ] {
+        let trace = delivery_trace.clone();
+        let omitted = delivery_trace_omitted.clone();
+        *current.account_client_test_hook.lock().unwrap() =
+            Some(Arc::new(move |observed, phase| {
+                if observed != peer
+                    || !(phase.starts_with("dial_")
+                        || phase.starts_with("session_")
+                        || phase.starts_with("negotiation_")
+                        || phase.starts_with("page_")
+                        || phase.starts_with("wake_"))
+                {
+                    return;
+                }
+                let safe_phase = phase
+                    .split_ascii_whitespace()
+                    .enumerate()
+                    .filter_map(|(index, token)| {
+                        (index == 0
+                            || [
+                                "outcome=",
+                                "domain=",
+                                "retry_ms=",
+                                "pending=",
+                                "after=",
+                                "deferred=",
+                                "reused=",
+                                "priority=",
+                            ]
+                            .iter()
+                            .any(|prefix| token.starts_with(prefix)))
+                        .then_some(token)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 128 {
+                    trace.pop_front();
+                    omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                trace.push_back((
+                    delivery_trace_started.elapsed().as_millis(),
+                    label,
+                    safe_phase,
+                ));
+            }));
+    }
     a1_node
         .send_channel_message(channel, b"after sibling joined")
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let original_new = channel_texts(&a1_node)
+        .into_iter()
+        .find(|row| row.text == b"after sibling joined")
+        .unwrap()
+        .id;
+    let mut first_public_arrival = None;
+    let new_channel_delivery = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
+            if first_public_arrival.is_none()
+                && a2_node
+                    .log
+                    .try_lock()
+                    .ok()
+                    .is_some_and(|log| log.get(&original_new).unwrap().is_some())
+            {
+                first_public_arrival = Some((
+                    delivery_trace_started.elapsed().as_millis(),
+                    linked_plaintext_metadata(&a2_node, original_new),
+                ));
+            }
             if channel_texts(&a2_node)
                 .iter()
                 .any(|item| item.text == b"after sibling joined")
@@ -8374,8 +8709,90 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .expect("new channel messages still arrive");
+    .await;
+    if new_channel_delivery.is_err() {
+        eprintln!(
+            "linked plaintext branch before_new_send={before_new_send} first_public_arrival={first_public_arrival:?} finish={}",
+            linked_plaintext_metadata(&a2_node, original_new)
+        );
+        let original = channel_texts(&a1_node)
+            .into_iter()
+            .find(|row| row.text == b"after sibling joined")
+            .map(|row| row.id);
+        let authorization = [&a1_node, &a2_node].map(|current| {
+            current.log.try_lock().ok().map(|log| {
+                crate::node::channel::ChannelBook::project_membership(
+                    channel,
+                    &log.events(&channel).unwrap(),
+                )
+                .authorized
+                .contains(&original_new)
+            })
+        });
+        eprintln!("linked public event authorization source_sibling={authorization:?}");
+        let observations: Vec<_> = [("source", &a1_node), ("sibling", &a2_node)]
+            .into_iter()
+            .map(|(label, current)| {
+                let (events, present) = {
+                    let log = current.log.lock().unwrap();
+                    (
+                        log.events(&channel).unwrap().len(),
+                        original.is_some_and(|id| log.get(&id).unwrap().is_some()),
+                    )
+                };
+                let surfaced = original
+                    .is_some_and(|id| channel_texts(current).iter().any(|row| row.id == id));
+                let queued = current
+                    .channel_recovery_pending
+                    .lock()
+                    .unwrap()
+                    .contains(&channel);
+                let recovery = current
+                    .channel_recovery
+                    .lock()
+                    .unwrap()
+                    .get(&channel)
+                    .cloned();
+                let role = current
+                    .account_group_access(channel)
+                    .map(|access| access.role);
+                let sync: Vec<_> = current
+                    .device_sync_status()
+                    .into_iter()
+                    .map(|status| {
+                        (
+                            status.device_id,
+                            status.phase,
+                            status.document_phase,
+                            status.error.is_some(),
+                            status.document_error.is_some(),
+                        )
+                    })
+                    .collect();
+                (
+                    label,
+                    events,
+                    present,
+                    surfaced,
+                    queued,
+                    recovery,
+                    role,
+                    current.sessions.test_capacity_snapshot(),
+                    sync,
+                )
+            })
+            .collect();
+        eprintln!(
+            "linked channel delivery metadata elapsed_ms={} original={original:?} observations={observations:?} omitted={} phases={:?}",
+            delivery_trace_started.elapsed().as_millis(),
+            delivery_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            delivery_trace.lock().unwrap()
+        );
+    }
+    for current in [&a1_node, &a2_node] {
+        *current.account_client_test_hook.lock().unwrap() = None;
+    }
+    new_channel_delivery.expect("new channel messages still arrive");
     tokio::time::sleep(Duration::from_secs(11)).await;
     let history = channel_texts(&a2_node);
     assert_eq!(

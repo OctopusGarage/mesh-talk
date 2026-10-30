@@ -1,24 +1,8 @@
-export interface ReceptionCursor {
-  epoch: string;
-  sequence: string;
-}
-
-export interface ReceptionScope {
-  owner: string;
-  account_id: string;
-  device_id: string;
-  runtime_id: string;
-}
-
-export interface ReceptionPage<Receipt> {
-  scope: ReceptionScope;
-  token: string;
-  after: ReceptionCursor;
-  next: ReceptionCursor;
-  through: ReceptionCursor;
-  complete: boolean;
-  receipts: Receipt[];
-}
+import type {
+  ReceptionCursor,
+  ReceptionPage,
+  ReceptionScope,
+} from "@/lib/types";
 
 export interface ReceptionDeliveryOptions<Receipt> {
   scope: ReceptionScope;

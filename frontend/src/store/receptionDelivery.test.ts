@@ -1,10 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
-import {
-  createReceptionDelivery,
-  type ReceptionCursor,
-  type ReceptionPage,
-  type ReceptionScope,
-} from "./receptionDelivery";
+import { createReceptionDelivery } from "./receptionDelivery";
+import type {
+  ReceptionCursor,
+  ReceptionPage,
+  ReceptionScope,
+} from "@/lib/types";
 
 const scope: ReceptionScope = {
   owner: "alice",

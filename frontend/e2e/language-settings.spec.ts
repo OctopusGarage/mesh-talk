@@ -21,6 +21,7 @@ for (const language of ["pt-BR", "ko"]) {
       );
       await enterChat(page);
       await openSidebarMenuAction(page, "sidebar-nav-settings");
+      await selectSettingsCategory(page, "appearance");
       const selector = page.getByTestId("settings-language-select");
       if (language === "pt-BR")
         await expect(selector.locator('option[value="pt-BR"]')).toHaveText(
@@ -29,7 +30,7 @@ for (const language of ["pt-BR", "ko"]) {
       await selector.selectOption(language);
       await expect(page.locator("html")).toHaveAttribute("lang", language);
       await expect(selector).toHaveValue(language);
-      await expect(page.getByTestId("settings-page-general")).toContainText(
+      await expect(page.getByTestId("settings-page-appearance")).toContainText(
         messages.settings.language,
       );
       for (const category of Object.keys(
@@ -49,7 +50,7 @@ for (const language of ["pt-BR", "ko"]) {
           page.getByTestId(`settings-nav-${category}`),
         ).toBeInViewport();
       }
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page.getByTestId("settings-dialog").screenshot({
         path: testInfo.outputPath(`${language}-${viewport.width}.png`),
         animations: "disabled",
@@ -62,6 +63,7 @@ for (const language of ["pt-BR", "ko"]) {
       await expect(page.getByTestId("login-submit")).toBeVisible();
       await enterChat(page);
       await openSidebarMenuAction(page, "sidebar-nav-settings");
+      await selectSettingsCategory(page, "appearance");
       await expect(page.getByTestId("settings-language-select")).toHaveValue(
         language,
       );

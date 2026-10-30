@@ -32,7 +32,7 @@ interface AvatarsState {
   setOwnId: (id: string) => void;
   /** Load the persisted LOCAL avatar table from the backend (called on app start). */
   load: (current?: () => boolean) => Promise<boolean>;
-  /** Load received peer avatars from the node (called once the node is ready). */
+  /** Resolve our current signed profile before migrating an old local photo. */
   loadPeers: (current?: () => boolean) => Promise<boolean>;
   /** Merge one received peer avatar (from the live `profile-received` event). */
   mergeReceived: (id: string, dataUrl: string | null) => void;
@@ -55,6 +55,26 @@ interface AvatarsState {
 
 /** Stable empty map so a "no avatars yet" load keeps a constant ref. */
 const EMPTY: Record<string, string> = {};
+// Current-value cache budgets match the core's admitted profile cohort. UTF-16
+// is charged before insertion; completed receipt pages never accumulate payloads
+// beyond this cache even if a producer supplies a larger sequence of identities.
+const MAX_RECEIVED_AVATARS = 1024;
+const MAX_RECEIVED_AVATAR_BYTES = 64 * 1024 * 1024;
+function boundedReceived(values: Record<string, string>, ownId: string) {
+  const ids = Object.keys(values);
+  let bytes = ids.reduce((total, id) => total + values[id].length * 2, 0);
+  let rows = ids.length;
+  for (const id of ids) {
+    if (rows <= MAX_RECEIVED_AVATARS && bytes <= MAX_RECEIVED_AVATAR_BYTES)
+      break;
+    if (id === ownId && values[id].length * 2 <= MAX_RECEIVED_AVATAR_BYTES)
+      continue;
+    bytes -= values[id].length * 2;
+    rows--;
+    delete values[id];
+  }
+  return values;
+}
 let localRevision = 0;
 let receivedRevision = 0;
 let pendingWrite: Promise<void> = Promise.resolve();
@@ -142,7 +162,9 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     const peerRevision = receivedRevision;
     if (!lease.current() || !current()) return false;
     try {
-      const profiles = (await avatarsApi.peers()) ?? EMPTY;
+      const ownId = get().ownId;
+      if (!ownId) return false;
+      const profile = await avatarsApi.peer(lease.owner!, ownId);
       if (
         lease.current() &&
         current() &&
@@ -150,15 +172,9 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
         revision === localRevision &&
         peerRevision === receivedRevision
       ) {
-        const received = Object.fromEntries(
-          Object.entries(profiles).filter(
-            (entry): entry is [string, string] => entry[1] !== null,
-          ),
-        );
-        set({ received });
-        const ownId = get().ownId;
-        if (ownId && Object.prototype.hasOwnProperty.call(profiles, ownId))
-          get().mergeReceived(ownId, profiles[ownId]);
+        if (get().ownId !== ownId) return false;
+        if (profile?.account_id === ownId)
+          get().mergeReceived(ownId, profile.avatar);
         return true;
       }
     } catch {
@@ -178,6 +194,7 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
       const next = { ...s.received };
       if (dataUrl) next[id] = dataUrl;
       else delete next[id];
+      boundedReceived(next, s.ownId);
       if (!replaceOwn) return { received: next };
       const local = { ...s.local };
       delete local[id];

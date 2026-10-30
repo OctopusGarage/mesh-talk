@@ -1,6 +1,7 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, openBobDm, revealComposerTools } from "./helpers/session";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
+import { selectSettingsCategory } from "./helpers/settings";
 import { expectDialogFitsViewport } from "./helpers/ui-audit";
 
 for (const viewport of [
@@ -14,6 +15,7 @@ for (const viewport of [
     await enterChat(page);
     await openBobDm(page);
     await openSidebarMenuAction(page, "sidebar-nav-settings");
+    await selectSettingsCategory(page, "shortcuts");
     const dialog = page.getByTestId("settings-dialog");
     await expect(page.locator("#setting-screenshot-global")).toHaveAttribute(
       "aria-checked",
@@ -69,6 +71,7 @@ test("global opt-in routes scoped events and exposes effective scope", async ({
   await enterChat(page);
   await openBobDm(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "shortcuts");
   await page.locator("#setting-screenshot-global").click();
   await expect(
     page.getByText("Global shortcuts active", { exact: true }),

@@ -41,6 +41,41 @@ struct ControlRoutes {
     publicly_observed: bool,
 }
 
+/// Task IDs distinguish an aborted route owner from its same-key replacement.
+#[derive(Default)]
+struct ControlTaskOwners {
+    current: std::collections::HashMap<ControlWork, tokio::task::AbortHandle>,
+    owners: std::collections::HashMap<tokio::task::Id, ControlWork>,
+}
+impl ControlTaskOwners {
+    fn insert(&mut self, key: ControlWork, task: tokio::task::AbortHandle) {
+        self.owners.insert(task.id(), key.clone());
+        self.current.insert(key, task);
+    }
+    fn finished(&mut self, task: tokio::task::Id) -> Option<ControlWork> {
+        let key = self.owners.remove(&task)?;
+        if self
+            .current
+            .get(&key)
+            .is_some_and(|current| current.id() == task)
+        {
+            self.current.remove(&key);
+            Some(key)
+        } else {
+            None
+        }
+    }
+    fn cancel(&mut self, key: &ControlWork) {
+        if let Some(task) = self.current.remove(key) {
+            task.abort();
+        }
+    }
+    fn clear(&mut self) {
+        self.current.clear();
+        self.owners.clear();
+    }
+}
+
 impl ControlWork {
     fn retry_key(&self, peer: &PublicIdentity) -> (u8, String) {
         (
@@ -705,6 +740,7 @@ impl Node {
             Ok(result) => {
                 self.delivery_suspended
                     .store(true, std::sync::atomic::Ordering::Release);
+                self.account_sync_notify.notify_one();
                 Ok(result)
             }
             Err(error) => {
@@ -838,6 +874,10 @@ impl Node {
         }
         if sibling && !self.device_sync_policy().history {
             return Ok(None);
+        }
+        if !sibling && let Some(peer_account) = proof.and_then(|proof| proof.account_id()) {
+            self.prepare_live_personal_dm(&peer_account, store)
+                .map_err(delivery_log_error)?;
         }
         store.check_capacity(1, event.ciphertext.len() as u64)?;
         let decrypted = self
@@ -978,6 +1018,10 @@ impl Node {
         if sibling && !policy.current().history {
             return Ok(None);
         }
+        if !sibling && let Some(peer_account) = proof.and_then(|proof| proof.account_id()) {
+            self.reopen_personal_after_live(&peer_account)
+                .map_err(delivery_log_error)?;
+        }
         store.begin(DeliveryTransaction::Incoming {
             sender: peer.clone(),
             original: Box::new(event.clone()),
@@ -1008,62 +1052,63 @@ impl Node {
             return Ok(());
         }
         loop {
-            let notification = store
-                .pending_transactions()
-                .first()
-                .and_then(|tx| match tx {
-                    DeliveryTransaction::Incoming {
-                        sender,
-                        original,
-                        received,
-                        ..
-                    } => Some((
-                        sender.clone(),
-                        original.conversation_id,
-                        (**received).clone(),
-                        false,
-                        true,
-                    )),
-                    DeliveryTransaction::IncomingManifest {
-                        sender,
-                        original,
-                        received,
-                        ..
-                    } => Some((
-                        sender.clone(),
-                        original.conversation_id,
-                        (**received).clone(),
-                        true,
-                        true,
-                    )),
-                    DeliveryTransaction::OutgoingManifest { received, .. } => Some((
-                        self.identity.public(),
-                        received.conversation,
-                        (**received).clone(),
-                        true,
-                        false,
-                    )),
-                    DeliveryTransaction::ChannelOutgoing { events, sent, .. }
-                        if events.last().is_some_and(|event| {
-                            event.kind == crate::eventlog::EventKind::FileManifest
-                        }) =>
-                    {
-                        Some((
+            let notification =
+                store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::Incoming {
+                            sender,
+                            original,
+                            received,
+                            ..
+                        } => Some((
+                            sender.clone(),
+                            original.conversation_id,
+                            (**received).clone(),
+                            false,
+                            true,
+                        )),
+                        DeliveryTransaction::IncomingManifest {
+                            sender,
+                            original,
+                            received,
+                            ..
+                        } => Some((
+                            sender.clone(),
+                            original.conversation_id,
+                            (**received).clone(),
+                            true,
+                            true,
+                        )),
+                        DeliveryTransaction::OutgoingManifest { received, .. } => Some((
                             self.identity.public(),
-                            sent.conversation,
-                            super::received_log::ReceivedEntry {
-                                event_id: tx.id(),
-                                conversation: sent.conversation,
-                                from: self.user_id(),
-                                wall_clock: sent.wall_clock,
-                                plaintext: sent.plaintext.clone(),
-                            },
+                            received.conversation,
+                            (**received).clone(),
                             true,
                             false,
-                        ))
-                    }
-                    _ => None,
-                });
+                        )),
+                        DeliveryTransaction::ChannelOutgoing { events, sent, .. }
+                            if events.last().is_some_and(|event| {
+                                event.kind == crate::eventlog::EventKind::FileManifest
+                            }) =>
+                        {
+                            Some((
+                                self.identity.public(),
+                                sent.conversation,
+                                super::received_log::ReceivedEntry {
+                                    event_id: tx.id(),
+                                    conversation: sent.conversation,
+                                    from: self.user_id(),
+                                    wall_clock: sent.wall_clock,
+                                    plaintext: sent.plaintext.clone(),
+                                },
+                                true,
+                                false,
+                            ))
+                        }
+                        _ => None,
+                    });
             let prepared_file_scopes =
                 match store.pending_transactions().first().map(|tx| tx.body()) {
                     Some(DeliveryTransaction::OutgoingManifest {
@@ -1081,7 +1126,7 @@ impl Node {
                     store.pending_transactions().first().map(|tx| tx.body()),
                     Some(DeliveryTransaction::ChannelOutgoing { .. })
                 )
-                && let Some(manifest) = crate::file::decode_manifest(&entry.plaintext)
+                && let Some(manifest) = super::files::validated_manifest(&entry.plaintext)
             {
                 self.remember_sent_manifest_scope(
                     manifest.file_conv(),
@@ -1097,12 +1142,20 @@ impl Node {
                     .is_some_and(|tx| match tx.body() {
                         DeliveryTransaction::Outgoing { .. }
                         | DeliveryTransaction::OutgoingManifest { .. }
-                        | DeliveryTransaction::ChannelOutgoing { .. } => true,
+                        | DeliveryTransaction::ChannelOutgoing { .. }
+                        | DeliveryTransaction::ChannelControl { .. }
+                        | DeliveryTransaction::AccountSelfControl { .. }
+                        | DeliveryTransaction::LegacyMemberLeave { .. }
+                        | DeliveryTransaction::AccountOwnerControl { .. }
+                        | DeliveryTransaction::ChannelMessageAction { .. } => true,
                         DeliveryTransaction::Incoming { sender, .. }
                         | DeliveryTransaction::IncomingManifest { sender, .. } => {
                             !self.certified_sibling(sender)
                         }
-                        DeliveryTransaction::Requested { .. } => false,
+                        DeliveryTransaction::Requested { .. }
+                        | DeliveryTransaction::GroupRequested { .. }
+                        | DeliveryTransaction::AccountGroupFile { .. }
+                        | DeliveryTransaction::AccountInvitation { .. } => false,
                     });
             let transaction_id = store.pending_transactions().first().map(|tx| tx.id());
             if let Some(
@@ -1137,19 +1190,55 @@ impl Node {
                         }
                         _ => None,
                     });
+            let control_channel =
+                store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::ChannelControl { events }
+                        | DeliveryTransaction::AccountSelfControl { events, .. }
+                        | DeliveryTransaction::LegacyMemberLeave { events, .. }
+                        | DeliveryTransaction::AccountOwnerControl { events, .. } => {
+                            events.first().map(|event| event.conversation_id)
+                        }
+                        _ => None,
+                    });
             let installed = {
                 let mut ratchet = self.dm_ratchet.lock().expect("ratchet lock not poisoned");
                 let mut log = self.log.lock().expect("log lock not poisoned");
+                if let Some(tx) = store.pending_transactions().first() {
+                    store.validate_message_action_transaction(tx, &log, &self.identity)?;
+                }
                 let mut received = self.received.lock().expect("received lock not poisoned");
                 let mut sent = self.sentlog.lock().expect("sent lock not poisoned");
                 let mut files = self.received_files.lock().expect("files lock not poisoned");
-                store.recover_next_with_channels(
+                let recall = store
+                    .pending_transactions()
+                    .first()
+                    .and_then(|tx| match tx.body() {
+                        DeliveryTransaction::ChannelMessageAction { recall, .. } => recall.clone(),
+                        _ => None,
+                    });
+                let mut complete =
+                    |operation: &super::account_group::operations::journal::OperationReference,
+                     events: &[Event]| {
+                        // Startup and running recovery use the same binding and
+                        // durable sidecar rule before completing the original ID.
+                        super::account_group::operations::persist_action_recall_completion(
+                            operation,
+                            recall.as_ref(),
+                            &mut self.recalls.lock().expect("recalls lock"),
+                        )?;
+                        self.complete_account_group_operation(operation, events)
+                    };
+                store.recover_next_with_group_operations(
                     &mut ratchet,
                     &mut log,
                     &mut *sent,
                     &mut *received,
                     Some(&mut *files),
                     Some(&mut self.channel_senders.lock().expect("sender store lock")),
+                    Some(&mut complete),
                 )
             };
             let removed = transaction_id.is_some_and(|id| {
@@ -1175,6 +1264,11 @@ impl Node {
             if removed {
                 self.install_file_card_scopes(prepared_file_scopes);
             }
+            if removed && let Some(channel) = control_channel {
+                // Refresh canonical controls after releasing projection guards.
+                self.refresh_channel_control_metadata(channel)?;
+                self.account_sync_notify.notify_one();
+            }
             if removed && wake_local {
                 self.note_account_local_change();
             }
@@ -1184,7 +1278,7 @@ impl Node {
                     if incoming {
                         self.note_reception_change();
                     }
-                    if let Some(manifest) = crate::file::decode_manifest(&entry.plaintext) {
+                    if let Some(manifest) = super::files::validated_manifest(&entry.plaintext) {
                         let fresh = {
                             let mut book = self.files.lock().expect("files lock not poisoned");
                             let fresh = !book.is_emitted(&entry.event_id);
@@ -1930,6 +2024,31 @@ impl Node {
         }
     }
 
+    fn cancel_changed_delivery_routes(
+        &self,
+        active: &mut std::collections::HashMap<ControlWork, ControlRoutes>,
+        owners: &mut ControlTaskOwners,
+    ) {
+        let changed: Vec<_> = active
+            .iter()
+            .filter(|(_, routes)| self.control_routes(&routes.peer).endpoints != routes.endpoints)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in changed {
+            owners.cancel(&key);
+            active.remove(&key);
+            // A completed-but-unjoined old task may have moved its observation
+            // token out of its Drop guard. Remove only that exact destination.
+            if let ControlWork::Destination(event) = key {
+                self.delivery_observations
+                    .lock()
+                    .expect("delivery observations lock not poisoned")
+                    .retain(|_, destination| destination != event);
+                self.delivery_status_notify.notify_waiters();
+            }
+        }
+    }
+
     /// Shared by desktop, CLI and SDK accept-loop hosts. The future owns all
     /// cursors and network work, so dropping it cancels scheduling and dials.
     pub(in crate::node) async fn run_delivery_loop(self: std::sync::Arc<Self>) {
@@ -1945,6 +2064,7 @@ impl Node {
         // JoinSet aborts its tasks on drop: retiring the worker also retires
         // every control dial/exchange. Never detach work from this lifetime.
         let mut controls = tokio::task::JoinSet::new();
+        let mut control_owners = ControlTaskOwners::default();
         let mut active: std::collections::HashMap<ControlWork, ControlRoutes> =
             std::collections::HashMap::new();
         let mut retries = super::delivery_retry::RetrySchedule::default();
@@ -1970,6 +2090,7 @@ impl Node {
                     self.relay_retry_after.lock().expect("relay retry lock not poisoned").clear();
                     controls.shutdown().await;
                     self.clear_delivery_observations();
+                    control_owners.clear();
                     active.clear();
                     retries.clear();
                     self.channel_recovery_notify.notify_one();
@@ -1977,10 +2098,11 @@ impl Node {
                     self.bridge_notify.notify_one();
                     continue;
                 },
-                result = controls.join_next(), if !controls.is_empty() => {
+                result = controls.join_next_with_id(), if !controls.is_empty() => {
                     match result {
-                        Some(Ok((key, persistence_failed, progress, observation))) => {
-                            if let Some(routes) = active.remove(&key) {
+                        Some(Ok((task, (key, persistence_failed, progress, observation)))) => {
+                            if control_owners.finished(task).as_ref() == Some(&key)
+                                && let Some(routes) = active.remove(&key) {
                                 retries.finished(key.retry_key(&routes.peer), routes.retry_routes(), progress, std::time::Instant::now());
                                 if let Some((token, reason)) = observation { self.finish_delivery_observation_with_reason(token, reason); }
                             }
@@ -1991,8 +2113,11 @@ impl Node {
                         // A panicked child cannot leave a permanently occupied
                         // lane. Retire this worker and cancel its remaining work.
                         Some(Err(error)) => {
-                            log::error!("automatic delivery control task failed: {error}");
-                            return;
+                            if let Some(key) = control_owners.finished(error.id()) { active.remove(&key); }
+                            if !error.is_cancelled() {
+                                log::error!("automatic delivery control task failed: {error}");
+                                return;
+                            }
                         }
                         None => {}
                     }
@@ -2002,15 +2127,7 @@ impl Node {
             // A new route for an active peer/eligible relay must not wait behind
             // an exchange still blocked on its old endpoint. Refresh timestamps
             // and unrelated peers do not invalidate the bounded control batch.
-            if active
-                .values()
-                .any(|routes| self.control_routes(&routes.peer).endpoints != routes.endpoints)
-            {
-                self.clear_delivery_observations();
-                controls.shutdown().await;
-                self.clear_delivery_observations();
-                active.clear();
-            }
+            self.cancel_changed_delivery_routes(&mut active, &mut control_owners);
             self.prune_delivery_observations();
             // Reading next_destination advances its per-message cursor. Only
             // select work when its lane can admit it, so busy lanes preserve
@@ -2123,7 +2240,8 @@ impl Node {
                         token: node.begin_delivery_observation(id, &destination),
                     };
                     active.insert(key.clone(), routes);
-                    controls.spawn(work.track(async move {
+                    let owner = key.clone();
+                    let task = controls.spawn(work.track(async move {
                         // Move the entire Drop owner into the future. Capturing
                         // only its Copy token would drop the guard at admission.
                         let mut attempt = attempt;
@@ -2148,6 +2266,7 @@ impl Node {
                         let observation = attempt.token.take().map(|token| (token, reason));
                         (key, failed, progress, observation)
                     }));
+                    control_owners.insert(owner, task);
                 }
             }
             if let Some(receipt) = receipt {
@@ -2169,7 +2288,8 @@ impl Node {
                     };
                     let node = self.clone();
                     active.insert(key.clone(), routes);
-                    controls.spawn(work.track(async move {
+                    let owner = key.clone();
+                    let task = controls.spawn(work.track(async move {
                         let progress = node.retry_one_destination(&receipt.destination).await;
                         let failed = progress
                             && node
@@ -2180,6 +2300,7 @@ impl Node {
                                 .is_err();
                         (key, failed, progress, None)
                     }));
+                    control_owners.insert(owner, task);
                 }
             }
             file_scheduler.admit(&self, files, cursor);
@@ -2227,10 +2348,12 @@ impl Node {
                     };
                     let node = self.clone();
                     active.insert(key.clone(), routes);
-                    controls.spawn(work.track(async move {
+                    let owner = key.clone();
+                    let task = controls.spawn(work.track(async move {
                         let progress = node.reconcile_delivery_peer(&peer).await;
                         (key, false, progress, None)
                     }));
+                    control_owners.insert(owner, task);
                 }
             }
         }
@@ -2434,15 +2557,40 @@ impl Node {
         tokio::pin!(direct, relay);
         // Both alternatives share the same bounded wall-clock window. Custody
         // cannot cancel recipient progress; exact recipient confirmation can.
-        let ((held, direct_elapsed, direct_timeout), (relay_held, relay_elapsed, relay_timeout)) = tokio::select! {
-            result = &mut direct => {
-                let still_pending = self.delivery.lock().expect("delivery lock not poisoned")
-                    .contains_work_event(destination.event.id);
-                if still_pending { (result, relay.await) }
-                else { (result, (false, started.elapsed(), false)) }
-            },
-            result = &mut relay => (direct.await, result),
+        let retired = async {
+            loop {
+                let changed = self.delivery_status_notify.notified();
+                tokio::pin!(changed);
+                // Register before checking durable state: notify_waiters does
+                // not retain a permit for a future subscriber.
+                changed.as_mut().enable();
+                if !self
+                    .delivery
+                    .lock()
+                    .expect("delivery lock not poisoned")
+                    .contains_work_event(destination.event.id)
+                {
+                    return;
+                }
+                changed.await;
+            }
         };
+        tokio::pin!(retired);
+        let mut direct_result = None;
+        let mut relay_result = None;
+        while direct_result.is_none() || relay_result.is_none() {
+            tokio::select! {
+                _ = &mut retired => break,
+                result = &mut direct, if direct_result.is_none() => direct_result = Some(result),
+                result = &mut relay, if relay_result.is_none() => relay_result = Some(result),
+            }
+        }
+        // Dropping an unfinished alternative releases its socket and peer lane.
+        // Custody or another destination's receipt leaves this event pending.
+        let (held, direct_elapsed, direct_timeout) =
+            direct_result.unwrap_or((false, started.elapsed(), false));
+        let (relay_held, relay_elapsed, relay_timeout) =
+            relay_result.unwrap_or((false, started.elapsed(), false));
         if started.elapsed() >= std::time::Duration::from_secs(10) {
             log::warn!(target: "mesh_talk::delivery",
                 "slow delivery attempt direct_ms={} relay_ms={} direct_held={} relay_held={} budget_ms={}",
@@ -2622,6 +2770,18 @@ impl Node {
             && self.known_account_allowed(&binding.device)
     }
 
+    /// Encrypted custody is independent of the recipient's local download
+    /// approval. An explicit refusal still stops further custody publication.
+    fn file_relay_custody_current(
+        &self,
+        file: &super::delivery_store::FileCard,
+        destination: &super::delivery_store::FileDestination,
+    ) -> bool {
+        self.file_destination_current(file, destination)
+            && self.outgoing_file_consent_status(file.id, destination.binding.event_id)
+                != Some(crate::eventlog::sync::FileConsentStatus::Declined)
+    }
+
     pub(in crate::node) async fn retry_file_step(
         &self,
         file: &super::delivery_store::FileCard,
@@ -2796,9 +2956,7 @@ impl Node {
             {
                 candidates.push((false, peer));
             }
-            if self.outgoing_file_consent_status(file.id, binding.event_id)
-                == Some(crate::eventlog::sync::FileConsentStatus::Accepted)
-            {
+            if self.file_relay_custody_current(file, destination) {
                 let relays = {
                     let roster = self.roster.lock().expect("roster lock not poisoned");
                     self.post_office_candidates_for(&roster, &binding.device)
@@ -2959,7 +3117,17 @@ impl Node {
                             transfer.phase = FilePhase::InitialCustody;
                         } else {
                             transfer.channel = None;
-                            transfer.phase = FilePhase::ConsentWait;
+                            transfer.sync = super::session::SyncProgress::default();
+                            // A pending local download must not pin this file on
+                            // its direct route while encrypted custody is available.
+                            if status == crate::eventlog::sync::FileConsentStatus::Pending
+                                && transfer.candidate_cursor + 1 < transfer.candidate_count
+                            {
+                                transfer.candidate_cursor += 1;
+                                transfer.phase = FilePhase::Dial;
+                            } else {
+                                transfer.phase = FilePhase::ConsentWait;
+                            }
                         }
                     }
                     Err(_) => {
@@ -3046,10 +3214,8 @@ impl Node {
             .as_ref()
             .ok_or(SessionError::UnexpectedMessage)?;
         let current = || {
-            self.file_destination_current(file, destination)
+            self.file_relay_custody_current(file, destination)
                 && self.relay_send_allowed(&relay.public)
-                && self.outgoing_file_consent_status(file.id, binding.event_id)
-                    == Some(crate::eventlog::sync::FileConsentStatus::Accepted)
                 && self
                     .roster
                     .lock()
@@ -3184,9 +3350,7 @@ impl Node {
         if direct && let Some(peer) = self.routing_peer(&binding.device.user_id()) {
             candidates.push((false, peer));
         }
-        let consented = self.outgoing_file_consent_status(file.id, binding.event_id)
-            == Some(crate::eventlog::sync::FileConsentStatus::Accepted);
-        if consented {
+        if self.file_relay_custody_current(file, destination) {
             let roster = self.roster.lock().expect("roster lock not poisoned");
             candidates.extend(
                 self.post_office_candidates_for(&roster, &binding.device)
@@ -3217,51 +3381,27 @@ impl Node {
                     return false;
                 }
                 if relay {
-                    if self
-                        .opaque_relay_round(&mut channel, &binding.device, Some(manifest_conv))
-                        .await
-                        .is_err()
-                    {
-                        return false;
-                    }
+                    // Reuse the retained worker's guarded publication state
+                    // machine so refusal/cancellation/relay-role changes are
+                    // rechecked on every opaque payload page in immediate sends.
+                    let mut transfer = FileTransfer::new(file.clone(), destination.clone());
+                    transfer.route = Some((true, peer.clone()));
+                    transfer.channel = Some(channel);
+                    transfer.phase = FilePhase::RelayManifestLegacy;
                     #[cfg(test)]
                     phase.store(6, std::sync::atomic::Ordering::Relaxed);
-                    let Ok(uploaded) = self
-                        .opaque_relay_round(
-                            &mut channel,
-                            &binding.device,
-                            Some(file.file_conversation),
-                        )
-                        .await
-                    else {
-                        return false;
-                    };
-                    let Some(final_chunk) = file.final_chunk else {
-                        return false;
-                    };
-                    let Some((_, outer_id)) = uploaded
-                        .iter()
-                        .find(|(inner_id, _)| *inner_id == final_chunk)
-                    else {
-                        return false;
-                    };
-                    let Ok(mailbox) = crate::postoffice::opaque::RelayMailbox::new(
-                        &self.identity,
-                        &binding.device,
-                        &peer.public,
-                    ) else {
-                        return false;
-                    };
+                    while !matches!(transfer.phase, FilePhase::RelayHeld) {
+                        if self
+                            .advance_relay_file_transfer(&mut transfer)
+                            .await
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
                     #[cfg(test)]
                     phase.store(7, std::sync::atomic::Ordering::Relaxed);
-                    return super::session::request_durable_have(
-                        &mut channel,
-                        mailbox.id(),
-                        *outer_id,
-                    )
-                    .await
-                    .unwrap_or(false)
-                        && current();
+                    return self.file_relay_custody_current(file, destination);
                 }
                 let store = self.sync_store(channel.peer_identity());
                 // Publish the manifest first so private recipients/relays can
@@ -3485,6 +3625,175 @@ impl Node {
 
 #[cfg(test)]
 mod diagnostic_tests {
+    #[tokio::test]
+    async fn cancelled_old_control_owner_cannot_remove_its_same_key_replacement() {
+        let key = super::ControlWork::Pull("fixture".into());
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut owners = super::ControlTaskOwners::default();
+        let old = tasks.spawn(std::future::pending::<()>());
+        let old_id = old.id();
+        owners.insert(key.clone(), old);
+        owners.cancel(&key);
+        let replacement = tasks.spawn(std::future::pending::<()>());
+        let replacement_id = replacement.id();
+        owners.insert(key.clone(), replacement);
+        let error = tasks.join_next_with_id().await.unwrap().unwrap_err();
+        assert!(error.is_cancelled());
+        assert_eq!(error.id(), old_id);
+        assert!(owners.finished(error.id()).is_none());
+        assert_eq!(owners.current[&key].id(), replacement_id);
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unrelated_pull_route_changes_preserve_slow_noise_delivery_and_its_observation() {
+        use super::super::test_support::node_with_files;
+        use crate::discovery::Announce;
+        use crate::identity::{account::Account, device::DeviceIdentity};
+        use std::sync::Arc;
+        use std::time::Duration;
+        let source_dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let aa = Account::generate();
+        let bob_account = Account::generate();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ap = Announce::new_with_account(&alice, &aa, "Alice", 9);
+        let bp = Announce::new_with_account(
+            &bob,
+            &bob_account,
+            "Bob",
+            listener.local_addr().unwrap().port(),
+        );
+        let (sender, _, _) = node_with_files(source_dir.path(), alice, aa, &bp);
+        let (recipient, _, _) = node_with_files(target_dir.path(), bob, bob_account, &ap);
+        let unrelated_identity = DeviceIdentity::generate();
+        let unrelated_account = Account::generate();
+        let unrelated =
+            Announce::new_with_account(&unrelated_identity, &unrelated_account, "Unrelated", 9);
+        sender.roster.lock().unwrap().update(
+            &unrelated,
+            "127.0.0.1".parse().unwrap(),
+            &sender.user_id(),
+        );
+        let logical = sender
+            .enqueue_to_account(&recipient.account_id(), b"synthetic slow delivery", None)
+            .await
+            .unwrap();
+        let destination = sender
+            .delivery
+            .lock()
+            .unwrap()
+            .message(logical)
+            .unwrap()
+            .destinations[0]
+            .clone();
+        let healthy = super::ControlWork::Destination(destination.event.id);
+        let changing = super::ControlWork::Pull(unrelated.user_id.clone());
+        let (accepted, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let server_node = recipient.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Some((accepted, release_rx));
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    incoming = listener.accept() => {
+                        let (stream, _) = incoming.unwrap();
+                        let node = server_node.clone();
+                        let boundary = held.take();
+                        connections.spawn(async move {
+                            let channel = node.privacy_accept(stream).await.unwrap();
+                            if let Some((accepted, release)) = boundary {
+                                let _ = accepted.send(());
+                                release.await.unwrap();
+                            }
+                            node.serve_connection(channel).await;
+                        });
+                    }
+                    result = connections.join_next(), if !connections.is_empty() => { result.unwrap().unwrap(); }
+                }
+            }
+        });
+        let mut active = std::collections::HashMap::new();
+        let mut owners = super::ControlTaskOwners::default();
+        let mut controls = tokio::task::JoinSet::new();
+        active.insert(healthy.clone(), sender.control_routes(&bp.public()));
+        let attempt = super::ObservationAttempt {
+            node: sender.clone(),
+            token: sender.begin_delivery_observation(logical, &destination),
+        };
+        assert!(attempt.token.is_some());
+        let sending = Arc::clone(&sender);
+        let task = controls.spawn(async move {
+            let _attempt = attempt;
+            sending
+                .retry_one_destination_with_reason(&destination)
+                .await
+                .0
+        });
+        let healthy_task = task.id();
+        owners.insert(healthy.clone(), task);
+        tokio::time::timeout(Duration::from_secs(3), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        for port in 10..13 {
+            active.insert(changing.clone(), sender.control_routes(&unrelated.public()));
+            let pull = controls.spawn(std::future::pending::<bool>());
+            owners.insert(changing.clone(), pull);
+            let relocated = Announce::new_with_account(
+                &unrelated_identity,
+                &unrelated_account,
+                "Unrelated",
+                port,
+            );
+            sender.roster.lock().unwrap().update(
+                &relocated,
+                "127.0.0.1".parse().unwrap(),
+                &sender.user_id(),
+            );
+            sender.cancel_changed_delivery_routes(&mut active, &mut owners);
+            assert!(
+                active.contains_key(&healthy),
+                "an unrelated Pull route must not cancel the healthy destination"
+            );
+            assert_eq!(owners.current[&healthy].id(), healthy_task);
+            assert!(!owners.current[&healthy].is_finished());
+            assert!(
+                sender.account_delivery_observations(&recipient.account_id(), &[logical])[0]
+                    .2
+                    .is_some(),
+                "route churn for another owner cannot erase this exact destination's observation"
+            );
+        }
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match controls.join_next_with_id().await.unwrap() {
+                    Ok((task, progress)) => {
+                        assert_eq!(owners.finished(task), Some(healthy.clone()));
+                        assert!(progress);
+                        break;
+                    }
+                    Err(error) => {
+                        assert!(error.is_cancelled());
+                        assert!(owners.finished(error.id()).is_none());
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sender.delivery_status(logical),
+            Some(super::DeliveryStatus::Delivered),
+            "the original signed recipient receipt, rather than relay custody, must finish the delivery"
+        );
+        server.abort();
+        let _ = server.await;
+    }
     #[tokio::test]
     async fn bounded_relay_batches_eventually_visit_a_healthy_tail_after_four_failures() {
         use crate::discovery::Announce;
@@ -3731,5 +4040,13 @@ mod diagnostic_tests {
             "revoked verification must prevent a new proactive recovery connection"
         );
         assert!(finished.is_ok());
+    }
+}
+
+// Keep local storage failures retryable at the wire delivery admission boundary.
+fn delivery_log_error(error: NodeError) -> LogError {
+    match error {
+        NodeError::Log(error) => error,
+        other => LogError::AdmissionRejected(other.to_string()),
     }
 }

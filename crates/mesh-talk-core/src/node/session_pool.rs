@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedSemaphorePermit, Semaphore},
 };
 
 pub(super) const MAX_TCP_CONNECTIONS: usize = 8;
@@ -25,7 +25,107 @@ const ACCOUNT_CAPABILITY_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_ACCOUNT_CAPABILITIES: usize = 256;
 const MAX_ROUTE_AFFINITIES: usize = 256;
 const MAX_AUTHENTICATION_GATES: usize = 256;
-type AuthenticationGate = tokio::sync::Mutex<()>;
+#[derive(Default)]
+struct AuthenticationGate {
+    state: Mutex<AuthenticationState>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct AuthenticationState {
+    active: bool,
+    next_ticket: u64,
+    ordinary_due: bool,
+    ordinary: std::collections::VecDeque<u64>,
+    control: std::collections::VecDeque<u64>,
+}
+
+impl AuthenticationState {
+    fn queue(&mut self, priority: AuthenticationPriority) -> &mut std::collections::VecDeque<u64> {
+        match priority {
+            AuthenticationPriority::Ordinary => &mut self.ordinary,
+            AuthenticationPriority::Control => &mut self.control,
+        }
+    }
+    fn next(&self) -> Option<(AuthenticationPriority, u64)> {
+        if self.ordinary_due
+            && let Some(ticket) = self.ordinary.front()
+        {
+            Some((AuthenticationPriority::Ordinary, *ticket))
+        } else if let Some(ticket) = self.control.front() {
+            Some((AuthenticationPriority::Control, *ticket))
+        } else {
+            self.ordinary
+                .front()
+                .map(|ticket| (AuthenticationPriority::Ordinary, *ticket))
+        }
+    }
+}
+
+pub(in crate::node) struct AuthenticationLease {
+    gate: Arc<AuthenticationGate>,
+}
+impl Drop for AuthenticationLease {
+    fn drop(&mut self) {
+        self.gate.state.lock().unwrap().active = false;
+        self.gate.changed.notify_waiters();
+    }
+}
+
+struct AuthenticationWaiter {
+    gate: Arc<AuthenticationGate>,
+    priority: AuthenticationPriority,
+    ticket: u64,
+    queued: bool,
+}
+impl Drop for AuthenticationWaiter {
+    fn drop(&mut self) {
+        if self.queued {
+            self.gate
+                .state
+                .lock()
+                .unwrap()
+                .queue(self.priority)
+                .retain(|ticket| *ticket != self.ticket);
+            self.gate.changed.notify_waiters();
+        }
+    }
+}
+impl AuthenticationWaiter {
+    async fn wait(mut self) -> AuthenticationLease {
+        loop {
+            // Register before inspecting state: release/cancellation between the
+            // check and await must not lose the sole owner's handoff.
+            let changed = self.gate.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let admitted = {
+                let mut state = self.gate.state.lock().unwrap();
+                if !state.active && state.next() == Some((self.priority, self.ticket)) {
+                    state.queue(self.priority).pop_front();
+                    state.active = true;
+                    state.ordinary_due = self.priority == AuthenticationPriority::Control;
+                    true
+                } else {
+                    false
+                }
+            };
+            if admitted {
+                self.queued = false;
+                return AuthenticationLease {
+                    gate: self.gate.clone(),
+                };
+            }
+            changed.await;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::node) enum AuthenticationPriority {
+    Ordinary,
+    Control,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::node) enum SessionProtocol {
@@ -74,6 +174,49 @@ impl CapacityDiagnostics {
     }
 }
 
+#[derive(Default)]
+struct InboundIdleState {
+    next: u64,
+    retiring: Option<u64>,
+    entries: std::collections::VecDeque<(u64, tokio::sync::oneshot::Sender<()>)>,
+}
+#[derive(Default)]
+struct InboundIdleRegistry {
+    state: Mutex<InboundIdleState>,
+    changed: tokio::sync::Notify,
+}
+pub(in crate::node) struct InboundIdleRegistration {
+    registry: Arc<InboundIdleRegistry>,
+    token: u64,
+}
+impl Drop for InboundIdleRegistration {
+    fn drop(&mut self) {
+        let mut state = self.registry.state.lock().unwrap();
+        state.entries.retain(|(token, _)| *token != self.token);
+        if state.retiring == Some(self.token) {
+            state.retiring = None;
+        }
+        drop(state);
+        self.registry.changed.notify_waiters();
+    }
+}
+
+pub(in crate::node) enum InboundReuse {
+    Frame(Vec<u8>),
+    Retired(InboundIdleRegistration),
+}
+async fn wait_registered_inbound(
+    channel: &SecureChannel<TcpStream>,
+    registration: InboundIdleRegistration,
+    mut retire: tokio::sync::oneshot::Receiver<()>,
+) -> Result<Option<InboundIdleRegistration>, TransportError> {
+    tokio::select! {
+        biased;
+        ready = channel.inbound_frame_ready() => ready.map(|_| None).map_err(TransportError::Io),
+        _ = &mut retire => Ok(Some(registration)),
+    }
+}
+
 pub(in crate::node) struct SessionPool {
     authentication_gates: Mutex<Vec<(PeerEndpointKey, Weak<AuthenticationGate>)>>,
     capacity_diagnostics: Mutex<CapacityDiagnostics>,
@@ -81,6 +224,7 @@ pub(in crate::node) struct SessionPool {
     outbound: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     idle: Arc<Mutex<Vec<Idle>>>,
+    inbound_idle: Arc<InboundIdleRegistry>,
     timings: Mutex<super::route_timing::RouteTimings>,
     account_unsupported: Mutex<std::collections::VecDeque<(PeerEndpointKey, Instant)>>,
     file_identity_unsupported: Mutex<std::collections::VecDeque<(PeerEndpointKey, Instant)>>,
@@ -97,6 +241,7 @@ impl Default for SessionPool {
             outbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             inbound: Arc::new(Semaphore::new(MAX_DIRECTION_CONNECTIONS)),
             idle: Arc::new(Mutex::new(Vec::new())),
+            inbound_idle: Arc::new(InboundIdleRegistry::default()),
             timings: Mutex::new(super::route_timing::RouteTimings::default()),
             account_unsupported: Mutex::new(Default::default()),
             file_identity_unsupported: Mutex::new(Default::default()),
@@ -113,7 +258,16 @@ impl SessionPool {
     pub(in crate::node) async fn authentication_admission(
         &self,
         key: PeerEndpointKey,
-    ) -> Result<OwnedMutexGuard<()>, TransportError> {
+    ) -> Result<AuthenticationLease, TransportError> {
+        self.authentication_admission_priority(key, AuthenticationPriority::Ordinary)
+            .await
+    }
+
+    pub(in crate::node) async fn authentication_admission_priority(
+        &self,
+        key: PeerEndpointKey,
+        priority: AuthenticationPriority,
+    ) -> Result<AuthenticationLease, TransportError> {
         let gate = {
             let mut gates = self.authentication_gates.lock().unwrap();
             gates.retain(|(_, gate)| gate.strong_count() > 0);
@@ -128,12 +282,27 @@ impl SessionPool {
                         "peer authentication capacity busy".into(),
                     ));
                 }
-                let gate = Arc::new(AuthenticationGate::new(()));
+                let gate = Arc::new(AuthenticationGate::default());
                 gates.push((key, Arc::downgrade(&gate)));
                 gate
             }
         };
-        tokio::time::timeout(CAPACITY_WAIT, gate.lock_owned())
+        let ticket = {
+            let mut state = gate.state.lock().unwrap();
+            let ticket = state.next_ticket;
+            state.next_ticket = ticket
+                .checked_add(1)
+                .ok_or_else(|| TransportError::Noise("peer authentication capacity busy".into()))?;
+            state.queue(priority).push_back(ticket);
+            ticket
+        };
+        let waiter = AuthenticationWaiter {
+            gate,
+            priority,
+            ticket,
+            queued: true,
+        };
+        tokio::time::timeout(CAPACITY_WAIT, waiter.wait())
             .await
             .map_err(|_| TransportError::Noise("peer authentication capacity busy".into()))
     }
@@ -233,12 +402,88 @@ impl SessionPool {
             .control_timed_out(&peer.user_id(), address);
     }
 
+    fn register_inbound_idle(
+        &self,
+    ) -> Option<(InboundIdleRegistration, tokio::sync::oneshot::Receiver<()>)> {
+        let mut state = self.inbound_idle.state.lock().unwrap();
+        if state.entries.len() + usize::from(state.retiring.is_some()) >= MAX_DIRECTION_CONNECTIONS
+        {
+            return None;
+        }
+        let token = state.next.checked_add(1)?;
+        state.next = token;
+        let (send, receive) = tokio::sync::oneshot::channel();
+        state.entries.push_back((token, send));
+        drop(state);
+        self.inbound_idle.changed.notify_waiters();
+        Some((
+            InboundIdleRegistration {
+                registry: self.inbound_idle.clone(),
+                token,
+            },
+            receive,
+        ))
+    }
+    fn retire_oldest_inbound_idle(&self) {
+        loop {
+            let entry = {
+                let mut state = self.inbound_idle.state.lock().unwrap();
+                if state.retiring.is_some() {
+                    return;
+                }
+                let entry = state.entries.pop_front();
+                state.retiring = entry.as_ref().map(|(token, _)| *token);
+                entry
+            };
+            let Some((token, retire)) = entry else {
+                return;
+            };
+            if retire.send(()).is_ok() {
+                return;
+            }
+            let mut state = self.inbound_idle.state.lock().unwrap();
+            if state.retiring == Some(token) {
+                state.retiring = None;
+            }
+        }
+    }
+    /// Retirement only signals a completed idle connection. Its owning future
+    /// must drop the channel and release the real permits before admission wins.
+    pub(in crate::node) async fn accept_connection_slot(
+        &self,
+        slots: &Arc<Semaphore>,
+    ) -> Result<OwnedSemaphorePermit, TransportError> {
+        loop {
+            let changed = self.inbound_idle.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Ok(permit) = slots.clone().try_acquire_owned() {
+                return Ok(permit);
+            }
+            // The channel can release its TCP permits just before the outer
+            // accept task drops its connection permit. Wait for that owner;
+            // do not retire another idle channel during this handoff.
+            if self.inbound.available_permits() == 0 {
+                self.retire_oldest_inbound_idle();
+            }
+            tokio::select! {
+                result = slots.clone().acquire_owned() => return result.map_err(|_| TransportError::AdmissionDenied),
+                _ = changed => {}
+            }
+        }
+    }
+
     fn prepare_capacity(&self, direction: &Arc<Semaphore>) {
         self.prune();
         if direction.available_permits() == 0 || self.total.available_permits() == 0 {
             // Idle connections must never prevent a new identity/route or an
             // incoming peer from making progress. Active sessions are untouched.
             self.idle.lock().unwrap().clear();
+            if self.total.available_permits() == 0
+                || Arc::ptr_eq(direction, &self.inbound) && direction.available_permits() == 0
+            {
+                self.retire_oldest_inbound_idle();
+            }
         }
     }
 
@@ -301,6 +546,16 @@ impl SessionPool {
         let directional = self.outbound.clone().try_acquire_owned().ok()?;
         let shared = self.total.clone().try_acquire_owned().ok()?;
         Some(vec![directional, shared])
+    }
+
+    #[cfg(test)]
+    pub(in crate::node) fn test_capacity_snapshot(&self) -> (usize, usize, usize, Option<usize>) {
+        (
+            self.total.available_permits(),
+            self.inbound.available_permits(),
+            self.outbound.available_permits(),
+            self.idle.try_lock().ok().map(|idle| idle.len()),
+        )
     }
 
     pub(in crate::node) async fn inbound(
@@ -440,6 +695,13 @@ impl SessionPool {
     }
 }
 
+/// Admission backpressure occurs locally, before any peer exchange. It provides
+/// no negative evidence about the peer's identity or protocol capabilities.
+pub(in crate::node) fn local_capacity_busy(error: &TransportError) -> bool {
+    matches!(error, TransportError::Noise(message) if matches!(message.as_str(),
+        "peer authentication capacity busy" | "TCP connection capacity busy"))
+}
+
 pub(in crate::node) fn retryable_transport_error(error: &TransportError) -> bool {
     matches!(error, TransportError::Io(error) if matches!(error.kind(),
         std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset |
@@ -452,29 +714,78 @@ pub(in crate::node) fn retryable_sync_error(error: &super::session::SessionError
 }
 
 impl Node {
-    fn pooled_presence_current(&self, channel: &SecureChannel<TcpStream>) -> bool {
+    fn pooled_presence_current(
+        &self,
+        protocol: SessionProtocol,
+        channel: &SecureChannel<TcpStream>,
+    ) -> bool {
         let public = channel.peer_identity();
-        let matches = |latest: &crate::discovery::Announce| {
-            channel.peer_announcement().is_some_and(|authenticated| {
-                authenticated.public() == latest.public()
-                    && authenticated.account_id() == latest.account_id()
-                    && authenticated.post_office == latest.post_office
-            })
-        };
-        let roster = self.roster.lock().expect("roster mutex not poisoned");
-        if roster
-            .announcement(public)
-            .is_some_and(|latest| !matches(latest))
-        {
+        let identity_only = channel.peer_announcement().is_none();
+        // Resolve durable membership before taking roster/privacy locks.
+        let certified = identity_only && self.certified_sibling(public);
+        if protocol == SessionProtocol::Sync && certified {
             return false;
         }
-        drop(roster);
+        let matches = |latest: &crate::discovery::Announce| {
+            channel.peer_announcement().map_or_else(
+                || {
+                    latest.public() == *public
+                        && !latest.post_office
+                        && match protocol {
+                            SessionProtocol::Sync => latest.account_id().is_none(),
+                            SessionProtocol::Account => {
+                                certified
+                                    && latest.valid_presence()
+                                    && latest.account_id().as_deref()
+                                        == Some(self.account_id().as_str())
+                            }
+                        }
+                },
+                |authenticated| {
+                    authenticated.public() == latest.public()
+                        && authenticated.account_id() == latest.account_id()
+                        && authenticated.post_office == latest.post_office
+                },
+            )
+        };
+        let latest = self
+            .roster
+            .lock()
+            .expect("roster mutex not poisoned")
+            .announcement(public)
+            .cloned();
+        if latest.as_ref().is_some_and(|latest| !matches(latest)) {
+            return false;
+        }
         let state = self
             .privacy
             .state
             .read()
             .expect("privacy lock not poisoned");
         state.as_ref().is_none_or(|state| {
+            // Generic identity-only Noise cannot stand in for a retained account pin,
+            // including a pairing certificate with no cached announcement.
+            if protocol == SessionProtocol::Sync
+                && channel.peer_announcement().is_none()
+                && (state.proofs.account_for(public).is_some()
+                    || latest
+                        .as_ref()
+                        .is_some_and(|latest| !state.proofs.accepts_binding(latest)))
+            {
+                return false;
+            }
+            if protocol == SessionProtocol::Account
+                && identity_only
+                && (latest
+                    .as_ref()
+                    .is_some_and(|latest| !state.proofs.accepts_binding(latest))
+                    || state
+                        .proofs
+                        .account_for(public)
+                        .is_some_and(|account| account != self.account_id()))
+            {
+                return false;
+            }
             channel
                 .peer_announcement()
                 .is_none_or(|authenticated| state.proofs.accepts_binding(authenticated))
@@ -583,7 +894,7 @@ impl Node {
                 .filter(|actual| permitted.contains(actual));
             for addr in std::iter::once(addr).chain(fallback) {
                 if let Some(channel) = self.sessions.checkout(protocol, addr, expected, generation)
-                    && self.pooled_presence_current(&channel)
+                    && self.pooled_presence_current(protocol, &channel)
                 {
                     if !self.account_allowed(expected, channel.peer_announcement())
                         && !self
@@ -604,6 +915,20 @@ impl Node {
 
     /// The caller must have consumed a successful complete sync exchange. On
     /// cancellation, malformed replies or I/O errors, simply drop the channel.
+    /// Only call after a successful terminal response, before reading a new
+    /// frame. Ready bytes win a retirement race; registration ends before recv.
+    pub(in crate::node) async fn recv_inbound_reuse(
+        &self,
+        channel: &mut SecureChannel<TcpStream>,
+    ) -> Result<InboundReuse, TransportError> {
+        if let Some((registration, retire)) = self.sessions.register_inbound_idle()
+            && let Some(retired) = wait_registered_inbound(channel, registration, retire).await?
+        {
+            return Ok(InboundReuse::Retired(retired));
+        }
+        channel.recv().await.map(InboundReuse::Frame)
+    }
+
     pub(in crate::node) fn recycle_sync_channel(&self, channel: SecureChannel<TcpStream>) {
         self.recycle_channel(SessionProtocol::Sync, channel);
     }
@@ -659,6 +984,114 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_capacity_backpressure_never_classifies_identity_or_protocol_failures_as_busy() {
+        for message in [
+            "peer authentication capacity busy",
+            "TCP connection capacity busy",
+        ] {
+            assert!(local_capacity_busy(&TransportError::Noise(message.into())));
+        }
+        for error in [
+            TransportError::IdentityMismatch,
+            TransportError::AdmissionDenied,
+            TransportError::Noise("invalid Noise handshake".into()),
+            TransportError::Io(std::io::ErrorKind::UnexpectedEof.into()),
+        ] {
+            assert!(!local_capacity_busy(&error));
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_encrypted_frame_wins_idle_retirement_and_cancellation_removes_its_token() {
+        use crate::identity::device::DeviceIdentity;
+        use tokio::net::TcpListener;
+        let first = DeviceIdentity::generate();
+        let second = DeviceIdentity::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sending, receiving) = tokio::join!(
+            async {
+                let stream = TcpStream::connect(address).await.unwrap();
+                SecureChannel::connect(stream, &first, Some(&second.public()))
+                    .await
+                    .unwrap()
+            },
+            async {
+                let (stream, _) = listener.accept().await.unwrap();
+                SecureChannel::accept(stream, &second).await.unwrap()
+            }
+        );
+        let (mut sending, mut receiving) = (sending, receiving);
+        let pool = SessionPool::default();
+        let (registration, retire) = pool.register_inbound_idle().unwrap();
+        let mut waiting = Box::pin(wait_registered_inbound(&receiving, registration, retire));
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(waiting.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(waiting);
+        assert!(
+            pool.inbound_idle.state.lock().unwrap().entries.is_empty(),
+            "cancelled idle reception cannot retain a stale eviction token"
+        );
+        sending
+            .send(b"already arrived framed request")
+            .await
+            .unwrap();
+        receiving.inbound_frame_ready().await.unwrap();
+        let (registration, retire) = pool.register_inbound_idle().unwrap();
+        pool.retire_oldest_inbound_idle();
+        assert!(
+            wait_registered_inbound(&receiving, registration, retire)
+                .await
+                .unwrap()
+                .is_none(),
+            "already-ready bytes must win simultaneous retirement"
+        );
+        assert!(pool.inbound_idle.state.lock().unwrap().entries.is_empty());
+        assert_eq!(
+            receiving.recv().await.unwrap(),
+            b"already arrived framed request",
+            "readiness and retirement must never consume or corrupt a framed request"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_idle_retirement_is_bounded_and_old_guards_cannot_remove_new_entries() {
+        let pool = SessionPool::default();
+        let (first, mut retired_first) = pool.register_inbound_idle().unwrap();
+        let (second, mut retired_second) = pool.register_inbound_idle().unwrap();
+        for _ in 0..MAX_DIRECTION_CONNECTIONS {
+            pool.retire_oldest_inbound_idle();
+        }
+        assert!(retired_first.try_recv().is_ok());
+        assert!(
+            matches!(
+                retired_second.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "repeated pressure must wait for the first owner to release its retirement guard"
+        );
+        drop(first);
+        assert_eq!(pool.inbound_idle.state.lock().unwrap().entries.len(), 1);
+        pool.retire_oldest_inbound_idle();
+        assert!(retired_second.try_recv().is_ok());
+        drop(second);
+        let registrations: Vec<_> = (0..MAX_DIRECTION_CONNECTIONS)
+            .map(|_| pool.register_inbound_idle().unwrap())
+            .collect();
+        assert!(pool.register_inbound_idle().is_none());
+        drop(registrations);
+        assert!(pool.inbound_idle.state.lock().unwrap().entries.is_empty());
+        assert_eq!(
+            pool.total.available_permits(),
+            MAX_TCP_CONNECTIONS,
+            "idle registration and cancellation never manufacture or release real TCP permits"
+        );
+    }
 
     #[test]
     fn capacity_diagnostic_throttle_counts_timeouts_without_sliding_its_deadline() {
@@ -734,6 +1167,105 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn control_authentication_overtakes_only_queued_ordinary_handshakes() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let active = pool.authentication_admission(key.clone()).await.unwrap();
+        let ordinary = pool.authentication_admission(key.clone());
+        tokio::pin!(ordinary);
+        assert!(futures_util::poll!(&mut ordinary).is_pending());
+        let control =
+            pool.authentication_admission_priority(key.clone(), AuthenticationPriority::Control);
+        tokio::pin!(control);
+        assert!(futures_util::poll!(&mut control).is_pending());
+        assert_eq!(pool.outbound.available_permits(), MAX_DIRECTION_CONNECTIONS);
+        drop(active);
+        let first = tokio::time::timeout(CAPACITY_WAIT, async {
+            tokio::select! {
+                result = &mut control => { drop(result.unwrap()); AuthenticationPriority::Control }
+                result = &mut ordinary => { drop(result.unwrap()); AuthenticationPriority::Ordinary }
+            }
+        }).await.unwrap();
+        assert_eq!(
+            first,
+            AuthenticationPriority::Control,
+            "an explicit Control handshake must overtake an earlier queued ordinary Wake without cancelling the active handshake"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_priority_preserves_class_fifo_and_one_control_then_ordinary_fairness() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let active = pool.authentication_admission(key.clone()).await.unwrap();
+        let ordinary_first = pool.authentication_admission(key.clone());
+        let ordinary_second = pool.authentication_admission(key.clone());
+        let control_first =
+            pool.authentication_admission_priority(key.clone(), AuthenticationPriority::Control);
+        let control_second =
+            pool.authentication_admission_priority(key, AuthenticationPriority::Control);
+        tokio::pin!(
+            ordinary_first,
+            ordinary_second,
+            control_first,
+            control_second
+        );
+        assert!(futures_util::poll!(&mut ordinary_first).is_pending());
+        assert!(futures_util::poll!(&mut ordinary_second).is_pending());
+        assert!(futures_util::poll!(&mut control_first).is_pending());
+        assert!(futures_util::poll!(&mut control_second).is_pending());
+        drop(active);
+        assert!(futures_util::poll!(&mut control_second).is_pending());
+        let first = control_first.await.unwrap();
+        assert!(futures_util::poll!(&mut ordinary_first).is_pending());
+        drop(first);
+        assert!(futures_util::poll!(&mut control_second).is_pending());
+        assert!(futures_util::poll!(&mut ordinary_second).is_pending());
+        let ordinary = ordinary_first.await.unwrap();
+        drop(ordinary);
+        let control = control_second.await.unwrap();
+        drop(control);
+        assert!(ordinary_second.await.is_ok());
+        assert_eq!(pool.total.available_permits(), MAX_TCP_CONNECTIONS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_priority_cancellation_and_timeouts_release_waiter_turns() {
+        let pool = SessionPool::default();
+        let key = authentication_key(1);
+        let active = pool.authentication_admission(key.clone()).await.unwrap();
+        {
+            let cancelled = pool
+                .authentication_admission_priority(key.clone(), AuthenticationPriority::Control);
+            tokio::pin!(cancelled);
+            assert!(futures_util::poll!(&mut cancelled).is_pending());
+        }
+        assert!(
+            pool.authentication_admission_priority(key.clone(), AuthenticationPriority::Control)
+                .await
+                .is_err()
+        );
+        drop(active);
+        let control = pool
+            .authentication_admission_priority(key.clone(), AuthenticationPriority::Control)
+            .await
+            .unwrap();
+        {
+            let cancelled = pool.authentication_admission(key.clone());
+            tokio::pin!(cancelled);
+            assert!(futures_util::poll!(&mut cancelled).is_pending());
+        }
+        drop(control);
+        assert!(
+            pool.authentication_admission_priority(key.clone(), AuthenticationPriority::Control)
+                .await
+                .is_ok()
+        );
+        assert!(pool.authentication_admission(key).await.is_ok());
+        assert_eq!(pool.authentication_gates.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn authentication_gates_scope_both_identity_keys_endpoint_and_generation() {
         let pool = SessionPool::default();
         let key = authentication_key(1);
@@ -746,7 +1278,10 @@ mod tests {
                 2 => independent.address.set_port(2),
                 _ => independent.generation += 1,
             }
-            let _guard = pool.authentication_admission(independent).await.unwrap();
+            let _guard = pool
+                .authentication_admission_priority(independent, AuthenticationPriority::Control)
+                .await
+                .unwrap();
         }
         assert!(
             pool.authentication_admission(key.clone()).await.is_err(),
@@ -769,9 +1304,12 @@ mod tests {
             owners.push(pool.authentication_admission(independent).await.unwrap());
         }
         assert!(
-            pool.authentication_admission(authentication_key(300))
-                .await
-                .is_err()
+            pool.authentication_admission_priority(
+                authentication_key(300),
+                AuthenticationPriority::Control
+            )
+            .await
+            .is_err()
         );
         pool.clear();
         pool.network_changed();

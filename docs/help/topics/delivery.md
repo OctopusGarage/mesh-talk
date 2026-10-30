@@ -8,9 +8,11 @@ A local message can be pending or failed before recipient confirmation. A relay 
 
 ## Inspect delivery details
 
-Select **Awaiting receipt** on one of your accepted direct messages to open its
-delivery details. The disclosure works with the keyboard: focus the label and
-press Enter or Space; Escape closes it and returns focus to the label.
+Select the clock icon beside the timestamp on an accepted direct message to
+expand **Awaiting receipt** details below that message. A check icon denotes
+recipient confirmation; select it to inspect its meaning. Status details stay
+in the conversation flow without hover overlays. Focus an icon and press Enter
+or Space to toggle its details; Escape closes them and returns focus to the icon.
 
 When available, details show when a local attempt started or a retry was
 scheduled. The age describes that local observation, not the recipient's
@@ -29,7 +31,7 @@ your settings automatically.
 
 An open recovery dialog stays open when recipient confirmation arrives or its
 message scrolls out of view. Dismissing it returns keyboard focus to the delivery
-label if it is still present, or to the conversation shell. Leaving the
+icon if it is still present, or to the conversation shell. Leaving the
 conversation, locking the app or changing the signed-in session closes it.
 
 Recipient confirmation replaces the awaiting disclosure. For files, confirmation

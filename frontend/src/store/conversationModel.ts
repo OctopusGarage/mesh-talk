@@ -21,6 +21,8 @@ export type SearchTarget =
     };
 
 export interface ChatMessage {
+  /** Group publication presentation; never an ordinary message or delivery receipt. */
+  announcement?: import("@/lib/types").ChannelMetadataValue;
   fileMessageAliases?: string[];
   protection?: import("@/lib/types").MessageProtection | null;
   /** Authenticated absolute send-time deadline; null/absent means keep. */
@@ -84,6 +86,8 @@ export type SendPayload =
       protection?: import("@/lib/types").MessageProtection | null;
     };
 export interface SendIntent {
+  /** Logical account operation ID, distinct from the eventual public EventId. */
+  operationId?: string;
   conversation: Conversation;
   payload: SendPayload;
   message: ChatMessage;

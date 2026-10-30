@@ -196,3 +196,57 @@ test(
     }
   },
 );
+
+
+test("Windows delta bundling restores canonical outputs when system temp is on another volume", async () => {
+  const fs = await import("node:fs");
+  const child = await import("node:child_process");
+  const { syncBuiltinESMExports } = await import("node:module");
+  const { tmpdir } = await import("node:os");
+  const { join, resolve } = await import("node:path");
+  const { rawWindowsTarget } = await import("../release/delta.mjs");
+  const root = fs.mkdtempSync(join(tmpdir(), "mesh-delta-volumes-"));
+  const cwd = process.cwd();
+  const originalRename = fs.default.renameSync;
+  const originalExec = child.default.execFileSync;
+  try {
+    process.chdir(root);
+    const release = resolve("target/x86_64-pc-windows-msvc/release");
+    const bundle = join(release, "bundle");
+    const work = join(root, "external-volume");
+    fs.mkdirSync(join(bundle, "nsis"), { recursive: true });
+    fs.mkdirSync(work);
+    fs.writeFileSync(join(bundle, "nsis/canonical.exe"), "canonical installer");
+    fs.writeFileSync(join(release, "mesh-talk.exe"), "__TAURI_BUNDLE_TYPE_VAR_MSI");
+    fs.default.renameSync = (source, destination) => {
+      if (source.startsWith(work)) throw Object.assign(new Error("cross-device rename"), { code: "EXDEV" });
+      return originalRename(source, destination);
+    };
+    let fail = false;
+    child.default.execFileSync = (program, args) => {
+      if (args.includes("bundle")) {
+        fs.writeFileSync(join(bundle, "nsis/canonical.exe"), "raw installer");
+      } else if (fail) {
+        throw new Error("native equivalence rejected");
+      }
+      return Buffer.alloc(0);
+    };
+    syncBuiltinESMExports();
+    const args = { canonical: join(root, "canonical.exe"), destination: join(work, "raw.exe"), target: "x86_64-pc-windows-msvc", work };
+    rawWindowsTarget(args);
+    assert.equal(fs.readFileSync(args.destination, "utf8"), "raw installer");
+    assert.equal(fs.readFileSync(join(bundle, "nsis/canonical.exe"), "utf8"), "canonical installer");
+    assert.equal(fs.readFileSync(join(release, "mesh-talk.exe"), "utf8"), "__TAURI_BUNDLE_TYPE_VAR_MSI");
+    fail = true;
+    assert.throws(() => rawWindowsTarget(args), /native equivalence rejected/);
+    assert.equal(fs.readFileSync(join(bundle, "nsis/canonical.exe"), "utf8"), "canonical installer");
+    assert.equal(fs.readFileSync(join(release, "mesh-talk.exe"), "utf8"), "__TAURI_BUNDLE_TYPE_VAR_MSI");
+    assert.deepEqual(fs.readdirSync(release).sort(), ["bundle", "mesh-talk.exe"]);
+  } finally {
+    fs.default.renameSync = originalRename;
+    child.default.execFileSync = originalExec;
+    syncBuiltinESMExports();
+    process.chdir(cwd);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

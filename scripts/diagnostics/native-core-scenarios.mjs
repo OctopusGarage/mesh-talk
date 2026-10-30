@@ -54,7 +54,7 @@ second line
 // CI-only OS input, never DOM keyboard events. INPUT's union includes MOUSEINPUT
 // so Marshal.SizeOf retains the native x64 40-byte layout (not keyboard-only 32).
 export function nativeWindowsKeyboardScript(pid, key) {
-  const vk = new Map([["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33]]).get(key);
+  const vk = new Map([["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33], ["\uE00F", 34]]).get(key);
   assert.ok(Number.isSafeInteger(pid) && pid > 0 && pid <= 0xffffffff, "owned Windows PID");
   assert.ok(vk, "allowlisted native control key");
   return `$ErrorActionPreference = 'Stop';
@@ -272,16 +272,17 @@ export async function revealLatestNativeMessage({ execute, until, command, now =
 }
 
 export async function revealHistoricalNativeMessage({ execute, until, command, key }, text) {
-  // Virtuoso's real scroller is keyboard-focusable. Native PageUp exercises
-  // normal browser scrolling, rather than mutating its virtual-list state.
+  // Virtuoso's real scroller is keyboard-focusable. Native paging exercises
+  // normal PageUp/PageDown scrolling until the receipt footer clears the log's
+  // clipping edges; an intersecting message body cannot certify a clipped badge.
   await until("restarted message log hydrated", () => execute("return !!document.querySelector('[role=log]');"));
   const log = await command("POST", "/element", { using: "css selector", value: '[role="log"]' });
   await command("POST", `/element/${log["element-6066-11e4-a52e-4f735466cecf"]}/click`, {});
-  try { await until("historical message visibly rendered after native PageUp", async () => {
-    const visible = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect();return !!r&&!!l&&r.width>0&&r.height>0&&r.bottom>l.top&&r.top<l.bottom&&r.right>l.left&&r.left<l.right;", [text]);
-    if (visible) return true;
-    assert.equal(await execute("return document.activeElement===document.querySelector('[role=log]');"), true, "native PageUp targets the focused message log");
-    await key("\uE00E");
+  try { await until("historical message receipt visibly rendered after native paging", async () => {
+    const state = await execute("const e=Array.from(document.querySelectorAll('[data-testid=message-bubble]')).find(e=>e.textContent.includes(arguments[0])),r=e?.getBoundingClientRect(),l=document.querySelector('[role=log]')?.getBoundingClientRect(),badges=e?.querySelectorAll('[data-delivery]'),b=badges?.length===1?badges[0].getBoundingClientRect():null;const top=Math.max(0,l?.top),bottom=Math.min(innerHeight,l?.bottom),left=Math.max(0,l?.left),right=Math.min(innerWidth,l?.right);const visible=!!r&&!!l&&r.width>0&&r.height>0&&(badges?.length?!!b&&b.width>0&&b.height>0&&b.top>=top&&b.bottom<=bottom&&b.left>=left&&b.right<=right:r.bottom>top&&r.top<bottom&&r.right>left&&r.left<right);return {visible,down:!!l&&(b?b.top>=top&&b.bottom>bottom:r?.top>=bottom)};", [text]);
+    if (state.visible) return true;
+    assert.equal(await execute("return document.activeElement===document.querySelector('[role=log]');"), true, "native paging targets the focused message log");
+    await key(state.down ? "\uE00F" : "\uE00E");
     return false;
   }); } catch (error) {
     const state = await execute("const log=document.querySelector('[role=log]'),bubbles=Array.from(document.querySelectorAll('[data-testid=message-bubble]'));return {count:bubbles.length,tails:bubbles.slice(-3).map(e=>e.textContent.slice(-120)),scrollTop:log?.scrollTop,scrollHeight:log?.scrollHeight,clientHeight:log?.clientHeight,targetInDom:bubbles.some(e=>e.textContent.includes(arguments[0]))};", [text]);

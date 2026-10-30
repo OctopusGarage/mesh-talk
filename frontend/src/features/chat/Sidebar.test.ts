@@ -1,4 +1,6 @@
-import { createElement } from "react";
+// @vitest-environment jsdom
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "@/lib/i18n";
@@ -7,21 +9,14 @@ const { chatState, policyState } = vi.hoisted(() => ({
   chatState: {
     active: null as null | { kind: string; id: string; name: string },
     unread: { "account:alice": 2 },
+    pendingUnknownUnread: {},
     ledger: {},
     messages: {
       "account:alice": [{ text: "See you on the LAN" }],
     } as Record<string, Array<{ text?: string; file?: { name: string } }>>,
     open: () => {},
     accounts: [{ account_id: "alice", names: ["Alice"], device_count: 1 }],
-    channels: [] as Array<{
-      channel_id: string;
-      name: string;
-      owner: string;
-      member_count: number;
-      archived?: boolean;
-      pending_invite?: boolean;
-      left?: boolean;
-    }>,
+    channels: [] as import("@/lib/types").ChannelInfo[],
     peers: [],
     favorites: {} as Record<
       string,
@@ -30,7 +25,15 @@ const { chatState, policyState } = vi.hoisted(() => ({
     togglePinned: () => {},
     setChannelHidden: () => {},
     setAlias: () => {},
-    renameChannel: () => {},
+    renameChannel: vi.fn(async (): Promise<unknown> => ({ kind: "committed" })),
+    runEpoch: 1,
+    identityEpoch: 1,
+    groupOperations: {} as Record<
+      string,
+      import("@/store/accountGroupOperations").GroupOperationTicket
+    >,
+    cancelGroupOperation: vi.fn(async () => ({ kind: "pending" })),
+    refreshGroupOperations: vi.fn(async () => {}),
     myId: "me",
     myAccountId: "my-account",
     ready: true,
@@ -106,7 +109,6 @@ vi.mock("./SearchDialog", () => ({ SearchDialog: () => null }));
 vi.mock("./FilesTray", () => ({ FilesTray: () => null }));
 vi.mock("./LinkDeviceDialog", () => ({ LinkDeviceDialog: () => null }));
 vi.mock("./DiagnosticsDialog", () => ({ DiagnosticsDialog: () => null }));
-vi.mock("./WebRtcTestDialog", () => ({ WebRtcTestDialog: () => null }));
 vi.mock("./OfflineConnectDialog", () => ({ OfflineConnectDialog: () => null }));
 vi.mock("./SettingsDialog", () => ({ SettingsDialog: () => null }));
 vi.mock("./ProfileDialog", () => ({ ProfileDialog: () => null }));
@@ -116,6 +118,8 @@ vi.mock("@/components/GroupAvatar", () => ({
     createElement("span", {}, title),
 }));
 
+vi.mock("./useSerialPoll", () => ({ useSerialPoll: () => {} }));
+vi.mock("./sidebar/SidebarUtilities", () => ({ SidebarUtilities: () => null }));
 import { Sidebar } from "./Sidebar";
 
 function expectConversation(
@@ -133,6 +137,11 @@ function expectConversation(
 }
 
 beforeEach(async () => {
+  (
+    globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
+  chatState.groupOperations = {};
+  chatState.renameChannel.mockReset().mockResolvedValue({ kind: "committed" });
   chatState.accounts = [
     { account_id: "alice", names: ["Alice"], device_count: 1 },
   ];
@@ -147,6 +156,36 @@ beforeEach(async () => {
   policyState.contacts = {};
   policyState.loaded = true;
   await i18n.changeLanguage("en");
+});
+
+it("keeps previous-account history accessible outside the active group list", () => {
+  chatState.channels = [
+    {
+      channel_id: "old",
+      name: "Prior group",
+      owner: "owner",
+      member_count: 2,
+      left: true,
+      previous_account: "previous",
+    },
+    {
+      channel_id: "current",
+      name: "Current group",
+      owner: "me",
+      member_count: 2,
+    },
+  ];
+  chatState.favorites.old = { pinned: true, custom_alias: null };
+  const html = renderToStaticMarkup(createElement(Sidebar));
+  expect(html).not.toContain('data-testid="conversation-row-old"');
+  expect(html).toContain('data-testid="conversation-row-current"');
+  const history = html.match(
+    /<details([^>]*data-testid="previous-account-groups"[^>]*)>([\s\S]*?)<\/details>/u,
+  );
+  expect(history).not.toBeNull();
+  expect(history?.[1]).not.toMatch(/\bopen(?:=|\s|$)/u);
+  expect(history?.[2]).toContain("<button");
+  expect(history?.[2]).toContain("Prior group");
 });
 
 it("keeps Message Yourself available without peers or loaded contacts", () => {
@@ -314,6 +353,144 @@ it("does not reveal contact rows before the visibility policy has loaded", () =>
     expect(html).not.toContain('data-testid="conversation-row-alice"');
   } finally {
     policyState.loaded = true;
+  }
+});
+
+it.each(["owner", "member"] as const)(
+  "renders the latest message for a verified account %s despite a physical shared reference",
+  (role) => {
+    chatState.channels = [
+      {
+        channel_id: "group",
+        name: "Study",
+        owner: "source-device",
+        member_count: 3,
+        shared_reference: true,
+        archived: true,
+        left: true,
+        pending_invite: true,
+        account_access: {
+          account_id: "my-account",
+          role,
+          execution: { kind: "waiting_for_device" },
+        },
+      },
+    ];
+    chatState.messages = {
+      "channel:group": [{ text: "Latest group message" }],
+    };
+    const html = renderToStaticMarkup(createElement(Sidebar));
+    expectConversation(html, "group", "Study", "Latest group message");
+    expect(html).not.toContain("Shared group information");
+  },
+);
+it("keeps unresolved account access ahead of an old group preview", () => {
+  chatState.channels = [
+    {
+      channel_id: "group",
+      name: "Study",
+      owner: "source-device",
+      member_count: 3,
+      account_access: {
+        account_id: "my-account",
+        role: "unknown",
+        execution: { kind: "reconciling" },
+      },
+    },
+  ];
+  chatState.messages = { "channel:group": [{ text: "Old group preview" }] };
+  const html = renderToStaticMarkup(createElement(Sidebar));
+  expectConversation(html, "group", "Study", "Updating group access…");
+  expect(html).not.toContain("Old group preview");
+});
+
+it("keeps the owner rename dialog open until its original operation commits", async () => {
+  chatState.channels = [
+    {
+      channel_id: "group",
+      name: "Study",
+      owner: "source",
+      member_count: 3,
+      shared_reference: true,
+      account_access: {
+        account_id: "my-account",
+        role: "owner",
+        execution: { kind: "waiting_for_device" },
+      },
+    },
+  ];
+  const status = {
+    id: "rename-op",
+    account_id: "my-account",
+    group: "group",
+    kind: "rename" as const,
+    phase: { kind: "waiting_for_executor" as const },
+    executions: [],
+    committed_events: [],
+    primary_event: null,
+  };
+  chatState.renameChannel.mockResolvedValueOnce({
+    kind: "pending",
+    id: "rename-op",
+    status,
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(createElement(Sidebar)));
+    await act(async () =>
+      host
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="conversation-actions-group"]',
+        )!
+        .click(),
+    );
+    await act(async () =>
+      [...document.body.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.trim() === "Rename")!
+        .click(),
+    );
+    const input = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Channel name"]',
+    )!;
+    expect(input).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, "Renamed");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () =>
+      [...document.body.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Save")!
+        .click(),
+    );
+    expect(chatState.renameChannel).toHaveBeenCalledExactlyOnceWith(
+      "group",
+      "Renamed",
+    );
+    expect(document.body.textContent).toContain("your linked devices");
+    expect(
+      document.body.querySelector('input[placeholder="Channel name"]'),
+    ).not.toBeNull();
+    chatState.groupOperations["rename-op"] = {
+      id: "rename-op",
+      account_id: "my-account",
+      group: "group",
+      kind: "rename",
+      stage: "observed",
+      observation: 1,
+      status: { ...status, phase: { kind: "committed" } },
+    };
+    await act(async () => root.render(createElement(Sidebar)));
+    expect(
+      document.body.querySelector('input[placeholder="Channel name"]'),
+    ).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
   }
 });
 

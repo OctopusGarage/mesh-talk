@@ -60,7 +60,7 @@ test("group avatar gallery offers the club pack", async ({ page }) => {
   await login(page);
   await page.getByTestId(`conversation-row-${CHANNEL}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
-  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page.getByRole("button", { name: "My group photo" }).click();
   await page.getByText(/Choose from gallery/).click();
   await expect(page.getByTestId("avatar-gallery")).toBeVisible();
   await page.getByRole("button", { name: "Clubs", exact: true }).click();

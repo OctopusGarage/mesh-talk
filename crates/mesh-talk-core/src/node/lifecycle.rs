@@ -13,6 +13,7 @@ use super::node::Node;
 use crate::eventlog::event::{ConversationId, EventId, EventKind};
 use crate::node::NodeError;
 use crate::node::conversation::account_conversation_id;
+use std::collections::{HashMap, HashSet};
 
 impl Node {
     /// Delete one message in the account conversation with `peer_account_id` (resolves the
@@ -205,6 +206,112 @@ impl Node {
         self.remove_matching(|c, _| c == conversation)
     }
 
+    /// Erase an older personal-deletion scope while preserving content whose
+    /// signed ancestry proves it followed a currently authorized fresh lifetime.
+    /// The caller holds the membership guard and validates these current lifetimes.
+    pub(in crate::node) fn clear_channel_conversation_preserving_lifetimes(
+        &self,
+        conversation: ConversationId,
+        fresh: &[super::account_group::MembershipLifetime],
+    ) -> Result<usize, NodeError> {
+        let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        // Capture existing orphaned projections before the public cut. New rows
+        // arriving after this snapshot must never be mistaken for old history.
+        let mut remove = HashSet::new();
+        for kind in [
+            super::transcript_repository::SENT,
+            super::transcript_repository::RECEIVED,
+            super::transcript_repository::FILES,
+        ] {
+            let mut after = None;
+            loop {
+                let page = match kind {
+                    super::transcript_repository::SENT => {
+                        self.sentlog.lock().expect("sent mutex").header_scan_page(
+                            Some(&conversation),
+                            after,
+                            super::transcript_repository::TranscriptPageLimit::default(),
+                        )?
+                    }
+                    super::transcript_repository::RECEIVED => self
+                        .received
+                        .lock()
+                        .expect("received mutex")
+                        .header_scan_page(
+                            Some(&conversation),
+                            after,
+                            super::transcript_repository::TranscriptPageLimit::default(),
+                        )?,
+                    _ => self
+                        .received_files
+                        .lock()
+                        .expect("files mutex")
+                        .header_scan_page(
+                            Some(&conversation),
+                            after,
+                            super::transcript_repository::TranscriptPageLimit::default(),
+                        )?,
+                };
+                if page.rows.is_empty() {
+                    break;
+                }
+                for header in page.rows {
+                    after = Some(header.ordinal);
+                    let id = if kind == super::transcript_repository::SENT {
+                        self.sent_header_identity(&header)?
+                    } else {
+                        EventId::new(header.key.as_slice().try_into().map_err(|_| {
+                            crate::eventlog::LogError::CorruptFile(
+                                "invalid transcript identity".into(),
+                            )
+                        })?)
+                    };
+                    remove.insert(id);
+                }
+            }
+        }
+        {
+            let log = self.log.lock().expect("log mutex not poisoned");
+            let mut pending = Vec::new();
+            for lifetime in fresh {
+                let id = lifetime.acceptance.unwrap_or(lifetime.membership);
+                if log
+                    .get(&id)?
+                    .is_some_and(|event| event.conversation_id == conversation)
+                {
+                    pending.push(id);
+                }
+            }
+            let events = log.events(&conversation)?;
+            let mut children: HashMap<EventId, Vec<EventId>> = HashMap::new();
+            for event in &events {
+                if matches!(event.kind, EventKind::Message | EventKind::FileManifest) {
+                    remove.insert(event.id);
+                }
+                for parent in &event.parents {
+                    children.entry(*parent).or_default().push(event.id);
+                }
+            }
+            // Follow actual signed edges: remote Lamport timestamps need not
+            // be honest, and unrelated wall clocks never establish ancestry.
+            let mut protected = HashSet::new();
+            while let Some(id) = pending.pop() {
+                if protected.insert(id)
+                    && let Some(children) = children.get(&id)
+                {
+                    pending.extend(children);
+                }
+            }
+            remove.retain(|id| !protected.contains(id));
+        }
+        self.remove_matching_events_with_store(
+            |c, _, id| c == conversation && id.is_some_and(|id| remove.contains(&id)),
+            &mut delivery,
+        )
+    }
+
     /// Retention prune: erase every locally-stored message older than `cutoff_ms`
     /// (`wall_clock < cutoff_ms`) across all conversations. Returns how many entries were
     /// removed. The caller derives the cutoff from the retention setting (now − N days); a
@@ -219,11 +326,33 @@ impl Node {
         &self,
         should_remove: impl Fn(ConversationId, u64) -> bool,
     ) -> Result<usize, NodeError> {
+        let mut delivery = self.delivery.lock().expect("delivery mutex");
+        self.remove_matching_with_store(should_remove, &mut delivery)
+    }
+    pub(in crate::node) fn clear_account_conversation_with_store(
+        &self,
+        peer: &str,
+        delivery: &mut super::delivery_store::DeliveryStore,
+    ) -> Result<usize, NodeError> {
+        let conversation = account_conversation_id(&self.account_id(), peer);
+        self.remove_matching_with_store(|c, _| c == conversation, delivery)
+    }
+    fn remove_matching_with_store(
+        &self,
+        should_remove: impl Fn(ConversationId, u64) -> bool,
+        delivery: &mut super::delivery_store::DeliveryStore,
+    ) -> Result<usize, NodeError> {
+        self.remove_matching_events_with_store(|c, wall, _| should_remove(c, wall), delivery)
+    }
+    fn remove_matching_events_with_store(
+        &self,
+        should_remove: impl Fn(ConversationId, u64, Option<EventId>) -> bool,
+        delivery: &mut super::delivery_store::DeliveryStore,
+    ) -> Result<usize, NodeError> {
         use super::transcript_repository::{FILES, RECEIVED, SENT, TranscriptPageLimit};
         let channels: std::collections::HashSet<_> =
             self.list_channels()?.into_iter().map(|c| c.id).collect();
-        let mut delivery = self.delivery.lock().expect("delivery mutex");
-        self.recover_delivery(&mut delivery)?;
+        self.recover_delivery(delivery)?;
         let mut after = None;
         let mut additional = 0;
         loop {
@@ -240,7 +369,7 @@ impl Node {
                 let id = EventId::new(h.key.as_slice().try_into().map_err(|_| {
                     crate::eventlog::LogError::CorruptFile("invalid file identity".into())
                 })?);
-                if should_remove(h.conversation, h.wall_clock)
+                if should_remove(h.conversation, h.wall_clock, Some(id))
                     && delivery.file_erasure_needs_slot(h.conversation, id)
                 {
                     additional += 1;
@@ -263,7 +392,7 @@ impl Node {
                 )?;
                 for header in page.items {
                     if matches!(header.kind, EventKind::Message | EventKind::FileManifest)
-                        && should_remove(*channel, header.wall_clock)
+                        && should_remove(*channel, header.wall_clock, Some(header.id))
                     {
                         self.account_suppression
                             .lock()
@@ -305,9 +434,6 @@ impl Node {
                 let mut media = Vec::new();
                 for h in page.rows {
                     after = Some(h.ordinal);
-                    if !should_remove(h.conversation, h.wall_clock) {
-                        continue;
-                    }
                     let id = if kind == SENT {
                         h.logical_id.or(if channels.contains(&h.conversation) {
                             Some(self.sent_header_identity(&h)?)
@@ -321,6 +447,9 @@ impl Node {
                             )
                         })?))
                     };
+                    if !should_remove(h.conversation, h.wall_clock, id) {
+                        continue;
+                    }
                     if let Some(id) = id {
                         if kind == FILES
                             || channels.contains(&h.conversation)
@@ -381,17 +510,17 @@ impl Node {
         self.my_dm_reactions
             .lock()
             .expect("reactions mutex")
-            .try_remove_where(|conv, wall, payload| {
-                if should_remove(conv, wall) {
+            .remove_matching(|conv, wall, target| {
+                if should_remove(conv, wall, Some(target)) {
                     return Ok(true);
                 }
                 self.account_suppression
                     .lock()
                     .expect("suppression mutex")
-                    .contains(conv, payload.target)
+                    .contains(conv, target)
             })?;
         for (conv, id, clock) in delivery.cancellation_rows() {
-            if should_remove(conv, clock) && delivery.cancel(conv, id)? {
+            if should_remove(conv, clock, Some(id)) && delivery.cancel(conv, id)? {
                 self.privacy
                     .generation
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -465,5 +594,210 @@ fn received_logical_id(plaintext: &[u8], event_id: EventId, account: bool) -> Ev
         super::queries::decode_account_entry(plaintext).0
     } else {
         event_id
+    }
+}
+
+#[cfg(test)]
+mod personal_scope_tests {
+    use super::*;
+    use crate::{
+        channel::ChannelMeta,
+        discovery::Roster,
+        eventlog::Event,
+        identity::{account::Account, device::DeviceIdentity},
+        node::account_group::AccountGroupRole,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn late_group_clear_preserves_only_fresh_lifetime_ancestry() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channels, _) = tokio::sync::mpsc::unbounded_channel();
+        let (files, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open_with_account(
+            DeviceIdentity::generate(),
+            Account::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channels,
+            files,
+            &dir.path().join("events.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        let owner = DeviceIdentity::generate();
+        let group = ConversationId::new([42; 32]);
+        let meta = |epoch| ChannelMeta {
+            name: "Scope proof".into(),
+            members: vec![owner.public(), node.identity.public()],
+            epoch,
+            owner: owner.public().user_id(),
+        };
+        let genesis = Event::new(
+            &owner,
+            group,
+            1,
+            vec![],
+            1,
+            10,
+            EventKind::MembershipChange,
+            meta(0).encode(),
+        );
+        let old = Event::new(
+            &node.identity,
+            group,
+            1,
+            vec![genesis.id],
+            2,
+            10,
+            EventKind::Message,
+            vec![1],
+        );
+        let leave = Event::new(
+            &node.identity,
+            group,
+            2,
+            vec![old.id],
+            3,
+            10,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let rejoin = Event::new(
+            &owner,
+            group,
+            2,
+            vec![leave.id],
+            4,
+            10,
+            EventKind::MembershipChange,
+            meta(2).encode_invitation(),
+        );
+        let accept = Event::new(
+            &node.identity,
+            group,
+            3,
+            vec![rejoin.id],
+            5,
+            10,
+            EventKind::ChannelAccept,
+            vec![],
+        );
+        let fresh = Event::new(
+            &node.identity,
+            group,
+            4,
+            vec![accept.id],
+            6,
+            10,
+            EventKind::Message,
+            vec![2],
+        );
+        // This late-arriving old branch has a larger wall clock, but no fresh
+        // membership ancestor. Wall clocks are never scope evidence.
+        let stale_branch = Event::new(
+            &owner,
+            group,
+            3,
+            vec![old.id],
+            3,
+            u64::MAX,
+            EventKind::Message,
+            vec![3],
+        );
+        for event in [
+            &genesis,
+            &old,
+            &leave,
+            &rejoin,
+            &accept,
+            &fresh,
+            &stale_branch,
+        ] {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(event.clone())
+                .unwrap();
+        }
+        node.process_channel(group);
+        let access = node.account_group_access(group).unwrap();
+        assert_eq!(access.role, AccountGroupRole::Member);
+        let lifetime = access
+            .sources
+            .iter()
+            .find(|source| source.device == node.identity.public())
+            .unwrap()
+            .lifetime
+            .clone();
+        assert_eq!(lifetime.membership, rejoin.id);
+        assert_eq!(lifetime.acceptance, Some(accept.id));
+        for event in [&old, &fresh] {
+            node.sentlog
+                .lock()
+                .unwrap()
+                .record(
+                    group,
+                    event.seq,
+                    event.wall_clock,
+                    if event.id == old.id { b"old" } else { b"fresh" },
+                )
+                .unwrap();
+        }
+        for event in [&stale_branch, &fresh] {
+            node.received
+                .lock()
+                .unwrap()
+                .record(
+                    group,
+                    owner.public().user_id(),
+                    event.wall_clock,
+                    if event.id == fresh.id {
+                        b"fresh received"
+                    } else {
+                        b"old received"
+                    },
+                    event.id,
+                )
+                .unwrap();
+        }
+        let _membership = node.channel_membership_commit.lock().unwrap();
+        node.clear_channel_conversation_preserving_lifetimes(group, &[lifetime])
+            .unwrap();
+        let sent = node.sentlog.lock().unwrap().entries(&group);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].plaintext, b"fresh");
+        let received = node.received.lock().unwrap().entries(&group);
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].event_id, fresh.id);
+        let suppression = node.account_suppression.lock().unwrap();
+        assert!(suppression.contains(group, old.id).unwrap());
+        assert!(suppression.contains(group, stale_branch.id).unwrap());
+        assert!(!suppression.contains(group, fresh.id).unwrap());
+        drop(suppression);
+        drop(_membership);
+        let dissolve = Event::new(
+            &owner,
+            group,
+            4,
+            vec![fresh.id, stale_branch.id],
+            7,
+            10,
+            EventKind::ChannelDissolve,
+            vec![],
+        );
+        node.log.lock().unwrap().append_durable(dissolve).unwrap();
+        node.process_channel(group);
+        let closed = node.account_group_access_with_closed(group).unwrap();
+        assert_eq!(closed.role, AccountGroupRole::Dissolved);
+        assert_eq!(closed.sources.len(), 1);
+        assert_eq!(closed.sources[0].lifetime.membership, rejoin.id);
+        assert_eq!(closed.sources[0].lifetime.acceptance, Some(accept.id));
+        assert!(
+            node.account_group_access(group).unwrap().sources.is_empty(),
+            "terminal cleanup provenance is never an executable public source"
+        );
     }
 }

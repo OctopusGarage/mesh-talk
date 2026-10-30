@@ -86,6 +86,9 @@ struct OpaqueRoundStore<'a> {
 }
 
 impl SyncStore for OpaqueRoundStore<'_> {
+    fn requires_channel_v5(&self, _conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(false)
+    }
     // Both legacy and federated mailboxes wrap every inner kind as Message.
     // Capability checks must not materialize and seal an upload page merely
     // to rediscover that invariant on every fingerprint probe and sync step.

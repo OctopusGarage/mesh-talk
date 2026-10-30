@@ -199,6 +199,9 @@ impl LegacyEventLog {
     pub fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
         self.log.requires_channel_v3(conversation)
     }
+    pub fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v5(conversation)
+    }
     pub fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
         self.log.requires_channel_v4(conversation)
     }
@@ -586,6 +589,9 @@ const COMPACT_PROFILE_MIN: usize = 8;
 // NOTE: this impl is structurally identical to `impl SyncStore for EventLog`
 // in sync.rs — keep the two in sync.
 impl SyncStore for LegacyEventLog {
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        Ok(self.requires_channel_v5(conversation))
+    }
     fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
         Ok(LegacyEventLog::requires_channel_v3(self, conversation))
     }

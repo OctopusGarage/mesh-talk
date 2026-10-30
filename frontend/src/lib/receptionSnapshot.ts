@@ -1,8 +1,5 @@
 import type { ReceptionLedger, ConversationReception } from "@/store/reception";
-import type {
-  ReceptionCursor,
-  ReceptionScope,
-} from "@/store/receptionDelivery";
+import type { ReceptionCursor, ReceptionScope } from "./types";
 
 export interface ReceptionSnapshot {
   cursor: ReceptionCursor;

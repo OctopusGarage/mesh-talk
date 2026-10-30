@@ -20,6 +20,7 @@ test("large peer pickers keep a bounded DOM and reach distant rows by keyboard",
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
   await page.getByTestId("members-trigger").click();
   const members = page.getByRole("dialog");
+  await members.locator("summary").filter({ hasText: "Add members" }).click();
   const addable = members.locator("[data-virtual-index]");
   await expect.poll(() => addable.count()).toBeLessThan(40);
   await addable.first().locator("button").focus();

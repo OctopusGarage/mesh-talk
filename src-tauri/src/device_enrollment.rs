@@ -516,6 +516,7 @@ mod tests {
             reopened
                 .account_profile(&source.account_id())
                 .unwrap()
+                .unwrap()
                 .display_name,
             "Source nickname"
         );

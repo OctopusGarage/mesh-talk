@@ -105,7 +105,9 @@ test("city avatar thumbnails load after scrolling the gallery", async ({
   await seedMarketPacks(page, ["cities"]);
   await enterChat(page);
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-  await page.getByRole("button", { name: "Change group photo" }).click();
+  await page
+    .getByRole("button", { name: "My group photo", exact: true })
+    .click();
   await page.getByText(/Choose from gallery/).click();
   const gallery = page.getByTestId("avatar-gallery");
   // Cold Windows module transforms need the startup budget before image checks.
@@ -418,7 +420,7 @@ for (const viewport of [
       await selectSettingsCategory(page, "appearance");
       await page.getByTestId("theme-light").click();
       await expect(page.locator("html")).not.toHaveClass(/dark/);
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page
         .getByTestId("settings-language-select")
         .selectOption("zh-Hans");
@@ -438,7 +440,7 @@ for (const viewport of [
       await selectSettingsCategory(page, "appearance");
       await page.getByTestId("theme-dark").click();
       await expect(page.locator("html")).toHaveClass(/dark/);
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page.getByTestId("settings-language-select").selectOption("en");
       await expect(
         page.getByText("Direct messages", { exact: true }),
@@ -513,7 +515,7 @@ if (process.env.EVAL_TIER === "extended")
           page.evaluate(() => localStorage.getItem("mesh-talk-theme")),
         )
         .toBe(theme);
-      await selectSettingsCategory(page, "general");
+      await selectSettingsCategory(page, "appearance");
       await page
         .getByTestId("settings-language-select")
         .selectOption("zh-Hans");

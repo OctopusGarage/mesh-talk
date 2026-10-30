@@ -47,6 +47,21 @@ it("keeps missing status indeterminate and ready attachments hidden", () => {
   expect(render({ ...receiving(10, 10), ready: true })).toBe("");
 });
 
+it("waits for the first chunk without claiming an active transfer", () => {
+  const html = render(receiving(0, 10));
+  expect(html).toContain("Waiting for file…");
+  expect(html).not.toContain("Receiving file");
+  expect(html).toContain('aria-valuenow="0"');
+  expect(html).toContain(">0%</span>");
+});
+
+it("shows receiving after a chunk has arrived", () => {
+  const html = render(receiving(1, 10));
+  expect(html).toContain("Receiving file…");
+  expect(html).not.toContain("Waiting for file…");
+  expect(html).toContain('aria-valuenow="10"');
+});
+
 it.each(["pending", "declined"] as const)(
   "does not display byte progress while consent is %s",
   (consent) => {

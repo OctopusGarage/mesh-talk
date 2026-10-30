@@ -96,6 +96,7 @@ impl<S: SyncStore> SessionBackend for LegacyCollectingNetworkAdapter<'_, S> {
                 channel_v2: store.requires_channel_v2(conv)?,
                 channel_v3: store.requires_channel_v3(conv)?,
                 channel_v4: store.requires_channel_v4(conv)?,
+                channel_v5: store.requires_channel_v5(conv)?,
             },
             None,
         ))
@@ -119,6 +120,7 @@ impl<S: SyncStore> SessionBackend for LegacyCollectingNetworkAdapter<'_, S> {
             channel_v2: store.requires_channel_v2(&view.conversation)?,
             channel_v3: store.requires_channel_v3(&view.conversation)?,
             channel_v4: store.requires_channel_v4(&view.conversation)?,
+            channel_v5: store.requires_channel_v5(&view.conversation)?,
         })
     }
     fn advertised_count(&self, view: &LegacyView) -> Result<u64, LogError> {
@@ -407,8 +409,14 @@ pub(super) fn have_count(count: u64) -> Result<usize, SessionError> {
     }
     Ok(count)
 }
-pub(super) fn unsupported_metadata(m: SyncMetadata, v2: bool, v3: bool, v4: bool) -> bool {
-    (!v2 && m.channel_v2) || (!v3 && m.channel_v3) || (!v4 && m.channel_v4)
+pub(super) fn unsupported_metadata(
+    m: SyncMetadata,
+    v2: bool,
+    v3: bool,
+    v4: bool,
+    v5: bool,
+) -> bool {
+    (!v2 && m.channel_v2) || (!v3 && m.channel_v3) || (!v4 && m.channel_v4) || (!v5 && m.channel_v5)
 }
 
 pub(super) async fn send_have_pages<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpin>(

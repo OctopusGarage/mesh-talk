@@ -292,7 +292,10 @@ impl Node {
                 .expect("documents mutex")
                 .digest(AccountDocumentDomain::DmRecall)
         };
-        (local, canonical)
+        let mut hash = Sha256::new();
+        hash.update(canonical);
+        hash.update(self.personal_floor_digest());
+        (local, hash.finalize().into())
     }
     /// A pure test against certified control claims; target authorship is supplied
     /// by the validated account envelope, so a recall can safely precede its body.

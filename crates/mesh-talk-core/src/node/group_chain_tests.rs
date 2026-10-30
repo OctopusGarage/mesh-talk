@@ -22,6 +22,67 @@ struct Chain {
     servers: Vec<Option<JoinHandle<()>>>,
 }
 
+#[tokio::test]
+async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut chain = Chain::new().await;
+        let group = chain.nodes[0]
+            .create_channel_invited("metadata", vec![chain.nodes[1].identity.public()])
+            .await
+            .unwrap();
+        chain.round(1, 0, group).await;
+        chain.nodes[1].accept_channel_invite(group).await.unwrap();
+        chain.round(1, 0, group).await;
+        chain.nodes[0]
+            .set_channel_history_policy(group, crate::channel::HistoryPolicy::Off)
+            .await
+            .unwrap();
+        chain.nodes[0]
+            .set_channel_announcement_if(group, Some("Current announcement"), None, |commit| {
+                commit()
+            })
+            .await
+            .unwrap();
+        chain.nodes[0]
+            .add_channel_member(group, chain.nodes[2].identity.public())
+            .await
+            .unwrap();
+        chain.round(1, 0, group).await;
+        chain.round(2, 1, group).await;
+        assert!(chain.nodes[2].channel_metadata(group).is_err());
+        chain.nodes[2].accept_channel_invite(group).await.unwrap();
+        chain.round(1, 2, group).await;
+        chain.servers[0].take().unwrap().abort();
+        assert!(
+            chain.nodes[2]
+                .channel_metadata(group)
+                .unwrap()
+                .announcement
+                .is_none()
+        );
+        assert_eq!(chain.nodes[1].retry_group_metadata().unwrap(), vec![group]);
+        chain.round(2, 1, group).await;
+        assert_eq!(
+            chain.nodes[2]
+                .channel_metadata(group)
+                .unwrap()
+                .announcement
+                .unwrap()
+                .content
+                .as_deref(),
+            Some("Current announcement")
+        );
+        assert!(
+            chain.nodes[2]
+                .channel_history(group, 100)
+                .unwrap()
+                .is_empty()
+        );
+    })
+    .await
+    .expect("group metadata must converge over a reachable accepted holder");
+}
+
 impl Drop for Chain {
     fn drop(&mut self) {
         for server in self.servers.iter().flatten() {
@@ -43,14 +104,18 @@ impl Chain {
             let (dm, _) = mpsc::unbounded_channel();
             let (channel, _) = mpsc::unbounded_channel();
             let (file, _) = mpsc::unbounded_channel();
+            // Sidecars and managed media belong to the directory, not the log
+            // filename. Independent network peers must never share that store.
+            let node_dir = dir.path().join(i.to_string());
+            std::fs::create_dir(&node_dir).unwrap();
             let node = Node::open(
                 DeviceIdentity::generate(),
                 Arc::new(Mutex::new(Roster::default())),
                 dm,
                 channel,
                 file,
-                &dir.path().join(format!("{i}-events.log")),
-                &dir.path().join(format!("{i}-sent.log")),
+                &node_dir.join("events.log"),
+                &node_dir.join("sent.log"),
                 "pw",
             )
             .unwrap();
@@ -343,7 +408,17 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
         chain.nodes[2].decide_attachment(file, true).unwrap();
     }
     chain.round(2, 1, file).await;
+    assert!(
+        chain.nodes[2]
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(chain.nodes[2].file_progress(file).unwrap().unwrap().done, 0);
+    assert!(!chain.nodes[2].file_ready_to_save(file).unwrap());
     assert_eq!(
         holder.log.lock().unwrap().events(&file).unwrap().len(),
         retained
@@ -918,6 +993,25 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     }
     // Let startup and its immediately-ready interval tick finish before sending.
     tokio::time::sleep(Duration::from_millis(500)).await;
+    let route_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let route_started = std::time::Instant::now();
+    let last_peer = chain.nodes[5].identity.public();
+    let observed_route = route_trace.clone();
+    *chain.nodes[4].account_client_test_hook.lock().unwrap() =
+        Some(Arc::new(move |peer, phase| {
+            if peer != last_peer || !phase.starts_with("dial_") {
+                return;
+            }
+            let mut trace = observed_route.lock().unwrap();
+            if trace.len() == 96 {
+                trace.pop_front();
+            }
+            trace.push_back((
+                route_started.elapsed().as_millis(),
+                tokio::task::try_id(),
+                phase,
+            ));
+        }));
     chain.nodes[0]
         .send_channel_message(group, b"notification-driven background gossip")
         .await
@@ -925,11 +1019,66 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let sender = chain.servers[0].take().unwrap();
     sender.abort();
     let _ = sender.await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let received = tokio::time::timeout(Duration::from_secs(2), async {
         while !chain.has_text(5, group, b"notification-driven background gossip") {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
+    })
+    .await;
+    *chain.nodes[4].account_client_test_hook.lock().unwrap() = None;
+    if received.is_err() {
+        // These additional snapshot reads occur only after the deadline;
+        // do not consume Notify permits or invoke recovery here.
+        let original = chain.nodes[0]
+            .channel_history(group, 10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.text == b"notification-driven background gossip")
+            .map(|row| row.id);
+        let observations: Vec<_> = chain
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let (events, present) = {
+                    let log = node.log.lock().unwrap();
+                    (
+                        log.events(&group).unwrap().len(),
+                        original.is_some_and(|id| log.get(&id).unwrap().is_some()),
+                    )
+                };
+                let surfaced = original.is_some_and(|id| {
+                    node.channel_history(group, 10)
+                        .unwrap()
+                        .iter()
+                        .any(|row| row.id == id)
+                });
+                let queued = node
+                    .channel_recovery_pending
+                    .lock()
+                    .unwrap()
+                    .contains(&group);
+                let recovery = node.channel_recovery.lock().unwrap().get(&group).cloned();
+                (
+                    index,
+                    events,
+                    present,
+                    surfaced,
+                    queued,
+                    recovery,
+                    node.sessions.test_capacity_snapshot(),
+                )
+            })
+            .collect();
+        eprintln!(
+            "background group gossip metadata original={original:?} observations={observations:?}"
+        );
+        eprintln!(
+            "last-hop dial phases={:?}",
+            route_trace.try_lock().ok().as_deref()
+        );
+    }
+    received.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
     for index in 1..6 {
         assert!(chain.has_text(index, group, b"notification-driven background gossip"));
     }

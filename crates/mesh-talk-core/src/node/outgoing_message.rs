@@ -276,6 +276,86 @@ impl Node {
         self.enqueue_channel_payload_if(channel, wrapped, EventKind::Message, request, authorize)
     }
 
+    /// Prepare the existing sender-key batch while the caller holds membership,
+    /// delivery, current channel state and event-log guards. The caller validates
+    /// its full source projection and actual channel epoch before entering here.
+    /// This syncs retained causal parents but neither appends nor publishes events.
+    pub(in crate::node) fn prepare_channel_outgoing_locked(
+        &self,
+        channel: ConversationId,
+        wrapped: Vec<u8>,
+        kind: EventKind,
+        log: &crate::eventlog::PersistentEventLog,
+        state: &crate::channel::ChannelState,
+    ) -> Result<(DeliveryTransaction, EventId), NodeError> {
+        let (payload, rotation, senders) = state
+            .prepare_sender_message(&wrapped)
+            .map_err(|e| NodeError::Channel(e.to_string()))?;
+        let author = Author::from_ed25519(self.identity.public().ed25519_pub);
+        let (mut parents, mut lamport) = log.prepare(&channel).map_err(NodeError::Log)?;
+        let mut seq = log
+            .next_sequence(&channel, &author)
+            .map_err(NodeError::Log)?;
+        let clock = now_millis();
+        let mut events = Vec::new();
+        if let Some(distribution) = rotation {
+            let sealed = super::channel::seal_keys_for(
+                &self.identity,
+                &state.recipient_members(),
+                &distribution,
+                state.epoch(),
+            )
+            .map_err(|e| NodeError::Channel(e.to_string()))?;
+            let event = Event::new(
+                &self.identity,
+                channel,
+                seq,
+                parents,
+                lamport,
+                clock,
+                EventKind::KeyRotation,
+                sealed.encode(),
+            );
+            parents = vec![event.id];
+            lamport = lamport
+                .checked_add(1)
+                .ok_or(NodeError::Log(crate::eventlog::LogError::ClockExhausted))?;
+            seq = seq
+                .checked_add(1)
+                .ok_or(NodeError::Log(crate::eventlog::LogError::SequenceExhausted))?;
+            events.push(event);
+        }
+        let event = Event::new(
+            &self.identity,
+            channel,
+            seq,
+            parents,
+            lamport,
+            clock,
+            kind,
+            payload,
+        );
+        if !super::session::event_fits_frame(&event) {
+            return Err(NodeError::InvalidInput(
+                "message exceeds transport frame".into(),
+            ));
+        }
+        let id = event.id;
+        events.push(event);
+        log.sync().map_err(NodeError::Log)?;
+        let transaction = DeliveryTransaction::ChannelOutgoing {
+            events,
+            sent: super::sentlog::SentEntry {
+                conversation: channel,
+                seq,
+                wall_clock: clock,
+                plaintext: wrapped,
+            },
+            senders,
+        };
+        Ok((transaction, id))
+    }
+
     pub(in crate::node) fn enqueue_channel_payload_if(
         &self,
         channel: ConversationId,
@@ -292,6 +372,15 @@ impl Node {
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
+            // A signed account departure can reach this device before its public
+            // control cut. It is a terminal negative, never a replacement for
+            // the physical membership and full-identity checks below.
+            if matches!(
+                self.account_group_access(channel)?.role,
+                super::AccountGroupRole::Left | super::AccountGroupRole::Dissolved
+            ) {
+                return Err(NodeError::Channel("not an active channel member".into()));
+            }
             let mut store = self.delivery.lock().expect("delivery lock");
             let wrapped = wrapped
                 .take()
@@ -308,73 +397,10 @@ impl Node {
             {
                 return Err(NodeError::Channel("not an active channel member".into()));
             }
-            let (payload, rotation, senders) = state
-                .prepare_sender_message(&wrapped)
-                .map_err(|e| NodeError::Channel(e.to_string()))?;
             let log = self.log.lock().expect("log lock");
-            let author = Author::from_ed25519(self.identity.public().ed25519_pub);
-            let (mut parents, mut lamport) = log.prepare(&channel).map_err(NodeError::Log)?;
-            let mut seq = log
-                .next_sequence(&channel, &author)
-                .map_err(NodeError::Log)?;
-            let clock = now_millis();
-            let mut events = Vec::new();
-            if let Some(distribution) = rotation {
-                let sealed = super::channel::seal_keys_for(
-                    &self.identity,
-                    &state.recipient_members(),
-                    &distribution,
-                    state.epoch(),
-                )
-                .map_err(|e| NodeError::Channel(e.to_string()))?;
-                let event = Event::new(
-                    &self.identity,
-                    channel,
-                    seq,
-                    parents,
-                    lamport,
-                    clock,
-                    EventKind::KeyRotation,
-                    sealed.encode(),
-                );
-                parents = vec![event.id];
-                lamport = lamport
-                    .checked_add(1)
-                    .ok_or(NodeError::Log(crate::eventlog::LogError::ClockExhausted))?;
-                seq = seq
-                    .checked_add(1)
-                    .ok_or(NodeError::Log(crate::eventlog::LogError::SequenceExhausted))?;
-                events.push(event);
-            }
-            let event = Event::new(
-                &self.identity,
-                channel,
-                seq,
-                parents,
-                lamport,
-                clock,
-                kind,
-                payload,
-            );
-            if !super::session::event_fits_frame(&event) {
-                return Err(NodeError::InvalidInput(
-                    "message exceeds transport frame".into(),
-                ));
-            }
-            let id = event.id;
-            events.push(event);
-            log.sync().map_err(NodeError::Log)?;
+            let (mut transaction, id) =
+                self.prepare_channel_outgoing_locked(channel, wrapped, kind, &log, state)?;
             drop(log);
-            let mut transaction = DeliveryTransaction::ChannelOutgoing {
-                events,
-                sent: super::sentlog::SentEntry {
-                    conversation: channel,
-                    seq,
-                    wall_clock: clock,
-                    plaintext: wrapped,
-                },
-                senders,
-            };
             if let Some(mut record) = request.take() {
                 record.message_id = id;
                 record.accepted_at_ms = now_millis();

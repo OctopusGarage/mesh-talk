@@ -52,7 +52,12 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
         for (const [id, entry] of Object.entries(entries)) {
           if (!current() || !enabled || !budget) return;
           const token = identity(key, id);
-          if (!entry.seen || known.has(token) || !validAccountSeenIdentity(id))
+          if (
+            !entry.seen ||
+            entry.suppressed ||
+            known.has(token) ||
+            !validAccountSeenIdentity(id)
+          )
             continue;
           await ports.mark(target, id);
           if (!current()) return;

@@ -434,7 +434,7 @@ async fn serve(options: ServeOptions) -> Result<(), IntegrationError> {
             physical_lan_only: false,
         }),
         |_| Ok(()),
-        |launch| Ok(launch(&name)),
+        |launch| launch(&name),
     )
     .await
     .map_err(|_| {

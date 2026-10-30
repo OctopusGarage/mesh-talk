@@ -278,7 +278,7 @@ export function AvatarCropDialog({
           >
             {img ? (
               <img
-                src={srcUrl ?? ""}
+                src={srcUrl ?? undefined}
                 alt=""
                 draggable={false}
                 aria-hidden

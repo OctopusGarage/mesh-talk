@@ -6,12 +6,13 @@ import { fileURLToPath } from "node:url";
 const complete = () => ({ stats: { expected: 1, unexpected: 0, skipped: 0, flaky: 0 }, errors: [], suites: [{ title: "portable-core.spec.ts", specs: [{ id: "fixture-id", title: "fixture case", ok: true, tests: [{ projectName: "chromium", status: "expected", results: [{ status: "passed", attachments: ["portable-browser-evidence", "portable-browser-screenshot", "trace"].map(name => ({ name, path: `/tmp/evidence/${name}` })) }] }] }] }] });
 test("portable matrix requires existing receipt and media cases in both tiers", async () => {
   const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
-  for (const [tier, count] of [["core", 67], ["extended", 68]]) {
+  for (const [tier, count] of [["core", 79], ["extended", 80]]) {
     const paths = requiredBrowserPaths(tier);
     assert.equal(paths.length, count);
     assert.ok(paths.some(path => path[0] === "portable-core.spec.ts" && path[1] === "presence waits for node readiness without showing a startup failure"));
     assert.ok(paths.some(path => path[1] === "city avatar thumbnails load after scrolling the gallery"));
-    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 13);
+    assert.equal(paths.filter(path => path[0] === "automatic-delivery.spec.ts").length, 14);
+    assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "typed channel File stays pending until canonical metadata commits and original-ID replay stays singular"));
     assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "a scoped native delivery invalidation refreshes status without a polling response"));
     assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "linked-device channel history waits for copy confirmation before showing a check"));
     for (const result of ["acceptance", "rejection"]) assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === `submitted text stays in its bubble after ${result} and navigation`));
@@ -21,7 +22,11 @@ test("portable matrix requires existing receipt and media cases in both tiers", 
     assert.ok(paths.some(path => path[1] === "delivery details close on navigation and app lock, including a late status response"));
     assert.ok(paths.some(path => path[0] === "automatic-delivery.spec.ts" && path[1] === "delivery recovery survives its receipt and returns focus safely, then retires on logout"));
     assert.equal(paths.filter(path => path[0] === "media-recovery.spec.ts").length, 1);
-    assert.equal(paths.filter(path => path[0] === "media-lifecycle.spec.ts").length, 3);
+    assert.equal(paths.filter(path => path[0] === "media-lifecycle.spec.ts").length, 4);
+    assert.equal(paths.filter(path => path[0] === "media-scroll.spec.ts").length, 8);
+    for (const shape of ["portrait", "panorama", "square", "small"]) {
+      assert.ok(paths.some(path => path[0] === "media-scroll.spec.ts" && path[1] === `${shape} images fit their original proportions in a short window`));
+    }
     assert.equal(paths.filter(path => path[0] === "screenshot-portable.spec.ts").length, 9);
     assert.ok(paths.some(path => path[0] === "screenshot-portable.spec.ts" && path[1] === "Enter sends a staged screenshot after capture loses input focus"));
     assert.ok(paths.some(path => path[0] === "screenshot-portable.spec.ts" && path[1] === "clipboard denial retains the edited screenshot for retry without staging"));
@@ -29,7 +34,7 @@ test("portable matrix requires existing receipt and media cases in both tiers", 
     assert.equal(paths.filter(path => path[0] === "directory-transfer.spec.ts").length, 3);
     assert.equal(paths.filter(path => path[0] === "attachment-approval.spec.ts").length, 4);
     assert.ok(paths.some(path => path[0] === "attachment-approval.spec.ts" && path[1] === "an expired previously ready attachment becomes unavailable"));
-    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 12);
+    assert.equal(paths.filter(path => path[0] === "unread-badge.spec.ts").length, 14);
     assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "channel mention indicator survives later traffic and clears when the mention is viewed"));
     assert.ok(paths.some(path => path[0] === "unread-badge.spec.ts" && path[1] === "one logical DM remains one unread badge across duplicate live events and history scanning"));
     const report = complete();
@@ -89,7 +94,7 @@ test("swapping evidence between viewports fails even when titles and revision ma
 test("isolated portable shards preserve the complete strict inventory and every failure", async () => {
   const { portableShards, mergePortableReports } = await import("../evals/portable-runner.mjs");
   const { validateBrowserReport } = await import("../evals/browser-report.mjs");
-  assert.equal(portableShards("win32"), 2);
+  assert.equal(portableShards("win32"), 4);
   for (const os of ["darwin", "linux"]) assert.equal(portableShards(os), 1);
   const first = complete(), second = structuredClone(first);
   second.suites[0].specs[0].id = "second";
@@ -110,14 +115,14 @@ test("isolated portable shards preserve the complete strict inventory and every 
   assert.throws(() => mergePortableReports([]), /Missing/);
 });
 
-for (const tier of ["core", "extended"]) {
-  test(`portable ${tier} inventory matches Playwright discovery`, async () => {
+for (const browser of ["chromium", "webkit", "firefox"]) for (const tier of ["core", "extended"]) {
+  test(`portable ${browser} ${tier} inventory matches Playwright discovery`, async () => {
     const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
     const frontend = fileURLToPath(new URL("../../frontend/", import.meta.url));
     const cli = fileURLToPath(new URL("../../frontend/node_modules/@playwright/test/cli.js", import.meta.url));
     const listed = spawnSync(process.execPath, [cli, "test", "--config", "playwright.portable.config.ts", "--list", "--reporter=json"], {
       cwd: frontend,
-      env: { ...process.env, EVAL_BROWSER: "chromium", EVAL_TIER: tier },
+      env: { ...process.env, EVAL_BROWSER: browser, EVAL_TIER: tier },
       encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: 120_000,
     });
     assert.equal(listed.status, 0, listed.stderr || listed.stdout);
@@ -131,5 +136,35 @@ for (const tier of ["core", "extended"]) {
     }
     for (const suite of report.suites ?? []) visit(suite);
     assert.deepEqual(paths.map(path => JSON.stringify(path)).sort(), requiredBrowserPaths(tier).map(path => JSON.stringify(path)).sort());
+  });
+}
+
+for (const tier of ["core", "extended"]) {
+  test(`Windows portable ${tier} batches bound the observed per-process slowdown without omitting scenarios`, async () => {
+    const { portableShards } = await import("../evals/portable-runner.mjs");
+    const { requiredBrowserPaths } = await import("../evals/browser-report.mjs");
+    const count = portableShards("win32");
+    const expected = requiredBrowserPaths(tier).map(path => JSON.stringify(path)).sort();
+    const frontend = fileURLToPath(new URL("../../frontend/", import.meta.url));
+    const cli = fileURLToPath(new URL("../../frontend/node_modules/@playwright/test/cli.js", import.meta.url));
+    const actual = [];
+    for (let shard = 1; shard <= count; shard++) {
+      const listed = spawnSync(process.execPath, [cli, "test", "--config", "playwright.portable.config.ts", `--shard=${shard}/${count}`, "--list", "--reporter=json"], {
+        cwd: frontend, env: { ...process.env, EVAL_BROWSER: "chromium", EVAL_TIER: tier }, encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: 120_000,
+      });
+      assert.equal(listed.status, 0, listed.stderr || listed.stdout);
+      const report = JSON.parse(listed.stdout);
+      assert.deepEqual(report.errors, []);
+      const paths = [];
+      function visit(suite, parents = []) {
+        const current = [...parents, suite.title];
+        for (const spec of suite.specs ?? []) paths.push(JSON.stringify([...current, spec.title]));
+        for (const child of suite.suites ?? []) visit(child, current);
+      }
+      for (const suite of report.suites ?? []) visit(suite);
+      assert.ok(paths.length > 0 && paths.length <= 20, `Windows process would run ${paths.length} scenarios; the hosted timeout followed 38-scenario batches`);
+      actual.push(...paths);
+    }
+    assert.deepEqual(actual.sort(), expected, "Every scenario must execute exactly once across the bounded batches");
   });
 }

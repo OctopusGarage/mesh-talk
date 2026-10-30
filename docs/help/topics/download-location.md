@@ -4,7 +4,7 @@ Choose a download folder without changing incoming-file approval.
 
 ## Choose a folder
 
-1. Open **More → Settings → Files & receiving**.
+1. Open **More → Settings → Files & downloads**.
 2. Find **Download folder**.
 3. Choose **Choose folder** or **Change**, then select a destination in the operating system's folder picker.
 4. Wait for the settings status to confirm the change. The selected path appears beside the control.

@@ -175,6 +175,16 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   The `dm.rs` recipient sealed-box (no FS) is now used only
   to distribute channel keys, seal file manifests and encrypt delivery-control
   metadata (the latter has no forward secrecy and contains no message text).
+- **Shared group metadata** — owner-published group photos and announcements use the appended kind-19
+  metadata control, gated by V5 sync envelopes. Each publication encrypts its
+  bounded content under an independent random key sealed to accepted members;
+  eligible current holders can release only a current field's key to an accepted
+  newcomer. This does not export prior sender chains or enable pre-join text
+  history. Causal owner authority, exact device/account bindings and current
+  membership govern publication, replay and release. Independent field revisions
+  and durable clear tombstones preserve offline convergence without coupling
+  updates to membership epochs or ordinary message retention. Private avatar
+  overrides retain their account-document owner. See [group announcements](help/topics/channels.md#group-announcements).
 - **Channels** — per-sender **sender-key** group ratchet (`channel/sender_key.rs`):
   single-use message keys; membership add/remove rotates the **epoch** and re-distributes
   sender-key distributions (sealed per member via the DM sealed-box). Sender chains are
@@ -249,12 +259,14 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   membership controls before granting a group route.
   Departure, acceptance, and ownership-transfer delivery are retried to channel
   members after an offline first push (bounded batches).
-  Membership is keyed to the device identity. When a channel owner discovers a
-  certified sibling of an accepted member, and local group-owner provenance is
-  established, it signs and distributes one invitation
-  per recovery pass; the sibling must still accept it. If the owner is offline, the
-  invitation waits until its node runs and learns the sibling's verified route.
-  Restored groups remain read-only archives until the new device is invited.
+  Membership and ownership in account-authorized groups belong to accounts.
+  New desktop groups authenticate selected account IDs and commit account grants
+  at creation. An invitation is accepted once per account; certified linked
+  devices inherit the role through authenticated sibling synchronization without
+  another owner invitation. Legacy device-only groups retain their signed device
+  lifetimes until an authorized account-format migration is available. A restored
+  archive alone does not prove membership. See the
+  [account/device boundaries](multi-device-sync-design.md#account-and-device-decision-boundaries).
   In Invisible mode, a manually trusted carrier may send
   a new channel's earlier signed ancestry, but the receiving sync connection
   stages it only in bounded memory (8 MiB). It is never advertised as durable
@@ -1294,6 +1306,15 @@ queries. SQLCipher passphrases are domain-separated so user input cannot select
 the raw-key syntax. Production key derivation retains a 600,000-iteration
 password work factor; only existing test configurations reduce it.
 
+Event repository schema v2 admits the signed `ChannelMetadata` event added by
+channel protocol v5. The only v1 schema change relaxes the event-kind constraint
+from 18 to 19. Upgrade validates the exact owned v1 tables and indexes, then
+changes that fixed constraint and version atomically using SQLite's documented
+schema-only procedure. It preserves retained payload pages and foreign keys;
+interruption rolls back the version and definition together. Unknown or weakened
+schemas fail explicitly. Capability probes use a covering kind index and never
+load retained bodies; a newly required v5 control invalidates an older sync view.
+
 Fresh encrypted databases establish incremental auto-vacuum (mode 2) before the
 first metadata table. Warm open authenticates application/schema and owner first,
 then requires the same mode. Unsupported NONE/FULL modes fail without a full
@@ -1524,8 +1545,12 @@ Current profile values occupy at most 16 rows and 1 MiB raw per page; their walk
 restarts on a new revision or renderer replacement. Alongside receipt and call
 budgets, their conservative serialization charge remains below 64 MiB. Backend current-value payloads use the encrypted participant indexes; Node warm
 reconciliation visits only exact pending source changes. Display-name inventories
-read bounded header pages and never hydrate avatars. Host cache lifetime remains
-a separate acceptance boundary from these backend query limits.
+read bounded header pages and never hydrate avatars. The desktop resolves a
+selected current profile under its local-user/runtime admission; explicit clear
+and missing profile remain distinct. It never sends a whole-avatar map through
+IPC. The received-avatar cache admits at most 1,024 values and 64 MiB of UTF-16
+payload charge, preserving the own-account value where it fits. Owner replacement
+and newer local edits fence delayed startup reads.
 Native alerts start at launch high-water, sample at most eight live observations
 per second and intentionally coalesce excess alarms. They never retire durable
 unread work or replay old unread backlog as live notifications.
@@ -1538,8 +1563,9 @@ retry and restart; a save completed before an interrupted ACK may run again.
 
 `SentStore`, `ReceivedStore` and `IndexedAccountSuppression` require completed
 participant authority; integration must retain `validate_participant_request`
-before invoking their constructors. These owners are not yet wired into Node's
-legacy consumers and do not establish bounded participant startup by themselves.
+before invoking their constructors. Node uses these indexed owners; separate
+file, channel, account-document and host consumers retain their own resource and
+authorization acceptance boundaries.
 
 Each transcript source imports independently from a private encrypted snapshot,
 retaining one authenticated record at a time. Original source identity must still

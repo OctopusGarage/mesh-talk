@@ -1,4 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import type {
+  AccountGroupControlRequest,
+  AccountGroupOperationStatus,
+  PersonalConversationState,
+} from "../types";
 import { invokeSensitive } from "./sensitiveInvoke";
 
 /** Local scheduling facts only; absence means unknown. */
@@ -69,6 +74,7 @@ export interface DeviceSyncStatus {
 import type {
   AccountInfo,
   ChannelInfo,
+  ChannelMetadata,
   ChannelMembersInfo,
   ChannelHistoryPolicy,
   ChannelActivityInfo,
@@ -270,6 +276,117 @@ export const chat = {
       ...(progressKey ? { progressKey } : {}),
       ...(protection ? { protection } : {}),
     }),
+  newAccountGroupOperationId: (owner: string, expectedAccount: string) =>
+    invoke<string>("owner_new_account_group_operation_id", {
+      owner,
+      expectedAccount,
+    }),
+  submitAccountGroupControl: (
+    owner: string,
+    expectedAccount: string,
+    operationId: string,
+    channelId: string,
+    operation: AccountGroupControlRequest,
+  ) =>
+    invoke<AccountGroupOperationStatus>("owner_submit_account_group_control", {
+      owner,
+      expectedAccount,
+      operationId,
+      channelId,
+      operation,
+    }),
+  submitAccountGroupText: (
+    owner: string,
+    expectedAccount: string,
+    operationId: string,
+    channelId: string,
+    text: string,
+    replyTo: string | null = null,
+    expiresAtMs?: number | null,
+    protection?: import("../types").MessageProtection | null,
+  ) =>
+    invoke<AccountGroupOperationStatus>("owner_submit_account_group_text", {
+      owner,
+      expectedAccount,
+      operationId,
+      channelId,
+      text,
+      replyTo,
+      expiresAtMs,
+      ...(protection ? { protection } : {}),
+    }),
+  submitAccountGroupFile: (
+    owner: string,
+    expectedAccount: string,
+    operationId: string,
+    channelId: string,
+    path: string,
+    media: boolean,
+    progressKey: string,
+    expiresAtMs?: number | null,
+    protection?: import("../types").MessageProtection | null,
+  ) =>
+    invoke<AccountGroupOperationStatus>("owner_submit_account_group_file", {
+      owner,
+      expectedAccount,
+      operationId,
+      channelId,
+      path,
+      media,
+      progressKey,
+      expiresAtMs,
+      protection,
+    }),
+  submitAccountGroupSticker: (
+    owner: string,
+    expectedAccount: string,
+    operationId: string,
+    channelId: string,
+    stickerId: string,
+    fallback: string,
+    expiresAtMs?: number | null,
+  ) =>
+    invoke<AccountGroupOperationStatus>("owner_submit_account_group_sticker", {
+      owner,
+      expectedAccount,
+      operationId,
+      channelId,
+      stickerId,
+      fallback,
+      expiresAtMs,
+    }),
+  accountGroupOperationStatus: (
+    owner: string,
+    expectedAccount: string,
+    operationId: string,
+  ) =>
+    invoke<AccountGroupOperationStatus | null>(
+      "owner_account_group_operation_status",
+      { owner, expectedAccount, operationId },
+    ),
+  listAccountGroupOperations: (
+    owner: string,
+    expectedAccount: string,
+    query: {
+      channelId?: string;
+      pendingOnly: boolean;
+      after?: string;
+      limit: number;
+    },
+  ) =>
+    invoke<AccountGroupOperationStatus[]>(
+      "owner_list_account_group_operations",
+      { owner, expectedAccount, ...query },
+    ),
+  cancelAccountGroupOperation: (
+    owner: string,
+    expectedAccount: string,
+    operationId: string,
+  ) =>
+    invoke<AccountGroupOperationStatus>(
+      "owner_cancel_account_group_operation",
+      { owner, expectedAccount, operationId },
+    ),
   enqueueChannelText: (
     owner: string,
     channelId: string,
@@ -349,6 +466,11 @@ export const chat = {
   networkName: () => invoke<string | null>("network_name"),
 
   listPeers: () => invoke<PeerInfo[]>("list_peers"),
+  personalConversationStates: (owner: string, expectedAccount: string) =>
+    invoke<PersonalConversationState[]>("owner_personal_conversation_states", {
+      owner,
+      expectedAccount,
+    }),
   listAccounts: () => invoke<AccountInfo[]>("list_accounts"),
   listChannels: () => invoke<ChannelInfo[]>("list_channels"),
 
@@ -358,6 +480,17 @@ export const chat = {
     invoke<void>("delete_message", { convId, target, isChannel }),
   recallMessage: (convId: string, target: string, isChannel: boolean) =>
     invoke<void>("recall_message", { convId, target, isChannel }),
+  deleteLeftChannel: (
+    owner: string,
+    expectedAccount: string,
+    channelId: string,
+  ) =>
+    invoke<void>("owner_delete_left_channel", {
+      owner,
+      expectedAccount,
+      channelId,
+    }),
+
   clearConversation: (convId: string, isChannel: boolean) =>
     invoke<void>("clear_conversation", { convId, isChannel }),
   // Send an animated sticker as its own message. `fallback` is the emoji char shown if the
@@ -412,8 +545,58 @@ export const chat = {
     invoke<string>("send_file_to_account", { account, path, media }),
 
   // Channels
-  createChannel: (name: string, memberIds: string[]) =>
-    invoke<string>("create_channel", { name, memberIds }),
+  channelMetadata: (
+    owner: string,
+    expectedAccount: string,
+    channelId: string,
+  ) =>
+    invoke<ChannelMetadata>("channel_metadata", {
+      owner,
+      expectedAccount,
+      channelId,
+    }),
+  setChannelCover: (
+    owner: string,
+    expectedAccount: string,
+    channelId: string,
+    content: string | null,
+    expectedRevision: string | null,
+  ) =>
+    invoke<ChannelMetadata>("set_channel_cover", {
+      owner,
+      expectedAccount,
+      channelId,
+      content,
+      expectedRevision,
+    }),
+  setChannelAnnouncement: (
+    owner: string,
+    expectedAccount: string,
+    channelId: string,
+    content: string | null,
+    expectedRevision: string | null,
+  ) =>
+    invoke<ChannelMetadata>("set_channel_announcement", {
+      owner,
+      expectedAccount,
+      channelId,
+      content,
+      expectedRevision,
+    }),
+  createChannelForOwner: (
+    owner: string,
+    expectedAccount: string,
+    name: string,
+    memberAccountIds: string[],
+  ) =>
+    invoke<string>("owner_create_channel", {
+      owner,
+      expectedAccount,
+      name,
+      memberAccountIds,
+    }),
+  createChannel: (name: string, memberAccountIds: string[]) =>
+    invoke<string>("create_channel", { name, memberAccountIds }),
   channelMembers: (channelId: string) =>
     invoke<ChannelMembersInfo>("channel_members", { channelId }),
   setChannelHistoryPolicy: (channelId: string, policy: ChannelHistoryPolicy) =>

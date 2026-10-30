@@ -29,6 +29,7 @@ export default defineConfig({
   testMatch: [
     "portable-core.spec.ts",
     "automatic-delivery.spec.ts",
+    "media-scroll.spec.ts",
     "media-recovery.spec.ts",
     "media-lifecycle.spec.ts",
     "file-send-progress.spec.ts",

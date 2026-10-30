@@ -1681,3 +1681,230 @@ fn runtime_metadata_oversized_receive_cannot_starve_later_valid_event() {
     );
     assert_eq!(repo.body_read_counts(), (0, 0));
 }
+
+fn downgrade_event_schema_fixture(db: &EncryptedDatabase) {
+    db.transaction(|c| {
+        let sql: String = c.query_row(
+            "SELECT sql FROM sqlite_master WHERE name='retained_events'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(sql.contains("kind BETWEEN 0 AND 19"));
+        c.execute_batch("PRAGMA writable_schema=ON")?;
+        c.execute(
+            "UPDATE sqlite_master SET sql=?1 WHERE name='retained_events'",
+            [sql.replace("kind BETWEEN 0 AND 19", "kind BETWEEN 0 AND 18")],
+        )?;
+        c.execute("UPDATE event_repository_schema SET version=1", [])?;
+        let version: i64 = c.pragma_query_value(None, "schema_version", |r| r.get(0))?;
+        c.pragma_update(None, "schema_version", version + 1)?;
+        c.execute_batch("PRAGMA writable_schema=RESET")?;
+        c.flush_prepared_statement_cache();
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn indexed_event_v5_upgrade_preserves_payload_pages_and_foreign_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let domain = EventDomainId([1; 16]);
+    let repo = EventRepository::new(db.clone(), domain).unwrap();
+    let author = DeviceIdentity::generate();
+    let parent = event(&author, 1, vec![], 1, EventKind::Message);
+    let child = event(&author, 2, vec![parent.id], 2, EventKind::Message);
+    repo.append(&parent).unwrap();
+    repo.append(&child).unwrap();
+    downgrade_event_schema_fixture(&db);
+    let root: i64 = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT rootpage FROM sqlite_master WHERE name='retained_events'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    drop(repo);
+    EventRepository::validate_existing_domain(&db, domain).unwrap();
+    let reopened = EventRepository::new(db.clone(), domain).unwrap();
+    assert_eq!(reopened.body_read_counts(), (0, 0));
+    let after: i64 = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT rootpage FROM sqlite_master WHERE name='retained_events'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        root, after,
+        "schema-only upgrade must preserve the retained payload b-tree"
+    );
+    assert_eq!(reopened.get(&child.id).unwrap(), Some(child.clone()));
+    let old_view = crate::eventlog::sync::network::NetworkSyncStore::open_view(
+        &reopened,
+        &child.conversation_id,
+    )
+    .unwrap();
+    let metadata = event(&author, 3, vec![child.id], 3, EventKind::ChannelMetadata);
+    reopened.append(&metadata).unwrap();
+    assert!(matches!(
+        crate::eventlog::sync::network::NetworkSyncStore::validate_view(&reopened, &old_view),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(
+        reopened
+            .has_kind(&metadata.conversation_id, EventKind::ChannelMetadata)
+            .unwrap()
+    );
+    let view = crate::eventlog::sync::network::NetworkSyncStore::open_view(
+        &reopened,
+        &metadata.conversation_id,
+    )
+    .unwrap();
+    assert!(
+        crate::eventlog::sync::network::NetworkSyncStore::metadata(&reopened, &view)
+            .unwrap()
+            .channel_v5
+    );
+    db.read(|c| {
+        assert!(
+            c.prepare("PRAGMA foreign_key_check")?
+                .query([])?
+                .next()?
+                .is_none()
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn indexed_event_v5_upgrade_failure_rolls_back_and_retries() {
+    for cut in [
+        "event-schema-v2-before-commit",
+        "event-schema-v2-after-cookie",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = database(&dir);
+        let domain = EventDomainId([1; 16]);
+        let repo = EventRepository::new(db.clone(), domain).unwrap();
+        let source = event(
+            &DeviceIdentity::generate(),
+            1,
+            vec![],
+            1,
+            EventKind::Message,
+        );
+        repo.append(&source).unwrap();
+        downgrade_event_schema_fixture(&db);
+        drop(repo);
+        crate::storage::profile::publication::tests::CUT.with(|p| p.replace(Some(cut)));
+        assert!(EventRepository::validate_existing_domain(&db, domain).is_err());
+        db.read(|c| {
+            let version: i64 =
+                c.query_row("SELECT version FROM event_repository_schema", [], |r| {
+                    r.get(0)
+                })?;
+            assert_eq!(version, 1);
+            let writable: i64 = c.pragma_query_value(None, "writable_schema", |r| r.get(0))?;
+            assert_eq!(writable, 0);
+            let sql: String = c.query_row(
+                "SELECT sql FROM sqlite_master WHERE name='retained_events'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert!(sql.contains("kind BETWEEN 0 AND 18"));
+            Ok(())
+        })
+        .unwrap();
+        EventRepository::validate_existing_domain(&db, domain).unwrap();
+        let reopened = EventRepository::new(db, domain).unwrap();
+        assert_eq!(reopened.get(&source.id).unwrap(), Some(source.clone()));
+        drop(reopened);
+        let reopened = EventRepository::new(database(&dir), domain).unwrap();
+        assert_eq!(reopened.get(&source.id).unwrap(), Some(source));
+    }
+}
+
+#[test]
+fn indexed_event_v5_upgrade_rejects_weakened_legacy_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let domain = EventDomainId([1; 16]);
+    let repo = EventRepository::new(db.clone(), domain).unwrap();
+    downgrade_event_schema_fixture(&db);
+    drop(repo);
+    db.transaction(|c| {
+        c.execute_batch("DROP INDEX retained_events_kind_author; CREATE INDEX retained_events_kind_author ON retained_events(domain,conversation,kind)")?;Ok(())
+    }).unwrap();
+    assert!(matches!(
+        EventRepository::validate_existing_domain(&db, domain),
+        Err(LogError::IncompatibleEventSchema)
+    ));
+    let version: i64 = db
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT version FROM event_repository_schema", [], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(version, 1);
+}
+
+#[test]
+fn indexed_custody_retry_cursor_wraps_once_without_reading_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repository = EventRepository::new(db, EventDomainId([1; 16])).unwrap();
+    let author = DeviceIdentity::generate();
+    let first = event(&author, 1, vec![], 1, EventKind::Message);
+    let last = event(&author, 2, vec![], u64::MAX, EventKind::Message);
+    let other = event(
+        &DeviceIdentity::generate(),
+        1,
+        vec![],
+        2,
+        EventKind::Message,
+    );
+    let profile = event(&author, 3, vec![], 3, EventKind::Profile);
+    let mut reference = crate::eventlog::EventLog::default();
+    for row in [&first, &last, &other, &profile] {
+        repository.append(row).unwrap();
+        reference.append(row.clone()).unwrap();
+    }
+    for cursor in [
+        None,
+        Some((0, EventId::new([0; 32]))),
+        Some((first.lamport, first.id)),
+        Some((last.lamport, last.id)),
+        Some((u64::MAX, EventId::new([255; 32]))),
+    ] {
+        for limit in [0, 1, 2, 8] {
+            assert_eq!(
+                repository
+                    .message_keys_after(first.conversation_id, first.author, cursor, limit)
+                    .unwrap(),
+                reference.message_keys_after(first.conversation_id, first.author, cursor, limit)
+            );
+        }
+    }
+    assert_eq!(repository.body_read_counts(), (0, 0));
+    assert_eq!(
+        repository
+            .message_keys_after(
+                first.conversation_id,
+                first.author,
+                Some((last.lamport, last.id)),
+                1
+            )
+            .unwrap(),
+        vec![(first.lamport, first.id)],
+        "a failed final custody attempt must not permanently starve retry"
+    );
+}

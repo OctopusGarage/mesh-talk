@@ -2027,6 +2027,7 @@ mod tests {
                                     std::io::ErrorKind::PermissionDenied,
                                 ))
                             })
+                            .and_then(std::convert::identity)
                     },
                 )
                 .await
@@ -2139,6 +2140,7 @@ mod tests {
                             std::io::ErrorKind::PermissionDenied,
                         ))
                     })
+                    .and_then(std::convert::identity)
             },
         )
         .await
@@ -2219,6 +2221,7 @@ mod tests {
                             std::io::ErrorKind::PermissionDenied,
                         ))
                     })
+                    .and_then(std::convert::identity)
             },
         )
         .await

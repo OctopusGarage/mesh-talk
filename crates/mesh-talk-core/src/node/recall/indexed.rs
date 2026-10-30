@@ -12,7 +12,7 @@ use crate::{
         record_log::EncryptedRecordLog,
     },
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{path::Path, sync::Arc};
 const SCHEMA: &str = "CREATE TABLE recall_marks(conversation BLOB NOT NULL CHECK(length(conversation)=32),target BLOB NOT NULL CHECK(length(target)=32),clock BLOB NOT NULL CHECK(length(clock)=8),PRIMARY KEY(conversation,target)) WITHOUT ROWID;";
 pub(crate) struct IndexedRecallLog {
@@ -127,6 +127,37 @@ impl IndexedRecallLog {
                 ],
                 |r| r.get(0),
             )?)
+        })
+    }
+    pub(crate) fn mark(
+        &self,
+        conversation: ConversationId,
+        target: EventId,
+    ) -> Result<Option<RecallMark>, LogError> {
+        self.source.profile().database().read(|c| {
+            let clock: Option<Vec<u8>> = c
+                .query_row(
+                    "SELECT clock FROM recall_marks WHERE conversation=?1 AND target=?2",
+                    params![
+                        conversation.as_bytes().as_slice(),
+                        target.as_bytes().as_slice()
+                    ],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            clock
+                .map(|clock| {
+                    Ok(RecallMark {
+                        conversation,
+                        target,
+                        wall_clock: u64::from_be_bytes(
+                            clock.try_into().map_err(|_| {
+                                LogError::CorruptFile("invalid recall clock".into())
+                            })?,
+                        ),
+                    })
+                })
+                .transpose()
         })
     }
     pub(crate) fn revision(&self) -> u64 {

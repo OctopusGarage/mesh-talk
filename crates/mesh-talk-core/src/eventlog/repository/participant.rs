@@ -132,13 +132,35 @@ impl EventRepository {
         limit: usize,
     ) -> Result<Vec<(u64, EventId)>, LogError> {
         self.database.read(|c| {
-            self.require_active_on(c,&conversation)?;
-            let condition=if after.is_some() {"AND (lamport,id)>(?4,?5)"} else {""};
-            let mut stmt=c.prepare(&format!("SELECT lamport,id FROM retained_events WHERE domain=?1 AND conversation=?2 AND author=?3 AND kind=0 {condition} ORDER BY lamport,id LIMIT ?6"))?;
-            let mut rows=stmt.query(params![self.domain.0.as_slice(),conversation.as_bytes().as_slice(),author.ed25519_pub().as_slice(),after.map_or(0,|v|v.0).to_be_bytes().as_slice(),after.map_or([0;32],|v|*v.1.as_bytes()).as_slice(),integer(limit)?])?;
-            let mut result=Vec::new(); while let Some(row)=rows.next()? { result.push((u64::from_be_bytes(blob(row,0)?),EventId::new(blob(row,1)?))); } Ok(result)
+            self.require_active_on(c, &conversation)?;
+            let select = |condition: &str, remaining: usize| -> Result<Vec<_>, LogError> {
+                let mut selected = Vec::new();
+                if remaining == 0 { return Ok(selected); }
+                let mut statement = c.prepare_cached(&format!(
+                    "SELECT lamport,id FROM retained_events WHERE domain=?1 AND conversation=?2 AND author=?3 AND kind=0 AND {condition} ORDER BY lamport,id LIMIT ?6"
+                ))?;
+                let mut rows = statement.query(params![
+                    self.domain.0.as_slice(), conversation.as_bytes().as_slice(),
+                    author.ed25519_pub().as_slice(),
+                    after.map_or(0, |value| value.0).to_be_bytes().as_slice(),
+                    after.map_or([0;32], |value| *value.1.as_bytes()).as_slice(), integer(remaining)?,
+                ])?;
+                while let Some(row) = rows.next()? {
+                    selected.push((u64::from_be_bytes(blob(row,0)?), EventId::new(blob(row,1)?)));
+                }
+                Ok(selected)
+            };
+            let mut result = select(if after.is_some() { "(lamport,id)>(?4,?5)" } else { "1" }, limit)?;
+            // Custody retry cursors rotate. A second disjoint covering range
+            // fills only the remaining budget; no COUNT, body read or duplicate.
+            let remaining = limit - result.len();
+            if after.is_some() && remaining > 0 {
+                result.extend(select("(lamport,id)<=(?4,?5)", remaining)?);
+            }
+            Ok(result)
         })
     }
+
     pub(crate) fn retain_conversations(
         &self,
         keep: &HashSet<ConversationId>,

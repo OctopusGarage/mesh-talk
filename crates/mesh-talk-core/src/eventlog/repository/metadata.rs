@@ -42,6 +42,24 @@ pub(crate) struct DomainChargeMetadata {
     pub estimated_bytes: u64,
 }
 impl EventRepository {
+    /// A covering kind index answers capability admission without event bodies.
+    pub(crate) fn has_kind(
+        &self,
+        conv: &ConversationId,
+        kind: EventKind,
+    ) -> Result<bool, LogError> {
+        self.database.read(|c| self.has_kind_on(c, conv, kind))
+    }
+    pub(crate) fn has_kind_on(
+        &self,
+        c: &Connection,
+        conv: &ConversationId,
+        kind: EventKind,
+    ) -> Result<bool, LogError> {
+        self.require_active_on(c, conv)?;
+        Ok(c.prepare_cached("SELECT EXISTS(SELECT 1 FROM retained_events INDEXED BY retained_events_kind_author WHERE domain=?1 AND conversation=?2 AND kind=?3)")?.query_row(params![self.domain.0.as_slice(),conv.as_bytes().as_slice(),kind as i64],|r|r.get(0))?)
+    }
+
     pub(crate) fn domain_charge_on(
         &self,
         c: &Connection,
@@ -218,6 +236,10 @@ impl EventRepository {
                     ));
                 }
                 self.append_on(tx, event)?;
+            }
+            #[cfg(test)]
+            if let Some(hook) = self.before_mutation.lock().unwrap().take() {
+                hook();
             }
             Ok(())
         })

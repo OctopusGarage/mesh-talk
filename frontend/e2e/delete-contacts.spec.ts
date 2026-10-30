@@ -51,7 +51,7 @@ test("offline deletion requires confirmation and erases history across restart a
   ).toBeVisible();
   await confirmCarol(page);
   await expect(page.getByTestId("delete-contact-dialog")).toContainText(
-    "cannot be undone",
+    "linked devices",
   );
   await page.setViewportSize({ width: 390, height: 844 });
   const dialog = page.getByTestId("delete-contact-dialog");
@@ -67,6 +67,7 @@ test("offline deletion requires confirmation and erases history across restart a
     page.getByRole("log").getByText("private history to erase"),
   ).toBeVisible();
   await confirmCarol(page);
+  await page.getByTestId("delete-contact-history").check();
   await page.getByTestId("delete-contact-confirm").click();
   await expect(page.getByTestId(`conversation-row-${carol}`)).toHaveCount(0);
   await expect(page.getByRole("log")).toHaveCount(0);
@@ -74,6 +75,21 @@ test("offline deletion requires confirmation and erases history across restart a
   await expect(page.getByTestId(`conversation-row-${bob}`)).toBeVisible();
   await expect(page.getByTestId(`conversation-row-${carol}`)).toHaveCount(0);
   await setCarolOnline(page);
+  await page.waitForTimeout(1200);
+  await expect(page.getByTestId(`conversation-row-${carol}`)).toHaveCount(0);
+  await page.evaluate(
+    (account) =>
+      (
+        window as unknown as {
+          __mockInject(conv: string, text: string, who: string): void;
+        }
+      ).__mockInject(
+        `acc:${account}`,
+        "new incoming message",
+        "device_carol_3333",
+      ),
+    carol,
+  );
   await expect(page.getByTestId(`conversation-row-${carol}`)).toBeVisible({
     timeout: 8000,
   });
@@ -83,21 +99,21 @@ test("offline deletion requires confirmation and erases history across restart a
   ).toHaveCount(0);
 });
 
-test("online contacts keep Hide and do not offer Delete", async ({ page }) => {
+test("online contacts offer deletion without blocking", async ({ page }) => {
   await login(page);
   await page.getByTestId(`conversation-row-${bob}`).click({ button: "right" });
   await expect(page.getByTestId(`hide-contact-menu-${bob}`)).toBeVisible();
-  await expect(page.getByTestId(`delete-contact-menu-${bob}`)).toHaveCount(0);
+  await expect(page.getByTestId(`delete-contact-menu-${bob}`)).toBeVisible();
 });
 
-test("coming online during confirmation disables deletion", async ({
+test("coming online during confirmation still allows personal deletion", async ({
   page,
 }) => {
   await login(page);
   await confirmCarol(page);
   await setCarolOnline(page);
-  await expect(page.getByTestId("delete-contact-confirm")).toBeDisabled();
-  await expect(page.getByRole("alert")).toContainText("online");
+  await expect(page.getByTestId("delete-contact-confirm")).toBeEnabled();
+  await expect(page.getByTestId("delete-contact-history")).not.toBeChecked();
   await page.getByTestId("delete-contact-cancel").click();
   await expect(page.getByTestId(`conversation-row-${carol}`)).toBeVisible();
 });
@@ -111,7 +127,7 @@ test("failed deletion preserves the row and allows retry", async ({ page }) => {
     ).__mockFailNext("delete_contact"),
   );
   await page.getByTestId("delete-contact-confirm").click();
-  await expect(page.getByRole("alert")).toContainText("try again");
+  await expect(page.getByRole("alert")).toContainText("Try again");
   await expect(page.getByTestId(`conversation-row-${carol}`)).toBeVisible();
   await page.getByTestId("delete-contact-confirm").click();
   await expect(page.getByTestId(`conversation-row-${carol}`)).toHaveCount(0);

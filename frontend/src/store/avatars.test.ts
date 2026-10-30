@@ -77,7 +77,8 @@ it("a linked device's avatar clear removes both own-avatar sources", async () =>
 
 it("a durable linked-device clear prevents a stale avatar from being republished on restart", async () => {
   invoke.mockImplementation((command: string) => {
-    if (command === "peer_avatars") return Promise.resolve({ own: null });
+    if (command === "peer_profile_avatar")
+      return Promise.resolve({ account_id: "own", avatar: null });
     if (command === "get_avatars") return Promise.resolve({ own: "old-local" });
     return Promise.resolve();
   });
@@ -98,9 +99,11 @@ it("a durable linked-device clear prevents a stale avatar from being republished
 });
 
 it("a stale startup profile load cannot replace a newer live update", async () => {
-  let finishPeers!: (value: Record<string, string | null>) => void;
+  let finishPeers!: (
+    value: { account_id: string; avatar: string | null } | null,
+  ) => void;
   invoke.mockImplementation((command: string) =>
-    command === "peer_avatars"
+    command === "peer_profile_avatar"
       ? new Promise((resolve) => {
           finishPeers = resolve;
         })
@@ -108,7 +111,7 @@ it("a stale startup profile load cannot replace a newer live update", async () =
   );
   const loading = useAvatars.getState().loadPeers();
   useAvatars.getState().mergeReceived("contact", "new-photo");
-  finishPeers({ contact: "old-photo" });
+  finishPeers({ account_id: "contact", avatar: "old-photo" });
   await loading;
   expect(useAvatars.getState().received.contact).toBe("new-photo");
 });
@@ -130,10 +133,12 @@ it("clearing my own avatar removes the previously received sibling photo immedia
 });
 
 it("startup never republishes an older avatar after a newer local edit", async () => {
-  let finishPeers!: (value: Record<string, string | null>) => void;
+  let finishPeers!: (
+    value: { account_id: string; avatar: string | null } | null,
+  ) => void;
   invoke.mockImplementation((command: string) => {
     if (command === "get_avatars") return Promise.resolve({ own: "old-photo" });
-    if (command === "peer_avatars")
+    if (command === "peer_profile_avatar")
       return new Promise((resolve) => {
         finishPeers = resolve;
       });
@@ -142,7 +147,7 @@ it("startup never republishes an older avatar after a newer local edit", async (
   const reassert = useAvatars.getState().reassertOwn();
   await vi.waitFor(() => expect(finishPeers).toBeDefined());
   await useAvatars.getState().setAvatar("own", "new-photo");
-  finishPeers({});
+  finishPeers(null);
   await reassert;
   expect(
     invoke.mock.calls.filter(([command]) => command === "publish_avatar"),
@@ -157,7 +162,7 @@ it("startup never republishes an older avatar after a newer local edit", async (
 it("startup skips republish when the durable profile load fails", async () => {
   invoke.mockImplementation((command: string) => {
     if (command === "get_avatars") return Promise.resolve({ own: "old-photo" });
-    if (command === "peer_avatars")
+    if (command === "peer_profile_avatar")
       return Promise.reject(new Error("unavailable"));
     return Promise.resolve();
   });
@@ -407,7 +412,9 @@ for (const boundary of ["generation", "runEpoch", "identityEpoch"] as const) {
 for (const avatar of ["new-photo", null]) {
   it(`rejects a peer snapshot started during an own-avatar ${avatar ? "edit" : "clear"} that returns after publication`, async () => {
     let finishPublish!: () => void;
-    let finishPeers!: (profiles: Record<string, string | null>) => void;
+    let finishPeers!: (
+      profiles: { account_id: string; avatar: string | null } | null,
+    ) => void;
     const persisted: Record<string, string> = { own: "old-photo" };
     invoke.mockImplementation(
       (command: string, args?: { id?: string; dataUrl?: string | null }) => {
@@ -419,8 +426,11 @@ for (const avatar of ["new-photo", null]) {
           return new Promise<void>((resolve) => {
             finishPublish = resolve;
           });
-        if (command === "peer_avatars")
-          return new Promise<Record<string, string | null>>((resolve) => {
+        if (command === "peer_profile_avatar")
+          return new Promise<{
+            account_id: string;
+            avatar: string | null;
+          } | null>((resolve) => {
             finishPeers = resolve;
           });
         return Promise.resolve();
@@ -436,7 +446,7 @@ for (const avatar of ["new-photo", null]) {
     const loading = useAvatars.getState().loadPeers();
     finishPublish();
     await saving;
-    finishPeers({ own: "old-photo" });
+    finishPeers({ account_id: "own", avatar: "old-photo" });
     expect(await loading).toBe(false);
     expect(useAvatars.getState().local.own).toBe(avatar ?? undefined);
     expect(useAvatars.getState().received.own).toBeUndefined();
@@ -484,4 +494,27 @@ it("does not report an older avatar failure after a newer intent starts during r
   read({ contact: "saved" });
   await Promise.all([first, second]);
   expect(useAvatars.getState().local.contact).toBe("second");
+});
+
+it("bounds completed current-profile pages while retaining our signed avatar", async () => {
+  invoke.mockResolvedValue(undefined);
+  useAvatars.getState().mergeReceived("own", "own-photo");
+  for (let index = 0; index < 1200; index++)
+    useAvatars.getState().mergeReceived(`peer-${index}`, `photo-${index}`);
+  const received = useAvatars.getState().received;
+  expect(Object.keys(received)).toHaveLength(1024);
+  expect(received.own).toBe("own-photo");
+  expect(received["peer-1199"]).toBe("photo-1199");
+  expect(received["peer-0"]).toBeUndefined();
+});
+
+it("bounds avatar strings by bytes as well as profile count", () => {
+  const photo = "x".repeat(128 * 1024);
+  for (let index = 0; index < 300; index++)
+    useAvatars.getState().mergeReceived(`peer-${index}`, photo);
+  const received = useAvatars.getState().received;
+  expect(
+    Object.values(received).reduce((sum, value) => sum + value.length * 2, 0),
+  ).toBeLessThanOrEqual(64 * 1024 * 1024);
+  expect(received["peer-299"]).toBe(photo);
 });

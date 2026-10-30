@@ -68,10 +68,12 @@ impl EventRepository {
         // binding before even its cached fingerprint or Have can be handed off.
         // Read fixed metadata only; ordinary appends retain this finite view.
         if let Some(current) = self.metadata_on(c, &view.binding.conversation)? {
-            let v4 = view.metadata.channel_v4;
+            let v5 = view.metadata.channel_v5;
+            let v4 = v5 || view.metadata.channel_v4;
             let v3 = v4 || view.metadata.channel_v3;
             let v2 = v3 || view.metadata.channel_v2;
-            if (current.channel_v4 && !v4)
+            if (self.has_kind_on(c, &view.binding.conversation, EventKind::ChannelMetadata)? && !v5)
+                || (current.channel_v4 && !v4)
                 || (current.channel_v3 && !v3)
                 || (current.channel_v2 && !v2)
             {
@@ -139,6 +141,7 @@ impl EventRepository {
                 channel_v2: m.channel_v2,
                 channel_v3: m.channel_v3,
                 channel_v4: m.channel_v4,
+                channel_v5: self.has_kind_on(c, conv, EventKind::ChannelMetadata)?,
                 fingerprint: self.cached_fingerprint_on(c, conv, m.revision)?,
             };
         }

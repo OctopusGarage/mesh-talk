@@ -33,7 +33,7 @@ test("origin sharing defaults off and can be disabled after bridge discovery is 
   await expect(sharing).toBeDisabled();
 });
 
-test("reopening settings selects General", async ({ page }) => {
+test("reopening settings selects App behavior", async ({ page }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
   await selectSettingsCategory(page, "appearance");

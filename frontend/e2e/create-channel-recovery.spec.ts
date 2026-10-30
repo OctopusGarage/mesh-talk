@@ -1,7 +1,7 @@
 import { test, expect } from "./tauri-mock";
 import { enterChat } from "./helpers/session";
 
-test("new channel peers show received account avatars without hiding device IDs", async ({
+test("new channel invitations show account avatars and account identity", async ({
   page,
 }) => {
   await enterChat(page);
@@ -13,7 +13,8 @@ test("new channel peers show received account avatars without hiding device IDs"
     .getByTestId("create-channel-dialog")
     .getByRole("button", { name: "bob" });
   await expect(bob.locator("img")).toHaveAttribute("src", /^data:image\//);
-  await expect(bob).toContainText("devi … 2222");
+  await expect(bob).toContainText("acc_ … 2222");
+  await expect(bob).not.toContainText("devi … 2222");
 });
 
 test("a failed channel creation keeps the form and allows retry", async ({
