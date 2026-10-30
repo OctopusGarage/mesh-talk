@@ -164,12 +164,25 @@ impl Node {
         token.extend(self.identity.public().ed25519_pub);
         token.push(u8::from(account.is_some()));
         token.push(u8::from(is_channel));
+        token.extend(b"file-history-eligibility-v2");
+        let file_eligible = |ordinal| {
+            if account.is_none() {
+                file_book.historical_eligible_ordinal(ordinal)
+            } else {
+                file_book.eligible_ordinal(ordinal)
+            }
+        };
+        let file_revision = if account.is_none() {
+            file_book.historical_revision()?
+        } else {
+            file_book.revision()?
+        };
         let mut stable = token.clone();
         for revision in [
             sent.rewrite_revision(),
             received.rewrite_revision(),
             files.rewrite_revision(),
-            file_book.revision()?,
+            file_revision,
             recovered
                 .as_ref()
                 .map(|r| r.revision())
@@ -185,7 +198,7 @@ impl Node {
             sent.conversation_revision(&conversation)?,
             received.conversation_revision(&conversation)?,
             files.conversation_revision(&conversation)?,
-            file_book.revision()?,
+            file_revision,
             recovered
                 .as_ref()
                 .map(|r| r.revision())
@@ -265,7 +278,7 @@ impl Node {
                     }
                     for header in page.rows {
                         after = Some(header.ordinal);
-                        if kind == FILES && !file_book.eligible_ordinal(header.ordinal)? {
+                        if kind == FILES && !file_eligible(header.ordinal)? {
                             continue;
                         }
                         if header.deadline.is_some_and(|d| d <= now) {
@@ -516,9 +529,7 @@ impl Node {
                     (row.plaintext, None, false)
                 }
                 RECEIVED | FILES => {
-                    if selector.source_kind == FILES
-                        && !file_book.eligible_ordinal(selector.ordinal)?
-                    {
+                    if selector.source_kind == FILES && !file_eligible(selector.ordinal)? {
                         continue;
                     }
                     let row = if selector.source_kind == RECEIVED {

@@ -392,6 +392,7 @@ impl IndexedFileBook {
                 }
             }
             let account = active(c)?;
+            super::historical::initialize_on(c)?;
             super::receiving::initialize_on(c, &account)?;
             // Only the initial account may import the old unnamespaced source.
             // A newly adopted account starts with no offers.
@@ -693,6 +694,88 @@ mod tests {
             )?;
             install_on(c, entry, original)
         }
+    }
+
+    #[test]
+    fn historical_file_eligibility_survives_adoption_without_current_offer_authority() {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        let (entry, original, manifest) = f.fixture(61);
+        let profile = f.book.profile.clone();
+        profile
+            .database()
+            .transaction(|c| Fixture::install(c, &entry, &original))
+            .unwrap();
+        let accepted = f.book.historical_offers_after(0, 1).unwrap();
+        assert_eq!(accepted.len(), 1);
+        let ordinal = accepted[0].ordinal;
+        assert_eq!(accepted[0].account, f.account.public().ed25519_pub);
+        assert_eq!(f.book.historical_revisions().unwrap(), (1, 0));
+        let adopted = Account::generate();
+        participant::prepare_adoption(profile.database(), &f.account.public(), &adopted.public())
+            .unwrap();
+        participant::finish_adoption(profile.database(), &adopted.public()).unwrap();
+        let current = IndexedFileBook::open(profile.clone()).unwrap();
+        assert!(!current.eligible_ordinal(ordinal).unwrap());
+        assert!(current.manifest(manifest.file_conv()).unwrap().is_none());
+        assert!(current.historical_eligible_ordinal(ordinal).unwrap());
+        assert!(matches!(
+            f.book.historical_revision(),
+            Err(LogError::StaleCursor)
+        ));
+        let failed: Result<(), LogError> = profile.database().transaction(|c| {
+            c.execute("DELETE FROM transcript_rows WHERE ordinal=?1", [ordinal])?;
+            Err(invalid("injected file retirement failure"))
+        });
+        assert!(failed.is_err());
+        assert!(current.historical_eligible_ordinal(ordinal).unwrap());
+        assert_eq!(current.historical_revisions().unwrap(), (1, 0));
+        profile
+            .database()
+            .transaction(|c| {
+                c.execute("DELETE FROM transcript_rows WHERE ordinal=?1", [ordinal])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!current.historical_eligible_ordinal(ordinal).unwrap());
+        assert_eq!(current.historical_revisions().unwrap(), (2, 2));
+        assert!(current.historical_offers_after(0, 128).unwrap().is_empty());
+    }
+
+    #[test]
+    fn historical_file_metadata_upgrade_keeps_existing_offers_as_initial_snapshot() {
+        let f = Fixture::new();
+        let (entry, original, _) = f.fixture(62);
+        let profile = f.book.profile.clone();
+        profile.database().transaction(|c|{
+            Fixture::install(c, &entry, &original)?;
+            c.execute_batch("DROP TRIGGER file_book_history_added; DROP TRIGGER file_book_history_removed; DROP TABLE file_book_offer_revisions; DROP TABLE file_book_history_state;")?;
+            Ok(())
+        }).unwrap();
+        let upgraded = IndexedFileBook::open(profile.clone()).unwrap();
+        let ordinal: i64 = profile
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT ordinal FROM transcript_rows WHERE kind=3 AND row_key=?1",
+                    [entry.event_id.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(upgraded.historical_eligible_ordinal(ordinal).unwrap());
+        assert_eq!(upgraded.historical_revisions().unwrap(), (0, 0));
+        assert!(upgraded.historical_offers_after(0, 128).unwrap().is_empty());
+        let (next, event, _) = f.fixture(63);
+        profile
+            .database()
+            .transaction(|c| Fixture::install(c, &next, &event))
+            .unwrap();
+        let page = upgraded.historical_offers_after(0, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].revision, 1);
+        assert_ne!(page[0].ordinal, ordinal);
+        assert!(upgraded.historical_offers_after(1, 1).unwrap().is_empty());
     }
 
     #[test]
@@ -1173,17 +1256,17 @@ mod tests {
             1234,
         );
         let adopted = Account::generate();
-        f.book
-            .profile
-            .database()
-            .transaction(|c| {
-                c.execute(
-                    "UPDATE participant_profile SET account=?1 WHERE singleton=1",
-                    [adopted.public().ed25519_pub.as_slice()],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        crate::storage::profile::participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &adopted.public(),
+        )
+        .unwrap();
+        crate::storage::profile::participant::finish_adoption(
+            f.book.profile.database(),
+            &adopted.public(),
+        )
+        .unwrap();
         let next =
             crate::node::reception_effects::ReceptionEffects::open(f.book.profile.clone()).unwrap();
         let next_head = next.head().unwrap();
