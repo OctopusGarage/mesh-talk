@@ -1,6 +1,13 @@
 use super::super::tests::{database, event};
 use super::*;
 use crate::identity::device::DeviceIdentity;
+fn stable_history_inputs() -> combined::HistoryInputStamp<'static> {
+    combined::HistoryInputStamp {
+        visibility: b"stable",
+        file_offers: 0,
+        file_identities: 0,
+    }
+}
 fn tiny() -> OrderWorkBudget {
     OrderWorkBudget {
         vertices: 1,
@@ -1301,11 +1308,11 @@ fn runtime_metadata_combined_history_append_failure_and_expiry_never_publish_par
     repo.history_add(&conv, first.job, row(1, 10), Some(20))
         .unwrap();
     ready(first.job);
-    repo.history_finish_inputs(&conv, first.job, b"stable", [1, 0, 0], 0)
+    repo.history_finish_inputs(&conv, first.job, stable_history_inputs(), [1, 0, 0], 0)
         .unwrap();
 
     let (append, prefix) = repo
-        .history_append_generation(&conv, b"two", b"stable", 0, None, None)
+        .history_append_generation(&conv, b"two", stable_history_inputs(), 0, None, None)
         .unwrap()
         .unwrap();
     assert_eq!(append.job, first.job);
@@ -1319,9 +1326,20 @@ fn runtime_metadata_combined_history_append_failure_and_expiry_never_publish_par
             .is_err()
     );
     assert!(
-        repo.history_append_generation(&conv, b"one", b"stable", 0, None, None)
-            .unwrap()
-            .is_none(),
+        repo.history_append_generation(
+            &conv,
+            b"one",
+            combined::HistoryInputStamp {
+                visibility: b"stable",
+                file_offers: 0,
+                file_identities: 0
+            },
+            0,
+            None,
+            None
+        )
+        .unwrap()
+        .is_none(),
         "reverting the source token cannot expose an interrupted append"
     );
     db.transaction(|c| {
@@ -1340,12 +1358,23 @@ fn runtime_metadata_combined_history_append_failure_and_expiry_never_publish_par
     repo.history_add(&conv, rebuilt.job, row(1, 10), Some(20))
         .unwrap();
     while !repo.history_order_step(rebuilt.job).unwrap().ready {}
-    repo.history_finish_inputs(&conv, rebuilt.job, b"stable", [1, 0, 0], 0)
+    repo.history_finish_inputs(&conv, rebuilt.job, stable_history_inputs(), [1, 0, 0], 0)
         .unwrap();
     assert!(
-        repo.history_append_generation(&conv, b"one", b"stable", 20, None, None)
-            .unwrap()
-            .is_none()
+        repo.history_append_generation(
+            &conv,
+            b"one",
+            combined::HistoryInputStamp {
+                visibility: b"stable",
+                file_offers: 0,
+                file_identities: 0
+            },
+            20,
+            None,
+            None
+        )
+        .unwrap()
+        .is_none()
     );
     let expired = repo.history_generation(&conv, b"one", 20, None).unwrap();
     assert_ne!(expired.job, rebuilt.job);
@@ -1384,7 +1413,7 @@ fn runtime_metadata_combined_history_prefix_reuses_signed_tail_and_rejects_retar
     repo.history_add(&conv, first.job, candidate(original.id, 100, 1), None)
         .unwrap();
     while !repo.history_order_step(first.job).unwrap().ready {}
-    repo.history_finish_inputs(&conv, first.job, b"stable", [0, 1, 0], 0)
+    repo.history_finish_inputs(&conv, first.job, stable_history_inputs(), [0, 1, 0], 0)
         .unwrap();
     let tail = event(&author, 2, vec![original.id], 101, EventKind::Message);
     repo.append(&tail).unwrap();
@@ -1393,7 +1422,7 @@ fn runtime_metadata_combined_history_prefix_reuses_signed_tail_and_rejects_retar
         .order_generation(&conv, CausalOrder::WallClock)
         .unwrap();
     let (append, prefix) = repo
-        .history_append_generation(&conv, b"two", b"stable", 0, signed, None)
+        .history_append_generation(&conv, b"two", stable_history_inputs(), 0, signed, None)
         .unwrap()
         .unwrap();
     assert_eq!(append.job, first.job);
@@ -1415,10 +1444,10 @@ fn runtime_metadata_combined_history_prefix_reuses_signed_tail_and_rejects_retar
             .collect::<Vec<_>>(),
         [original.id, tail.id, archive]
     );
-    repo.history_finish_inputs(&conv, append.job, b"stable", [0, 3, 0], 0)
+    repo.history_finish_inputs(&conv, append.job, stable_history_inputs(), [0, 3, 0], 0)
         .unwrap();
     let (retarget, prefix) = repo
-        .history_append_generation(&conv, b"retarget", b"stable", 0, signed, None)
+        .history_append_generation(&conv, b"retarget", stable_history_inputs(), 0, signed, None)
         .unwrap()
         .unwrap();
     let mut replacement = candidate(archive, 0, 4);

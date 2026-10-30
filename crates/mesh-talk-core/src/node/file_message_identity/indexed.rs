@@ -1,5 +1,7 @@
 //! Exact logical-file bindings on the participant connection; retained bundles
 //! and alias history never become a resident map.
+mod acceptance;
+
 use super::*;
 use crate::node::transcript_repository::{
     FILE_IDENTITIES, FILES, publication::PublishedHistorySource,
@@ -88,7 +90,8 @@ impl IndexedFileMessageIdentities {
                     c.execute_batch(SCHEMA)?;
                     c.execute("INSERT INTO file_identity_usage VALUES(1,0,0)", [])?;
                 }
-                manifest::validate_ddl(c, SCHEMA)
+                manifest::validate_ddl(c, SCHEMA)?;
+                acceptance::initialize_on(c)
             })?;
         let source = PublishedHistorySource::open(
             profile,
@@ -241,6 +244,7 @@ impl IndexedFileMessageIdentities {
                 ],
             )?;
         }
+        acceptance::insert_on(c, host, logical, count + 1)?;
         c.execute("UPDATE file_identity_usage SET identities=identities+1,aliases=aliases+?1 WHERE singleton=1",[identity.aliases.len() as i64])?;
         Ok(true)
     }
@@ -574,5 +578,279 @@ mod tests {
         assert_eq!(store.row_logical(&row).unwrap(), identity.logical);
         assert_eq!(store.page(None, 128).unwrap().len(), 1);
         assert_eq!(store.revision().unwrap(), 1);
+    }
+    #[test]
+    fn indexed_file_identity_acceptance_is_atomic_bounded_and_body_free() {
+        let root = tempfile::tempdir().unwrap();
+        let signer = DeviceIdentity::generate();
+        let account = Account::generate();
+        let target = Account::generate();
+        let profile = owner(root.path(), &signer, &account);
+        let path = root.path().join("file-message-identities.log");
+        let mut store =
+            IndexedFileMessageIdentities::from_profile(profile.clone(), &path, "pw").unwrap();
+        let host = fixture(&signer, &account, &target, 1).1.host();
+        for n in 1..=24 {
+            let (bundle, identity, _) = fixture(&signer, &account, &target, n);
+            store.insert(bundle, identity).unwrap();
+        }
+        let (bundle, identity, _) = fixture(&signer, &account, &Account::generate(), 50);
+        store.insert(bundle, identity).unwrap();
+        let (bundle, identity, _) = fixture(&signer, &account, &target, 24);
+        assert!(!store.insert(bundle, identity).unwrap());
+        profile.database().transaction(|c| {c.execute_batch("CREATE TEMP TRIGGER reject_acceptance BEFORE INSERT ON file_identity_acceptance BEGIN SELECT RAISE(ABORT,'acceptance interrupted'); END;")?;Ok(())}).unwrap();
+        let (bundle, identity, _) = fixture(&signer, &account, &target, 26);
+        assert!(store.insert(bundle.clone(), identity.clone()).is_err());
+        assert_eq!(store.revision().unwrap(), 25);
+        assert!(!store.contains(host, identity.logical).unwrap());
+        profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER reject_acceptance")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(store.insert(bundle, identity.clone()).unwrap());
+        profile
+            .database()
+            .transaction(|c| {
+                c.execute("UPDATE file_identity_bodies SET ciphertext=zeroblob(1)", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let page = store.accepted_page(host, 20, 24, 2).unwrap();
+        assert_eq!(
+            page.iter().map(|p| p.revision).collect::<Vec<_>>(),
+            [21, 22]
+        );
+        let page = store.accepted_page(host, 24, 26, 128).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].revision, 26);
+        assert_eq!(page[0].logical, identity.logical);
+        assert_eq!(
+            store.accepted_aliases(host, identity.logical).unwrap(),
+            identity.aliases
+        );
+        for (after, through, rows) in [(0, 26, 0), (0, 26, 129), (26, 25, 1), (0, u64::MAX, 1)] {
+            assert!(matches!(
+                store.accepted_page(host, after, through, rows),
+                Err(LogError::InvalidPageBudget)
+            ));
+        }
+        drop(store);
+        drop(profile);
+        let profile = owner(root.path(), &signer, &account);
+        crate::storage::record_log::frame_observations::reset();
+        let store = IndexedFileMessageIdentities::from_profile(profile, &path, "pw").unwrap();
+        assert_eq!(
+            crate::storage::record_log::frame_observations::maximum_capacity(),
+            0
+        );
+        assert_eq!(
+            store.accepted_page(host, 24, 26, 128).unwrap()[0].logical,
+            identity.logical
+        );
+    }
+
+    #[test]
+    fn indexed_file_identity_acceptance_upgrade_uses_metadata_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        let signer = DeviceIdentity::generate();
+        let account = Account::generate();
+        let target = Account::generate();
+        let profile = owner(root.path(), &signer, &account);
+        let path = root.path().join("file-message-identities.log");
+        let mut store =
+            IndexedFileMessageIdentities::from_profile(profile.clone(), &path, "pw").unwrap();
+        let (bundle, identity, _) = fixture(&signer, &account, &target, 1);
+        let host = identity.host();
+        store.insert(bundle, identity).unwrap();
+        profile.database().transaction(|c|{c.execute_batch("DROP TABLE file_identity_acceptance; UPDATE file_identity_bodies SET ciphertext=zeroblob(1)")?;Ok(())}).unwrap();
+        drop(store);
+        drop(profile);
+        let profile = owner(root.path(), &signer, &account);
+        let mut store = IndexedFileMessageIdentities::from_profile(profile, &path, "pw").unwrap();
+        assert_eq!(store.revision().unwrap(), 1);
+        assert!(store.accepted_page(host, 0, 1, 128).unwrap().is_empty());
+        let (bundle, identity, _) = fixture(&signer, &account, &target, 2);
+        store.insert(bundle, identity).unwrap();
+        assert_eq!(store.accepted_page(host, 0, 2, 128).unwrap()[0].revision, 2);
+    }
+
+    #[test]
+    fn indexed_file_identity_history_append_reuses_prior_metadata() {
+        use crate::discovery::Roster;
+        use crate::node::transcript_repository::take_header_reads_for_test;
+        use std::sync::Mutex;
+        let root = tempfile::tempdir().unwrap();
+        let signer = DeviceIdentity::generate();
+        let secrets = signer.secret_bytes();
+        let account = Account::generate();
+        let target = Account::generate();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open_with_account(
+            DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+            Account::from_secret_bytes(account.secret_bytes()),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &root.path().join("events.log"),
+            &root.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        let append = |n: u8, bind: bool, proof: bool| {
+            let (_, mut identity, mut row) = fixture(&signer, &account, &target, n);
+            let original = Event::new(
+                &signer,
+                ConversationId::new([251; 32]),
+                u64::from(n),
+                vec![],
+                u64::from(n),
+                u64::from(n),
+                EventKind::FileManifest,
+                vec![n; 64],
+            );
+            row.event_id = original.id;
+            row.wall_clock = original.wall_clock;
+            identity.logical = if bind {
+                original.id
+            } else {
+                EventId::new([250; 32])
+            };
+            identity.aliases = if bind {
+                vec![original.id]
+            } else {
+                vec![identity.logical, original.id]
+            };
+            let mut body = PREFIX.to_vec();
+            body.extend(bincode::serialize(&identity).unwrap());
+            let bundle = Event::new(
+                &signer,
+                scope(identity.logical),
+                1,
+                vec![],
+                1,
+                original.wall_clock,
+                EventKind::Message,
+                body,
+            );
+            if bind {
+                node.file_message_identities
+                    .lock()
+                    .unwrap()
+                    .insert(bundle.clone(), identity.clone())
+                    .unwrap();
+            }
+            if proof {
+                node.received_files
+                    .lock()
+                    .unwrap()
+                    .record_file_with_reception(&row, Some(&original), None)
+                    .unwrap();
+            } else {
+                // A retained card is not authority. Later proof acceptance must
+                // reproject this old ordinal even though its bytes are unchanged.
+                node.received_files
+                    .lock()
+                    .unwrap()
+                    .record_file_alias_durable(&row)
+                    .unwrap();
+            }
+            (original, bundle, identity, row)
+        };
+        for n in 1..=128 {
+            append(n, true, true);
+        }
+        assert_eq!(
+            node.account_history(&target.account_id(), 50)
+                .unwrap()
+                .len(),
+            50
+        );
+        take_header_reads_for_test();
+        let appended = append(129, true, true).0.id;
+        let recent = node.account_history(&target.account_id(), 50).unwrap();
+        let examined = take_header_reads_for_test();
+        assert_eq!(recent.len(), 50);
+        assert_eq!(recent.last().unwrap().id, appended);
+        assert_eq!(recent.first().unwrap().wall_clock, 80);
+        assert!(
+            examined <= 16,
+            "one accepted file binding must not rescan128 historical headers (examined {examined})"
+        );
+        let (original, bundle, identity, _) = append(130, false, true);
+        assert_eq!(
+            node.account_history(&target.account_id(), 50)
+                .unwrap()
+                .last()
+                .unwrap()
+                .id,
+            original.id
+        );
+        node.file_message_identities
+            .lock()
+            .unwrap()
+            .insert(bundle, identity.clone())
+            .unwrap();
+        let retargeted = node.account_history(&target.account_id(), 50).unwrap();
+        assert_eq!(retargeted.last().unwrap().id, identity.logical);
+        assert!(!retargeted.iter().any(|row| row.id == original.id));
+
+        let (original, _, _, row) = append(131, true, false);
+        assert!(
+            !node
+                .account_history(&target.account_id(), 50)
+                .unwrap()
+                .iter()
+                .any(|row| row.id == original.id)
+        );
+        node.received_files
+            .lock()
+            .unwrap()
+            .record_file_with_reception(&row, Some(&original), None)
+            .unwrap();
+        assert_eq!(
+            node.account_history(&target.account_id(), 50)
+                .unwrap()
+                .last()
+                .unwrap()
+                .id,
+            original.id
+        );
+        take_header_reads_for_test();
+        let next = append(132, true, true).0.id;
+        assert_eq!(
+            node.account_history(&target.account_id(), 50)
+                .unwrap()
+                .last()
+                .unwrap()
+                .id,
+            next
+        );
+        assert!(
+            take_header_reads_for_test() <= 16,
+            "safe FILES tails resume after a required rebuild"
+        );
+        // Explicit retained-host history has its own visibility gate. It uses
+        // the same append proof without inheriting the active account route.
+        node.history(row.conversation, 50).unwrap();
+        take_header_reads_for_test();
+        let next = append(133, true, true).0.id;
+        assert_eq!(
+            node.history(row.conversation, 50)
+                .unwrap()
+                .last()
+                .unwrap()
+                .id,
+            next
+        );
+        assert!(
+            take_header_reads_for_test() <= 16,
+            "explicit host history also reuses a safe FILES prefix"
+        );
     }
 }
