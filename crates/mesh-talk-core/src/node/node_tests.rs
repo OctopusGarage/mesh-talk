@@ -12281,7 +12281,9 @@ fn participant_event_growth_reads_owned_bodies_and_preserves_finite_network_view
 
 #[test]
 fn participant_network_pages_do_not_rescan_unchanged_history() {
-    use crate::eventlog::sync::network::{ExportPageBudget, IdPageBudget, NetworkSyncStore};
+    use crate::eventlog::sync::network::{
+        ExportPageBudget, IdPageBudget, NetworkSyncStore, PreparationBudget,
+    };
     for count in [16_u64, 64, 600] {
         let directory = tempfile::tempdir().unwrap();
         let identity = DeviceIdentity::generate();
@@ -12323,6 +12325,10 @@ fn participant_network_pages_do_not_rescan_unchanged_history() {
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
         let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        while !NetworkSyncStore::prepare_view_step(&*store, &view, PreparationBudget::default())
+            .unwrap()
+            .ready
+        {}
         let reads = || {
             node.log
                 .lock()
@@ -12360,6 +12366,19 @@ fn participant_network_pages_do_not_rescan_unchanged_history() {
         );
         for _ in 0..2 {
             let before = reads();
+            while !NetworkSyncStore::reset_export_step(&*store, &view, PreparationBudget::default())
+                .unwrap()
+                .ready
+            {}
+            while !NetworkSyncStore::prepare_export_step(
+                &*store,
+                &view,
+                &Default::default(),
+                PreparationBudget::default(),
+            )
+            .unwrap()
+            .ready
+            {}
             let mut cursor = None;
             let mut exported = Vec::new();
             loop {
@@ -12416,6 +12435,14 @@ fn participant_network_pages_do_not_rescan_unchanged_history() {
             "drop performs one bounded cleanup step"
         );
         let replacement = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        while !NetworkSyncStore::prepare_view_step(
+            &*store,
+            &replacement,
+            PreparationBudget::default(),
+        )
+        .unwrap()
+        .ready
+        {}
         assert_eq!(
             node.log
                 .lock()

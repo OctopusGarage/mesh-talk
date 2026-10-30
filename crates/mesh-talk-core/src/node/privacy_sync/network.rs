@@ -1,49 +1,48 @@
 //! Production participant network adapter. A finite authorization selection lives
 //! in the encrypted profile DB; unchanged pages only check scalar revisions.
-//! The initial authority reducer remains an explicit temporary history collector.
+//! Preparation advances bounded header/edge pages and yields in the session owner.
 use super::*;
 use crate::eventlog::{
-    repository::{
-        network::{ExportCursor, HaveCursor, NetworkView},
-        selection::Selection,
-    },
+    repository::network::{ExportCursor, HaveCursor, NetworkView},
     sync::{
         FileConsentStatus,
         network::{
-            ExportPage, ExportPageBudget, IdPageBudget, NetworkSyncStore, SyncMetadata, SyncPage,
+            ExportPage, ExportPageBudget, IdPageBudget, NetworkSyncStore, PreparationBudget,
+            PreparationStep, SyncMetadata, SyncPage,
         },
     },
 };
 use std::sync::{Mutex, atomic::Ordering};
 
 #[derive(Clone, PartialEq, Eq)]
-struct Policy {
+pub(super) struct Policy {
     privacy_generation: u64,
     pending: [u8; 32],
-    outbound: ([bool; 3], u64),
+    pub(super) network_paused: bool,
+    pub(super) sibling: bool,
+    device_policy: u64,
 }
 #[derive(Clone, PartialEq, Eq)]
 struct Observation {
     source: i64,
-    roster: u64,
+    destructive_policy: i64,
+    roster: Option<[u8; 32]>,
     proofs: Option<u64>,
-    file_scopes: u64,
+    file_scopes: (u64, (u64, u64)),
+    controls: Option<[i64; 32]>,
     delivery_controls: u64,
     established: Option<[u8; 32]>,
 }
 pub(in crate::node) struct ParticipantView {
-    conversation: ConversationId,
-    repository: NetworkView,
-    selection: Selection,
-    policy: Policy,
+    pub(super) conversation: ConversationId,
+    pub(super) repository: NetworkView,
+    pub(super) preparation: Mutex<super::principal::Preparation>,
+    pub(super) policy: Policy,
     observed: Mutex<Observation>,
-    visible: [u8; 32],
-    metadata: SyncMetadata,
     // Staged invitations already have an 8 MiB owner budget.
-    pending: Vec<EventId>,
+    pub(super) pending: Vec<EventId>,
     export_have: Mutex<Option<[u8; 32]>>,
     sibling_closure: bool,
-    own_closure: bool,
 }
 #[derive(Clone)]
 pub(in crate::node) enum ParticipantHaveCursor {
@@ -60,16 +59,17 @@ impl GuardedSyncStore<'_> {
         Ok(Policy {
             privacy_generation: self.node.privacy.generation.load(Ordering::SeqCst),
             pending: crate::eventlog::sync::fingerprint(self.pending_ids(conversation)),
-            outbound: (
-                [
-                    self.node.shares_replica(conversation)?,
-                    self.node
-                        .restricts_group_file_replica(conversation, &self.peer)?,
-                    self.node.certified_sibling(&self.peer),
-                ],
-                self.node.device_sync_policy_snapshot().1,
-            ),
+            network_paused: self.node.group_file_sharing_status().paused,
+            sibling: self.node.certified_sibling(&self.peer),
+            device_policy: self.node.device_sync_policy_snapshot().1,
         })
+    }
+    fn policy_unchanged(&self, conversation: &ConversationId, policy: &Policy) -> bool {
+        self.node.privacy.generation.load(Ordering::SeqCst) == policy.privacy_generation
+            && crate::eventlog::sync::fingerprint(self.pending_ids(conversation)) == policy.pending
+            && self.node.device_sync_policy_snapshot().1 == policy.device_policy
+            && self.node.certified_sibling(&self.peer) == policy.sibling
+            && self.node.group_file_sharing_status().paused == policy.network_paused
     }
     fn network_observation(&self, conversation: &ConversationId) -> Result<Observation, LogError> {
         let established = self
@@ -101,13 +101,28 @@ impl GuardedSyncStore<'_> {
             .expect("log lock")
             .repository()?
             .source_revision()?;
-        let roster = *self
+        let destructive_policy = self
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .destructive_policy_revision()?;
+        let roster = self
             .node
             .roster
             .lock()
             .expect("roster lock")
-            .subscribe_changes()
-            .borrow();
+            .historical_announcement(&self.peer)
+            .map(|proof| {
+                use sha2::{Digest, Sha256};
+                // Route/last-seen heartbeats are not authorization changes. Capture
+                // the exact bounded authenticated proof used by this principal.
+                bincode::serialize(proof)
+                    .map(|bytes| Sha256::digest(bytes).into())
+                    .map_err(|error| LogError::Serialization(error.to_string()))
+            })
+            .transpose()?;
         let proofs = self
             .node
             .privacy
@@ -122,13 +137,39 @@ impl GuardedSyncStore<'_> {
             .lock()
             .expect("control ids lock")
             .revision();
-        let file_scopes = self.node.privacy.projection_revision.load(Ordering::SeqCst);
+        let file_scopes = (
+            self.node.privacy.projection_revision.load(Ordering::SeqCst),
+            self.node.file_scope_revision()?,
+        );
+        let controls = self
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .raw_policy_revisions()?
+            .map(|mut revisions| {
+                for kind in [
+                    EventKind::Message,
+                    EventKind::Edit,
+                    EventKind::Delete,
+                    EventKind::React,
+                    EventKind::ReadMarker,
+                    EventKind::FileManifest,
+                    EventKind::Profile,
+                ] {
+                    revisions[kind as usize] = -1;
+                }
+                revisions
+            });
         Ok(Observation {
             source,
+            destructive_policy,
             roster,
             proofs,
             delivery_controls,
             file_scopes,
+            controls,
             established,
         })
     }
@@ -156,133 +197,85 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             self.node.log.lock().expect("log lock").repository()?,
             conversation,
         )?;
-        let events = self.visible_projection(conversation, false)?;
         let pending = self.pending_ids(conversation);
-        let visible = crate::eventlog::sync::fingerprint(events.iter().map(|e| e.id).collect());
-        let mut metadata = SyncMetadata {
-            count: (events.len() + pending.len()) as u64,
-            ..Default::default()
-        };
-        for event in events.iter().chain(
-            self.pending_channels
-                .get(conversation)
-                .into_iter()
-                .flat_map(|p| p.events.iter()),
-        ) {
-            metadata.channel_v2 |= event.kind == EventKind::ChannelReplica;
-            metadata.channel_v3 |= matches!(
-                event.kind,
-                EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory
-            );
-            metadata.channel_v4 |= matches!(
-                event.kind,
-                EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance
-            );
-        }
-        metadata.fingerprint = Some(crate::eventlog::sync::fingerprint(
-            events
-                .iter()
-                .map(|e| e.id)
-                .chain(pending.iter().copied())
-                .collect(),
-        ));
-        let own = self.node.identity.public().ed25519_pub;
-        let device_policy = self.node.device_sync_policy();
-        let selection = self
-            .node
-            .log
-            .lock()
-            .expect("log lock")
-            .repository()?
-            .create_selection(
-                &repository,
-                &events,
-                super::super::session_pool::MAX_TCP_CONNECTIONS,
-                |event| {
-                    let own = event.author.ed25519_pub() == &own;
-                    let selected = match event.kind {
-                        EventKind::Message => device_policy.history,
-                        EventKind::FileManifest => device_policy.attachments,
-                        _ => true,
-                    };
-                    (
-                        !self.pull_only && (!policy.outbound.0[1] || own),
-                        selected,
-                        own,
-                    )
-                },
-            )?;
-        if policy != self.network_policy(conversation)?
-            || observed != self.network_observation(conversation)?
-        {
-            return Err(LogError::StaleCursor);
-        }
-        let sibling_closure = policy.outbound.0[2]
+        let sibling_closure = policy.sibling
             && *conversation
                 == super::super::conversation::dm_conversation_id(
                     &self.node.identity.public(),
                     &self.peer,
                 );
-        let own_closure = !self.inbound && !policy.outbound.0[0];
         Ok(ParticipantView {
             conversation: *conversation,
             repository,
-            selection,
+            preparation: Mutex::new(super::principal::Preparation::default()),
             policy,
             observed: Mutex::new(observed),
-            visible,
-            metadata,
             pending,
             export_have: Mutex::new(None),
             sibling_closure,
-            own_closure,
         })
+    }
+    fn prepare_view_step(
+        &self,
+        view: &Self::View,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        self.validate_view(view)?;
+        let before = self.network_observation(&view.conversation)?;
+        let step = {
+            let mut preparation = view.preparation.lock().expect("view preparation lock");
+            preparation.step(self, view, budget)?
+        };
+        let after = self.network_observation(&view.conversation)?;
+        let mut expected = before;
+        // Bounded cold metadata backfill changes only derived kind readiness.
+        expected.controls = after.controls;
+        if expected != after || !self.policy_unchanged(&view.conversation, &view.policy) {
+            return Err(LogError::StaleCursor);
+        }
+        if step.ready {
+            *view.observed.lock().expect("view observation lock") = after;
+        }
+        Ok(step)
     }
     fn validate_view(&self, view: &Self::View) -> Result<(), LogError> {
         NetworkSyncStore::validate_view(
             self.node.log.lock().expect("log lock").repository()?,
             &view.repository,
         )?;
-        if self.network_policy(&view.conversation)? != view.policy {
+        if !self.policy_unchanged(&view.conversation, &view.policy) {
             return Err(LogError::StaleCursor);
         }
         let current = self.network_observation(&view.conversation)?;
+        let ready = view
+            .preparation
+            .lock()
+            .expect("view preparation lock")
+            .ready();
         let mut observed = view.observed.lock().expect("view observation lock");
-        if *observed != current {
-            let events = self.visible_projection(&view.conversation, false)?;
-            // Raw repository capability flags may include rejected controls.
-            // Bind negotiated support to this principal's fresh authorization too.
-            let v4 = view.metadata.channel_v4;
-            let v3 = v4 || view.metadata.channel_v3;
-            let v2 = v3 || view.metadata.channel_v2;
-            if events.iter().any(|event| match event.kind {
-                EventKind::ChannelReplica => !v2,
-                EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory => !v3,
-                EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance => !v4,
-                _ => false,
-            }) {
-                return Err(LogError::StaleCursor);
-            }
-            let ids = self
-                .node
-                .log
-                .lock()
-                .expect("log lock")
-                .repository()?
-                .finite_ids(&view.repository, &events)?;
-            if crate::eventlog::sync::fingerprint(ids) != view.visible
-                || self.network_policy(&view.conversation)? != view.policy
-                || self.network_observation(&view.conversation)? != current
-            {
-                return Err(LogError::StaleCursor);
-            }
+        let mut expected = observed.clone();
+        if ready {
+            // Ordinary appends preserve the finite cutoff. Raw control changes,
+            // including rejected controls, and all mutable policy owners do not.
+            expected.source = current.source;
+        } else {
+            expected.controls = current.controls;
+        }
+        if expected != current {
+            return Err(LogError::StaleCursor);
+        }
+        if ready {
             *observed = current;
         }
         Ok(())
     }
     fn metadata(&self, view: &Self::View) -> Result<SyncMetadata, LogError> {
         self.validate_view(view)?;
-        Ok(view.metadata)
+        let preparation = view.preparation.lock().expect("view preparation lock");
+        if !preparation.ready() {
+            return Err(LogError::StaleCursor);
+        }
+        Ok(preparation.metadata)
     }
     fn have_page(
         &self,
@@ -312,13 +305,23 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             None => None,
             Some(ParticipantHaveCursor::Pending(_)) => unreachable!(),
         };
-        let page = self
-            .node
-            .log
-            .lock()
-            .expect("log lock")
-            .repository()?
-            .selected_have_page(&view.selection, &view.repository, retained_after, budget)?;
+        let page = {
+            let preparation = view.preparation.lock().expect("view preparation lock");
+            if !preparation.ready() {
+                return Err(LogError::StaleCursor);
+            }
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_have_page(
+                    preparation.selection()?,
+                    &view.repository,
+                    retained_after,
+                    budget,
+                )?
+        };
         let next = page
             .next
             .map(ParticipantHaveCursor::Retained)
@@ -329,6 +332,64 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             examined: page.examined,
             next,
         })
+    }
+    fn reset_export_step(
+        &self,
+        view: &Self::View,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        self.validate_view(view)?;
+        *view.export_have.lock().expect("view export lock") = None;
+        let preparation = view.preparation.lock().expect("view preparation lock");
+        if !preparation.ready() {
+            return Err(LogError::StaleCursor);
+        }
+        self.node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .reset_selected_export_step(preparation.selection()?, &view.repository, budget)
+    }
+    fn stage_export_have(&self, view: &Self::View, ids: &[EventId]) -> Result<(), LogError> {
+        self.validate_view(view)?;
+        let preparation = view.preparation.lock().expect("view preparation lock");
+        self.node
+            .log
+            .lock()
+            .expect("log lock")
+            .repository()?
+            .stage_selected_have(preparation.selection()?, &view.repository, ids)
+    }
+    fn prepare_export_step(
+        &self,
+        view: &Self::View,
+        have: &HashSet<EventId>,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        self.validate_view(view)?;
+        let step = {
+            let preparation = view.preparation.lock().expect("view preparation lock");
+            self.node
+                .log
+                .lock()
+                .expect("log lock")
+                .repository()?
+                .selected_export_step(
+                    preparation.selection()?,
+                    &view.repository,
+                    view.sibling_closure,
+                    !self.inbound && !preparation.replica_shared,
+                    budget,
+                )?
+        };
+        self.validate_view(view)?;
+        if step.ready {
+            *view.export_have.lock().expect("view export lock") = Some(
+                crate::eventlog::sync::fingerprint(have.iter().copied().collect()),
+            );
+        }
+        Ok(step)
     }
     fn export_page(
         &self,
@@ -345,24 +406,13 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         if after.is_some_and(|cursor| cursor.have != fingerprint) {
             return Err(LogError::StaleCursor);
         }
-        let mut prepared = view.export_have.lock().expect("view export lock");
+        let preparation = view.preparation.lock().expect("view preparation lock");
+        if !preparation.ready() {
+            return Err(LogError::StaleCursor);
+        }
+        let prepared = view.export_have.lock().expect("view export lock");
         if *prepared != Some(fingerprint) {
-            // Mark dirty before work: a failed rebuild can never reuse partial flags.
-            *prepared = None;
-            self.node
-                .log
-                .lock()
-                .expect("log lock")
-                .repository()?
-                .prepare_selected_export(
-                    &view.selection,
-                    &view.repository,
-                    have,
-                    view.sibling_closure,
-                    view.own_closure,
-                )?;
-            self.validate_view(view)?;
-            *prepared = Some(fingerprint);
+            return Err(LogError::StaleCursor);
         }
         let page = self
             .node
@@ -371,12 +421,14 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             .expect("log lock")
             .repository()?
             .selected_export_page(
-                &view.selection,
+                preparation.selection()?,
                 &view.repository,
                 have,
                 after.map(|a| &a.retained),
                 budget,
             )?;
+        drop(prepared);
+        drop(preparation);
         self.validate_view(view)?;
         Ok(ExportPage {
             events: page.events,
@@ -440,6 +492,20 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
 }
 
 #[cfg(test)]
+fn open_prepared(store: &GuardedSyncStore<'_>, conversation: &ConversationId) -> ParticipantView {
+    let view = NetworkSyncStore::open_view(store, conversation).unwrap();
+    for _ in 0..100_000 {
+        if NetworkSyncStore::prepare_view_step(store, &view, PreparationBudget::default())
+            .unwrap()
+            .ready
+        {
+            return view;
+        }
+    }
+    panic!("participant preparation did not terminate");
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -448,11 +514,36 @@ mod tests {
         identity::{account::Account, device::DeviceIdentity},
     };
 
+    fn prepare_export(
+        store: &GuardedSyncStore<'_>,
+        view: &ParticipantView,
+        have: &HashSet<EventId>,
+    ) {
+        while !NetworkSyncStore::reset_export_step(store, view, PreparationBudget::default())
+            .unwrap()
+            .ready
+        {}
+        let ids: Vec<_> = have.iter().copied().collect();
+        for ids in ids.chunks(64) {
+            NetworkSyncStore::stage_export_have(store, view, ids).unwrap();
+        }
+        while !NetworkSyncStore::prepare_export_step(
+            store,
+            view,
+            have,
+            PreparationBudget::default(),
+        )
+        .unwrap()
+        .ready
+        {}
+    }
+
     fn collect(
         store: &GuardedSyncStore<'_>,
         view: &ParticipantView,
         have: &HashSet<EventId>,
     ) -> Vec<EventId> {
+        prepare_export(store, view, have);
         let mut after = None;
         let mut result = Vec::new();
         loop {
@@ -476,6 +567,466 @@ mod tests {
             }
         }
         result
+    }
+
+    #[tokio::test]
+    async fn participant_network_wide_parent_preparation_honors_small_byte_turns() {
+        let directory = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &account, "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            account,
+            &proof,
+        );
+        node.configure_privacy(
+            directory.path(),
+            "pw",
+            &node.own_group_proof(),
+            std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .proofs
+            .record(&proof)
+            .unwrap();
+        node.set_invisible(true).await.unwrap();
+        node.account_devices
+            .lock()
+            .unwrap()
+            .insert(super::super::super::account_devices::AccountDevice {
+                public: peer.public(),
+                certificate: node.account.certify(&peer.public().ed25519_pub),
+            })
+            .unwrap();
+        node.set_device_sync_category(crate::node::SyncCategory::History, false)
+            .unwrap();
+        node.set_device_sync_category(crate::node::SyncCategory::Attachments, true)
+            .unwrap();
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let mut parents = Vec::new();
+        for seq in 1..=1025 {
+            let event = Event::new(
+                &node.identity,
+                conversation,
+                seq,
+                vec![],
+                seq,
+                0,
+                EventKind::Message,
+                vec![1],
+            );
+            parents.push(event.id);
+            node.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        let child = Event::new(
+            &node.identity,
+            conversation,
+            1026,
+            parents.clone(),
+            1026,
+            0,
+            EventKind::FileManifest,
+            vec![2],
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(child.clone())
+            .unwrap();
+        let counts = || {
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts()
+        };
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        assert!(
+            node.privacy
+                .state
+                .read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .policy
+                .snapshot()
+                .invisible,
+            "exercise private parent authorization before export closure"
+        );
+        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let budget = PreparationBudget {
+            rows: 7,
+            edges: 11,
+            bytes: 512,
+        };
+        let bounded = |step: PreparationStep| {
+            assert!(
+                step.rows <= budget.rows
+                    && step.edges <= budget.edges
+                    && step.bytes <= budget.bytes,
+                "every rejected or admitted edge must fit the turn: {step:?}"
+            );
+            step.ready
+        };
+        let before = counts();
+        let mut prepared = false;
+        for _ in 0..20_000 {
+            if bounded(NetworkSyncStore::prepare_view_step(&*store, &view, budget).unwrap()) {
+                prepared = true;
+                break;
+            }
+        }
+        assert!(
+            prepared,
+            "wide legal parent lists must retain resumable progress"
+        );
+        assert_eq!(
+            NetworkSyncStore::metadata(&*store, &view).unwrap().count,
+            1026
+        );
+        assert_eq!(counts(), before);
+        for count in [1024, 1025] {
+            let have: HashSet<_> = parents[..count].iter().copied().collect();
+            loop {
+                let reset = NetworkSyncStore::reset_export_step(
+                    &*store,
+                    &view,
+                    PreparationBudget {
+                        bytes: 64,
+                        ..budget
+                    },
+                )
+                .unwrap();
+                assert!(
+                    reset.rows <= 2 && reset.bytes <= 64,
+                    "replacing peer Have uses the same finite byte admission: {reset:?}"
+                );
+                if reset.ready {
+                    break;
+                }
+            }
+            for ids in parents[..count].chunks(64) {
+                NetworkSyncStore::stage_export_have(&*store, &view, ids).unwrap();
+            }
+            let before = counts();
+            assert!(
+                matches!(
+                    NetworkSyncStore::prepare_export_step(
+                        &*store,
+                        &view,
+                        &have,
+                        PreparationBudget {
+                            bytes: 63,
+                            ..budget
+                        }
+                    ),
+                    Err(LogError::PageBudgetTooSmall { required: 64 })
+                ),
+                "a budget that cannot examine one edge must fail instead of spinning"
+            );
+            let mut edge_turns = 0;
+            let mut ready = false;
+            for _ in 0..20_000 {
+                let step =
+                    NetworkSyncStore::prepare_export_step(&*store, &view, &have, budget).unwrap();
+                edge_turns += usize::from(step.edges > 0);
+                if bounded(step) {
+                    ready = true;
+                    break;
+                }
+            }
+            assert!(ready);
+            assert!(
+                edge_turns > 100,
+                "one wide vertex must yield between edge pages"
+            );
+            assert_eq!(counts(), before, "Have closure reads no Event bodies");
+            let mut cursor = None;
+            let mut exported = Vec::new();
+            loop {
+                let page = NetworkSyncStore::export_page(
+                    &*store,
+                    &view,
+                    &have,
+                    cursor.as_ref(),
+                    ExportPageBudget {
+                        examined: 64,
+                        events: 1,
+                        encoded_bytes: 65536,
+                        allocated_bytes: 262144,
+                    },
+                )
+                .unwrap();
+                exported.extend(page.events.into_iter().map(|event| event.id));
+                cursor = page.next;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(
+                exported,
+                if count == 1025 {
+                    vec![child.id]
+                } else {
+                    vec![]
+                },
+                "the last required Have parent decides export without losing the candidate"
+            );
+        }
+    }
+
+    #[test]
+    fn participant_network_open_defers_history_work_at_increasing_sizes() {
+        for count in [128, 512] {
+            let directory = tempfile::tempdir().unwrap();
+            let peer = DeviceIdentity::generate();
+            let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+            let (node, _, _) = super::super::super::test_support::node_with_files(
+                directory.path(),
+                DeviceIdentity::generate(),
+                Account::generate(),
+                &proof,
+            );
+            let conversation = super::super::super::conversation::dm_conversation_id(
+                &node.identity.public(),
+                &peer.public(),
+            );
+            for seq in 1..=count {
+                let event = Event::new(
+                    &node.identity,
+                    conversation,
+                    seq,
+                    vec![],
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![7; 2048],
+                );
+                node.log.lock().unwrap().append_durable(event).unwrap();
+            }
+            let counts = || {
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .body_read_counts()
+            };
+            let owner = node.sync_store(&peer.public());
+            let store = owner.lock().unwrap();
+            let before = counts();
+            let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+            assert_eq!(
+                counts(),
+                before,
+                "opening {count} retained messages must only capture scalar context; bounded preparation belongs to session turns"
+            );
+            let mut turns = 0;
+            let mut reloaded = false;
+            loop {
+                let budget = PreparationBudget::default();
+                let step = NetworkSyncStore::prepare_view_step(&*store, &view, budget).unwrap();
+                assert!(
+                    step.rows <= budget.rows
+                        && step.edges <= budget.edges
+                        && step.bytes <= budget.bytes,
+                    "every preparation turn must honor work budgets: {step:?}"
+                );
+                turns += 1;
+                if !reloaded && !step.ready && view.preparation.lock().unwrap().metadata.count > 0 {
+                    view.preparation
+                        .lock()
+                        .unwrap()
+                        .discard_transient_preparation();
+                    reloaded = true;
+                }
+                if step.ready {
+                    break;
+                }
+                assert!(turns < 20 * count, "preparation must make finite progress");
+            }
+            assert!(turns >= count / 64);
+            assert!(
+                reloaded,
+                "exercise a real durable-cursor resume before readiness"
+            );
+            assert_eq!(
+                NetworkSyncStore::metadata(&*store, &view).unwrap().count,
+                count
+            );
+            assert_eq!(
+                counts(),
+                before,
+                "ordinary message preparation must only read headers"
+            );
+        }
+    }
+
+    #[test]
+    fn participant_network_preparation_recovers_committed_row_before_cursor_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        let mut expected = Vec::new();
+        for seq in 1..=8 {
+            let event = Event::new(
+                &node.identity,
+                conversation,
+                seq,
+                vec![],
+                seq,
+                0,
+                EventKind::Message,
+                vec![1; 2048],
+            );
+            expected.push(event.id);
+            node.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let single_row = PreparationBudget {
+            rows: 1,
+            ..PreparationBudget::default()
+        };
+        for _ in 0..100 {
+            NetworkSyncStore::prepare_view_step(&*store, &view, single_row).unwrap();
+            if view.preparation.lock().unwrap().metadata.count == 1 {
+                break;
+            }
+        }
+        assert_eq!(view.preparation.lock().unwrap().metadata.count, 1);
+        node.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TEMP TRIGGER test_fail_selection_progress BEFORE UPDATE ON participant_sync_progress BEGIN SELECT RAISE(ABORT,'injected selection cursor failure'); END;")?;
+            Ok(())
+        }).unwrap();
+        assert!(NetworkSyncStore::prepare_view_step(&*store, &view, single_row).is_err());
+        assert_eq!(
+            node.storage
+                .database()
+                .read(|c| {
+                    c.query_row("SELECT count(*) FROM participant_sync_rows", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(Into::into)
+                })
+                .unwrap(),
+            2,
+            "the selected row commits before the injected cursor-save failure"
+        );
+        assert!(
+            !view.preparation.lock().unwrap().ready(),
+            "failed cursor save cannot publish a ready view"
+        );
+        node.storage
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER test_fail_selection_progress")?;
+                Ok(())
+            })
+            .unwrap();
+        for _ in 0..100 {
+            if NetworkSyncStore::prepare_view_step(&*store, &view, PreparationBudget::default())
+                .unwrap()
+                .ready
+            {
+                break;
+            }
+        }
+        assert_eq!(NetworkSyncStore::metadata(&*store, &view).unwrap().count, 8);
+        assert_eq!(collect(&store, &view, &HashSet::new()), expected);
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        let ordinary = Event::new(
+            &node.identity,
+            conversation,
+            9,
+            vec![],
+            9,
+            0,
+            EventKind::Message,
+            vec![1],
+        );
+        node.log.lock().unwrap().append_durable(ordinary).unwrap();
+        node.roster
+            .lock()
+            .unwrap()
+            .update(&proof, "127.0.0.9".parse().unwrap(), &node.user_id());
+        NetworkSyncStore::validate_view(&*store, &view).unwrap();
+        assert_eq!(
+            NetworkSyncStore::metadata(&*store, &view).unwrap().count,
+            8,
+            "ordinary append preserves the finite cutoff"
+        );
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before
+        );
+        let preparing = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        NetworkSyncStore::prepare_view_step(&*store, &preparing, PreparationBudget::default())
+            .unwrap();
+        let changed = Event::new(
+            &node.identity,
+            conversation,
+            10,
+            vec![],
+            10,
+            0,
+            EventKind::ChannelReplica,
+            vec![0],
+        );
+        node.log.lock().unwrap().append_durable(changed).unwrap();
+        assert!(matches!(
+            NetworkSyncStore::prepare_view_step(&*store, &preparing, PreparationBudget::default()),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            NetworkSyncStore::validate_view(&*store, &view),
+            Err(LogError::StaleCursor)
+        ));
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before,
+            "generation invalidation must not hydrate history"
+        );
     }
 
     #[test]
@@ -541,7 +1092,7 @@ mod tests {
         }
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
-        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let view = open_prepared(&store, &conversation);
         for (have, expected) in [
             (HashSet::new(), vec![]),
             (HashSet::from([a.id]), vec![b.id, c.id]),
@@ -569,6 +1120,7 @@ mod tests {
                 "closure must use headers/edges, even when Have changes"
             );
         }
+        prepare_export(&store, &view, &HashSet::from([a.id]));
         let first = NetworkSyncStore::export_page(
             &*store,
             &view,
@@ -604,6 +1156,168 @@ mod tests {
             NetworkSyncStore::validate_view(&*store, &view),
             Err(LogError::StaleCursor)
         ));
+    }
+
+    #[tokio::test]
+    async fn participant_network_parent_retirement_invalidates_prepared_file_authorization() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let peer_account = Account::generate();
+        let proof = Announce::new_with_account(&peer, &peer_account, "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        node.configure_privacy(
+            directory.path(),
+            "pw",
+            &node.own_group_proof(),
+            std::sync::Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+        node.privacy
+            .state
+            .write()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .proofs
+            .record(&proof)
+            .unwrap();
+        node.set_allowed(&peer_account.account_id(), true)
+            .await
+            .unwrap();
+        node.set_invisible(true).await.unwrap();
+        let parent = ConversationId::new([190; 32]);
+        let genesis = Event::new(
+            &node.identity,
+            parent,
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "retirement dependency".into(),
+                members: vec![node.identity.public(), peer.public()],
+                epoch: 0,
+                owner: node.user_id(),
+            }
+            .encode(),
+        );
+        node.log.lock().unwrap().append_durable(genesis).unwrap();
+        node.process_channel(parent);
+        let path = directory.path().join("payload.txt");
+        std::fs::write(&path, b"file authorization belongs to its live parent").unwrap();
+        let file = node
+            .send_file_channel(parent, &path, crate::file::FileKind::File)
+            .await
+            .unwrap();
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = open_prepared(&store, &file);
+        assert!(NetworkSyncStore::metadata(&*store, &view).unwrap().count > 0);
+        let have = HashSet::new();
+        prepare_export(&store, &view, &have);
+        let scopes = node.file_scope_revision().unwrap();
+        let transcript_rows = node.received_files.lock().unwrap().count(None).unwrap();
+        let parent_rows = || {
+            node.storage
+                .database()
+                .read(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM retained_events WHERE conversation=?1",
+                        [parent.as_bytes().as_slice()],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map_err(Into::into)
+                })
+                .unwrap()
+        };
+        let physical_parent_rows = parent_rows();
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        assert!(matches!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .begin_retirement(&parent)
+                .unwrap(),
+            crate::eventlog::repository::retirement::RetirementBegin::Started(_)
+        ));
+        assert_eq!(
+            parent_rows(),
+            physical_parent_rows,
+            "test the logical boundary before any physical deletion"
+        );
+        assert_eq!(
+            node.file_scope_revision().unwrap(),
+            scopes,
+            "Book and fanout scopes remain unchanged"
+        );
+        assert_eq!(
+            node.received_files.lock().unwrap().count(None).unwrap(),
+            transcript_rows
+        );
+        NetworkSyncStore::validate_view(
+            node.log.lock().unwrap().repository().unwrap(),
+            &view.repository,
+        )
+        .unwrap();
+        let metadata_stale = matches!(
+            NetworkSyncStore::metadata(&*store, &view),
+            Err(LogError::StaleCursor)
+        );
+        let have_stale = matches!(
+            NetworkSyncStore::have_page(
+                &*store,
+                &view,
+                None,
+                IdPageBudget {
+                    ids: 1,
+                    examined: 1
+                }
+            ),
+            Err(LogError::StaleCursor)
+        );
+        let export_stale = matches!(
+            NetworkSyncStore::export_page(
+                &*store,
+                &view,
+                &have,
+                None,
+                ExportPageBudget {
+                    examined: 64,
+                    events: 1,
+                    encoded_bytes: 65536,
+                    allocated_bytes: 262144
+                }
+            ),
+            Err(LogError::StaleCursor)
+        );
+        assert!(
+            metadata_stale && have_stale && export_stale,
+            "retired parent must invalidate all ready FILES selectors: metadata={metadata_stale}, Have={have_stale}, export={export_stale}"
+        );
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before,
+            "destructive dependency validation must stay metadata-only"
+        );
     }
 
     #[tokio::test]
@@ -681,7 +1395,7 @@ mod tests {
         assert!(!node.shares_replica(&conversation).unwrap());
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
-        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let view = open_prepared(&store, &conversation);
         assert_eq!(
             collect(&store, &view, &HashSet::new()),
             vec![genesis.id, share_off.id]
@@ -773,7 +1487,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let view = open_prepared(&store, &conversation);
         assert_eq!(NetworkSyncStore::metadata(&*store, &view).unwrap().count, 1);
         let first = NetworkSyncStore::have_page(
             &*store,
@@ -803,7 +1517,7 @@ mod tests {
             Err(LogError::StaleCursor)
         ));
         drop(view);
-        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let view = open_prepared(&store, &conversation);
         let capability = Event::new(
             &peer,
             conversation,
@@ -890,7 +1604,7 @@ mod tests {
             .unwrap();
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
-        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let view = open_prepared(&store, &conversation);
         assert_eq!(collect(&store, &view, &HashSet::new()), vec![event.id]);
         let source = node
             .log
@@ -977,7 +1691,7 @@ mod tests {
         }
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
-        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let view = open_prepared(&store, &conversation);
         let metadata = NetworkSyncStore::metadata(&*store, &view).unwrap();
         assert!(!metadata.channel_v2 && !metadata.channel_v3 && !metadata.channel_v4);
         let valid = Event::new(
@@ -1080,7 +1794,7 @@ mod control_publication_tests {
         node.privacy.generation.fetch_add(1, Ordering::SeqCst);
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
-        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let view = open_prepared(&store, &conversation);
         let read_counts = || {
             node.log
                 .lock()
@@ -1157,7 +1871,7 @@ mod control_publication_tests {
             "erased control must not leave the old selection"
         );
         drop(view);
-        let empty = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let empty = open_prepared(&store, &conversation);
         assert_eq!(
             NetworkSyncStore::metadata(&*store, &empty).unwrap().count,
             0

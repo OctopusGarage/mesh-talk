@@ -1427,10 +1427,11 @@ The explicit standalone `PersistentEventLog::open` remains the collecting legacy
 SDK owner and rejects a retired participant source. Transcripts, crypto and
 projections still have separate migration boundaries. Transcript history ordering
 and account routes use persisted metadata selectors; ordinary recent and
-exact-context reads hydrate selected rows only. Initial and changed-source
-principal authorization still retains a temporary collection, so the event,
-transcript and channel cutovers do not establish the complete participant runtime
-memory bound.
+exact-context reads hydrate selected rows only. Production network authorization
+prepares finite SQL selections through yielded header/edge turns. Individual
+channel-control authority queries and the explicit collecting SDK compatibility
+adapter remain separate; these cuts do not establish the complete participant
+runtime work bound.
 
 The channel checkpoint owner reuses the existing canonical logical-order job and
 its source revision. Safe tails extend the same job; a late control that changes
@@ -1865,23 +1866,49 @@ export tests selection before fetching payloads. Sibling category filtering and
 share-off ancestry use retained parent edges plus the peer's exact Have set.
 Source, roster, proof, receipt-control and channel-state revisions guard the selection, while
 privacy, sharing, cost and device-policy changes invalidate stale views. Unchanged
+views also check a domain-wide destructive revision, advanced atomically with
+logical retirement or destructive rewrites. This invalidates inherited file
+authorization when a parent channel retires, even before physical deletion and
+without changing the file's own epoch, transcript or scope rows. Unchanged
 Have pages and pre-send validation read no historical bodies; each export fetches
 only selected payloads once, including retransmissions. Receipt-control bindings
 and their process-local revision publish under one index lock, including complete
 cancellation replacements and individual delivery-recovery insertions; a privacy
 generation bump cannot hide a later control-map retirement. Ordinary source appends
-trigger one revalidation of the original cutoff without extending the view.
+preserve the original finite cutoff; current authority changes invalidate it.
+
+Opening a production view captures context without collecting retained history.
+`privacy_sync/principal.rs` advances canonical ordering, policy scope selection,
+legacy/modern authorization, exact parent closure and the unchanged wire
+fingerprint in separate preparation turns. The session releases its store lock
+and yields after each turn, checking cancellation and current authority on resume.
+Historical selected IDs, departures and ancestor marks stay in the existing
+SQL selection owner; a persisted current reducer/cursor resumes interrupted
+preparation without a body cache. Raw kind revisions include rejected controls
+and invalidate preparation independently of admitted channel authority. Message
+classification reads headers and, only for receipt-shaped payloads, a bounded
+incremental BLOB prefix; matching receipts and selected controls still receive
+full authentication. Fresh sessions may traverse retained metadata, so they are
+not constant-time opens followed by constant-time preparation.
+
+Preparation defaults to 64 rows, 512 parent edges and an 8 MiB body/work charge.
+Large legal parent lists resume at an exact edge cursor. An undersized budget
+returns an explicit error without discarding the event. Have-dependent export
+closure stages the admitted peer Have in bounded batches and resumes its vertex
+and edge together; replacing Have also retires old rows incrementally.
+Channel checkpoint projection remains the authority for signed controls. Its
+individual synchronous ancestry query still needs the preparing-graph integration;
+outer preparation turns alone do not establish a complete control-work bound.
+The explicit collecting SyncStore compatibility API is separate from this runtime.
 
 Selection lifetimes use the existing eight-connection exchange limit and admitted
-remote-Have budget. Drop/cancellation retires a selection and deletes at most 512
-rows from each working table; warm open and admitted maintenance take the same
-bounded cleanup step. A new view drains previous retirement debt in bounded
-transactions before adding another selection, preventing cancellation buildup.
-An owner nonce identifies abandoned work after restart without replaying it.
-The initial authorization reducer and changed-source revalidation still build
-temporary metadata/control collections and scan historical body pages; replacing
-that reducer remains necessary for a complete history-independent memory and I/O
-bound.
+remote-Have budget. Each connection may hold its primary selection and one
+non-file parent selection for file-scope authorization, giving at most sixteen
+active selections. Drop/cancellation retires a selection and deletes at most 512
+rows from one working table; warm open and admitted maintenance take the same
+bounded cleanup step. A new view drains previous retirement debt through yielded
+bounded transactions before adding another selection, preventing cancellation
+buildup. An owner nonce identifies abandoned work after restart without replaying it.
 
 Owned individual participant event reads fetch only the selected body from the
 encrypted repository. Standalone legacy SDK reads copy from their resident index.

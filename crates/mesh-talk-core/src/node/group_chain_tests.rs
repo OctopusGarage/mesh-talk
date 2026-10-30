@@ -43,14 +43,16 @@ impl Chain {
             let (dm, _) = mpsc::unbounded_channel();
             let (channel, _) = mpsc::unbounded_channel();
             let (file, _) = mpsc::unbounded_channel();
+            let node_dir = dir.path().join(i.to_string());
+            std::fs::create_dir(&node_dir).unwrap();
             let node = Node::open(
                 DeviceIdentity::generate(),
                 Arc::new(Mutex::new(Roster::default())),
                 dm,
                 channel,
                 file,
-                &dir.path().join(format!("{i}-events.log")),
-                &dir.path().join(format!("{i}-sent.log")),
+                &node_dir.join("events.log"),
+                &node_dir.join("sent.log"),
                 "pw",
             )
             .unwrap();

@@ -98,7 +98,10 @@
             "node::group_chain_tests::metered_group_file_replica_preserves_explicit_attachment_consent",
             "startup_network_options_precede_discovery_and_delivery_launch",
             "participant_event_growth_reads_owned_bodies_and_preserves_finite_network_view",
-            "participant_network_"
+            "participant_network_",
+            "paged_preparation_yields_unlocked_and_observes_concurrent_revocation",
+            "node::privacy_sync::causal_export_tests::",
+            "node::session::paged_tests::"
           ]
         }
       ],
@@ -113,6 +116,10 @@
           {
             "name": "Cost-class changes expire session-local exceptions; manual share-off and conversation authorization remain authoritative. Finite participant selections preserve exact Have-dependent ancestry, fresh proof/source revocation, atomic receipt-control publication and pending invitations; unchanged paging reads no historical bodies, and cancellation cleanup is bounded.",
             "reference": "docs/help/topics/channels.md#network-data-protection"
+          },
+          {
+            "name": "Production principal preparation yields between bounded header/edge turns, persists resumable SQL selection facts, and rejects changed authorization before publication; fresh views do not collect retained event bodies. Legal wide-parent events retain progress and exact Have-dependent eligibility.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -899,7 +906,9 @@
           "package": "mesh-talk-core",
           "filters": [
             "eventlog::",
-            "node::node::tests::participant_event_"
+            "node::node::tests::participant_event_",
+            "participant_ciphertext_prefix_",
+            "participant_kind_metadata_"
           ]
         }
       ],

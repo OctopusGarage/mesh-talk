@@ -125,9 +125,13 @@ publication, its downgrade barrier, authenticated import and retryable cleanup.
 Nodes; `persist/legacy.rs` retains the explicit standalone compatibility owner.
 `core/node/privacy_sync/network.rs` applies participant authorization to finite
 repository network pages. `core/eventlog/repository/selection.rs` owns disposable
-SQL authorization IDs, causal closure, and bounded retirement cleanup; views use
-scalar revision checks until source/proof state changes. Initial and changed-source
-principal selection still uses the temporary collecting authorization reducer.
+SQL authorization IDs, causal closure, and bounded retirement cleanup.
+`core/node/privacy_sync/principal/` and `principal.rs` own current principal state
+and resumable preparation; historical IDs, departures and ancestry stay on disk.
+`core/node/session.rs` releases the store lock and yields between preparation
+turns. Ready views use scalar source/proof checks. Channel-control authority still
+uses the checkpoint owner; its individual ancestry queries remain a separate
+bounded-work integration requirement.
 `core/node/channel/checkpoint/` owns indexed current membership, canonical authority,
 receiver checkpoints, exact processing evidence, activity pages and pending retries.
 Ordinary warm channel opens load current metadata and the active sending epoch;

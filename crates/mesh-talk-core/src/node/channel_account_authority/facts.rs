@@ -384,18 +384,28 @@ impl AccountAuthority {
             c.query_row("SELECT EXISTS(SELECT 1 FROM channel_authority_facts WHERE job=?1 AND channel=?2 AND kind=2 AND account=?3)",params![history.job.as_slice(),history.channel.as_bytes().as_slice(),account.as_slice()],|r|r.get(0)).map_err(Into::into)
         })
     }
+    #[cfg(test)]
     pub(in crate::node) fn revocation_page(
         &self,
         account: &[u8; 32],
         after: Option<&[u8]>,
     ) -> Result<RevocationPage, LogError> {
+        self.revocation_page_with_limit(account, after, 64)
+    }
+    pub(in crate::node) fn revocation_page_with_limit(
+        &self,
+        account: &[u8; 32],
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<RevocationPage, LogError> {
+        let limit = crate::eventlog::sync::network::scan_limit(limit.min(64))? - 1;
         let Some(history) = &self.history else {
             return Err(invalid("indexed revocation page requires history owner"));
         };
         history.profile.database().read(|c| {
             history.guard_on(c)?;
-            let mut statement=c.prepare("SELECT key,value FROM channel_authority_facts WHERE job=?1 AND channel=?2 AND kind=2 AND account=?3 AND (?4 IS NULL OR key>?4) ORDER BY key LIMIT 64")?;
-            let mut rows=statement.query(params![history.job.as_slice(),history.channel.as_bytes().as_slice(),account.as_slice(),after])?;
+            let mut statement=c.prepare("SELECT key,value FROM channel_authority_facts WHERE job=?1 AND channel=?2 AND kind=2 AND account=?3 AND (?4 IS NULL OR key>?4) ORDER BY key LIMIT ?5")?;
+            let mut rows=statement.query(params![history.job.as_slice(),history.channel.as_bytes().as_slice(),account.as_slice(),after,limit])?;
             let mut events=Vec::new();let mut next=None;
             while let Some(row)=rows.next()? {next=Some(row.get(0)?);let bytes:Vec<u8>=row.get(1)?;events.push(decode(&bytes)?);}
             Ok(RevocationPage{events,next})

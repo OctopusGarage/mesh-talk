@@ -687,7 +687,7 @@ impl SyncProgress {
         // only skip a diff — never corrupt — so this is safe.)
         if !self.started {
             self.started = true;
-            let (metadata, probe_view) = backend.probe_metadata(&conversation)?;
+            let (metadata, probe_view) = backend::prepared_probe(backend, &conversation).await?;
             let local_count = usize::try_from(metadata.count)
                 .map_err(|_| crate::eventlog::LogError::RepositoryCounterExhausted)?;
             let (local_v2, local_v3, local_v4) = (
@@ -751,7 +751,7 @@ impl SyncProgress {
         // metadata cost is O(N) per round. Capture N, the diff, and the round count so we can
         // evaluate reconciliation scaling (e.g. range-based / Negentropy) on real workloads.
         let round = self.rounds;
-        let have_view = backend.open_view(&conversation)?;
+        let have_view = backend::open_prepared_view(backend, &conversation).await?;
         let local_count = have_count(backend.advertised_count(&have_view)?)?;
         if round == 0 {
             self.first_have = local_count;
@@ -811,7 +811,7 @@ impl SyncProgress {
             return Err(SessionError::UnexpectedMessage);
         }
         // Ingest may add causal parents; select a fresh outgoing cutoff.
-        let outgoing_view = backend.open_view(&conversation)?;
+        let outgoing_view = backend::open_prepared_view(backend, &conversation).await?;
         let mut followups = select_export_frames(
             backend,
             &outgoing_view,
@@ -1077,7 +1077,7 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             // requester's streamed have, then answer.
             let have =
                 recv_have_owned(channel, true, conversation, backend.remote_have_budget()).await?;
-            let view = backend.open_view(&conversation)?;
+            let view = backend::open_prepared_view(backend, &conversation).await?;
             let metadata = backend.metadata(&view)?;
             have_count(metadata.count)?;
             let response = if unsupported_metadata(metadata, v2, v3, v4) {
@@ -1138,7 +1138,7 @@ async fn serve_wire_backend<B: SessionBackend, IO: AsyncRead + AsyncWrite + Unpi
             let v4 = matches!(decode(bytes)?, SyncWire::FpRequestV4(_));
             let v3 = v4 || matches!(decode(bytes)?, SyncWire::FpRequestV3(_));
             let v2 = v3 || matches!(decode(bytes)?, SyncWire::FpRequestV2(_));
-            let (metadata, probe_view) = backend.probe_metadata(&conversation)?;
+            let (metadata, probe_view) = backend::prepared_probe(backend, &conversation).await?;
             let matched = if unsupported_metadata(metadata, v2, v3, v4) {
                 None
             } else {
