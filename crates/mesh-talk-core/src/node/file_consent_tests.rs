@@ -172,11 +172,12 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     qs.lock().unwrap().accept(malformed_outer.clone()).unwrap();
     b.drain_from_post_office().await;
     assert!(
-        b.opaque_seen
+        b.opaque_receive_cache
             .lock()
             .unwrap()
-            .get(&identity_mailbox.id())
-            .is_some_and(|seen| seen.contains(&malformed_outer.id)),
+            .seen(identity_mailbox.id(), &b.log.lock().unwrap())
+            .unwrap()
+            .contains(&malformed_outer.id),
         "malformed reserved identity controls must be consumed, not retained in the deferred queue"
     );
     assert!(!b.log.lock().unwrap().has(&malformed.id).unwrap());
@@ -276,11 +277,12 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap();
     let deferred_control = retry_mailbox.wrap(&control).unwrap().id;
     assert!(
-        a.opaque_seen
+        !a.opaque_receive_cache
             .lock()
             .unwrap()
-            .get(&retry_mailbox.id())
-            .is_none_or(|seen| !seen.contains(&deferred_control)),
+            .seen(retry_mailbox.id(), &a.log.lock().unwrap())
+            .unwrap()
+            .contains(&deferred_control),
         "failed controls must not enter the node-wide seen cache"
     );
     tokio::time::timeout(

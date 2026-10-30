@@ -271,11 +271,9 @@ pub struct Node {
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_send_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_receive_enabled: std::sync::atomic::AtomicBool,
-    /// Optional encrypted mappings, validated against retained history on open.
+    /// Optional disk hints, checked against retained history during mailbox sync.
     pub(in crate::node) opaque_receive_cache:
         Mutex<super::opaque_receive_cache::OpaqueReceiveCache>,
-    /// Active transfer hints. Discarding them causes safe re-downloads.
-    pub(in crate::node) opaque_seen: Mutex<HashMap<ConversationId, HashSet<EventId>>>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
     // private to the `node` module (no wider exposure).
@@ -696,16 +694,7 @@ impl Node {
             origin_res,
             contacts_res,
             recovered_ids_res,
-            opaque_cache_res,
         ) = std::thread::scope(|s| {
-            let h_opaque = s.spawn(|| {
-                super::opaque_receive_cache::OpaqueReceiveCache::open(
-                    log_path,
-                    password,
-                    &identity.public(),
-                    &account.account_id(),
-                )
-            });
             let h_sent = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::sentlog::SentEntry>(&storage,sent_path,password,super::transcript_repository::SENT,b"MTSENT"));
             let h_sess = s.spawn(|| RatchetSessions::open(&dir.join("ratchet.sessions"), password));
             let h_recv = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::received_log::ReceivedEntry>(&storage,&dir.join("received.log"),password,super::transcript_repository::RECEIVED,b"MTRECV"));
@@ -768,13 +757,10 @@ impl Node {
                 h_origin.join(),
                 h_contacts.join(),
                 h_recovered_ids.join(),
-                h_opaque.join(),
             )
         });
         // A join() error means the opening thread panicked; re-raise the panic so it
         // is not silently swallowed. A normal open failure surfaces as the inner Err.
-        let opaque_receive_cache =
-            opaque_cache_res.unwrap_or_else(|e| std::panic::resume_unwind(e));
         sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -1084,7 +1070,13 @@ impl Node {
         favorite_media
             .prune_unreferenced(&favorites.live_files(now_millis()))
             .map_err(LogError::Io)?;
-        let opaque_seen = opaque_receive_cache.restored(&log)?;
+        let opaque_receive_cache = super::opaque_receive_cache::OpaqueReceiveCache::open(
+            storage.clone(),
+            log_path,
+            password,
+            &identity.public(),
+            &account.account_id(),
+        );
         let privacy = Arc::new(super::privacy_runtime::PrivacyControl::with_storage(
             storage.clone(),
         ));
@@ -1212,7 +1204,6 @@ impl Node {
             post_office_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
-            opaque_seen: Mutex::new(opaque_seen),
             opaque_receive_cache: Mutex::new(opaque_receive_cache),
             preferred_routes: Mutex::new(HashMap::new()),
             received: Mutex::new(received),

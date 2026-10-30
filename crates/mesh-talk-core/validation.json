@@ -2,6 +2,31 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-opaque-receive-hints",
+      "paths": ["crates/mesh-talk-core/src/node/opaque_receive_cache.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::opaque_receive_cache::tests::",
+            "node::opaque_relay::permission_tests::",
+            "federated_file_consent_and_complete_bytes_need_no_direct_client_route"
+          ]
+        }
+      ],
+      "consumers": ["core-node"],
+      "capability": {
+        "summary": "Keep optional opaque receive mappings on encrypted disk and load only the active mailbox's bounded protocol identifiers.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Warm open decodes no historical hints; only retained inner events qualify durable hints, session progress cannot survive restart, and corrupt or foreign optional sources remain preserved without blocking login.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
+    },
+    {
       "id": "core-reception-effects",
       "paths": [
         "crates/mesh-talk-core/src/node/reception_effects/",
