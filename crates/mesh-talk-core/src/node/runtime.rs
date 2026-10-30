@@ -1411,7 +1411,7 @@ impl NodeRuntime {
     pub fn channel_activity(
         &self,
         channel: crate::eventlog::event::ConversationId,
-    ) -> Vec<crate::node::ChannelActivity> {
+    ) -> Result<Vec<crate::node::ChannelActivity>, NodeError> {
         self.node.channel_activity(channel)
     }
 

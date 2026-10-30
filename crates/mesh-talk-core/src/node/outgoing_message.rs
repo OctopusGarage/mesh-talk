@@ -421,6 +421,8 @@ impl Node {
         if let Err(error) = self.recover_delivery(&mut store) {
             log::warn!("accepted channel message awaits local recovery: {error}");
         }
+        drop(store);
+        self.process_channel(channel);
         self.delivery_notify.notify_one();
         Ok(id)
     }

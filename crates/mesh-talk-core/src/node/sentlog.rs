@@ -3,17 +3,22 @@
 //! decrypt its own messages back from the synced event log; this store keeps a
 //! private plaintext copy so history can show both sides. It is never synced,
 //! never served to peers, and holds no signatures. The on-disk framing is the
-//! shared [`EncryptedRecordLog`] (magic + salt header, then length-prefixed
+//! shared [`crate::storage::record_log::EncryptedRecordLog`] (magic + salt header, then length-prefixed
 //! AES-256-GCM records); this store layers [`SentEntry`] records and a
 //! per-conversation in-memory index on top.
 
+#[cfg(test)]
 use crate::eventlog::LogError;
 use crate::eventlog::event::ConversationId;
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 
+#[cfg(test)]
 const MAGIC: &[u8; 6] = b"MTSENT";
 
 /// One sent message's local plaintext record.
@@ -27,20 +32,21 @@ pub struct SentEntry {
 
 /// An append-only, password-encrypted log of locally-sent message plaintext,
 /// indexed in memory by conversation.
+#[cfg(test)]
 pub struct SentLog {
     file: EncryptedRecordLog<SentEntry>,
-    revision: u64,
-    rewrite_revision: u64,
     by_conversation: HashMap<ConversationId, Vec<SentEntry>>,
     keys: HashMap<SentKey, (ConversationId, usize)>,
 }
 
+#[cfg(test)]
 #[derive(PartialEq, Eq, Hash)]
 enum SentKey {
     Account(ConversationId, [u8; 32]),
     Legacy(ConversationId, u64),
 }
 
+#[cfg(test)]
 fn key(entry: &SentEntry) -> SentKey {
     match super::dm_envelope::DmEnvelope::decode(&entry.plaintext) {
         Some(envelope) => SentKey::Account(entry.conversation, envelope.msg_id),
@@ -48,15 +54,11 @@ fn key(entry: &SentEntry) -> SentKey {
     }
 }
 
+#[cfg(test)]
 impl SentLog {
-    #[cfg(test)]
-    pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
-        self.file.fail_appends_for_test(enabled)
-    }
     /// Install an exact transaction record durably, including an already installed
     /// record. A logical account id (or legacy conversation/sequence) cannot be
     /// reused for different history; recovery fails closed on such conflicts.
-    #[allow(dead_code)] // Used by the delivery transaction integration in the next phase.
     pub fn record_durable(&mut self, entry: &SentEntry) -> Result<(), LogError> {
         let entry_key = key(entry);
         if let Some((conversation, index)) = self.keys.get(&entry_key) {
@@ -71,7 +73,6 @@ impl SentLog {
         self.keys
             .insert(entry_key, (entry.conversation, entries.len()));
         entries.push(entry.clone());
-        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -96,8 +97,6 @@ impl SentLog {
         Ok(Self {
             file,
             by_conversation,
-            revision: 0,
-            rewrite_revision: 0,
             keys,
         })
     }
@@ -122,7 +121,6 @@ impl SentLog {
             .entry(key(&entry))
             .or_insert((conversation, entries.len()));
         entries.push(entry);
-        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
@@ -157,8 +155,6 @@ impl SentLog {
                 .insert(key(&entry), (entry.conversation, entries.len()));
             entries.push(entry);
         }
-        self.revision = self.revision.wrapping_add(1);
-        self.rewrite_revision = self.rewrite_revision.wrapping_add(1);
         Ok(removed)
     }
 
@@ -175,29 +171,6 @@ impl SentLog {
         );
         v.sort_by_key(|e| (e.wall_clock, e.seq));
         v
-    }
-
-    /// Borrow this conversation's entries WITHOUT cloning (in insertion order — callers
-    /// that need them sorted use [`Self::entries`]). For read-only scans (e.g. search)
-    /// that would otherwise clone every plaintext.
-    pub fn entries_ref(&self, conversation: &ConversationId) -> &[SentEntry] {
-        self.by_conversation
-            .get(conversation)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
-    }
-
-    /// Process-local invalidation for archive selectors; wire/storage stay unchanged.
-    pub(crate) fn revision(&self) -> u64 {
-        self.revision
-    }
-    pub(crate) fn rewrite_revision(&self) -> u64 {
-        self.rewrite_revision
-    }
-
-    /// The conversation ids this log holds entries for.
-    pub fn conversations(&self) -> Vec<ConversationId> {
-        self.by_conversation.keys().copied().collect()
     }
 }
 

@@ -12,16 +12,21 @@
 
 mod indexed;
 use super::node::{Node, now_millis};
+#[cfg(test)]
 use crate::eventlog::LogError;
 use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
 use crate::node::NodeError;
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 use crate::node::dm_envelope::RecallEnvelope;
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
 use bincode::Options;
 pub(crate) use indexed::IndexedRecallLog;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::collections::HashSet;
+#[cfg(test)]
 use std::path::Path;
 
 /// How long after sending a message it may still be recalled (WeChat's 2 minutes).
@@ -71,12 +76,14 @@ pub struct RecallMark {
 }
 
 /// A local-only, password-encrypted log of our own recalls, indexed by conversation.
+#[cfg(test)]
 pub struct RecallLog {
     file: EncryptedRecordLog<RecallMark>,
     by_conversation: HashMap<ConversationId, Vec<RecallMark>>,
     revision: u64,
 }
 
+#[cfg(test)]
 impl RecallLog {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, marks) =
@@ -124,38 +131,12 @@ impl RecallLog {
         Ok(())
     }
 
-    pub(in crate::node) fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    pub(crate) fn contains(
-        &self,
-        conversation: ConversationId,
-        target: EventId,
-    ) -> Result<bool, LogError> {
-        Ok(self
-            .by_conversation
-            .get(&conversation)
-            .is_some_and(|marks| marks.iter().any(|mark| mark.target == target)))
-    }
-
     /// The targets we ourselves recalled in `conversation`.
     pub fn targets(&self, conversation: &ConversationId) -> Vec<EventId> {
         self.by_conversation
             .get(conversation)
             .map(|v| v.iter().map(|m| m.target).collect())
             .unwrap_or_default()
-    }
-
-    pub(in crate::node) fn mark(
-        &self,
-        conversation: &ConversationId,
-        target: EventId,
-    ) -> Option<&RecallMark> {
-        self.by_conversation
-            .get(conversation)?
-            .iter()
-            .find(|mark| mark.target == target)
     }
 
     /// Own recall tombstones retained for a portable snapshot.
@@ -198,7 +179,7 @@ mod recovery_snapshot_tests {
 }
 
 pub(in crate::node) enum ChannelRecallPreparation {
-    Retry,
+    Retry(Option<EventId>),
     Ignored,
     Mark(RecallMark),
 }
@@ -221,7 +202,7 @@ impl Node {
             self.historical_author(event.author.ed25519_pub())
                 .map(|p| p.x25519_pub)
         }) else {
-            return Ok(ChannelRecallPreparation::Retry);
+            return Ok(ChannelRecallPreparation::Retry(None));
         };
         let Some(payload) = super::channel::SealedPayload::decode(&event.ciphertext)
             .and_then(|sealed| sealed.open(&self.identity, &author_x))
@@ -236,7 +217,7 @@ impl Node {
             .repository()?
             .header(&payload.target)?
         else {
-            return Ok(ChannelRecallPreparation::Retry);
+            return Ok(ChannelRecallPreparation::Retry(Some(payload.target)));
         };
         if target.author != event.author || target.conversation != event.conversation_id {
             return Ok(ChannelRecallPreparation::Ignored);

@@ -132,6 +132,13 @@ impl Node {
             .lock()
             .expect("custody mutex")
             .observations_after(after.as_ref());
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => {
+                log::warn!("custody migration deferred: {error}");
+                return;
+            }
+        };
         if rows.is_empty() {
             *after = None;
             return;

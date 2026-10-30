@@ -871,7 +871,7 @@ impl Node {
         {
             let files = self.files.lock().expect("files lock");
             let manifest = files
-                .manifest(&conv)
+                .manifest(&conv)?
                 .ok_or_else(|| invalid("Archive unavailable"))?;
             if manifest.size() > 64 * 1024 * 1024 {
                 return Err(invalid("Archive exceeds budget"));

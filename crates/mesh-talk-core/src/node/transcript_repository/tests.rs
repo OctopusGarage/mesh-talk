@@ -48,6 +48,49 @@ fn received(n: u8) -> ReceivedEntry {
 }
 
 #[test]
+fn auxiliary_sources_recover_each_barrier_without_changing_transcript_schema() {
+    use publication::PublishedHistorySource;
+    for kind in [16, 17, 18] {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = DeviceIdentity::generate();
+        let account = Account::generate();
+        let owner = profile(dir.path(), &identity, &account);
+        initialize(&owner).unwrap();
+        let path = dir.path().join("auxiliary.log");
+        let (mut legacy, _) = EncryptedRecordLog::<u64>::open(&path, "pw", b"MTAUX1").unwrap();
+        legacy.append(&7).unwrap();
+        drop(legacy);
+        publication::fail_at(Some("transcript-imported"));
+        let mut imported = 0;
+        let result =
+            PublishedHistorySource::open(owner.clone(), &path, "pw", kind, |_, path, password| {
+                let (_, records) = EncryptedRecordLog::<u64>::open(path, password, b"MTAUX1")?;
+                assert_eq!(records, [7]);
+                imported += 1;
+                Ok(())
+            });
+        publication::fail_at(None);
+        assert!(result.is_err());
+        assert_eq!(
+            imported, 1,
+            "auxiliary source {kind} must enter the shared publisher"
+        );
+        drop(owner);
+        let owner = profile(dir.path(), &identity, &account);
+        let source = PublishedHistorySource::open(owner.clone(), &path, "pw", kind, |_, _, _| {
+            panic!("published auxiliary source must not replay legacy rows")
+        })
+        .unwrap();
+        source.check_write().unwrap();
+        owner
+            .database()
+            .read(|c| manifest::validate_ddl(c, SCHEMA))
+            .unwrap();
+        assert!(EncryptedRecordLog::<u64>::open(&path, "pw", b"MTAUX1").is_err());
+    }
+}
+
+#[test]
 fn runtime_leaf_gap_revisions_survive_warm_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let identity = DeviceIdentity::generate();

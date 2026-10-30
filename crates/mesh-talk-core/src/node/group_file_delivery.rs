@@ -88,9 +88,7 @@ impl Node {
                 .lock()
                 .expect("recalls lock")
                 .contains(row.conversation, manifest)?
-            || self
-                .channel_content_gate(row.conversation)?
-                .is_some_and(|ids| !ids.contains(&manifest))
+            || !self.channel_content_visible(row.conversation, manifest)?
         {
             return Ok(None);
         }

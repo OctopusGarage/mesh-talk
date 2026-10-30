@@ -30,10 +30,6 @@ pub(in crate::node) struct PrivacyState {
     pub own: Announce,
     pub visibility: Arc<DiscoveryVisibility>,
     pub routes: super::privacy_routes::RouteCache,
-    pub sent_manifest_scopes: crate::storage::record_log::EncryptedRecordLog<StoredManifestScope>,
-    pub scope_repair_needed: bool,
-    pub legacy_scope_ids: std::collections::HashSet<crate::eventlog::EventId>,
-    pub file_scopes: std::collections::HashMap<crate::eventlog::ConversationId, Vec<ManifestScope>>,
 }
 #[derive(Clone, PartialEq, Eq)]
 pub(in crate::node) struct ManifestScope {
@@ -44,10 +40,10 @@ pub(in crate::node) struct ManifestScope {
 /// Local encrypted metadata only: never included in message history or wire frames.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(in crate::node) struct StoredManifestScope {
-    file: crate::eventlog::ConversationId,
-    parent: crate::eventlog::ConversationId,
-    author: crate::eventlog::Author,
-    event: crate::eventlog::EventId,
+    pub(in crate::node) file: crate::eventlog::ConversationId,
+    pub(in crate::node) parent: crate::eventlog::ConversationId,
+    pub(in crate::node) author: crate::eventlog::Author,
+    pub(in crate::node) event: crate::eventlog::EventId,
 }
 #[derive(Default)]
 pub(in crate::node) struct PrivacyControl {
@@ -158,92 +154,12 @@ impl Node {
         }
         let routes =
             super::privacy_routes::RouteCache::open(&directory.join("peer-routes"), password)?;
-        let (mut sent_manifest_scopes, stored_scopes) =
-            crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
-                &directory.join("sent-manifest-scopes.log"),
-                password,
-                b"MTFSC1",
-            )
-            .map_err(io::Error::other)?;
-        // The shared record log accepts a torn trailing append. Normalize it before
-        // further writes so later valid scopes cannot land behind the torn bytes.
-        sent_manifest_scopes
-            .rewrite(&stored_scopes)
-            .map_err(io::Error::other)?;
-        let mut file_scopes: std::collections::HashMap<_, Vec<ManifestScope>> = Default::default();
-        let mut legacy_scope_ids = std::collections::HashSet::new();
-        if stored_scopes.len() > super::delivery_store::DeliveryLimits::default().completed_receipts
-        {
-            return Err(io::Error::other("legacy file scope capacity exhausted"));
-        }
-        {
-            let records = self
-                .received_files
-                .lock()
-                .expect("received files lock not poisoned");
-            let log = self.log.lock().expect("log lock not poisoned");
-            let mut events = std::collections::HashMap::new();
-            for conversation in log.conversations().map_err(io::Error::other)? {
-                for event in log.events(&conversation).map_err(io::Error::other)? {
-                    if event.kind == crate::eventlog::EventKind::FileManifest {
-                        events.insert(event.id, event);
-                    }
-                }
-            }
-            for scope in stored_scopes {
-                if scope.file != scope.parent
-                    && events.get(&scope.event).is_some_and(|event| {
-                        event.conversation_id == scope.parent && event.author == scope.author
-                    })
-                {
-                    let scopes = file_scopes.entry(scope.file).or_default();
-                    let restored = ManifestScope {
-                        parent: scope.parent,
-                        author: scope.author,
-                        event: scope.event,
-                    };
-                    if !scopes.contains(&restored) {
-                        legacy_scope_ids.insert(restored.event);
-                        scopes.push(restored);
-                    }
-                }
-            }
-            let mut after = None;
-            loop {
-                let page = records
-                    .scan_page(None, after, Default::default())
-                    .map_err(io::Error::other)?;
-                for record in page.rows {
-                    if let (Some(manifest), Some(event)) = (
-                        crate::file::decode_manifest(&record.plaintext),
-                        events.get(&record.event_id),
-                    ) {
-                        file_scopes
-                            .entry(manifest.file_conv())
-                            .or_default()
-                            .push(ManifestScope {
-                                parent: event.conversation_id,
-                                author: event.author,
-                                event: event.id,
-                            });
-                    }
-                }
-                match page.next {
-                    Some(next) => after = Some(next),
-                    None => break,
-                }
-            }
-        }
         let next = PrivacyState {
             policy,
             proofs,
             own: own.clone(),
             visibility,
             routes,
-            sent_manifest_scopes,
-            scope_repair_needed: false,
-            legacy_scope_ids,
-            file_scopes,
         };
         let mut state = self.privacy.state.write().map_err(|_| denied())?;
         if state.is_some() {
@@ -251,9 +167,6 @@ impl Node {
         }
         *state = Some(next);
         drop(state);
-        let delivery = self.delivery.lock().expect("delivery lock not poisoned");
-        self.reseed_live_file_book(&delivery)
-            .map_err(std::io::Error::other)?;
         Ok(())
     }
     /// Return current local policy; unconfigured SDK nodes report the public default.
@@ -820,102 +733,76 @@ impl Node {
             .cloned();
         self.account_allowed(public, announce.as_ref())
     }
-    pub(in crate::node) fn remember_manifest_scope(
+    pub(in crate::node) fn manifest_scopes(
         &self,
         file: crate::eventlog::ConversationId,
-        parent: crate::eventlog::ConversationId,
-        author: crate::eventlog::Author,
-        event: crate::eventlog::EventId,
-    ) {
-        if file == parent {
-            return;
-        }
-        let mut state = self
-            .privacy
-            .state
-            .write()
-            .expect("privacy lock not poisoned");
-        if let Some(state) = state.as_mut() {
-            let scopes = state.file_scopes.entry(file).or_default();
-            let scope = ManifestScope {
-                parent,
-                author,
-                event,
-            };
-            if !scopes.contains(&scope) {
-                scopes.push(scope);
-                self.privacy
-                    .projection_revision
-                    .fetch_add(1, Ordering::SeqCst);
-            }
-        }
+    ) -> impl Iterator<Item = Result<ManifestScope, LogError>> + use<> {
+        let offers = self
+            .files
+            .lock()
+            .expect("files lock")
+            .offers(Some(file), None)
+            .map(|offer| {
+                offer.map(|offer| ManifestScope {
+                    parent: offer.parent,
+                    author: offer.author,
+                    event: offer.event,
+                })
+            });
+        #[cfg(test)]
+        let withheld = self.withheld_file_scopes.lock().unwrap().contains(&file);
+        #[cfg(not(test))]
+        let withheld = false;
+        offers
+            .chain(self.manifest_scopes.scopes(file))
+            .filter(move |_| !withheld)
     }
-    /// Keep all fanout scopes durable without duplicating the account history bubble.
+    pub(in crate::node) fn has_file_scope(
+        &self,
+        file: crate::eventlog::ConversationId,
+    ) -> Result<bool, LogError> {
+        self.manifest_scopes(file)
+            .next()
+            .transpose()
+            .map(|scope| scope.is_some())
+    }
+    pub(in crate::node) fn file_scope_revision(&self) -> Result<(u64, u64), LogError> {
+        Ok((
+            self.files.lock().expect("files lock").revision()?,
+            self.manifest_scopes.revision()?,
+        ))
+    }
+    // Incoming scopes are installed with their validated FILES row. This hint
+    // invalidates existing network projections without retaining another copy.
+    pub(in crate::node) fn remember_manifest_scope(
+        &self,
+        _file: crate::eventlog::ConversationId,
+        _parent: crate::eventlog::ConversationId,
+        _author: crate::eventlog::Author,
+        _event: crate::eventlog::EventId,
+    ) {
+        self.privacy
+            .projection_revision
+            .fetch_add(1, Ordering::SeqCst);
+    }
     pub(in crate::node) fn remember_sent_manifest_scope(
         &self,
         file: crate::eventlog::ConversationId,
         parent: crate::eventlog::ConversationId,
         author: crate::eventlog::Author,
         event: crate::eventlog::EventId,
-    ) -> Result<(), crate::eventlog::LogError> {
-        if file == parent {
-            return Ok(());
-        }
-        let mut state = self
-            .privacy
-            .state
-            .write()
-            .map_err(|_| crate::eventlog::LogError::Io(denied()))?;
-        if let Some(state) = state.as_mut() {
-            let scope = ManifestScope {
+    ) -> Result<(), LogError> {
+        self.manifest_scopes.insert(
+            file,
+            ManifestScope {
                 parent,
                 author,
                 event,
-            };
-            if !state
-                .file_scopes
-                .get(&file)
-                .is_some_and(|scopes| scopes.contains(&scope))
-            {
-                if state.legacy_scope_ids.len()
-                    >= super::delivery_store::DeliveryLimits::default().completed_receipts
-                {
-                    return Err(crate::eventlog::LogError::CorruptFile(
-                        "legacy file scope capacity exhausted".into(),
-                    ));
-                }
-                if state.scope_repair_needed {
-                    let valid = state
-                        .file_scopes
-                        .iter()
-                        .flat_map(|(file, scopes)| {
-                            scopes.iter().map(|scope| StoredManifestScope {
-                                file: *file,
-                                parent: scope.parent,
-                                author: scope.author,
-                                event: scope.event,
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    state.sent_manifest_scopes.rewrite(&valid)?;
-                    state.scope_repair_needed = false;
-                }
-                if let Err(error) = state.sent_manifest_scopes.append(&StoredManifestScope {
-                    file,
-                    parent,
-                    author,
-                    event,
-                }) {
-                    state.scope_repair_needed = true;
-                    return Err(error);
-                }
-                state.legacy_scope_ids.insert(event);
-                state.file_scopes.entry(file).or_default().push(scope);
-                self.privacy
-                    .projection_revision
-                    .fetch_add(1, Ordering::SeqCst);
-            }
-        }
+            },
+        )?;
+        self.privacy
+            .projection_revision
+            .fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     pub(in crate::node) fn update_presence(&self, own: &Announce) -> io::Result<()> {

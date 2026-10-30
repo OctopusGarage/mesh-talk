@@ -67,6 +67,28 @@ async fn join_history_default_is_bounded_and_requires_acceptance() {
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
     alice.retry_join_history().unwrap();
+    let before = alice
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    for _ in 0..3 {
+        alice.retry_join_history().unwrap();
+    }
+    assert_eq!(
+        alice
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        before,
+        "completed sender retry must reuse the unchanged control prefix"
+    );
+
     copy(&alice, &bob, channel);
     let history = bob.channel_history(channel, 100).unwrap();
     assert_eq!(history.len(), 10);
@@ -78,6 +100,26 @@ async fn join_history_default_is_bounded_and_requires_acceptance() {
         10,
         "delivery replay must deduplicate"
     );
+    assert_eq!(bob.reception_effects.head().unwrap().sequence, 10);
+    let before = bob
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    bob.process_channel(channel);
+    assert_eq!(
+        bob.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        before,
+        "completed invitation history must not reopen historical controls"
+    );
+    assert_eq!(bob.reception_effects.head().unwrap().sequence, 10);
 }
 
 #[tokio::test]
@@ -267,7 +309,8 @@ async fn join_history_foreign_protected_offer_preserves_concealed_receiver_proje
         &bob.identity,
         channel,
         &log.events(&channel).unwrap().iter().collect::<Vec<_>>(),
-    );
+    )
+    .unwrap();
     assert_eq!(messages.len(), 2);
     for message in messages {
         assert_eq!(
@@ -1254,12 +1297,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
         .unwrap();
     let projected = sibling.account_group_projection(channel).unwrap();
     let state = projected.state.as_ref().unwrap();
-    assert!(account_release_admitted(
-        state,
-        released,
-        &projected.authority,
-        &graph
-    ));
+    assert!(account_release_admitted(state, released, &projected.authority, &graph).unwrap());
     for tamper in 0..3 {
         let mut body = decode_account_release(&released.ciphertext).unwrap();
         match tamper {
@@ -1278,7 +1316,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
             encode_account_release(&body),
         );
         assert!(
-            !account_release_admitted(state, &forged, &projected.authority, &graph),
+            !account_release_admitted(state, &forged, &projected.authority, &graph).unwrap(),
             "signed source cannot substitute another grant, recipient key or oversized key payload"
         );
     }
@@ -1286,12 +1324,15 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
         .try_account_channel_remove(channel, &anchor.account_id())
         .unwrap();
     let removed = owner.account_group_projection(channel).unwrap();
-    assert!(!account_release_admitted(
-        removed.state.as_ref().unwrap(),
-        released,
-        &removed.authority,
-        &graph
-    ));
+    assert!(
+        !account_release_admitted(
+            removed.state.as_ref().unwrap(),
+            released,
+            &removed.authority,
+            &graph
+        )
+        .unwrap()
+    );
     owner
         .try_account_channel_invite(
             channel,
@@ -1306,7 +1347,8 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
             released,
             &reinvited.authority,
             &graph
-        ),
+        )
+        .unwrap(),
         "a new account invitation cannot reuse an earlier incarnation's selected history permission"
     );
 }
@@ -1477,4 +1519,151 @@ async fn account_invitation_three_event_wal_recovers_atomically_after_restart() 
             .authority
             .is_member(&target.identity.public(), &target.own_group_proof())
     );
+}
+
+#[tokio::test]
+async fn join_history_rejected_release_is_not_reopened_by_safe_tail_control() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let alice = node(a.path());
+    let bob = node(b.path());
+    let channel = alice
+        .create_channel_invited("bounded retry", vec![])
+        .await
+        .unwrap();
+    alice
+        .send_channel_message(channel, b"old row")
+        .await
+        .unwrap();
+    alice
+        .add_channel_member(channel, bob.identity.public())
+        .await
+        .unwrap();
+    copy(&alice, &bob, channel);
+    bob.accept_channel_invite(channel).await.unwrap();
+    copy(&bob, &alice, channel);
+    let offer = alice
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .unwrap()
+        .into_iter()
+        .find(|event| {
+            matches!(
+                decode::<HistoryControl>(&event.ciphertext),
+                Some(HistoryControl::Offer(_))
+            )
+        })
+        .unwrap()
+        .id;
+    let acceptance = bob
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .unwrap()
+        .into_iter()
+        .find(|event| {
+            event.kind == EventKind::ChannelAccept && event.author.user_id() == bob.user_id()
+        })
+        .unwrap()
+        .id;
+    alice
+        .append_event(
+            channel,
+            EventKind::ChannelJoinHistory,
+            encode(&HistoryControl::Release(Release {
+                offer,
+                acceptance,
+                sealed_key: vec![0; 8],
+            })),
+        )
+        .unwrap();
+    copy(&alice, &bob, channel);
+    assert!(bob.channel_history(channel, 10).unwrap().is_empty());
+    let job = bob
+        .channel_checkpoints
+        .source_binding(channel)
+        .unwrap()
+        .unwrap()
+        .job;
+    alice
+        .rename_channel(channel, "new current name")
+        .await
+        .unwrap();
+    for event in alice.log.lock().unwrap().events(&channel).unwrap() {
+        bob.log.lock().unwrap().append(event).unwrap();
+    }
+    bob.account_group_projection(channel).unwrap();
+    assert_eq!(
+        bob.channel_checkpoints
+            .source_binding(channel)
+            .unwrap()
+            .unwrap()
+            .job,
+        job,
+        "this fixture must remain in the same canonical order generation"
+    );
+    let before = bob
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    bob.process_join_history_reception(channel, false).unwrap();
+    assert_eq!(
+        bob.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        before,
+        "unchanged rejected ciphertext cannot become decryptable after a later rename"
+    );
+    assert_eq!(bob.reception_effects.head().unwrap().sequence, 0);
+}
+
+#[tokio::test]
+async fn join_history_retry_without_live_offers_reads_no_historical_bodies() {
+    for count in [1, 80] {
+        let directory = tempfile::tempdir().unwrap();
+        let alice = node(directory.path());
+        let channel = alice.create_channel("no offers", vec![]).await.unwrap();
+        for _ in 0..count {
+            alice
+                .enqueue_channel_message_reply_expiring_if(
+                    channel,
+                    b"history",
+                    None,
+                    None,
+                    |commit| commit(),
+                )
+                .unwrap();
+        }
+        alice.account_group_projection(channel).unwrap();
+        let before = alice
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        for _ in 0..3 {
+            assert!(alice.retry_join_history().unwrap().is_empty());
+        }
+        assert_eq!(
+            alice
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before,
+            "unchanged history retry scanned signed history at {count} messages"
+        );
+    }
 }

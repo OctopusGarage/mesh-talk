@@ -173,7 +173,12 @@ pub(super) struct PreparedReceiverOpen {
     next: SenderChain,
     plaintext: Zeroizing<Vec<u8>>,
 }
+type OpenCheckpoint = (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>, u32);
+
 impl PreparedReceiverOpen {
+    pub(super) fn into_checkpoint(self) -> Result<OpenCheckpoint, SenderKeyError> {
+        Ok((self.next.encode_checkpoint()?, self.plaintext, self.next.n))
+    }
     pub(super) fn install(self, chain: &mut SenderChain) -> Vec<u8> {
         let Self {
             next,

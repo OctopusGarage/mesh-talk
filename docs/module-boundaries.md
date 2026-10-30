@@ -173,8 +173,12 @@ Nodes; `persist/legacy.rs` retains the explicit standalone compatibility owner.
 `core/node/privacy_sync/network.rs` applies participant authorization to finite
 repository network pages. `core/eventlog/repository/selection.rs` owns disposable
 SQL authorization IDs, causal closure, and bounded retirement cleanup; views use
-scalar revision checks until source/proof state changes. The initial temporary
-metadata/control reducer and startup channel replay still scale with history. Other participant domains retain their
+scalar revision checks until source/proof state changes. Initial and changed-source
+principal selection still uses the temporary collecting authorization reducer.
+`core/node/channel/checkpoint/` owns indexed current membership, canonical authority,
+receiver checkpoints, exact processing evidence, activity pages and pending retries.
+Ordinary warm channel opens load current metadata and the active sending epoch;
+completed signed history is not replayed. Other participant domains retain their
 legacy owners until their own cutovers. `core/node/runtime_startup.rs` composes
 startup inputs and completion through `runtime_work.rs`; blocking captures and
 undelivered results remain admitted until their resources are destroyed.
@@ -189,12 +193,16 @@ reuse that publication owner for signed file proofs and exact logical-file
 bindings, with fixed headers, bounded owned payload reads and persisted revisions.
 `filebook/indexed.rs` owns validated file eligibility metadata and
 exact processed facts tied to existing FILES ordinals; its account namespace,
-resumable import and persisted revision use the same connection.
+resumable import and persisted revision use the same connection. Production Node
+uses this owner directly. `filebook/scopes.rs` owns source 9 sent fanout references;
+`filebook/work.rs` owns metadata-only download discovery, fair bounded admission and
+revision-qualified completion. Neither owns a second payload journal or permission
+rule; network disclosure reuses the existing exact parent authorization.
 `sent_store.rs`, `received_store.rs` and the indexed owner in
 `account_suppression.rs` expose owned lookups, bounded pages and exact local
 deletion markers. Their constructors require validated participant authority;
 production Node history, recovery, recall, and account-sync consumers use these
-indexed stores. FileBook and media lifetime cutovers remain separate. `eventlog/repository/order/combined.rs` extends the existing causal
+indexed stores. Media bytes retain their independent encryption/lifetime owner. `eventlog/repository/order/combined.rs` extends the existing causal
 order owner with disk ranks for signed events and isolated archive roots.
 `eventlog/repository/receiving.rs` owns resumable metadata discovery and bounded,
 fair retry selection; exact transcript evidence survives body erasure and commits
@@ -695,8 +703,8 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   authenticated replay can recover earlier noncausal file ordering. Local clock
   and author-sequence allocation return errors on exhaustion. Public `prepare`
   now returns `Result`; SDK callers must handle it despite unchanged wire formats.
-- Archived channel summaries and admission use `ChannelBook::projected_metadata`
-  and its signed control reducer. Key distribution/decryption remains separate;
+- Archived channel summaries and admission use the indexed channel checkpoint's
+  current metadata and its signed control reducer. Key distribution/decryption remains separate;
   archives share membership epochs, leaves, acceptance, ownership, rename and
   terminal dissolution rules with the metadata projection.
 - Peer-avatar journals reclaim obsolete versions using encrypted record-log
@@ -1151,6 +1159,11 @@ exports when the control revision changes. Group authority and local deletion
 remain with their existing owners.
 
 `channel_custody.rs` owns locally observed exact-event possession and retractions;
+its indexed child keeps those exact positive and negative observations in the
+leased profile database, with selected-event reads and 32-row keyset migration
+pages. It shares the history-source publisher and legacy-writer barrier rather
+than retaining the custody journal in memory. Auxiliary source identities 16–18
+use a separate registry without rewriting the installed transcript-source schema.
 `account_documents/custody.rs` owns their account-private versioned publication
 and sibling projection. It reuses certified account sessions and document digests,
 without adding a group transport or claiming recipient delivery. Channel authority

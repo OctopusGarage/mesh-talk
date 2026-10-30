@@ -33,6 +33,13 @@ impl TranscriptRepository {
             Ok(result)
         })
     }
+    pub(crate) fn ordinal_for_key(
+        &self,
+        conversation: ConversationId,
+        key: &[u8],
+    ) -> Result<Option<i64>, LogError> {
+        self.profile.database().read(|c|Ok(c.query_row("SELECT ordinal FROM transcript_rows WHERE kind=?1 AND conversation=?2 AND row_key=?3",params![self.kind,conversation.as_bytes().as_slice(),key],|r|r.get(0)).optional()?))
+    }
     pub(crate) fn remove_ordinals(&mut self, ordinals: &[i64]) -> Result<usize, LogError> {
         if ordinals.len() > MAX_PAGE_ROWS || ordinals.iter().any(|n| *n <= 0) {
             return Err(LogError::InvalidPageBudget);

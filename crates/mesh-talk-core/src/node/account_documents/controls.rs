@@ -241,6 +241,7 @@ impl Node {
         }
         Ok(out)
     }
+    #[cfg(test)]
     pub(in crate::node) fn private_dm_recall_claims(&self, peer: &str) -> Vec<(EventId, String)> {
         self.private_control_entries(AccountDocumentDomain::DmRecall, peer)
             .into_iter()

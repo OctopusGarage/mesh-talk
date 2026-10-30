@@ -276,28 +276,27 @@ impl Node {
         };
         let members = match members {
             Some(members) => members,
-            None => {
-                let log = self.log.lock().expect("log mutex not poisoned");
-                super::channel::ChannelBook::projected_metadata(channel, &log.events(&channel)?)
-                    .map(|state| {
-                        state
-                            .members()
-                            .iter()
-                            .filter(|member| state.is_accepted_member(&member.user_id()))
-                            .cloned()
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            }
+            None => self
+                .account_group_projection(channel)?
+                .state
+                .map(|state| {
+                    state
+                        .members()
+                        .iter()
+                        .filter(|member| state.is_accepted_member(&member.user_id()))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
         };
         Ok(self.project_channel_member_accounts(&members))
     }
 
     /// Read validated controls independently of delayed plaintext persistence.
     fn channel_control_state(&self, channel: ConversationId) -> Result<ChannelState, NodeError> {
-        let log = self.log.lock().expect("log mutex not poisoned");
-        let events = log.events(&channel)?;
-        let state = ChannelBook::projected_metadata(channel, &events)
+        let state = self
+            .account_group_projection(channel)?
+            .state
             .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
         if state.is_dissolved() {
             return Err(NodeError::Channel("channel is dissolved".into()));
@@ -728,6 +727,31 @@ impl Node {
         Ok(())
     }
 
+    /// Stable selected-content cache binding. Ordinary content tails preserve
+    /// this token; control changes and reordered canonical history replace it.
+    pub(in crate::node) fn channel_content_generation(
+        &self,
+        channel: ConversationId,
+    ) -> Result<Option<([u8; 16], i64)>, NodeError> {
+        let Some(source) = self.channel_checkpoints.source_binding(channel)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            source.job,
+            self.channel_checkpoints.control_stamp(&source)?,
+        )))
+    }
+
+    /// Exact invitation cutoff for one selected event, including own authors.
+    /// Receive-chain admission has a separate stricter owner.
+    pub(in crate::node) fn channel_content_visible(
+        &self,
+        channel: ConversationId,
+        event: crate::eventlog::EventId,
+    ) -> Result<bool, LogError> {
+        self.channel_checkpoints.content_visible(channel, event)
+    }
+
     /// Event ids visible to this device after it accepted an invitation.
     /// `None` means this channel has no acceptance cutoff (or is not a channel).
     pub(in crate::node) fn channel_content_gate(
@@ -1036,6 +1060,8 @@ impl Node {
         drop(book);
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
+        drop(delivery);
+        self.process_channel(channel);
         Ok(())
     }
 
@@ -2045,7 +2071,7 @@ impl Node {
             // observed external copies without installing a physical grant.
             // Positive holder qualification still needs the existing public
             // membership view; never turn an unresolved positive into zero.
-            let (confirmed, _) = self.effective_channel_custody_observations(channel, id);
+            let (confirmed, _) = self.effective_channel_custody_observations(channel, id)?;
             return Ok((!observations.is_empty()
                 && observations.iter().all(|meta| meta.tombstone)
                 && confirmed.is_empty()
@@ -2060,7 +2086,7 @@ impl Node {
         if !own_local && observations.is_empty() {
             return Ok(None);
         }
-        let (principals, unreadable) = self.confirmed_channel_custody_principals(channel, id);
+        let (principals, unreadable) = self.confirmed_channel_custody_principals(channel, id)?;
         if unreadable && principals.is_empty() {
             Ok(None)
         } else {
@@ -2139,16 +2165,19 @@ impl Node {
         &self,
         channel: ConversationId,
         id: EventId,
-    ) -> (
-        HashSet<String>,
-        Vec<super::account_documents::AccountDocumentMeta>,
-    ) {
+    ) -> Result<
+        (
+            HashSet<String>,
+            Vec<super::account_documents::AccountDocumentMeta>,
+        ),
+        NodeError,
+    > {
         let observations = self.channel_custody_observations(channel, id);
         let mut confirmed = self
             .channel_custody
             .lock()
             .expect("custody mutex")
-            .peers(id);
+            .peers(id)?;
         for meta in &observations {
             if let super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } =
                 &meta.key
@@ -2160,15 +2189,15 @@ impl Node {
                 }
             }
         }
-        (confirmed, observations)
+        Ok((confirmed, observations))
     }
 
     fn confirmed_channel_custody_principals(
         &self,
         channel: ConversationId,
         id: EventId,
-    ) -> (HashSet<String>, bool) {
-        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id);
+    ) -> Result<(HashSet<String>, bool), NodeError> {
+        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id)?;
         let members = self
             .channels
             .lock()
@@ -2188,7 +2217,7 @@ impl Node {
             let member = members.iter().find(|member| member.user_id() == device)?;
             self.channel_custody_member_principal(channel, member, None)
         }).collect();
-        (principals, unreadable)
+        Ok((principals, unreadable))
     }
 
     /// Historical exact-wrapper custody confirmed by post offices, separate
@@ -2201,7 +2230,7 @@ impl Node {
         if self.channel_custody_count(channel, id)?.is_none() {
             return Ok(None);
         }
-        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id);
+        let (confirmed, observations) = self.effective_channel_custody_observations(channel, id)?;
         let unreadable = observations.iter().any(|meta| !meta.tombstone && matches!(&meta.key, super::account_documents::AccountDocumentKey::ChannelCustody { holder, .. } if holder.starts_with("relay:")) && self.channel_custody_holder_binding(&meta.key).is_none());
         if unreadable {
             return Ok(None);
@@ -2314,7 +2343,7 @@ impl Node {
                 return Ok(());
             };
             let cycle = advance_custody_cursor(channel, (lamport, event_id), after, cycles);
-            let (confirmed, _) = self.effective_channel_custody_observations(channel, event_id);
+            let (confirmed, _) = self.effective_channel_custody_observations(channel, event_id)?;
             let members = self.channel_custody_repair_members(channel);
             let peers = members
                 .iter()
@@ -2471,7 +2500,8 @@ impl Node {
                 {
                     continue;
                 }
-                let (principals, _) = self.confirmed_channel_custody_principals(channel, event_id);
+                let (principals, _) =
+                    self.confirmed_channel_custody_principals(channel, event_id)?;
                 let peers = members
                     .iter()
                     .filter(|member| {

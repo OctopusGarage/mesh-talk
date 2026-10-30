@@ -269,6 +269,7 @@
       "id": "core-shared-channel-custody",
       "paths": [
         "crates/mesh-talk-core/src/node/channel_custody.rs",
+        "crates/mesh-talk-core/src/node/channel_custody/**",
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/account_documents/custody.rs",
         "crates/mesh-talk-core/src/node/node_tests.rs",
@@ -619,7 +620,8 @@
         "crates/mesh-talk-core/src/node/channel_account_controls.rs",
         "crates/mesh-talk-core/src/node/account_group/access.rs",
         "crates/mesh-talk-core/src/node/account_group/wire.rs",
-        "crates/mesh-talk-core/src/node/account_documents/group_control.rs"
+        "crates/mesh-talk-core/src/node/account_documents/group_control.rs",
+        "crates/mesh-talk-core/src/node/channel_account_authority/"
       ],
       "rust": [
         {
@@ -723,7 +725,8 @@
       "paths": [
         "crates/mesh-talk-core/src/channel/history.rs",
         "crates/mesh-talk-core/src/node/join_history.rs",
-        "crates/mesh-talk-core/src/node/join_history_tests.rs"
+        "crates/mesh-talk-core/src/node/join_history_tests.rs",
+        "crates/mesh-talk-core/src/node/join_history/"
       ],
       "rust": [
         {
@@ -762,6 +765,10 @@
           {
             "name": "Protected rows do not consume invitation history budgets or become ordinary snapshots, and incoming protected copies retain concealed projections",
             "reference": "docs/privacy-controls.md#protected-messages"
+          },
+          {
+            "name": "Indexed offer/release selectors retain canonical and causal invitation authority and exact received identities; unchanged source retry turns decode no historical controls.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -880,18 +887,25 @@
       "id": "core-channel",
       "paths": [
         "crates/mesh-talk-core/src/channel/",
-        "crates/mesh-talk-core/tests/forward_secrecy_boundaries.rs"
+        "crates/mesh-talk-core/tests/forward_secrecy_boundaries.rs",
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/node/channel/",
+        "crates/mesh-talk-core/src/node/channel_senders.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/ancestry.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
-            "channel::"
+            "channel::",
+            "node::channel_senders::tests::",
+            "node::node::tests::channel_checkpoint_",
+            "node::node::tests::group_reception_"
           ]
         }
       ],
       "capability": {
-        "summary": "Preserve exact channel receiver state through authenticated candidate preparation and reject exhausted sender-key counters before mutation.",
+        "summary": "Keep current channel metadata and exact receiver progress on encrypted disk, with bounded pending work and atomic transcript/reception installation.",
         "guide": "docs/ARCHITECTURE.md",
         "invariants": [
           {
@@ -901,6 +915,14 @@
           {
             "name": "The strict bounded device-local codec preserves skipped-key identity and eviction order; exhausted u32 advancement cannot wrap, while terminal skipped keys remain consumable.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Exact discard evidence and independent role terminal facts survive retries and restart.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Failed authentication waits for new key material, gaps wait for the existing skip bound, and legal oversized work remains pending without silent completion.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -2445,7 +2467,7 @@
         "crates/mesh-talk-core/src/node/transcript_repository/",
         "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
         "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
-        "crates/mesh-talk-core/src/node/filebook/indexed.rs",
+        "crates/mesh-talk-core/src/node/filebook/",
         "crates/mesh-talk-core/src/node/account_suppression.rs"
       ],
       "rust": [
@@ -2457,7 +2479,12 @@
             "runtime_metadata_",
             "node::filebook::indexed::tests::",
             "node::recovered_sent_ids::tests::",
-            "node::account_suppression::tests::"
+            "node::account_suppression::tests::",
+            "indexed_file_runtime_warm_open_does_not_hydrate_retained_manifest_history",
+            "incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_and_delivers_ack",
+            "sent_scope_repair_failure_installs_no_permission_and_retry_recovers",
+            "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
+            "failed_media_"
           ]
         }
       ],

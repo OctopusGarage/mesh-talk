@@ -13,7 +13,9 @@ use super::account_group::operations::journal::OperationReference;
 use super::dm_envelope::DmEnvelope;
 use super::dm_ratchet::{DmRatchet, PreparedRatchet};
 use super::received_log::{ReceivedEntry, ReceivedLog};
-use super::sentlog::{SentEntry, SentLog};
+use super::sentlog::SentEntry;
+#[cfg(test)]
+use super::sentlog::SentLog;
 use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
 use crate::eventlog::persist::PersistentEventLog;
@@ -40,6 +42,15 @@ pub(crate) trait DeliveryReceivedProjection {
     ) -> Result<(), LogError> {
         self.record_durable(entry)
     }
+    fn record_manifest_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        scopes: &[&Event],
+    ) -> Result<(), LogError> {
+        let _ = scopes;
+        self.record_manifest(entry, original, None)
+    }
     fn record_incoming(
         &mut self,
         original: &Event,
@@ -47,6 +58,7 @@ pub(crate) trait DeliveryReceivedProjection {
         owner: Option<(&PublicIdentity, &str)>,
     ) -> Result<(), LogError>;
 }
+#[cfg(test)]
 impl DeliverySentProjection for SentLog {
     fn record_durable(&mut self, entry: &SentEntry) -> Result<(), LogError> {
         SentLog::record_durable(self, entry)
@@ -81,6 +93,14 @@ impl DeliveryReceivedProjection for super::received_store::ReceivedStore {
         metadata: Option<&super::reception_effects::ReceptionMetadata>,
     ) -> Result<(), LogError> {
         self.record_file_with_reception(entry, original, metadata)
+    }
+    fn record_manifest_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        scopes: &[&Event],
+    ) -> Result<(), LogError> {
+        self.record_file_with_scopes(entry, original, None, scopes)
     }
     fn record_incoming(
         &mut self,
@@ -1602,14 +1622,18 @@ impl DeliveryStore {
                 }
                 files
                     .ok_or_else(|| invalid("file recovery adapter required"))?
-                    .record_manifest(
+                    .record_manifest_scopes(
                         received,
                         message
                             .destinations
                             .iter()
                             .find(|destination| destination.event.id == received.event_id)
                             .map(|destination| &destination.event),
-                        None,
+                        &message
+                            .destinations
+                            .iter()
+                            .map(|destination| &destination.event)
+                            .collect::<Vec<_>>(),
                     )?;
             }
             DeliveryTransaction::IncomingManifest {
@@ -1905,6 +1929,11 @@ impl DeliveryStore {
         }
     }
 
+    pub(crate) fn file_erasures(&self) -> impl Iterator<Item = (ConversationId, EventId)> + '_ {
+        self.erased_files
+            .iter()
+            .map(|(conversation, id)| (ConversationId::new(*conversation), *id))
+    }
     pub(crate) fn file_erased(&self, conversation: ConversationId, original: EventId) -> bool {
         self.erased_files
             .contains(&(*conversation.as_bytes(), original))

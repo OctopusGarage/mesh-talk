@@ -28,6 +28,9 @@ pub(crate) const ACCOUNT_PROFILES: i64 = 12;
 pub(crate) const AVATAR_PROFILES: i64 = 13;
 pub(crate) const TRUST_CARDS: i64 = 14;
 pub(crate) const AUTHORED_REACTIONS: i64 = 15;
+pub(crate) const CHANNEL_CUSTODY: i64 = 16;
+pub(crate) const ATTACHMENT_CONSENT: i64 = 17;
+pub(crate) const FILE_CONSENT: i64 = 18;
 pub(crate) const MAX_PAGE_ROWS: usize = 128;
 pub(crate) const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -266,6 +269,9 @@ impl TranscriptRepository {
         if self.fail_writes || self.fail_next.replace(false) {
             return Err(std::io::Error::other("injected transcript write failure").into());
         }
+        self.check_publication()
+    }
+    pub(super) fn check_publication(&self) -> Result<(), LogError> {
         self.source.check_write()
     }
     pub(crate) fn revision(&self) -> u64 {

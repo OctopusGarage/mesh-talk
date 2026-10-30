@@ -427,7 +427,7 @@ pub async fn channel_activity(
     let guard = state.0.read().await;
     let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
     Ok(rt
-        .channel_activity(channel)
+        .channel_activity(channel)?
         .into_iter()
         .map(|entry| ChannelActivityInfo {
             kind: entry.kind.to_string(),

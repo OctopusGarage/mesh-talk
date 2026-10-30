@@ -118,7 +118,7 @@ impl Node {
         if !self.device_sync_policy().enabled(SyncCategory::History) {
             return;
         }
-        let entries = {
+        {
             let book = self.channels.lock().expect("channels mutex");
             let Some(state) = book.state(&group) else {
                 return;
@@ -126,18 +126,29 @@ impl Node {
             if !self.channel_identity_matches_account(state) {
                 return;
             }
-            book.activity(&group)
-                .into_iter()
-                .rev()
-                .take(MAX_ENTRIES)
-                .map(|entry| ActivityEntry {
-                    kind: entry.kind.into(),
-                    actor: entry.actor,
-                    target: entry.target,
-                    wall_clock: entry.wall_clock,
-                })
-                .collect::<Vec<_>>()
+        }
+        // The checkpoint owns presentation history. Read its latest bounded
+        // page directly: this publisher already runs within group projection.
+        let page = match self
+            .channel_checkpoints
+            .activity_page(group, None, Default::default())
+        {
+            Ok(page) => page,
+            Err(error) => {
+                log::debug!("group activity publication deferred: {error}");
+                return;
+            }
         };
+        let entries = page
+            .items
+            .into_iter()
+            .map(|entry| ActivityEntry {
+                kind: entry.kind.into(),
+                actor: entry.actor,
+                target: entry.target,
+                wall_clock: entry.wall_clock,
+            })
+            .collect();
         let channel = hex::encode(group.as_bytes());
         let source_device = self.user_id();
         let inventory_key = AccountDocumentKey::GroupInventory {
@@ -164,7 +175,7 @@ impl Node {
                     public: self.identity.public(),
                     certificate: self.account.certify(&self.identity.public().ed25519_pub),
                 },
-                entries: entries.into_iter().rev().collect(),
+                entries,
                 signature: String::new(),
             };
             value.signature = hex::encode(self.identity.sign(&value.signing_message()));
@@ -316,15 +327,15 @@ mod tests {
         let (_directory, _account, source, target, group) = fixture();
         copy_inventory(&source, &target, group);
         assert!(
-            target.channel_activity(group).is_empty(),
+            target.channel_activity(group).unwrap().is_empty(),
             "legacy absence stays empty"
         );
         copy_document(&source, &target, &key(&source, group));
         assert_eq!(
-            target.channel_activity(group),
-            source.channel_activity(group)
+            target.channel_activity(group).unwrap(),
+            source.channel_activity(group).unwrap()
         );
-        assert_eq!(target.channel_activity(group)[0].kind, "created");
+        assert_eq!(target.channel_activity(group).unwrap()[0].kind, "created");
         assert!(target.channel_members(group).is_empty());
         assert!(
             target
@@ -347,13 +358,13 @@ mod tests {
         target
             .set_device_sync_category(SyncCategory::History, false)
             .unwrap();
-        assert!(target.channel_activity(group).is_empty());
+        assert!(target.channel_activity(group).unwrap().is_empty());
         target
             .set_device_sync_category(SyncCategory::History, true)
             .unwrap();
         assert_eq!(
-            target.channel_activity(group),
-            source.channel_activity(group)
+            target.channel_activity(group).unwrap(),
+            source.channel_activity(group).unwrap()
         );
     }
 
@@ -437,7 +448,7 @@ mod tests {
         }
         source.publish_group_inventory_for(group);
         copy_inventory(&source, &target, group);
-        assert!(target.channel_activity(group).is_empty());
+        assert!(target.channel_activity(group).unwrap().is_empty());
         source.publish_group_activity_for(group);
         copy_document(&source, &target, &key(&source, group));
         let current = source
@@ -446,10 +457,11 @@ mod tests {
             .unwrap();
         assert_ne!(current.meta.content_hash, old.meta.content_hash);
         assert!(current.payload().len() <= 8192);
-        assert_eq!(target.channel_activity(group).len(), MAX_ENTRIES);
+        assert_eq!(target.channel_activity(group).unwrap().len(), MAX_ENTRIES);
         assert!(
             target
                 .channel_activity(group)
+                .unwrap()
                 .iter()
                 .all(|entry| entry.kind == "renamed")
         );
@@ -465,7 +477,7 @@ mod tests {
         let (_directory, _account, source, target, group) = fixture();
         copy_inventory(&source, &target, group);
         copy_document(&source, &target, &key(&source, group));
-        assert!(!target.channel_activity(group).is_empty());
+        assert!(!target.channel_activity(group).unwrap().is_empty());
         // Install a real local view through the ordinary public reducer.
         let event = Event::new(
             &target.identity,
@@ -486,10 +498,13 @@ mod tests {
         target.log.lock().unwrap().append(event).unwrap();
         target.process_channel(group);
         assert!(target.channel_shared_reference(group).is_none());
-        assert_eq!(target.channel_activity(group)[0].actor, target.user_id());
+        assert_eq!(
+            target.channel_activity(group).unwrap()[0].actor,
+            target.user_id()
+        );
         assert_ne!(
-            target.channel_activity(group),
-            source.channel_activity(group)
+            target.channel_activity(group).unwrap(),
+            source.channel_activity(group).unwrap()
         );
     }
     #[test]
@@ -534,11 +549,11 @@ mod tests {
             (&second, &source)
         };
         copy_document(other, &target, &key(other, group));
-        assert!(target.channel_activity(group).is_empty());
+        assert!(target.channel_activity(group).unwrap().is_empty());
         copy_document(selected, &target, &key(selected, group));
         assert_eq!(
-            target.channel_activity(group),
-            selected.channel_activity(group)
+            target.channel_activity(group).unwrap(),
+            selected.channel_activity(group).unwrap()
         );
     }
 

@@ -1446,11 +1446,48 @@ backend retains no event-body cache; exact reads fetch complete owned events
 from SQLCipher, and ordinary appends leave the retired legacy source untouched.
 The explicit standalone `PersistentEventLog::open` remains the collecting legacy
 SDK owner and rejects a retired participant source. Transcripts, crypto and
-projections still have separate migration boundaries. Transcript history ordering and account routes use persisted metadata selectors;
-ordinary recent and exact-context reads hydrate selected rows only. Channel
-startup, file/media state and remaining optional caches have separate cutovers,
-so the event and transcript changes alone do not establish a complete startup
-or runtime memory bound.
+projections still have separate migration boundaries. Transcript history ordering
+and account routes use persisted metadata selectors; ordinary recent and
+exact-context reads hydrate selected rows only. Initial and changed-source
+principal authorization still retains a temporary collection, so the event,
+transcript and channel cutovers do not establish the complete participant runtime
+memory bound.
+
+The channel checkpoint owner reuses the existing canonical logical-order job and
+its source revision. Safe tails extend the same job; a late control that changes
+canonical order rebuilds derived authority in bounded turns. Current metadata,
+selected causal membership, activity rows and exact applied identities live in
+indexed tables. Retired derived generations are reclaimed incrementally. A warm
+ordinary Node open loads current channel metadata without decoding completed
+signed channel history. Source 8 independently publishes legacy channel sender
+snapshots; only each channel's active sending epoch is loaded into memory.
+
+Receiver state is separate from rebuildable authority. One exact channel, author
+and epoch checkpoint preserves consumed holes, skipped keys and their eviction
+order. Preparation never mutates it. The account/source-bound compare-and-swap,
+received body or exact suppression evidence, reception provenance and batch
+progress commit in one SQL transaction before any in-memory publication. Failed
+writes leave the key usable. Replaying old distributions or reordered controls
+cannot roll consumed keys back. The owner provides separate message and file
+batch terminal facts. Channel file producers still await adoption of this
+prepared receiver transaction boundary; the checkpoint seam alone does not
+complete that runtime cutover.
+
+Pending channel work is selected by bounded indexed pages. One message producer
+invocation examines at most 64 bodies and 64 selector pages, sharing a 16 MiB
+charge budget across its previews while retaining the existing 8 MiB per-row
+admission. Two successful candidates distinguish catch-up from live delivery.
+When the budget ends first, a lone candidate stays pending without consuming its
+key; a scheduled continuation preserves arrival provenance and leaves the batch
+terminal open. Startup continuations also retain their expiry and notification
+semantics. Authentication failures wait for changed key material; sequence gaps wait until receiver
+progress can satisfy the existing skip bound. Valid oversized records remain
+pending with an explicit budget error. Definitive malformed sender headers
+commit exact general-discovery evidence with their channel disposition. Missing
+recall targets wake exact persisted dependencies. Invitation history uses indexed
+offer/release selectors, canonical and causal authority, and the existing bounded
+frozen text copy; unchanged retry ticks do not replay historical control bodies.
+Shared delivery journals retain their existing last-retired recovery ordering.
 
 The separate `node/transcript_repository/` owner provides indexed sent, received,
 file-card and exact suppression storage on that same encrypted connection.
@@ -1459,8 +1496,8 @@ barrier. Proof reads validate row and physical allocation charges before payload
 fetches; aliases remain bounded by the signed identity limit. Persisted revisions
 advance only for newly accepted proofs or bindings, so duplicate insertion and
 restart preserve ordered-view invalidation. Export visitors release the SQL guard
-between bounded pages. These indexed owners alone do not replace FileBook startup
-reconstruction or qualify the complete participant runtime memory bound.
+between bounded pages. Production Node uses the indexed FileBook described below;
+other independent runtime owners retain their own resource and startup contracts.
 The indexed FileBook projection references those existing file-card bodies by
 ordinal. It installs validated signed bindings and exact processing facts in the
 body transaction. Its transfer fingerprint shares the existing file equality
@@ -1473,8 +1510,17 @@ cleanup can fail. Signed logical aliases apply this rule in either arrival order
 the indexed author and exact plaintext digest must match the retained offer.
 Metadata pages check row and byte budgets; selected manifest reads verify physical allocation
 charges before loading bytes. Account adoption fences old handles and never
-imports the former account into the new namespace. This leaf does not by itself
-replace legacy FileBook retention or media startup work. Delivery-journal file
+imports the former account into the new namespace. Production Node imports old
+FILES bindings once through bounded turns; warm reopen reads checkpoints and exact
+retained erasure keys without hydrating file-card history. Download scheduling is
+account-scoped SQL work installed with each new validated offer. Metadata discovery
+pages contain at most 128 IDs and each worker turn admits eight files. A completion
+acknowledges the observed work revision, so a newer offer cannot lose its sole retry
+fact. Consent changes restart a persisted metadata scan, and failed media or
+completion writes leave pending work retryable across restart. Sent fanout scopes
+reuse source 9 publication and bounded metadata pages; the sync owner still checks
+each exact signed parent permission. Ordinary scope reads require a live validated
+binding, and historical scopes are never rebuilt in a resident map. Delivery-journal file
 projections now install FILES, validated eligibility and incoming reception facts
 in one transaction before retiring the intent. The same installer accepts the
 incoming channel owner's receiver checkpoint transaction. Outgoing manifest
@@ -1578,6 +1624,22 @@ missing or changed barrier fails closed. Warm constructors inspect fixed metadat
 and barriers without decoding historical bodies or opening another connection.
 The existing profile lease excludes cooperating writers; identity comparisons
 also reject detected source changes during import.
+
+Custody observations reuse this publisher through auxiliary source identity 16.
+Positive and negative exact-event/holder facts stay in the encrypted database;
+warm participant startup does not replay the custody journal. Migration seeks
+32 observations after its compound key and retries storage failures without
+inventing an empty result. Auxiliary identities 16–18 have their own registry,
+so extending the publisher does not rewrite the installed transcript table.
+
+Raw account-group access observations remain separate from admitted channel
+authority: rejected signed controls still contribute to their original sorted-ID
+fingerprint. The access owner computes this metadata using bounded header and
+parent pages with disk ancestry marks, and caches the completed result against
+the exact retained source revision. The frontier is capped with an overflow
+sentinel; an incomplete local frontier cannot establish a complete observation.
+This bounds memory and makes unchanged observations reusable; a changed source
+can still require metadata work proportional to its retained graph.
 
 Transcript lookups return owned, fallible results. Chronological, reverse and
 insertion-order pages select keys and aggregate sender/body bytes before fetching

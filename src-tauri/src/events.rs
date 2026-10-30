@@ -9,26 +9,7 @@ use tauri_plugin_notification::NotificationExt;
 /// How many characters of a message body we surface in a notification preview.
 const PREVIEW_LEN: usize = 80;
 
-/// Queue native presentation before acquiring session authority. Window queries
-/// may synchronously dispatch to the main thread; holding the Session mutex on
-/// a worker during that roundtrip deadlocks a main-thread owner command.
-/// Revalidate inside the queued task so replacement sessions cannot receive an
-/// earlier runtime's notifications or frontend events.
-pub(crate) fn dispatch_runtime_presentation<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-    authority: &crate::chat_commands::RuntimeAuthority,
-    present: impl FnOnce(&tauri::AppHandle<R>) + Send + 'static,
-) {
-    let queued_app = app.clone();
-    if let Err(error) = queue_runtime_presentation(
-        authority.clone(),
-        move || present(&queued_app),
-        |task| app.run_on_main_thread(task),
-    ) {
-        log::warn!("Unable to queue runtime presentation: {error}");
-    }
-}
-
+#[cfg(test)]
 fn queue_runtime_presentation<E>(
     authority: crate::chat_commands::RuntimeAuthority,
     present: impl FnOnce() + Send + 'static,

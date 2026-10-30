@@ -1,7 +1,10 @@
 //! Frozen, owner-authorized history copies. The offer contains a separately
 //! encrypted snapshot, never sender-chain keys. Existing accepted holders can
 //! release its independent key only after the invitee's signed acceptance.
-use super::channel::{ChannelBook, ReceivedChannelMessage, SealedPayload};
+mod indexed;
+
+use super::channel::ChannelBook;
+use super::channel::{ReceivedChannelMessage, SealedPayload};
 use super::{HistoryEntry, Node, NodeError};
 use crate::channel::{GroupKey, HistoryPolicy};
 use crate::eventlog::{ConversationId, Event, EventId, EventKind};
@@ -9,7 +12,8 @@ use crate::identity::device::{DeviceIdentity, PublicIdentity};
 use crate::node::message::MessageBody;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use zeroize::Zeroize;
 
 #[cfg(test)]
@@ -34,6 +38,7 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         .ok()
 }
 
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 struct SnapshotRow {
     id: EventId,
@@ -118,32 +123,35 @@ fn valid_account_acceptance(
     event: &Event,
     grant: &super::channel_account_authority::AccountGrant,
     authority: &super::channel_account_authority::AccountAuthority,
-    graph: &super::channel_account_authority::EventGraph<'_>,
-) -> bool {
+    graph: &impl super::channel::graph::AuthorityGraph,
+) -> Result<bool, crate::eventlog::LogError> {
     if event.kind != EventKind::ChannelAccept
         || !event.ciphertext.is_empty()
         || !event.is_canonical()
         || !event.verify_integrity()
         || !event.verify_signature()
     {
-        return false;
+        return Ok(false);
     }
     if grant.acceptance_event == Some(event.id)
         && event.author.ed25519_pub() == &grant.original.ed25519_pub
     {
-        return super::channel::descends_from(event, grant.membership_event, graph);
+        return graph.descends(event.id, grant.membership_event);
     }
-    authority.original_device_proofs().into_iter().any(|proof| {
-        proof.ed25519_pub == *event.author.ed25519_pub()
+    for proof in authority.original_device_proofs() {
+        if proof.ed25519_pub == *event.author.ed25519_pub()
             && authority
                 .grant_for_device(&proof.public(), &proof)
                 .and_then(super::channel_account_authority::AccountGrant::id)
                 == grant.id()
-            && authority
-                .clone()
-                .accept_account(event, &proof, graph)
-                .is_ok()
-    })
+            && super::channel_account_authority::admitted(
+                authority.clone().accept_account(event, &proof, graph),
+            )?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 /// Metadata admission is deliberately independent of View/ChannelBook replay.
 /// Full frozen-offer authorization and row bounds are checked before decryption.
@@ -151,10 +159,10 @@ pub(super) fn account_release_admitted(
     state: &crate::channel::ChannelState,
     event: &Event,
     authority: &super::channel_account_authority::AccountAuthority,
-    graph: &super::channel_account_authority::EventGraph<'_>,
-) -> bool {
+    graph: &impl super::channel::graph::AuthorityGraph,
+) -> Result<bool, crate::eventlog::LogError> {
     let Some(value) = decode_account_release(&event.ciphertext) else {
-        return false;
+        return Ok(false);
     };
     if event.kind != EventKind::ChannelDeviceInheritance
         || event.conversation_id != state.id()
@@ -163,13 +171,13 @@ pub(super) fn account_release_admitted(
         || !event.verify_integrity()
         || !event.verify_signature()
     {
-        return false;
+        return Ok(false);
     }
     let Some(grant) = authority
         .account_grant(&value.grant.account_pub)
         .filter(|grant| grant.id() == Some(value.grant))
     else {
-        return false;
+        return Ok(false);
     };
     let proofs = authority.original_device_proofs();
     let Some(recipient) = proofs.iter().find(|proof| {
@@ -179,30 +187,30 @@ pub(super) fn account_release_admitted(
                 .and_then(super::channel_account_authority::AccountGrant::id)
                 == Some(value.grant)
     }) else {
-        return false;
+        return Ok(false);
     };
     if authority.device_authorization(&recipient.public(), recipient)
         != Some(value.device_authorization)
-        || !super::channel::descends_from(event, value.device_authorization, graph)
+        || !graph.descends(event.id, value.device_authorization)?
     {
-        return false;
+        return Ok(false);
     }
     let Some(sender) = proofs.iter().find(|proof| {
         proof.ed25519_pub == *event.author.ed25519_pub() && state.is_accepted_member(&proof.user_id)
     }) else {
-        return false;
+        return Ok(false);
     };
-    if authority
-        .device_authorization(&sender.public(), sender)
-        .is_none_or(|binding| !super::channel::descends_from(event, binding, graph))
-    {
-        return false;
+    let Some(binding) = authority.device_authorization(&sender.public(), sender) else {
+        return Ok(false);
+    };
+    if !graph.descends(event.id, binding)? {
+        return Ok(false);
     }
-    let Some(offer_event) = graph.get(&value.release.offer) else {
-        return false;
+    let Some(offer_event) = graph.event(value.release.offer)? else {
+        return Ok(false);
     };
     let Some(HistoryControl::Offer(offer)) = decode(&offer_event.ciphertext) else {
-        return false;
+        return Ok(false);
     };
     if offer_event.kind != EventKind::ChannelJoinHistory
         || !offer_event.is_canonical()
@@ -216,16 +224,16 @@ pub(super) fn account_release_admitted(
             .entries
             .iter()
             .any(|source| source.user_id == sender.user_id)
-        || !super::channel::descends_from(event, offer_event.id, graph)
+        || !graph.descends(event.id, offer_event.id)?
     {
-        return false;
+        return Ok(false);
     }
-    let Some(acceptance) = graph.get(&value.release.acceptance) else {
-        return false;
+    let Some(acceptance) = graph.event(value.release.acceptance)? else {
+        return Ok(false);
     };
-    acceptance.conversation_id == event.conversation_id
-        && super::channel::descends_from(event, acceptance.id, graph)
-        && valid_account_acceptance(acceptance, grant, authority, graph)
+    Ok(acceptance.conversation_id == event.conversation_id
+        && graph.descends(event.id, acceptance.id)?
+        && valid_account_acceptance(&acceptance, grant, authority, graph)?)
 }
 
 pub(super) struct View<'a> {
@@ -602,13 +610,45 @@ fn select_history(
     selected
 }
 
+pub(in crate::node) fn initialize_indexed(
+    c: &rusqlite::Connection,
+    fresh: bool,
+) -> Result<(), crate::eventlog::LogError> {
+    indexed::initialize(c, fresh)
+}
+pub(in crate::node) fn index_control_on(
+    c: &rusqlite::Connection,
+    job: [u8; 16],
+    channel: ConversationId,
+    event: &Event,
+    rank: i64,
+) -> Result<(), crate::eventlog::LogError> {
+    indexed::install_on(c, job, channel, event, rank)
+}
+pub(in crate::node) fn indexed_policy(
+    checkpoints: &super::channel::checkpoint::ChannelCheckpointStore,
+    repository: &crate::eventlog::repository::EventRepository,
+    me: &DeviceIdentity,
+    channel: ConversationId,
+) -> Result<HistoryPolicy, crate::eventlog::LogError> {
+    indexed::current_policy(checkpoints, repository, me, channel)
+}
 impl Node {
     pub fn channel_history_policy(
         &self,
         channel: ConversationId,
     ) -> Result<HistoryPolicy, NodeError> {
         let log = self.log.lock().expect("log lock");
-        Ok(policy(&log.events(&channel)?.iter().collect::<Vec<_>>()))
+        while !self
+            .channel_checkpoints
+            .project_step(log.repository()?, &self.identity, channel)?
+        {}
+        Ok(indexed_policy(
+            &self.channel_checkpoints,
+            log.repository()?,
+            &self.identity,
+            channel,
+        )?)
     }
     pub async fn set_channel_history_policy(
         &self,
@@ -708,17 +748,27 @@ impl Node {
         // earlier row. Never give that member the snapshot root as a source.
         let sources = {
             let log = self.log.lock().expect("log lock");
-            let refs = log.events(&channel)?;
-            let refs: Vec<_> = refs.iter().collect();
-            let view = View::new(&refs);
-            let authorities: Vec<_> = rows
-                .iter()
-                .filter_map(|row| {
-                    view.by_id.get(&row.id).and_then(|original| {
-                        Some((view.before(original)?, view.canonical_before(original)?))
-                    })
-                })
-                .collect();
+            let repository = log.repository()?;
+            let source = self
+                .channel_checkpoints
+                .source_binding(channel)?
+                .ok_or(crate::eventlog::LogError::StaleCursor)?;
+            let mut authorities = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let causal = self.channel_checkpoints.causal_state(
+                    repository,
+                    &self.identity,
+                    channel,
+                    row.id,
+                )?;
+                let canonical = self
+                    .channel_checkpoints
+                    .canonical_state(channel, row.id, false)?;
+                if let (Some(causal), Some(canonical)) = (causal, canonical) {
+                    authorities.push((causal, canonical));
+                }
+            }
+            self.channel_checkpoints.check_source(&source)?;
             sources
                 .into_iter()
                 .filter(|source| {
@@ -935,216 +985,6 @@ impl Node {
             },
         )
     }
-    /// At most eight ready invitations are released per control tick. All bytes
-    /// remain in the durable event log, so an offline source can retry on restart.
-    pub(super) fn retry_join_history(&self) -> Result<Vec<ConversationId>, NodeError> {
-        let _membership = self
-            .channel_membership_commit
-            .lock()
-            .expect("channel membership commit lock");
-        let mut channels = self.channels.lock().expect("channels lock").channel_ids();
-        channels.sort_by_key(|channel| *channel.as_bytes());
-        if !channels.is_empty() {
-            let offset =
-                ((super::node::now_millis() / 3000) as usize).wrapping_mul(32) % channels.len();
-            channels.rotate_left(offset);
-        }
-        channels.truncate(32);
-        let mut remaining = MAX_RETRIES;
-        let mut ready = HashSet::new();
-        for channel in channels {
-            if !self.channel_replica_enabled(channel, &self.user_id()) {
-                continue;
-            }
-            let events: Vec<_> = self
-                .log
-                .lock()
-                .expect("log lock")
-                .events(&channel)?
-                .into_iter()
-                .collect();
-            let refs: Vec<_> = events.iter().collect();
-            let view = View::new(&refs);
-            let Some(current) = ChannelBook::projected_metadata(channel, &refs) else {
-                continue;
-            };
-            if !self.channel_identity_is_current(&current)? || current.is_dissolved() {
-                continue;
-            }
-            for (event, offer) in view.offers() {
-                if remaining == 0 {
-                    return Ok(ready.into_iter().collect());
-                }
-                if view.lifetime_closed(&offer, None) {
-                    continue;
-                }
-                if !current.is_accepted_member(&offer.recipient) {
-                    continue;
-                }
-                let projection = self.account_group_projection(channel)?;
-                let authority = &projection.authority;
-                let account_grant = authority.grants().into_iter().find(|grant| {
-                    grant.membership_event == offer.invitation
-                        && grant.original.user_id == offer.recipient
-                });
-                let mut recipients = Vec::new();
-                if let Some(grant) = account_grant {
-                    let Some(id) = grant.id() else {
-                        continue;
-                    };
-                    let Some(acceptance) = view.events.iter().find(|candidate| {
-                        valid_account_acceptance(candidate, &grant, authority, &view.by_id)
-                    }) else {
-                        continue;
-                    };
-                    for proof in authority.original_device_proofs() {
-                        if authority
-                            .grant_for_device(&proof.public(), &proof)
-                            .and_then(super::channel_account_authority::AccountGrant::id)
-                            != Some(id)
-                        {
-                            continue;
-                        }
-                        let Some(binding) = authority.device_authorization(&proof.public(), &proof)
-                        else {
-                            continue;
-                        };
-                        let released = view.events.iter().any(|prior| {
-                            decode_account_release(&prior.ciphertext).is_some_and(|release| {
-                                release.release.offer == event.id
-                                    && release.recipient == proof.public()
-                                    && account_release_admitted(
-                                        &current,
-                                        prior,
-                                        authority,
-                                        &view.by_id,
-                                    )
-                            }) || (proof.user_id == offer.recipient
-                                && view.release(prior, event, &offer).is_some())
-                        });
-                        if released {
-                            ready.insert(channel);
-                            continue;
-                        }
-                        recipients.push((proof.public(), acceptance.id, Some((id, binding))));
-                    }
-                } else {
-                    let releases: Vec<_> = view
-                        .events
-                        .iter()
-                        .filter(|candidate| {
-                            candidate.kind == EventKind::ChannelJoinHistory
-                                && view.release(candidate, event, &offer).is_some()
-                        })
-                        .collect();
-                    if !releases.is_empty() {
-                        if releases
-                            .iter()
-                            .any(|release| release.author.user_id() == self.user_id())
-                        {
-                            ready.insert(channel);
-                        }
-                        continue;
-                    }
-                    let Some(acceptance) = view.events.iter().find(|candidate| {
-                        candidate.kind == EventKind::ChannelAccept
-                            && candidate.author.user_id() == offer.recipient
-                            && candidate.ciphertext.is_empty()
-                            && view.before(candidate).is_some_and(|state| {
-                                state.is_member(&offer.recipient)
-                                    && !state.is_accepted_member(&offer.recipient)
-                            })
-                            && super::channel::descends_from(
-                                candidate,
-                                offer.invitation,
-                                &view.by_id,
-                            )
-                    }) else {
-                        continue;
-                    };
-                    let Some(recipient) = current
-                        .members()
-                        .iter()
-                        .find(|member| member.user_id() == offer.recipient)
-                    else {
-                        continue;
-                    };
-                    recipients.push((recipient.clone(), acceptance.id, None));
-                }
-                if recipients.is_empty() {
-                    continue;
-                }
-                let Some(author) = view.author(event) else {
-                    continue;
-                };
-                let Some(mut key) = offer.keys.open(&self.identity, &author.x25519_pub) else {
-                    continue;
-                };
-                let root = <[u8; 32]>::try_from(key.as_slice())
-                    .ok()
-                    .map(GroupKey::from_bytes);
-                key.zeroize();
-                let Some(root) = root else {
-                    continue;
-                };
-                let recalled = self.recalled_targets_channel(channel)?;
-                let now = super::node::now_millis();
-                let keys: Vec<_> = offer
-                    .rows
-                    .iter()
-                    .filter_map(|row| {
-                        if recalled.contains(&row.id) {
-                            return None;
-                        }
-                        let key = row_key(&root, row.id);
-                        let mut plaintext =
-                            crate::channel::open_channel_message(&key, &row.ciphertext).ok()?;
-                        let visible =
-                            crate::expiry::split(&plaintext).is_some_and(|(deadline, _)| {
-                                deadline.is_none_or(|deadline| deadline > now)
-                            });
-                        plaintext.zeroize();
-                        visible.then_some(RowKey {
-                            id: row.id,
-                            key: *key.as_bytes(),
-                        })
-                    })
-                    .collect();
-                let key_bytes = zeroize::Zeroizing::new(encode(&keys));
-                for (recipient, acceptance, account) in recipients.into_iter().take(remaining) {
-                    let sealed_key =
-                        crate::dm::seal(&self.identity, &recipient.x25519_pub, &key_bytes)
-                            .map_err(|error| NodeError::Channel(error.to_string()))?;
-                    let release = Release {
-                        offer: event.id,
-                        acceptance,
-                        sealed_key,
-                    };
-                    let (kind, payload) = if let Some((grant, device_authorization)) = account {
-                        (
-                            EventKind::ChannelDeviceInheritance,
-                            encode_account_release(&AccountRelease {
-                                version: 1,
-                                grant,
-                                device_authorization,
-                                recipient,
-                                release,
-                            }),
-                        )
-                    } else {
-                        (
-                            EventKind::ChannelJoinHistory,
-                            encode(&HistoryControl::Release(release)),
-                        )
-                    };
-                    self.append_event(channel, kind, payload)?;
-                    remaining -= 1;
-                    ready.insert(channel);
-                }
-            }
-        }
-        Ok(ready.into_iter().collect())
-    }
     pub(super) fn select_join_history(
         &self,
         channel: ConversationId,
@@ -1162,18 +1002,19 @@ impl Node {
     }
 }
 
+#[cfg(test)]
 pub(super) fn received(
     me: &DeviceIdentity,
     channel: ConversationId,
     events: &[&Event],
-) -> Vec<ReceivedChannelMessage> {
+) -> Result<Vec<ReceivedChannelMessage>, crate::eventlog::LogError> {
     let projection = ChannelBook::project_membership(channel, events);
     let Some(current) = projection.state.as_ref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let uid = me.user_id();
     if current.is_dissolved() || !current.is_accepted_member(&uid) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let view = View::new(events);
     let offers: HashMap<_, _> = view
@@ -1190,7 +1031,7 @@ pub(super) fn received(
             else {
                 continue;
             };
-            if !account_release_admitted(current, event, &projection.authority, &view.by_id) {
+            if !account_release_admitted(current, event, &projection.authority, &view.by_id)? {
                 continue;
             }
             (value.release, true)
@@ -1281,7 +1122,7 @@ pub(super) fn received(
             out.extend(batch.into_iter().filter(|row| emitted.insert(row.event_id)));
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]

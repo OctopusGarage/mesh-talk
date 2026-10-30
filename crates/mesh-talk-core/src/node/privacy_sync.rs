@@ -329,25 +329,14 @@ impl Node {
             return Ok(book.replica_enabled(*conversation, &me));
         }
         drop(book);
-        let manifests = self
-            .files
-            .lock()
-            .expect("files lock not poisoned")
-            .manifest_events(*conversation);
-        let parents: Vec<_> = {
-            let log = self.log.lock().expect("log lock not poisoned");
-            let mut parents = Vec::new();
-            for id in &manifests {
-                if let Some(conversation) = log.event_conversation(id)? {
-                    parents.push(conversation);
-                }
+        for scope in self.manifest_scopes(*conversation) {
+            let parent = scope?.parent;
+            let book = self.channels.lock().expect("channels lock");
+            if book.state(&parent).is_some() && !book.replica_enabled(parent, &me) {
+                return Ok(false);
             }
-            parents
-        };
-        let book = self.channels.lock().expect("channels lock not poisoned");
-        Ok(parents
-            .into_iter()
-            .all(|parent| book.state(&parent).is_none() || book.replica_enabled(parent, &me)))
+        }
+        Ok(true)
     }
 }
 impl GuardedSyncStore<'_> {
@@ -658,9 +647,11 @@ impl GuardedSyncStore<'_> {
             return Ok(allowed);
         }
         // A file conversation inherits its verified manifest's parent scope.
-        if let Some(scopes) = state.file_scopes.get(conversation) {
+        if self.node.has_file_scope(*conversation)? {
+            let scopes = self.node.manifest_scopes(*conversation);
             let mut authors = HashSet::new();
             for scope in scopes {
+                let scope = scope?;
                 let parent_events: Vec<_> = self
                     .node
                     .log
@@ -670,7 +661,7 @@ impl GuardedSyncStore<'_> {
                     .into_iter()
                     .collect();
                 if scope.parent != *conversation
-                    && !state.file_scopes.contains_key(&scope.parent)
+                    && !self.node.has_file_scope(scope.parent)?
                     && self
                         .projection(state, &scope.parent, &parent_events)?
                         .contains(&scope.event)
@@ -1835,8 +1826,7 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .files
                 .lock()
                 .expect("files lock not poisoned")
-                .manifest(&event.conversation_id)
-                .is_some()
+                .contains_file(event.conversation_id)?
         };
         // A chunk-first legacy sender must not fill the recipient's log before
         // its offer has arrived. Ordinary messages have an authenticated DM,
@@ -1901,8 +1891,7 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .files
                 .lock()
                 .expect("files lock not poisoned")
-                .manifest(&event.conversation_id)
-                .cloned();
+                .manifest(&event.conversation_id)?;
             if let Some(manifest) = manifest.filter(super::media_store::automatic_inline_image) {
                 let first_chunk = self
                     .node

@@ -2,6 +2,7 @@
 //! in the single parent state machine. Unscoped source keys are unchanged.
 use super::*;
 const SCHEMA: &str = "CREATE TABLE account_history_sources(kind INTEGER NOT NULL CHECK(kind=15),account BLOB NOT NULL CHECK(length(account)=32),locator BLOB NOT NULL UNIQUE,stub BLOB NOT NULL CHECK(length(stub)=54),raw_size INTEGER NOT NULL CHECK(raw_size>=0),raw_hash BLOB NOT NULL CHECK(length(raw_hash)=32),published INTEGER NOT NULL CHECK(published IN(0,1)),PRIMARY KEY(kind,account)) WITHOUT ROWID;";
+const AUXILIARY_SCHEMA: &str = "CREATE TABLE auxiliary_history_sources(kind INTEGER PRIMARY KEY CHECK(kind BETWEEN 16 AND 18),locator BLOB NOT NULL UNIQUE,stub BLOB NOT NULL CHECK(length(stub)=54),raw_size INTEGER NOT NULL CHECK(raw_size>=0),raw_hash BLOB NOT NULL CHECK(length(raw_hash)=32),published INTEGER NOT NULL CHECK(published IN(0,1)));";
 
 #[derive(Clone, Copy)]
 pub(super) struct SourceIdentity {
@@ -21,6 +22,8 @@ impl SourceIdentity {
     pub fn table(self) -> &'static str {
         if self.account.is_some() {
             "account_history_sources"
+        } else if self.kind >= CHANNEL_CUSTODY {
+            "auxiliary_history_sources"
         } else {
             "transcript_sources"
         }
@@ -34,19 +37,24 @@ impl SourceIdentity {
     }
     pub fn initialize(self, profile: &ProfileStorage) -> Result<(), LogError> {
         initialize(profile)?;
-        if self.account.is_none() {
+        if self.table() == "transcript_sources" {
             return Ok(());
         }
+        let schema = if self.account.is_some() {
+            SCHEMA
+        } else {
+            AUXILIARY_SCHEMA
+        };
         profile.database().transaction(|c| {
             let present: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='account_history_sources')",
-                [],
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
+                [self.table()],
                 |r| r.get(0),
             )?;
             if !present {
-                c.execute_batch(SCHEMA)?;
+                c.execute_batch(schema)?;
             }
-            manifest::validate_ddl(c, SCHEMA)
+            manifest::validate_ddl(c, schema)
         })
     }
     pub fn load(self, c: &Connection, locator: &[u8]) -> Result<Option<Source>, LogError> {
@@ -93,7 +101,7 @@ impl SourceIdentity {
         if let Some(account) = self.account {
             c.execute("INSERT INTO account_history_sources(kind,account,locator,stub,raw_size,raw_hash,published) VALUES(?1,?2,?3,?4,0,zeroblob(32),0)",params![self.kind,account.as_slice(),locator,stub])?;
         } else {
-            c.execute("INSERT INTO transcript_sources(kind,locator,stub,raw_size,raw_hash,published) VALUES(?1,?2,?3,0,zeroblob(32),0)",params![self.kind,locator,stub])?;
+            c.execute(&format!("INSERT INTO {}(kind,locator,stub,raw_size,raw_hash,published) VALUES(?1,?2,?3,0,zeroblob(32),0)",self.table()),params![self.kind,locator,stub])?;
         }
         Ok(())
     }

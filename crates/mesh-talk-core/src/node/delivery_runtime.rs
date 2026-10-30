@@ -563,6 +563,9 @@ impl Node {
         {
             return Err(LogError::CorruptFile("invalid manifest device pair".into()));
         }
+        if self.files.lock().expect("files lock").processed(event.id)? {
+            return Ok(());
+        }
         let manifest = super::files::validated_manifest(&received.plaintext)
             .ok_or_else(|| LogError::CorruptFile("invalid file manifest".into()))?;
         let logical = self.file_message_row_logical_id(&received)?;
@@ -575,7 +578,7 @@ impl Node {
             self.files
                 .lock()
                 .expect("files lock")
-                .mark_emitted(event.id);
+                .mark_processed(event.id)?;
             return Ok(());
         }
         if store.manifest_event_erased(event.id)
@@ -585,26 +588,21 @@ impl Node {
                 .files
                 .lock()
                 .expect("files lock not poisoned")
-                .manifest(&manifest.file_conv())
-                .is_some_and(|existing| !super::files::same_file_transfer(existing, &manifest))
+                .accepts(&manifest)?
+                == false
         {
             return Err(LogError::CorruptFile(
                 "conflicting immutable file manifest".into(),
             ));
         }
         {
-            let mut permitted_authors = self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .authors(manifest.file_conv());
-            permitted_authors.insert(event.author);
+            let file_book = self.files.lock().expect("files lock").clone();
             let log = self.log.lock().expect("log lock not poisoned");
             let mut chunks = log.events(&manifest.file_conv())?;
             chunks.sort_by_key(|chunk| chunk.seq);
             let mut previous = None;
             let mut chunk_author = None;
-            if chunks.iter().enumerate().any(|(index, chunk)| {
+            for (index, chunk) in chunks.iter().enumerate() {
                 let mixed_authors = chunk_author.is_some_and(|author| author != chunk.author);
                 chunk_author = Some(chunk.author);
                 let malformed_chain = chunk.seq != index as u64 + 1
@@ -613,10 +611,11 @@ impl Node {
                         Some(id) => chunk.parents != [id],
                     };
                 previous = Some(chunk.id);
-                malformed_chain
+                if malformed_chain
                     || mixed_authors
                     || chunk.kind != crate::eventlog::EventKind::Message
-                    || !permitted_authors.contains(&chunk.author)
+                    || (chunk.author != event.author
+                        && !file_book.has_author(manifest.file_conv(), chunk.author)?)
                     || chunk.seq == 0
                     || chunk.seq > u64::from(manifest.chunk_count())
                     || !chunk.verify_integrity()
@@ -627,10 +626,11 @@ impl Node {
                         &chunk.ciphertext,
                     )
                     .is_err()
-            }) {
-                return Err(LogError::CorruptFile(
-                    "conflicting file chunk conversation".into(),
-                ));
+                {
+                    return Err(LogError::CorruptFile(
+                        "conflicting file chunk conversation".into(),
+                    ));
+                }
             }
         }
         let payload = super::delivery_receipt::ReceiptPayload::prepare(
@@ -1256,6 +1256,9 @@ impl Node {
                     .state_mut(&channel)
             {
                 for (epoch, bytes) in senders {
+                    if epoch != state.epoch() {
+                        continue;
+                    }
                     if let Some(key) = crate::channel::sender_key::SenderKey::deserialize(&bytes) {
                         state.import_my_sender(epoch, key);
                     }
@@ -1279,17 +1282,6 @@ impl Node {
                         self.note_reception_change();
                     }
                     if let Some(manifest) = super::files::validated_manifest(&entry.plaintext) {
-                        let fresh = {
-                            let mut book = self.files.lock().expect("files lock not poisoned");
-                            let fresh = !book.is_emitted(&entry.event_id);
-                            book.mark_emitted(entry.event_id);
-                            book.record_event(
-                                entry.event_id,
-                                crate::eventlog::Author::from_ed25519(sender.ed25519_pub),
-                                manifest.clone(),
-                            );
-                            fresh
-                        };
                         self.remember_manifest_scope(
                             manifest.file_conv(),
                             original_conv,
@@ -1297,17 +1289,13 @@ impl Node {
                             entry.event_id,
                         );
                         if incoming
-                            && fresh
                             && !self.recipient_expired(
                                 &entry.plaintext,
                                 entry.event_id,
                                 entry.wall_clock,
                             )
                         {
-                            self.pending_files
-                                .lock()
-                                .expect("pending files lock not poisoned")
-                                .insert(manifest.file_conv());
+                            self.file_pull_notify.notify_one();
                             if !self.certified_sibling(&sender) {
                                 let _ = self.file_incoming.send(ReceivedFile {
                                     protection: manifest.protection(),

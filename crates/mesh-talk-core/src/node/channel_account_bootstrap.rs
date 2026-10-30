@@ -279,8 +279,8 @@ fn receive_key_admission(
     state: &crate::channel::ChannelState,
     event: &Event,
     authority: &super::channel_account_authority::AccountAuthority,
-    graph: &super::channel_account_authority::EventGraph<'_>,
-) -> Option<ReceiveKeyAdmission> {
+    graph: &impl super::channel::graph::AuthorityGraph,
+) -> Result<Option<ReceiveKeyAdmission>, LogError> {
     let Some(DeviceControl::ReceiveKeys {
         authority: reference,
         inheritance,
@@ -292,21 +292,26 @@ fn receive_key_admission(
         positions,
     }) = DeviceControl::decode(&event.ciphertext)
     else {
-        return None;
+        return Ok(None);
     };
     if event.kind != crate::eventlog::EventKind::ChannelDeviceInheritance
         || !event.is_canonical()
         || !event.verify_integrity()
         || !event.verify_signature()
         || state.epoch() != epoch
-        || !authority.knows_authority(reference)
-        || !super::channel::descends_from(event, reference, graph)
-        || !super::channel::descends_from(event, inheritance, graph)
+        || !authority.try_knows_authority(reference)?
+        || !graph.descends(event.id, reference)?
+        || !graph.descends(event.id, inheritance)?
     {
-        return None;
+        return Ok(None);
     }
-    let inherited = graph.get(&inheritance)?;
-    let (_, inherited_grant, target_proof) = DeviceControl::signed_inheritance(inherited)?;
+    let Some(inherited) = graph.event(inheritance)? else {
+        return Ok(None);
+    };
+    let Some((_, inherited_grant, target_proof)) = DeviceControl::signed_inheritance(&inherited)
+    else {
+        return Ok(None);
+    };
     if target_proof.public() != recipient
         || inherited_grant != grant
         || authority
@@ -314,7 +319,7 @@ fn receive_key_admission(
             .and_then(|grant| grant.id())
             != Some(grant)
     {
-        return None;
+        return Ok(None);
     }
     let author = event.author.user_id();
     let account = crate::identity::account::AccountPublic {
@@ -324,51 +329,54 @@ fn receive_key_admission(
     if state.member_account_id(&author) != Some(account.as_str())
         || !state.is_accepted_member(&author)
     {
-        return None;
+        return Ok(None);
     }
-    let source = state
+    let Some(source) = state
         .members()
         .iter()
-        .find(|member| member.ed25519_pub == *event.author.ed25519_pub())?;
-    Some(ReceiveKeyAdmission {
+        .find(|member| member.ed25519_pub == *event.author.ed25519_pub())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ReceiveKeyAdmission {
         source: source.clone(),
         recipient,
         epoch,
         sealed,
         authors,
         positions,
-    })
+    }))
 }
 pub(super) fn receive_keys_admitted(
     state: &crate::channel::ChannelState,
     event: &Event,
     authority: &super::channel_account_authority::AccountAuthority,
-    graph: &super::channel_account_authority::EventGraph<'_>,
-) -> bool {
-    receive_key_admission(state, event, authority, graph).is_some()
+    graph: &impl super::channel::graph::AuthorityGraph,
+) -> Result<bool, LogError> {
+    Ok(receive_key_admission(state, event, authority, graph)?.is_some())
 }
 
 /// Secret replay follows exactly the same grant admission as transport projection.
-pub(super) fn apply_receive_keys(
+pub(super) fn open_receive_distributions(
     me: &crate::identity::device::DeviceIdentity,
-    state: &mut crate::channel::ChannelState,
+    state: &crate::channel::ChannelState,
     event: &Event,
     authority: &super::channel_account_authority::AccountAuthority,
-    graph: &super::channel_account_authority::EventGraph<'_>,
-) {
-    let Some(admission) = receive_key_admission(state, event, authority, graph) else {
-        return;
+    graph: &impl super::channel::graph::AuthorityGraph,
+) -> Result<Vec<ReceiveDistribution>, LogError> {
+    let Some(admission) = receive_key_admission(state, event, authority, graph)? else {
+        return Ok(Vec::new());
     };
     if admission.recipient != me.public() {
-        return;
+        return Ok(Vec::new());
     }
     let epoch = admission.epoch;
     let Ok(bytes) = crate::dm::open(me, &admission.source.x25519_pub, &admission.sealed) else {
-        return;
+        return Ok(Vec::new());
     };
     let bytes = zeroize::Zeroizing::new(bytes);
     let Some(distributions) = ReceiveDistribution::decode_batch(&bytes) else {
-        return;
+        return Ok(Vec::new());
     };
     if distributions
         .iter()
@@ -379,22 +387,30 @@ pub(super) fn apply_receive_keys(
             .map(|item| item.distribution.n)
             .ne(admission.positions.iter().copied())
     {
-        return;
+        return Ok(Vec::new());
     }
     if distributions.iter().any(|distribution| {
         distribution.epoch != epoch
             || !state.is_accepted_member(&distribution.author.user_id())
             || !state.members().contains(&distribution.author)
     }) {
-        return;
+        return Ok(Vec::new());
     }
-    for distribution in distributions {
-        state.refresh_sender_chain(
-            distribution.author.user_id(),
-            distribution.epoch,
-            &distribution.distribution,
-        );
+    Ok(distributions)
+}
+
+#[cfg(test)]
+pub(super) fn apply_receive_keys(
+    me: &crate::identity::device::DeviceIdentity,
+    state: &mut crate::channel::ChannelState,
+    event: &Event,
+    authority: &super::channel_account_authority::AccountAuthority,
+    graph: &impl super::channel::graph::AuthorityGraph,
+) -> Result<(), LogError> {
+    for item in open_receive_distributions(me, state, event, authority, graph)? {
+        state.refresh_sender_chain(item.author.user_id(), item.epoch, &item.distribution);
     }
+    Ok(())
 }
 
 impl super::Node {
@@ -480,11 +496,25 @@ impl super::Node {
         channel: ConversationId,
     ) -> Result<super::channel::ChannelMembershipProjection, LogError> {
         let log = self.log.lock().expect("log lock not poisoned");
-        let events = log.events(&channel)?;
-        Ok(super::channel::ChannelBook::project_membership(
-            channel, &events,
-        ))
+        self.account_group_projection_with_log(&log, channel)
     }
+
+    pub(super) fn account_group_projection_with_log(
+        &self,
+        log: &crate::eventlog::persist::PersistentEventLog,
+        channel: ConversationId,
+    ) -> Result<super::channel::ChannelMembershipProjection, LogError> {
+        let repository = log.repository()?;
+        while !self
+            .channel_checkpoints
+            .project_step(repository, &self.identity, channel)?
+        {}
+        Ok(self
+            .channel_checkpoints
+            .published_projection(channel)?
+            .unwrap_or_else(|| super::channel::ChannelMembershipProjection::empty(channel)))
+    }
+
     pub(super) fn own_group_proof(&self) -> Announce {
         Announce::new_with_account(&self.identity, &self.account, "", 1)
     }
@@ -559,11 +589,7 @@ impl super::Node {
                         let projection = self.account_group_projection(row.id)?;
                         if projection.authority.current_event().is_some()
                             && (projection.authority.account_grant(&own_account).is_some()
-                                || projection
-                                    .authority
-                                    .revoked()
-                                    .iter()
-                                    .any(|id| id.account_pub == own_account))
+                                || projection.authority.has_revocation(&own_account)?)
                         {
                             channels.push(row.id);
                         }

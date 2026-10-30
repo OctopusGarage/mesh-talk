@@ -122,51 +122,48 @@ impl Node {
         else {
             return Ok(Vec::new());
         };
-        let offers = match requested {
-            Some((file, manifest)) => vec![(file, vec![manifest])],
-            None => self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .offers_from(crate::eventlog::Author::from_ed25519(sender.ed25519_pub)),
-        };
+        let offers: Box<dyn Iterator<Item = Result<(ConversationId, EventId), LogError>>> =
+            match requested {
+                Some(pair) => Box::new(std::iter::once(Ok(pair))),
+                None => Box::new(
+                    self.files
+                        .lock()
+                        .expect("files lock")
+                        .offers(
+                            None,
+                            Some(crate::eventlog::Author::from_ed25519(sender.ed25519_pub)),
+                        )
+                        .map(|offer| offer.map(|offer| (offer.file, offer.event))),
+                ),
+            };
         let mut controls = Vec::new();
         let scope = super::conversation::dm_conversation_id(&self.identity.public(), sender);
-        for (file, manifests) in offers {
-            let candidates: Vec<_> = {
-                let log = self.log.lock().expect("log lock not poisoned");
-                let mut selected = Vec::new();
-                for id in manifests {
-                    if let Some(event) = log.get(&id)? {
-                        selected.push((id, event.conversation_id));
-                    }
-                }
-                selected
-            };
-            let mut manifests = Vec::new();
-            for (id, parent) in candidates {
-                if (parent == scope && self.known_account_allowed(sender))
-                    || self.group_file_offer(file, id, sender)?.is_some()
-                {
-                    manifests.push(id);
-                }
-            }
-            let Some(first) = manifests.first() else {
+        for offer in offers {
+            let (file, manifest) = offer?;
+            let parent = self
+                .log
+                .lock()
+                .expect("log lock")
+                .event_conversation(&manifest)?;
+            let group_offer = self.group_file_offer(file, manifest, sender)?;
+            if !(parent == Some(scope) && self.known_account_allowed(sender))
+                && group_offer.is_none()
+            {
                 continue;
-            };
-            if let Some((event, row)) = self.group_file_offer(file, *first, sender)? {
+            }
+            if let Some((event, row)) = group_offer {
                 self.retain_group_file_completion(&event, &row)?;
             }
             let Some((automatic, account, _, _)) =
-                self.incoming_offer(file, Some(*first), Some(sender))?
+                self.incoming_offer(file, Some(manifest), Some(sender))?
             else {
                 continue;
             };
-            let aliases = self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .manifest_events(file);
+            let decision = if automatic {
+                ReceiveDecision::Accepted
+            } else {
+                self.consent_for_file_account(self.equivalent_offer_decision(file)?, &account)
+            };
             let delivery = self.delivery.lock().expect("delivery lock not poisoned");
             if self
                 .delivery_suspended
@@ -178,17 +175,12 @@ impl Node {
                 .attachment_consent
                 .lock()
                 .expect("consent lock not poisoned");
-            let decision = if automatic {
-                ReceiveDecision::Accepted
-            } else {
-                policy.status_for_events(&aliases, &account)
-            };
             let generation = policy.generation();
             let mut store = self
                 .file_consent
                 .lock()
                 .expect("file consent lock not poisoned");
-            for manifest in manifests {
+            {
                 if delivery.manifest_event_erased(manifest) {
                     continue;
                 }

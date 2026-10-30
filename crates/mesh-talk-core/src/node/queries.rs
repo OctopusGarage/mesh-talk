@@ -671,9 +671,7 @@ fn tombstone_recalled(entries: &mut [HistoryEntry], recalled: &std::collections:
     }
 }
 
-/// Decode an account-history store entry (a full `DmEnvelope`) into its logical id
-/// and inner body. A malformed or legacy entry falls back to a bare `MessageBody`
-/// with a zero id, so it still renders rather than breaking history.
+#[cfg(test)]
 pub(in crate::node) fn decode_account_entry(plaintext: &[u8]) -> (EventId, MessageBody) {
     match DmEnvelope::decode(plaintext) {
         Some(env) => (EventId::new(env.msg_id), MessageBody::decode(&env.body)),

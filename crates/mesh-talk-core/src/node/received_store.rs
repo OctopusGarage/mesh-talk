@@ -15,7 +15,7 @@ use std::{path::Path, sync::Arc};
 pub(crate) struct ReceivedStore {
     repository: TranscriptRepository,
     #[cfg(test)]
-    fail_once_after: Option<usize>,
+    fail_once_after: std::cell::Cell<Option<usize>>,
 }
 fn decode(row: repository::StoredRow) -> Result<ReceivedEntry, LogError> {
     let id = row
@@ -84,7 +84,7 @@ impl ReceivedStore {
         Ok(Self {
             repository,
             #[cfg(test)]
-            fail_once_after: None,
+            fail_once_after: std::cell::Cell::new(None),
         })
     }
     pub(crate) fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
@@ -113,8 +113,26 @@ impl ReceivedStore {
             )
         }
     }
+    /// Preflight body-free processing evidence without consuming a body-write
+    /// fault hook. The outer channel transaction supplies the account fence.
+    pub(crate) fn check_publication(&self) -> Result<(), LogError> {
+        self.repository.check_publication()
+    }
     pub(crate) fn check_write(&self) -> Result<(), LogError> {
+        #[cfg(test)]
+        self.check_failure_for_test()?;
         self.repository.check_write()
+    }
+    #[cfg(test)]
+    fn check_failure_for_test(&self) -> Result<(), LogError> {
+        if let Some(remaining) = self.fail_once_after.get() {
+            if remaining == 0 {
+                self.fail_once_after.set(None);
+                return Err(std::io::Error::other("injected receive projection failure").into());
+            }
+            self.fail_once_after.set(Some(remaining - 1));
+        }
+        Ok(())
     }
     /// Body-free processing evidence for a consumed channel message. The caller
     /// checks this store's publication barrier and commits its receiver state in
@@ -244,6 +262,15 @@ impl ReceivedStore {
         original: Option<&crate::eventlog::Event>,
         metadata: Option<&super::reception_effects::ReceptionMetadata>,
     ) -> Result<(), LogError> {
+        self.record_file_with_scopes(entry, original, metadata, &[])
+    }
+    pub(crate) fn record_file_with_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&crate::eventlog::Event>,
+        metadata: Option<&super::reception_effects::ReceptionMetadata>,
+        scopes: &[&crate::eventlog::Event],
+    ) -> Result<(), LogError> {
         if self.repository.kind != FILES {
             return Err(repository::invalid("file reception requires FILES owner"));
         }
@@ -262,7 +289,30 @@ impl ReceivedStore {
                     &stored
                 }
             };
-            Self::install_file_on(c, entry, original, metadata)
+            let inserted = Self::install_file_on(c, entry, original, metadata)?;
+            if !scopes.is_empty() {
+                let manifest = super::files::validated_manifest(&entry.plaintext)
+                    .ok_or_else(|| repository::invalid("invalid file manifest"))?;
+                for scope in scopes {
+                    if scope.kind != crate::eventlog::EventKind::FileManifest
+                        || scope.author != original.author
+                        || !scope.verify_integrity()
+                        || !scope.verify_signature()
+                    {
+                        return Err(repository::invalid("invalid sent manifest scope"));
+                    }
+                    super::filebook::scopes::IndexedManifestScopes::put_on(
+                        c,
+                        &super::privacy_runtime::StoredManifestScope {
+                            file: manifest.file_conv(),
+                            parent: scope.conversation_id,
+                            author: scope.author,
+                            event: scope.id,
+                        },
+                    )?;
+                }
+            }
+            Ok(inserted)
         })?;
         self.note_channel_commit(usize::from(inserted));
         Ok(())
@@ -320,13 +370,7 @@ impl ReceivedStore {
         event_id: EventId,
     ) -> Result<(), LogError> {
         #[cfg(test)]
-        if let Some(remaining) = self.fail_once_after.as_mut() {
-            if *remaining == 0 {
-                self.fail_once_after = None;
-                return Err(std::io::Error::other("injected receive projection failure").into());
-            }
-            *remaining -= 1;
-        }
+        self.check_failure_for_test()?;
         self.repository.put(
             conversation,
             event_id.as_bytes(),
@@ -342,13 +386,17 @@ impl ReceivedStore {
         self.repository.contains(None, id.as_bytes())
     }
     pub(crate) fn processed(&self, id: EventId) -> Result<bool, LogError> {
-        self.repository.profile.database().read(|c| {
-            Ok(c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM transcript_received_evidence WHERE id=?1)",
-                [id.as_bytes().as_slice()],
-                |r| r.get(0),
-            )?)
-        })
+        self.repository
+            .profile
+            .database()
+            .read(|c| Self::processed_on(c, id))
+    }
+    pub(crate) fn processed_on(c: &rusqlite::Connection, id: EventId) -> Result<bool, LogError> {
+        Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transcript_received_evidence WHERE id=?1)",
+            [id.as_bytes().as_slice()],
+            |r| r.get(0),
+        )?)
     }
     pub(crate) fn contains_in(
         &self,
@@ -537,6 +585,19 @@ impl ReceivedStore {
         })?;
         Ok(found)
     }
+    pub(crate) fn remove_exact(
+        &mut self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> Result<usize, LogError> {
+        match self
+            .repository
+            .ordinal_for_key(conversation, id.as_bytes())?
+        {
+            Some(ordinal) => self.repository.remove_ordinals(&[ordinal]),
+            None => Ok(0),
+        }
+    }
     pub(crate) fn remove_ordinals(&mut self, ordinals: &[i64]) -> Result<usize, LogError> {
         self.repository.remove_ordinals(ordinals)
     }
@@ -588,7 +649,7 @@ impl ReceivedStore {
     }
     #[cfg(test)]
     pub(crate) fn fail_once_after_for_test(&mut self, successful: usize) {
-        self.fail_once_after = Some(successful);
+        self.fail_once_after.set(Some(successful));
     }
 }
 

@@ -4,6 +4,7 @@ use crate::eventlog::LogError;
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -15,21 +16,14 @@ struct Suppressed {
     id: EventId,
 }
 
+#[cfg(test)]
 pub(super) struct AccountSuppression {
     file: EncryptedRecordLog<Suppressed>,
     ids: HashSet<Suppressed>,
 }
 
+#[cfg(test)]
 impl AccountSuppression {
-    pub(super) fn len(&self) -> usize {
-        self.ids.len()
-    }
-
-    /// Export exact local facts without cloning a second historical ID set.
-    pub(super) fn records(&self) -> impl Iterator<Item = (ConversationId, EventId)> + '_ {
-        self.ids.iter().map(|row| (row.conversation, row.id))
-    }
-
     pub(super) fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::open(path, password, MAGIC)?;
         Ok(Self {

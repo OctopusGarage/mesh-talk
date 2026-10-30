@@ -8,10 +8,9 @@ use crate::storage::record_log::EncryptedRecordLog;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::{collections::HashSet, path::Path};
 
 mod indexed;
 pub(crate) use indexed::IndexedFileMessageIdentities;
@@ -186,6 +185,7 @@ fn classify_import_failure(error: NodeError) -> FileMessageIdentityImportError {
     }
 }
 
+#[cfg(test)]
 pub(in crate::node) struct FileMessageIdentities {
     log: EncryptedRecordLog<Event>,
     bundles: HashMap<(ConversationId, EventId), (Event, Identity)>,
@@ -193,6 +193,7 @@ pub(in crate::node) struct FileMessageIdentities {
     by_manifest: HashMap<EventId, (ConversationId, EventId)>,
 }
 
+#[cfg(test)]
 impl FileMessageIdentities {
     pub(super) fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (log, events) = EncryptedRecordLog::<Event>::open(path, password, MAGIC)?;
@@ -278,44 +279,6 @@ impl FileMessageIdentities {
             .filter(|(_, identity)| identity.matches(row))
             .map_or(row.event_id, |_| logical)
     }
-    pub(super) fn row_suppressed(
-        &self,
-        row: &ReceivedEntry,
-        suppression: &super::account_suppression::AccountSuppression,
-    ) -> bool {
-        suppression.contains(row.conversation, row.event_id)
-            || self
-                .by_manifest
-                .get(&row.event_id)
-                .and_then(|key| self.bundles.get(key))
-                .is_some_and(|(_, identity)| {
-                    // One signed offer may have a legacy device-host row plus an
-                    // account alias. Authority stays anchored to its signed account
-                    // group, and only exact source/content matches share deletion.
-                    identity.matches_content(row)
-                        && (suppression.contains(identity.host(), identity.logical)
-                            || suppression.contains(identity.host(), row.event_id))
-                })
-    }
-    pub(super) fn row_author_account(&self, row: &ReceivedEntry) -> Option<String> {
-        let logical = self.logical(row.conversation, row.event_id);
-        self.bundles
-            .get(&(row.conversation, logical))
-            .filter(|(_, identity)| identity.matches(row))
-            .map(|(_, identity)| identity.source.account_id())
-    }
-    pub(super) fn aliases(&self, host: ConversationId, event: EventId) -> Vec<EventId> {
-        self.bundles
-            .get(&(host, self.logical(host, event)))
-            .map_or_else(Vec::new, |(_, identity)| identity.aliases.clone())
-    }
-    fn bundle(&self, manifest: EventId) -> Option<Event> {
-        self.by_manifest
-            .get(&manifest)
-            .and_then(|key| self.bundles.get(key))
-            .map(|(event, _)| event.clone())
-    }
-
     pub(super) fn snapshot(&self) -> Vec<Event> {
         self.bundles
             .values()
@@ -1824,7 +1787,15 @@ mod tests {
                     .len(),
                 2
             );
-            assert!(f.receiver.files.lock().unwrap().manifest(&file).is_some());
+            assert!(
+                f.receiver
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(&file)
+                    .unwrap()
+                    .is_some()
+            );
             assert_eq!(
                 f.receiver
                     .account_history(&f.sender.account_id(), 10)
@@ -1929,7 +1900,13 @@ mod tests {
                 usize::from(keep_other_message)
             );
             assert_eq!(
-                f.receiver.files.lock().unwrap().manifest(&file).is_some(),
+                f.receiver
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(&file)
+                    .unwrap()
+                    .is_some(),
                 keep_other_message,
                 "accepted deletion retires its key while an independent same-artwork message keeps its own scope"
             );
@@ -1943,7 +1920,13 @@ mod tests {
                 &f.account,
             );
             assert_eq!(
-                reopened.files.lock().unwrap().manifest(&file).is_some(),
+                reopened
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(&file)
+                    .unwrap()
+                    .is_some(),
                 keep_other_message
             );
             assert_eq!(reopened.read_media(file).is_some(), keep_other_message);
@@ -1972,7 +1955,13 @@ mod tests {
                 usize::from(keep_other_message)
             );
             assert_eq!(
-                restored.files.lock().unwrap().manifest(&file).is_some(),
+                restored
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(&file)
+                    .unwrap()
+                    .is_some(),
                 keep_other_message
             );
             assert_eq!(restored.read_media(file).is_some(), keep_other_message);

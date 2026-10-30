@@ -211,6 +211,9 @@ fn domain(kind: i64) -> Result<[u8; 16], LogError> {
         AVATAR_PROFILES => Ok(*b"MeshAvatarProf01"),
         TRUST_CARDS => Ok(*b"MeshTrustCards01"),
         AUTHORED_REACTIONS => Ok(*b"MeshOwnReacts001"),
+        CHANNEL_CUSTODY => Ok(*b"MeshChanCustody1"),
+        ATTACHMENT_CONSENT => Ok(*b"MeshAttachCons01"),
+        FILE_CONSENT => Ok(*b"MeshFileConsent1"),
         _ => Err(invalid("invalid transcript source kind")),
     }
 }

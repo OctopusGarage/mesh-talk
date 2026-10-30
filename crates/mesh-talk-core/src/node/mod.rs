@@ -23,6 +23,7 @@ pub use account_group::{
 };
 pub(crate) mod account_devices;
 mod account_documents;
+#[cfg(test)]
 pub(crate) mod account_file_proofs;
 mod account_file_repository;
 pub(crate) mod account_preferences;
@@ -165,6 +166,9 @@ pub use account_sync::{DeviceSyncStatus, SyncPhase};
 pub use account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};
+pub use channel::checkpoint::activity::{
+    ChannelActivityCursor, ChannelActivityPage, ChannelActivityPageLimit,
+};
 pub use channel::{ChannelActivity, ReceivedChannelMessage};
 pub use delivery_observation::{
     DeliveryObservation, DeliveryObservationKind, DeliveryRecoveryReason,

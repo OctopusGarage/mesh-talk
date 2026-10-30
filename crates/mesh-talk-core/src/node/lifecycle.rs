@@ -586,17 +586,6 @@ impl Node {
     }
 }
 
-/// The logical id of a received plaintext entry: the `DmEnvelope` msg id for an account
-/// conversation, otherwise the event id (matching how `history`/`account_history` derive
-/// the id the UI targets).
-fn received_logical_id(plaintext: &[u8], event_id: EventId, account: bool) -> EventId {
-    if account {
-        super::queries::decode_account_entry(plaintext).0
-    } else {
-        event_id
-    }
-}
-
 #[cfg(test)]
 mod personal_scope_tests {
     use super::*;

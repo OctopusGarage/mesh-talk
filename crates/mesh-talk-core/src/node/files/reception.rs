@@ -23,33 +23,18 @@ impl Node {
         {
             return Ok(None);
         }
-        let original = self
-            .log
+        let Some(offer) = self
+            .files
             .lock()
-            .expect("log lock not poisoned")
-            .get(&entry.event_id)?;
-        let original = match original {
-            Some(event) => Some(event),
-            None => self
-                .account_file_proofs
-                .lock()
-                .expect("file proofs lock not poisoned")
-                .get(&entry.event_id)?,
-        };
-        let Some(original) = original else {
-            return Ok(None);
-        };
-        let decoded = validated_manifest(&entry.plaintext);
-        let existing = decoded.as_ref().and_then(|manifest| {
-            self.files
-                .lock()
-                .expect("file book lock not poisoned")
-                .manifest(&manifest.file_conv())
-                .cloned()
-        });
-        let Some(manifest) = eligible_manifest_row(entry, Some(&original), existing.as_ref())
+            .expect("file book lock not poisoned")
+            .offer_for_entry(entry)?
         else {
             return Ok(None);
+        };
+        let Some(manifest) = validated_manifest(&entry.plaintext) else {
+            return Err(LogError::CorruptFile(
+                "invalid retained file manifest".into(),
+            ));
         };
         let is_channel = self
             .channels
@@ -93,7 +78,7 @@ impl Node {
             conv: if is_channel {
                 entry.conversation
             } else {
-                original.conversation_id
+                offer.parent
             },
             is_channel,
             from: metadata.from_device.clone(),

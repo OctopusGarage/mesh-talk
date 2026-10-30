@@ -615,16 +615,24 @@ impl Node {
                         {
                             return Ok(());
                         }
+                        let event_id = EventId::new(event_id);
+                        let original = node
+                            .log
+                            .lock()
+                            .expect("log mutex")
+                            .get(&event_id)
+                            .map_err(|_| SnapshotError::Io)?;
+                        let row = super::received_log::ReceivedEntry {
+                            conversation: ConversationId::new(conversation),
+                            event_id,
+                            from,
+                            wall_clock,
+                            plaintext: manifest,
+                        };
                         node.received_files
                             .lock()
                             .expect("received_files mutex not poisoned")
-                            .record(
-                                ConversationId::new(conversation),
-                                from,
-                                wall_clock,
-                                &manifest,
-                                EventId::new(event_id),
-                            )
+                            .record_file_with_reception(&row, original.as_ref(), None)
                             .map_err(|_| SnapshotError::Io)?;
                     }
                     SnapshotRecordV1::AccountContact { account_id } => {

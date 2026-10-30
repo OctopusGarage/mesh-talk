@@ -174,26 +174,26 @@ impl Node {
         let Some(context) = self.reference_context(reference, true)? else {
             return Ok(None);
         };
-        Ok((|| {
-            let entry = context.messages.into_iter().next()?;
-            let protection = entry.protection?;
-            let file = entry.file?;
-            if !file.media || !file.mime.starts_with("image/") || file.size > 16 * 1024 * 1024 {
-                return None;
-            }
-            let manifest = self
-                .files
-                .lock()
-                .expect("files lock")
-                .manifest(&file.file_conv)
-                .cloned()?;
-            if manifest.protection() != Some(protection)
-                || !crate::node::media_store::automatic_inline_image(&manifest)
-            {
-                return None;
-            }
-            Some(protection)
-        })())
+        let Some(entry) = context.messages.into_iter().next() else {
+            return Ok(None);
+        };
+        let (Some(protection), Some(file)) = (entry.protection, entry.file) else {
+            return Ok(None);
+        };
+        if !file.media || !file.mime.starts_with("image/") || file.size > 16 * 1024 * 1024 {
+            return Ok(None);
+        }
+        let Some(manifest) = self
+            .files
+            .lock()
+            .expect("files lock")
+            .manifest(file.file_conv)?
+        else {
+            return Ok(None);
+        };
+        Ok((manifest.protection() == Some(protection)
+            && crate::node::media_store::automatic_inline_image(&manifest))
+        .then_some(protection))
     }
 
     pub fn protected_image_content(
@@ -216,8 +216,7 @@ impl Node {
             .files
             .lock()
             .expect("files lock")
-            .manifest(&file.file_conv)
-            .cloned()
+            .manifest(&file.file_conv)?
         else {
             return Ok(None);
         };
