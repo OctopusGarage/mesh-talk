@@ -7,8 +7,12 @@ use crate::{
     node::channel::{graph::IndexedGraph, projection_facts::ProjectionFacts},
 };
 
+mod query;
+pub(in crate::node) use query::{CausalProjectionQuery, CausalProjectionStep};
+
 const SCHEMA: &str = "
 CREATE TABLE channel_projection_queries(job BLOB PRIMARY KEY CHECK(length(job)=16),channel BLOB NOT NULL CHECK(length(channel)=32),retired INTEGER NOT NULL CHECK(retired IN(0,1))) WITHOUT ROWID;
+CREATE INDEX channel_projection_queries_retired ON channel_projection_queries(retired,job);
 CREATE TABLE channel_legacy_cuts(source_job BLOB NOT NULL,channel BLOB NOT NULL,event BLOB NOT NULL,selection BLOB NOT NULL,query BLOB NOT NULL,after_rank INTEGER NOT NULL,PRIMARY KEY(source_job,channel,event)) WITHOUT ROWID;
 CREATE TABLE channel_causal_states(job BLOB NOT NULL CHECK(length(job)=16),channel BLOB NOT NULL CHECK(length(channel)=32),event BLOB NOT NULL CHECK(length(event)=32),state BLOB,PRIMARY KEY(job,channel,event)) WITHOUT ROWID;
 ";
@@ -16,6 +20,7 @@ pub(super) fn initialize(c: &Connection, fresh: bool) -> Result<(), LogError> {
     if fresh {
         c.execute_batch(SCHEMA)?;
     }
+    c.execute_batch("CREATE INDEX IF NOT EXISTS channel_projection_queries_retired ON channel_projection_queries(retired,job);")?;
     crate::storage::profile::manifest::validate_ddl(c, SCHEMA)?;
     // At most one serialized query can be active. Its potentially large facts
     // remain deferred cleanup, never an all-row warm-start replay.
@@ -34,13 +39,19 @@ impl Drop for Query {
                 "UPDATE channel_projection_queries SET retired=1 WHERE job=?1",
                 [self.job.as_slice()],
             )?;
-            cleanup_on(c).map(|_| ())
+            Ok(())
         }) {
             log::warn!("channel causal query cleanup deferred: {error}");
         }
     }
 }
 fn cleanup_on(c: &Connection) -> Result<bool, LogError> {
+    Ok(cleanup_step_on(c, 128)? != 0)
+}
+pub(super) fn cleanup_step_on(c: &Connection, limit: usize) -> Result<usize, LogError> {
+    if limit == 0 {
+        return Err(LogError::InvalidPageBudget);
+    }
     let row: Option<(Vec<u8>, Vec<u8>)> = c
         .query_row(
             "SELECT job,channel FROM channel_projection_queries WHERE retired=1 LIMIT 1",
@@ -49,9 +60,11 @@ fn cleanup_on(c: &Connection) -> Result<bool, LogError> {
         )
         .optional()?;
     let Some((job, channel)) = row else {
-        return Ok(false);
+        return Ok(0);
     };
     for (table, key) in [
+        ("channel_decision_answers", "key"),
+        ("channel_decision_work", "channel"),
         ("channel_event_authority", "event"),
         ("channel_departure_facts", "member,event"),
         ("channel_membership_snapshots", "rank"),
@@ -59,15 +72,26 @@ fn cleanup_on(c: &Connection) -> Result<bool, LogError> {
         ("channel_authority_current", "channel"),
         ("channel_projection_work", "channel"),
     ] {
+        if table == "channel_decision_work" {
+            super::super::graph::preparing::retire_selection_on(c, &job, &channel)?;
+        }
         let sql = format!(
-            "DELETE FROM {table} WHERE job=?1 AND channel=?2 AND ({key}) IN (SELECT {key} FROM {table} WHERE job=?1 AND channel=?2 LIMIT 128)"
+            "DELETE FROM {table} WHERE job=?1 AND channel=?2 AND ({key}) IN (SELECT {key} FROM {table} WHERE job=?1 AND channel=?2 LIMIT ?3)"
         );
-        if c.execute(&sql, params![&job, &channel])? != 0 {
-            return Ok(true);
+        let removed = c.execute(
+            &sql,
+            params![
+                &job,
+                &channel,
+                i64::try_from(limit).map_err(|_| LogError::InvalidPageBudget)?
+            ],
+        )?;
+        if removed != 0 {
+            return Ok(removed);
         }
     }
     c.execute("DELETE FROM channel_projection_queries WHERE job=?1", [job])?;
-    Ok(true)
+    Ok(1)
 }
 
 impl ChannelCheckpointStore {
@@ -140,17 +164,25 @@ impl ChannelCheckpointStore {
                         .ok_or_else(|| invalid("causal channel control disappeared"))?;
                     reducer.step(&event, &graph)?
                 } else {
-                    reducer.step_header(&header)?
+                    reducer.step_header(&header, &graph)?
                 };
                 let facts = reducer
                     .history
                     .as_ref()
                     .ok_or_else(|| invalid("missing causal channel fact owner"))?
                     .clone();
+                let after_accept = facts.after_accept(&reducer, &header, &graph)?;
                 self.profile.database().transaction(|c| {
                     self.check_account_on(c)?;
                     replay::require_source_on(c, channel, source_job, revision)?;
-                    facts.checkpoint_on(c, &mut reducer, &header, rank, allowed, &own)?;
+                    facts.checkpoint_on(
+                        c,
+                        &mut reducer,
+                        &header,
+                        rank,
+                        (allowed, after_accept),
+                        &own,
+                    )?;
                     Ok(())
                 })?;
             }
@@ -264,17 +296,25 @@ impl ChannelCheckpointStore {
                         .ok_or_else(|| invalid("causal channel control disappeared"))?;
                     reducer.step(&event, &graph)?
                 } else {
-                    reducer.step_header(&header)?
+                    reducer.step_header(&header, &graph)?
                 };
                 let facts = reducer
                     .history
                     .as_ref()
                     .ok_or_else(|| invalid("missing causal fact owner"))?
                     .clone();
+                let after_accept = facts.after_accept(&reducer, &header, &graph)?;
                 self.profile.database().transaction(|c| {
                     self.check_account_on(c)?;
                     replay::require_source_on(c, channel, source_job, revision)?;
-                    facts.checkpoint_on(c, &mut reducer, &header, rank, allowed, "")?;
+                    facts.checkpoint_on(
+                        c,
+                        &mut reducer,
+                        &header,
+                        rank,
+                        (allowed, after_accept),
+                        "",
+                    )?;
                     Ok(())
                 })?;
             }
@@ -355,34 +395,70 @@ impl ChannelCheckpointStore {
             }
             (selection, query, -1)
         };
-        if !repository.ancestor_selection_step(&selection)? {
+        if !repository
+            .ancestor_selection_step_with_budget(
+                &selection,
+                crate::eventlog::repository::order::OrderWorkBudget {
+                    vertices: 64,
+                    edges: 512,
+                    bytes: 8 * 1024 * 1024,
+                },
+            )?
+            .complete
+        {
             return Ok(LegacyCut::Pending);
         }
         let (mut reducer, _) =
             ProjectionFacts::load_bound(self.profile.clone(), query, source_job, channel)?;
         reducer.legacy_checks = false;
-        let graph = IndexedGraph {
-            repository,
-            conversation: channel,
-        };
-        let page = repository.ancestor_headers_page(&selection, after, 64)?;
+        let page = repository.ancestor_headers_page(&selection, after, 1)?;
         for (rank, header) in page.items {
+            use crate::node::channel::graph::{AuthorityGraph, preparing::PreparingGraph};
+            let graph = PreparingGraph::open(
+                self.profile.clone(),
+                repository,
+                crate::node::channel::graph::preparing::DecisionBinding {
+                    job: query,
+                    source_job,
+                    revision,
+                    channel,
+                    event: header.id,
+                },
+                crate::eventlog::sync::network::PreparationBudget {
+                    rows: 63,
+                    edges: 512,
+                    bytes: 8 * 1024 * 1024 - 256,
+                },
+            )?;
+            if !graph.prepare()? {
+                return Ok(LegacyCut::Pending);
+            }
             let allowed = if super::super::projection_facts::is_membership_control(header.kind) {
-                let event = repository
-                    .get(&header.id)?
-                    .ok_or_else(|| invalid("legacy cut control disappeared"))?;
+                let event = graph.event(header.id)?;
+                if graph.pending() {
+                    return Ok(LegacyCut::Pending);
+                }
+                let event = event.ok_or_else(|| invalid("legacy cut control disappeared"))?;
                 reducer.step(&event, &graph)?
             } else {
-                reducer.step_header(&header)?
+                reducer.step_header(&header, &graph)?
             };
+            if graph.pending() {
+                return Ok(LegacyCut::Pending);
+            }
             let facts = reducer
                 .history
                 .as_ref()
                 .ok_or_else(|| invalid("legacy cut facts missing"))?
                 .clone();
+            let after_accept = facts.after_accept(&reducer, &header, &graph)?;
+            if graph.pending() {
+                return Ok(LegacyCut::Pending);
+            }
             self.profile.database().transaction(|c| {
                 self.check_account_on(c)?;replay::require_source_on(c,channel,source_job,revision)?;
-                facts.checkpoint_on(c,&mut reducer,&header,rank,allowed,"")?;
+                facts.checkpoint_on(c,&mut reducer,&header,rank,(allowed,after_accept),"")?;
+                graph.complete_on(c)?;
                 c.execute("UPDATE channel_legacy_cuts SET after_rank=?4 WHERE source_job=?1 AND channel=?2 AND event=?3",params![source_job.as_slice(),channel.as_bytes().as_slice(),event.id.as_bytes().as_slice(),rank])?;
                 Ok(())
             })?;
@@ -394,13 +470,33 @@ impl ChannelCheckpointStore {
             })?;
             return Ok(LegacyCut::Pending);
         }
+        use crate::node::channel::graph::{AuthorityGraph, preparing::PreparingGraph};
+        let graph = PreparingGraph::open(
+            self.profile.clone(),
+            repository,
+            crate::node::channel::graph::preparing::DecisionBinding {
+                job: query,
+                source_job,
+                revision,
+                channel,
+                event: event.id,
+            },
+            crate::eventlog::sync::network::PreparationBudget {
+                rows: 63,
+                edges: 512,
+                bytes: 8 * 1024 * 1024 - 256,
+            },
+        )?;
+        if !graph.prepare()? {
+            return Ok(LegacyCut::Pending);
+        }
         let mut candidate = None;
         if reducer.authority.current_event().is_none()
             && reducer
                 .history
                 .as_ref()
                 .ok_or_else(|| invalid("legacy cut facts missing"))?
-                .parents_authorized(event.id)?
+                .parents_authorized(event.id, &graph)?
             && let Some(state) = &reducer.prior
         {
             let author = event.author.user_id();
@@ -419,6 +515,9 @@ impl ChannelCheckpointStore {
                     },
                 });
             }
+        }
+        if graph.pending() {
+            return Ok(LegacyCut::Pending);
         }
         self.finish_legacy_cut(channel, source_job, event.id, query)?;
         repository.retire_ancestor_selection(selection.id())?;

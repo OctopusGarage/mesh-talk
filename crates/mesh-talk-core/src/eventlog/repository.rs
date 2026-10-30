@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::sync::Arc;
 
 mod ancestry;
+pub(crate) use ancestry::AncestorSelection;
 mod decode;
 pub(crate) mod import;
 pub(crate) mod maintenance;
@@ -88,6 +89,8 @@ pub(crate) struct EventRepository {
     network_header_fetches: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     body_fetches: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    ancestry_vertices: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -107,6 +110,11 @@ impl std::ops::Deref for RepositoryOwner {
     }
 }
 impl EventRepository {
+    #[cfg(test)]
+    pub(crate) fn ancestry_vertex_reads(&self) -> usize {
+        self.ancestry_vertices
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
     #[cfg(test)]
     pub(crate) fn body_read_counts(&self) -> (usize, usize) {
         use std::sync::atomic::Ordering;
@@ -177,6 +185,8 @@ impl EventRepository {
             network_header_fetches: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             body_fetches: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            ancestry_vertices: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 

@@ -73,6 +73,16 @@ impl ProjectionFacts {
         crate::storage::profile::manifest::validate_ddl(c, SCHEMA)?;
         super::super::channel_account_authority::AuthorityHistory::initialize(c, fresh)
     }
+    pub(super) fn snapshot_charge(
+        profile: &ProfileStorage,
+        job: [u8; 16],
+        channel: ConversationId,
+    ) -> Result<usize, LogError> {
+        profile.database().read(|c| {
+            let bytes:i64=c.query_row("SELECT COALESCE((SELECT COALESCE(length(state),0)+length(context) FROM channel_projection_work WHERE job=?1 AND channel=?2),0)+COALESCE((SELECT length(state) FROM channel_authority_current WHERE job=?1 AND channel=?2),0)",params![job.as_slice(),channel.as_bytes().as_slice()],|r|r.get(0))?;
+            usize::try_from(bytes).ok().and_then(|n|n.checked_mul(3)).ok_or(LogError::RepositoryCounterExhausted)
+        })
+    }
     pub(super) fn load(
         profile: Arc<ProfileStorage>,
         job: [u8; 16],
@@ -161,12 +171,55 @@ impl ProjectionFacts {
     pub(super) fn is_authorized(&self, event: EventId) -> Result<bool, LogError> {
         self.profile.database().read(|c| { self.guard_on(c)?; c.query_row("SELECT EXISTS(SELECT 1 FROM channel_event_authority WHERE job=?1 AND channel=?2 AND event=?3 AND allowed=1)",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),event.as_bytes().as_slice()],|r|r.get(0)).map_err(Into::into) })
     }
-    pub(super) fn parents_authorized(&self, event: EventId) -> Result<bool, LogError> {
-        self.profile.database().read(|c| {
-            self.guard_on(c)?;
-            c.query_row("SELECT NOT EXISTS(SELECT 1 FROM retained_event_parents p LEFT JOIN channel_event_authority a ON a.job=?1 AND a.channel=?2 AND a.event=p.parent WHERE p.domain=?3 AND p.child=?4 AND (a.allowed IS NULL OR a.allowed=0))",
-                params![self.job.as_slice(),self.channel.as_bytes().as_slice(),DOMAIN.as_slice(),event.as_bytes().as_slice()],|r|r.get(0)).map_err(Into::into)
-        })
+    pub(super) fn parents_authorized(
+        &self,
+        event: EventId,
+        graph: &impl AuthorityGraph,
+    ) -> Result<bool, LogError> {
+        let mut key = vec![5];
+        key.extend_from_slice(event.as_bytes());
+        Ok(!super::graph::any_fact(
+            graph,
+            &key,
+            |after| {
+                self.profile.database().read(|c| {
+                self.guard_on(c)?;
+                c.query_row("SELECT p.parent,COALESCE(a.allowed,0) FROM retained_event_parents p LEFT JOIN channel_event_authority a ON a.job=?1 AND a.channel=?2 AND a.event=p.parent WHERE p.domain=?3 AND p.child=?4 AND p.parent>COALESCE(?5,x'') ORDER BY p.parent LIMIT 1",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),DOMAIN.as_slice(),event.as_bytes().as_slice(),after],|r|Ok((r.get(0)?,r.get::<_,bool>(1)?))).optional().map_err(Into::into)
+            })
+            },
+            |allowed| Ok(!allowed),
+        )?)
+    }
+    pub(super) fn after_accept(
+        &self,
+        reducer: &MembershipReducer,
+        header: &EventHeader,
+        graph: &impl AuthorityGraph,
+    ) -> Result<bool, LogError> {
+        let Some(accept) = reducer
+            .prior
+            .as_ref()
+            .and_then(ChannelState::accepted_event_id)
+        else {
+            return Ok(false);
+        };
+        if header.id == accept {
+            return Ok(true);
+        }
+        let mut key = vec![6];
+        key.extend_from_slice(accept.as_bytes());
+        key.extend_from_slice(header.id.as_bytes());
+        super::graph::any_fact(
+            graph,
+            &key,
+            |after| {
+                self.profile.database().read(|c| {
+                self.guard_on(c)?;
+                c.query_row("SELECT p.parent,COALESCE(a.after_accept=1 AND a.accept_root=?5,0) FROM retained_event_parents p LEFT JOIN channel_event_authority a ON a.job=?1 AND a.channel=?2 AND a.event=p.parent WHERE p.domain=?3 AND p.child=?4 AND p.parent>COALESCE(?6,x'') ORDER BY p.parent LIMIT 1",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),DOMAIN.as_slice(),header.id.as_bytes().as_slice(),accept.as_bytes().as_slice(),after],|r|Ok((r.get(0)?,r.get::<_,bool>(1)?))).optional().map_err(Into::into)
+            })
+            },
+            Ok,
+        )
     }
     pub(super) fn departure_blocks(
         &self,
@@ -174,30 +227,22 @@ impl ProjectionFacts {
         event: EventId,
         graph: &impl AuthorityGraph,
     ) -> Result<bool, LogError> {
-        let mut after: Option<Vec<u8>> = None;
-        loop {
-            let page:Vec<Vec<u8>>=self.profile.database().read(|c| {
+        let mut key = vec![2];
+        key.extend_from_slice(member.as_bytes());
+        super::graph::any_fact(
+            graph,
+            &key,
+            |after| {
+                self.profile.database().read(|c| {
                 self.guard_on(c)?;
-                let mut statement=c.prepare("SELECT event FROM channel_departure_facts WHERE job=?1 AND channel=?2 AND member=?3 AND (?4 IS NULL OR event>?4) ORDER BY event LIMIT 64")?;
-                statement.query_map(params![self.job.as_slice(),self.channel.as_bytes().as_slice(),member,after],|r|r.get(0))?.collect::<Result<_,_>>().map_err(Into::into)
-            })?;
-            if page.is_empty() {
-                return Ok(false);
-            }
-            for bytes in page {
-                let id = EventId::new(
-                    bytes
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| invalid("invalid departure event identity"))?,
-                );
-                if !graph.descends(event, id)? {
-                    return Ok(true);
-                }
-                after = Some(bytes);
-            }
-        }
+                let bytes:Option<Vec<u8>>=c.query_row("SELECT event FROM channel_departure_facts WHERE job=?1 AND channel=?2 AND member=?3 AND event>COALESCE(?4,x'') ORDER BY event LIMIT 1",params![self.job.as_slice(),self.channel.as_bytes().as_slice(),member,after],|r|r.get(0)).optional()?;
+                bytes.map(|bytes| {let id=EventId::new(bytes.as_slice().try_into().map_err(|_|invalid("invalid departure event identity"))?);Ok((bytes,id))}).transpose()
+            })
+            },
+            |id| Ok(!graph.descends(event, id)?),
+        )
     }
+
     pub(super) fn pending_departure(
         &self,
         member: &str,
@@ -243,9 +288,10 @@ impl ProjectionFacts {
         reducer: &mut MembershipReducer,
         header: &EventHeader,
         rank: i64,
-        allowed: bool,
+        decision: (bool, bool),
         own: &str,
     ) -> Result<bool, LogError> {
+        let (allowed, after_accept) = decision;
         let state = reducer.prior.as_mut();
         if let Some(state) = state {
             state.set_identity(own.to_owned());
@@ -255,12 +301,6 @@ impl ProjectionFacts {
             .prior
             .as_ref()
             .and_then(ChannelState::accepted_event_id);
-        let after_accept = if let Some(accept) = accept {
-            header.id==accept || c.query_row("SELECT EXISTS(SELECT 1 FROM retained_event_parents p JOIN channel_event_authority a ON a.job=?1 AND a.channel=?2 AND a.event=p.parent AND a.accept_root=?4 AND a.after_accept=1 WHERE p.domain=?3 AND p.child=?5)",
-                params![self.job.as_slice(),self.channel.as_bytes().as_slice(),DOMAIN.as_slice(),accept.as_bytes().as_slice(),header.id.as_bytes().as_slice()],|r|r.get(0))?
-        } else {
-            false
-        };
         let receive = reducer.prior.as_ref().is_some_and(|state| {
             reducer.known_local
                 && !state.is_dissolved()

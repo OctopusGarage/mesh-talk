@@ -45,6 +45,7 @@ impl MembershipReducer {
     pub(super) fn step_header(
         &self,
         header: &crate::eventlog::repository::EventHeader,
+        graph: &impl AuthorityGraph,
     ) -> Result<bool, LogError> {
         if super::projection_facts::is_membership_control(header.kind) {
             return Err(LogError::CorruptFile(
@@ -60,7 +61,7 @@ impl MembershipReducer {
         self.history
             .as_ref()
             .ok_or_else(|| LogError::CorruptFile("indexed reducer has no fact owner".into()))?
-            .parents_authorized(header.id)
+            .parents_authorized(header.id, graph)
     }
     pub(super) fn step(
         &mut self,
@@ -371,7 +372,7 @@ impl MembershipReducer {
         }
         let closed = valid
             && if let Some(history) = history.as_ref() {
-                history.parents_authorized(event.id)?
+                history.parents_authorized(event.id, by_id)?
             } else {
                 event
                     .parents
