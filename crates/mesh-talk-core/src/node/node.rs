@@ -445,7 +445,7 @@ pub struct Node {
     pub(in crate::node) profile_receive_work:
         Mutex<super::profile_receive_work::ProfileReceiveWork>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
-    pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::ReactionStore>,
+    pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::IndexedReactionStore>,
     // Declared last so every legacy handle drops before the connection and lease.
     pub(in crate::node) storage: Arc<crate::storage::profile::context::ProfileStorage>,
 }
@@ -864,9 +864,13 @@ impl Node {
         )?;
         let account_access_updates =
             tokio::sync::watch::channel(account_access.current(&account.account_id())).0;
-        let my_dm_reactions = super::reaction_store::ReactionStore::open(
-            &log_path.with_extension(format!("{}-reactions.log", account.account_id())),
+        let reaction_path =
+            log_path.with_extension(format!("{}-reactions.log", account.account_id()));
+        super::reaction_store::IndexedReactionStore::authenticate_legacy(
+            &storage,
+            &reaction_path,
             password,
+            account.public().ed25519_pub,
         )?;
         let channel_migration = super::channel_account_maintenance::ChannelMigrationStore::open(
             &dir.join(format!("channel-migration-{}.log", account.account_id())),
@@ -888,6 +892,12 @@ impl Node {
         )?;
         let account_document_updates = tokio::sync::watch::channel(0).0;
         storage.complete_participant(password, legacy_previous.as_deref())?;
+        let my_dm_reactions = super::reaction_store::IndexedReactionStore::from_profile(
+            storage.clone(),
+            &reaction_path,
+            password,
+            account.public().ed25519_pub,
+        )?;
         let avatars = super::profile_store::IndexedProfileStore::from_profile(
             storage.clone(),
             &dir.join("profiles.log"),

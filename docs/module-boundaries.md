@@ -164,6 +164,17 @@ fenced by a fresh run identifier. ID sets exist only for the bounded active wire
 exchange. Corrupt or foreign hint sources remain preserved and unavailable; hints
 never establish admission, delivery, or deletion authority.
 
+`core/node/reaction_store/indexed.rs` owns the exact locally authored reaction
+projection. Its independently published source is keyed by the full account
+public key, preserving the legacy per-account path across adoption. The common
+publication state machine keeps unscoped history identities unchanged; only its
+registry selector varies. Node warm open reads no authored reaction payloads;
+conversation and target pages admit keys and bytes before bodies. Unsigned action
+clocks and remove-wins ties are unchanged. Bulk physical cleanup uses bounded
+transactions and evaluates external predicates outside the SQL mutex. Incoming
+reaction aggregation and the account-document startup owner retain separate
+consumer work; this source cut does not establish bounded reaction-view queries.
+
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary
 projections omit the content. The explicit exact-message content lookup is for

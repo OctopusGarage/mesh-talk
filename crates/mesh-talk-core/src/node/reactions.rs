@@ -208,14 +208,21 @@ impl Node {
         }
         // Merge our own account reactions (sealed to peers; not openable from our log).
         let acct_conv = account_conversation_id(&my_account, peer_account_id);
-        for ((c, _, _), (w, p)) in self
-            .my_dm_reactions
-            .lock()
-            .expect("my_dm_reactions mutex not poisoned")
-            .iter()
-        {
-            if *c == acct_conv {
-                decoded.push((my_account.clone(), *w, p.clone()));
+        let mut after = None;
+        loop {
+            let page = self.my_dm_reactions.lock().expect("reactions mutex").page(
+                Some(acct_conv),
+                None,
+                after,
+                128,
+                8 * 1024 * 1024,
+            )?;
+            if page.rows.is_empty() {
+                break;
+            }
+            after = page.next;
+            for row in page.rows {
+                decoded.push((my_account.clone(), row.wall, row.payload));
             }
         }
         for (_, _, payload) in &mut decoded {
@@ -347,14 +354,21 @@ impl Node {
         }
         // Merge our own DM reactions for this conversation (not in the openable log).
         if !is_channel {
-            for ((c, _, _), (w, p)) in self
-                .my_dm_reactions
-                .lock()
-                .expect("my_dm_reactions mutex not poisoned")
-                .iter()
-            {
-                if *c == conv {
-                    decoded.push((self_uid.clone(), *w, p.clone()));
+            let mut after = None;
+            loop {
+                let page = self.my_dm_reactions.lock().expect("reactions mutex").page(
+                    Some(conv),
+                    None,
+                    after,
+                    128,
+                    8 * 1024 * 1024,
+                )?;
+                if page.rows.is_empty() {
+                    break;
+                }
+                after = page.next;
+                for row in page.rows {
+                    decoded.push((self_uid.clone(), row.wall, row.payload));
                 }
             }
         }
@@ -364,9 +378,8 @@ impl Node {
     /// Record one of OUR OWN reactions (sealed to the peer, so un-openable from our log)
     /// for later merge in `reactions`/`account_reactions`. Collapsed to the latest action
     /// per `(conv, target, emoji)` — newer wall_clock wins, and on an exact tie a `remove`
-    /// beats an `add` — so the map matches `aggregate`'s per-author max-reduction and
-    /// stays bounded by the number of distinct (conv, target, emoji) keys (no per-toggle
-    /// growth, no linear scan blow-up).
+    /// beats an `add`. The exact account-scoped SQL key keeps one current action;
+    /// historical keys and their payloads do not remain resident in the Node.
     fn record_my_reaction(
         &self,
         conv: ConversationId,
@@ -386,6 +399,45 @@ mod acceptance_tests {
     use super::*;
     use crate::discovery::Announce;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[test]
+    fn indexed_authored_reactions_warm_node_reads_no_historical_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "peer", 1);
+        let open = || {
+            super::super::test_support::node_with_files(
+                dir.path(),
+                DeviceIdentity::from_secret_bytes([91; 32], [90; 32]),
+                Account::from_secret_bytes([92; 32]),
+                &proof,
+            )
+            .0
+        };
+        let node = open();
+        let conversation = ConversationId::new([93; 32]);
+        for n in 0..64 {
+            node.record_my_reaction(
+                conversation,
+                u64::from(n),
+                ReactionPayload {
+                    target: EventId::new([n; 32]),
+                    emoji: "x".repeat(8192),
+                    remove: false,
+                },
+            )
+            .unwrap();
+        }
+        drop(node);
+        drop(open());
+        crate::storage::record_log::frame_observations::reset();
+        let node = open();
+        assert!(
+            crate::storage::record_log::frame_observations::maximum_capacity() < 8192,
+            "ordinary Node reopen must not read historical reaction frames"
+        );
+        assert_eq!(node.my_dm_reactions.lock().unwrap().len(), 64);
+    }
 
     #[tokio::test]
     async fn channel_content_controls_recheck_membership_at_durable_acceptance() {

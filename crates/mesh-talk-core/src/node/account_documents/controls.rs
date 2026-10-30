@@ -484,16 +484,22 @@ impl Node {
         peers.dedup();
         for peer in peers {
             let conv = account_conversation_id(&own, &peer);
-            let rows: Vec<_> = self
-                .my_dm_reactions
-                .lock()
-                .expect("reactions mutex")
-                .iter()
-                .filter(|((c, _, _), _)| *c == conv)
-                .map(|(_, (wall, p))| (*wall, p.clone()))
-                .collect();
-            for (wall, payload) in rows {
-                self.publish_own_account_reaction(&peer, wall, &payload)?;
+            let mut after = None;
+            loop {
+                let page = self.my_dm_reactions.lock().expect("reactions mutex").page(
+                    Some(conv),
+                    None,
+                    after,
+                    128,
+                    8 * 1024 * 1024,
+                )?;
+                if page.rows.is_empty() {
+                    break;
+                }
+                after = page.next;
+                for row in page.rows {
+                    self.publish_own_account_reaction(&peer, row.wall, &row.payload)?;
+                }
             }
             // Validate old unscoped recall marks against a retained account route;
             // a local delete/clear never enters RecallLog and cannot be promoted.

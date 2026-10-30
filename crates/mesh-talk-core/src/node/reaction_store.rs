@@ -1,31 +1,42 @@
 //! Durable projection of locally authored reactions that only peers can decrypt.
 
 use super::reaction::ReactionPayload;
+#[cfg(test)]
 use crate::eventlog::LogError;
-use crate::eventlog::event::{ConversationId, EventId};
+use crate::eventlog::event::ConversationId;
+#[cfg(test)]
+use crate::eventlog::event::EventId;
+#[cfg(test)]
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 
+#[cfg(test)]
 type ReactionKey = (ConversationId, EventId, String);
+#[cfg(test)]
 type ReactionValue = (u64, ReactionPayload);
+#[cfg(test)]
 type Entries = HashMap<ReactionKey, ReactionValue>;
 const MAGIC: &[u8; 6] = b"MTREAC";
 
 #[derive(Clone, Serialize, Deserialize)]
-struct Record {
-    conversation: ConversationId,
-    wall: u64,
-    payload: ReactionPayload,
+pub(in crate::node) struct Record {
+    pub conversation: ConversationId,
+    pub wall: u64,
+    pub payload: ReactionPayload,
 }
 
+#[cfg(test)]
 pub(super) struct ReactionStore {
     file: EncryptedRecordLog<Record>,
     entries: Entries,
     records: usize,
 }
 
+#[cfg(test)]
 impl ReactionStore {
     pub(super) fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::open(path, password, MAGIC)?;
@@ -92,46 +103,6 @@ impl ReactionStore {
         self.entries.len()
     }
 
-    pub(super) fn remove_where(
-        &mut self,
-        remove: impl Fn(ConversationId, u64, &ReactionPayload) -> bool,
-    ) -> Result<(), LogError> {
-        let kept = self.records_kept(remove);
-        if kept.len() != self.entries.len() {
-            self.file.rewrite(&kept)?;
-            self.records = kept.len();
-            self.entries.clear();
-            for record in kept {
-                self.merge(record);
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn try_remove_where(
-        &mut self,
-        remove: impl Fn(ConversationId, u64, &ReactionPayload) -> Result<bool, LogError>,
-    ) -> Result<(), LogError> {
-        let mut kept = Vec::new();
-        for ((conversation, _, _), (wall, payload)) in &self.entries {
-            if !remove(*conversation, *wall, payload)? {
-                kept.push(Record {
-                    conversation: *conversation,
-                    wall: *wall,
-                    payload: payload.clone(),
-                });
-            }
-        }
-        if kept.len() != self.entries.len() {
-            self.file.rewrite(&kept)?;
-            self.records = kept.len();
-            self.entries.clear();
-            for record in kept {
-                self.merge(record);
-            }
-        }
-        Ok(())
-    }
     fn records_kept(
         &self,
         remove: impl Fn(ConversationId, u64, &ReactionPayload) -> bool,
@@ -145,11 +116,6 @@ impl ReactionStore {
                 payload: payload.clone(),
             })
             .collect()
-    }
-
-    #[cfg(test)]
-    pub(super) fn fail_appends_for_test(&mut self) {
-        self.file.fail_appends_for_test(true).unwrap();
     }
 }
 
@@ -183,3 +149,6 @@ mod tests {
         );
     }
 }
+
+mod indexed;
+pub(in crate::node) use indexed::IndexedReactionStore;

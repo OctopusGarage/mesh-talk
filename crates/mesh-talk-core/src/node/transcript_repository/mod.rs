@@ -27,6 +27,7 @@ pub(crate) const OPAQUE_RECEIVE_HINTS: i64 = 11;
 pub(crate) const ACCOUNT_PROFILES: i64 = 12;
 pub(crate) const AVATAR_PROFILES: i64 = 13;
 pub(crate) const TRUST_CARDS: i64 = 14;
+pub(crate) const AUTHORED_REACTIONS: i64 = 15;
 pub(crate) const MAX_PAGE_ROWS: usize = 128;
 pub(crate) const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
 

@@ -2,6 +2,44 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-indexed-authored-reactions",
+      "paths": [
+        "crates/mesh-talk-core/src/node/reaction_store.rs",
+        "crates/mesh-talk-core/src/node/reaction_store/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "indexed_authored_reactions_",
+            "node::reaction_store::tests::",
+            "own_account_reactions_survive_restart_and_removal",
+            "own_dm_reactions_survive_restart_and_removal"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node"
+      ],
+      "capability": {
+        "summary": "Persist authored reaction projection on encrypted disk under independently published account-qualified sources.",
+        "guide": "docs/module-boundaries.md",
+        "invariants": [
+          {
+            "name": "Warm Node open reads no authored reaction payloads; exact account/conversation/target/emoji keys retain unsigned action clocks and remove-wins ties, with key and byte admission before page bodies.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "The shared source publisher preserves unscoped identities and uses full account public keys for scoped publication, independent locators and barriers; faults resume without replay or cross-account projection.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Authored source storage does not certify incoming reaction aggregation, selected reaction-view APIs, or account-document startup memory; those consumers require separate bounded-query and runtime acceptance."
+      ]
+    },
+    {
       "id": "core-indexed-current-profiles",
       "paths": [
         "crates/mesh-talk-core/src/node/profile_store/",
