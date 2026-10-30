@@ -163,6 +163,15 @@ test("desktop search reaches its session and frontend consumers", () => {
   assert.ok(selected.frontend.includes("src/lib/api.test.ts"));
 });
 
+test("control task lifetime changes select their source-backed regression", () => {
+  const selected = plan("crates/mesh-talk-core/src/node/account_session.rs");
+  assert.deepEqual(selected.blockers, []);
+  assert.ok(selected.owners.some(({ id }) => id === "core-account-group-operations"));
+  const name = "control_task_lifetime_scope_restores_outer_witness_after_panic";
+  const filters = selected.rust.find(({ package: value }) => value === "mesh-talk-core").filters;
+  assert.deepEqual(filters.filter((filter) => filter.includes(name)), [name]);
+});
+
 // Source evidence catches accidental empty/fabricated filters without compiling
 // four crates. Cargo's actual per-platform --list inventory remains authoritative.
 test("every Rust selector has nonignored library test evidence in its owning module", () => {
