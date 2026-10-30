@@ -1418,7 +1418,7 @@ impl Node {
         if !media {
             return false; // attachment — never written to the media store
         }
-        if self.media.contains(file_conv) && self.has_verified_file_completion(file_conv) {
+        if self.local_media_recovery_complete(file_conv) {
             self.complete_sticker_aliases(file_conv);
             if !self.pending_sticker_aliases(file_conv) {
                 return false; // every retained offer is already complete
