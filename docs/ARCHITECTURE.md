@@ -1442,7 +1442,10 @@ between bounded pages. These indexed owners alone do not replace FileBook startu
 reconstruction or qualify the complete participant runtime memory bound.
 The indexed FileBook projection references those existing file-card bodies by
 ordinal. It installs validated signed bindings and exact processing facts in the
-body transaction. Physical deletion cascades to eligibility metadata, advances
+body transaction. Its transfer fingerprint shares the existing file equality
+rule: presentation names and MIME can differ between aliases, while version,
+protection and immutable transfer fields remain bound. Each source row still
+retains its exact plaintext digest. Physical deletion cascades to eligibility metadata, advances
 its persisted revision and retains compact processing evidence. Durable local
 suppression also revokes eligibility in that same transaction, before physical
 cleanup can fail. Signed logical aliases apply this rule in either arrival order;

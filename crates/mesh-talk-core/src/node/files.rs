@@ -13,31 +13,45 @@ pub(in crate::node) fn same_file_transfer(
     left: &crate::file::AnyManifest,
     right: &crate::file::AnyManifest,
 ) -> bool {
+    file_transfer_fingerprint(left)
+        .zip(file_transfer_fingerprint(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+/// The existing transfer-binding rule ignores presentation names and MIME but
+/// preserves the manifest version, protection and immutable transfer fields.
+/// The indexed file owner uses this same rule for its persisted fingerprint.
+pub(in crate::node) fn file_transfer_fingerprint(
+    manifest: &crate::file::AnyManifest,
+) -> Option<[u8; 32]> {
     use crate::file::AnyManifest;
-    fn v1(mut manifest: crate::file::FileManifest) -> crate::file::FileManifest {
+    fn v1(mut manifest: crate::file::FileManifest) -> Vec<u8> {
         manifest.name.clear();
         manifest.mime.clear();
-        manifest
+        manifest.encode()
     }
-    fn v2(mut manifest: crate::file::FileManifestV2) -> crate::file::FileManifestV2 {
+    fn v2(mut manifest: crate::file::FileManifestV2) -> Vec<u8> {
         manifest.name.clear();
         manifest.mime.clear();
-        manifest
+        manifest.encode()
     }
-    if left.protection() != right.protection() {
-        return false;
-    }
-    match (left.unprotected(), right.unprotected()) {
-        (AnyManifest::V1(left), AnyManifest::V1(right)) => v1(left.clone()) == v1(right.clone()),
-        (AnyManifest::V2(left), AnyManifest::V2(right)) => v2(left.clone()) == v2(right.clone()),
-        (AnyManifest::V3(left), AnyManifest::V3(right)) => {
-            v2(left.v2.clone()) == v2(right.v2.clone())
-        }
-        (AnyManifest::V4(left), AnyManifest::V4(right)) => {
-            v2(left.v3.v2.clone()) == v2(right.v3.v2.clone())
-        }
-        _ => false,
-    }
+    let (version, body) = match manifest.unprotected() {
+        AnyManifest::V1(manifest) => (1, v1(manifest.clone())),
+        AnyManifest::V2(manifest) => (2, v2(manifest.clone())),
+        AnyManifest::V3(manifest) => (3, v2(manifest.v2.clone())),
+        AnyManifest::V4(manifest) => (4, v2(manifest.v3.v2.clone())),
+        AnyManifest::Protected { .. } => return None,
+    };
+    let protection = match manifest.protection() {
+        None => 0,
+        Some(MessageProtection::Click) => 1,
+        Some(MessageProtection::Authenticate) => 2,
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"mesh-talk/file-transfer-binding/v1\0");
+    hash.update([version, protection]);
+    hash.update(body);
+    Some(hash.finalize().into())
 }
 use crate::eventlog::event::{Author, ConversationId, EventId, EventKind};
 use crate::file::{

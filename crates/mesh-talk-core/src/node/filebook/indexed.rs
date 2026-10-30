@@ -60,9 +60,10 @@ fn active(c: &Connection) -> Result<[u8; 32], LogError> {
     )
 }
 fn digest(bytes: &[u8]) -> Result<[u8; 32], LogError> {
-    let (_, body) =
-        crate::expiry::split(bytes).ok_or_else(|| invalid("invalid file deadline wrapper"))?;
-    Ok(Sha256::digest(body).into())
+    crate::node::files::validated_manifest(bytes)
+        .as_ref()
+        .and_then(crate::node::files::file_transfer_fingerprint)
+        .ok_or_else(|| invalid("invalid file transfer binding"))
 }
 
 fn page_limit(rows: usize, bytes: usize, charge: usize) -> Result<i64, LogError> {
@@ -875,5 +876,52 @@ mod tests {
             Some(manifest)
         );
         assert_ne!(effects.head().unwrap(), after);
+    }
+    #[test]
+    fn display_aliases_keep_the_established_file_transfer_binding() {
+        let mut f = Fixture::new();
+        let (first, original, manifest) = f.fixture(9);
+        let AnyManifest::V1(mut renamed) = manifest.clone() else {
+            unreachable!()
+        };
+        renamed.name = "renamed.txt".into();
+        renamed.mime = "application/octet-stream".into();
+        let second_original = Event::new(
+            &f.device,
+            original.conversation_id,
+            2,
+            vec![],
+            2,
+            42,
+            EventKind::FileManifest,
+            vec![222],
+        );
+        let mut second = first.clone();
+        second.event_id = second_original.id;
+        second.plaintext = renamed.encode();
+        assert!(crate::node::files::same_file_transfer(
+            &manifest,
+            &AnyManifest::V1(renamed.clone())
+        ));
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                Fixture::install(c, &first, &original)?;
+                Fixture::install(c, &second, &second_original)?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            f.book.manifest(manifest.file_conv()).unwrap(),
+            Some(manifest.clone())
+        );
+        f.records
+            .remove_where(|row| row.event_id == first.event_id)
+            .unwrap();
+        assert_eq!(
+            f.book.manifest(manifest.file_conv()).unwrap(),
+            Some(AnyManifest::V1(renamed))
+        );
     }
 }
