@@ -13,6 +13,15 @@ impl Drop for ReleaseDirectoryOnDrop {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_source_receipt_overtakes_another_siblings_held_control_over_noise() {
+    selected_source_receipt_over_held_control(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selected_source_cold_capability_setup_precedes_role_page_budget() {
+    selected_source_receipt_over_held_control(true).await;
+}
+
+async fn selected_source_receipt_over_held_control(hold_initial_control: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let owner = node(&dir.path().join("owner"), &account);
@@ -104,17 +113,56 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
         }
     }
     let mut servers = tokio::task::JoinSet::new();
+    let bootstrap_release = Arc::new(Semaphore::new(0));
+    let _bootstrap_release_on_drop = ReleaseDirectoryOnDrop(bootstrap_release.clone());
+    if hold_initial_control {
+        let (arrived, held) = oneshot::channel();
+        let arrived = Arc::new(Mutex::new(Some(arrived)));
+        let exact_reference = reference.identity.public();
+        *owner.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let release = bootstrap_release.clone();
+            move |peer, frame| {
+                let release = release.clone();
+                let arrived = arrived.clone();
+                let exact_reference = exact_reference.clone();
+                Box::pin(async move {
+                    if peer != exact_reference {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentsRequest { body } = frame else {
+                        return;
+                    };
+                    let request =
+                        crate::node::account_documents::wire::DocumentRequest::decode(&body)
+                            .expect("authenticated bootstrap request must decode");
+                    if request.domain == AccountDocumentDomain::GroupControl {
+                        if let Some(signal) = arrived.lock().unwrap().take() {
+                            let _ = signal.send(());
+                        }
+                        let _ = release.acquire().await;
+                    }
+                })
+            }
+        }));
+        servers.spawn(async move {
+            super::cold_account_setup(held)
+                .await
+                .expect("the real first capability request must enter the cold hold")
+                .unwrap();
+            // Deliberately exceed the unchanged three-second role-page budget.
+            // Initial capability completion belongs to the existing cold setup
+            // watchdog, before the independently measured operation is admitted.
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            bootstrap_release.close();
+        });
+    }
     for (target, listener) in listeners {
         servers.spawn(target.run_accept_loop(listener));
     }
     owner.publish_account_group_access(&mut None);
-    super::message_action_reference::pull_reference_action_control(
-        &reference,
-        &owner,
-        addresses[0],
-        group,
-    )
-    .await;
+    // Cold reciprocal capability negotiation has its own setup watchdog. The
+    // shorter exact-role page barrier starts only after those real capabilities
+    // exist; neither wait admits an operation or manufactures protocol support.
     super::cold_account_setup(async {
         loop {
             let ready = [&owner, &reference].into_iter().all(|node| {
@@ -141,6 +189,14 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
     })
     .await
     .expect("both certified devices must bootstrap real operation support");
+    super::message_action_reference::pull_reference_action_control(
+        &reference,
+        &owner,
+        addresses[0],
+        group,
+    )
+    .await;
+    *owner.account_session_test_hook.lock().unwrap() = None;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner

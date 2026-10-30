@@ -432,6 +432,18 @@ establish the fixture's real connection state; they are not an eight-second
 operation or custody latency assertion, and they do not drive extra RPCs, warm
 session pools, retry submissions or suppress background workers.
 
+In the selected-source receipt fixture, observe reciprocal operation capability
+for the exact full peer identities before invoking the three-second signed-role
+page helper. Its readiness predicate requires a completed source capability page;
+starting it first charges cold negotiation to the wrong phase. The
+`selected_source_cold_capability_setup_precedes_role_page_budget` regression holds
+the real first authenticated Control responses beyond that role-page budget,
+then requires autonomous background capability completion, the exact signed
+source role and the unchanged operation/held-page recovery assertions. Its hold
+controller belongs to the fixture task set, and a drop guard releases the hold on
+failure before task cancellation. Normal cleanup joins the server tasks and drains
+admitted writers before checking the held-period assertions.
+
 Modern self-control fixtures observe validated Directory and Control scope
 completions in both directions for the selected full peer identities. These
 observations reset before final requester enrollment. The aggregate device sync
