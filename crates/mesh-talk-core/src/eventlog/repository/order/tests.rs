@@ -1189,3 +1189,86 @@ fn runtime_metadata_combined_history_keeps_delayed_parent_order_and_reuses_uncha
     ));
     assert_eq!(repo.body_read_counts(), (0, 0));
 }
+
+#[test]
+fn runtime_metadata_interrupted_history_retirement_cannot_reuse_partial_ready_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = database(&dir);
+    let repo = EventRepository::new(db.clone(), EventDomainId([2; 16])).unwrap();
+    let conv = ConversationId::new([27; 32]);
+    repo.initialize_history_order().unwrap();
+    let generation = repo
+        .history_generation(&conv, b"original visibility", 0, None)
+        .unwrap();
+    let populate = |repo: &EventRepository, job| {
+        for n in 0u64..300 {
+            let mut id = [0; 32];
+            id[..8].copy_from_slice(&n.to_be_bytes());
+            repo.history_add(
+                &conv,
+                job,
+                combined::HistorySelector {
+                    id: EventId::new(id),
+                    clock: n,
+                    source_kind: 2,
+                    ordinal: n as i64 + 1,
+                    priority: 2,
+                    sequence: 0,
+                    charged_bytes: 1,
+                },
+                None,
+            )
+            .unwrap();
+        }
+        loop {
+            if repo.history_order_step(job).unwrap().ready {
+                break;
+            }
+        }
+    };
+    populate(&repo, generation.job);
+    db.transaction(|c| {
+        c.execute_batch("CREATE TEMP TRIGGER interrupt_history_retirement BEFORE DELETE ON history_order_candidates WHEN (SELECT count(*) FROM history_order_rows WHERE job=OLD.job)<129 BEGIN SELECT RAISE(ABORT,'interrupted retirement'); END;")?;
+        Ok(())
+    }).unwrap();
+    assert!(
+        repo.history_generation(&conv, b"changed visibility", 0, None)
+            .is_err()
+    );
+    db.transaction(|c| {
+        let remaining: i64 =
+            c.query_row("SELECT count(*) FROM history_order_rows", [], |r| r.get(0))?;
+        assert_eq!(
+            remaining, 172,
+            "first bounded cleanup transaction committed before the failure"
+        );
+        c.execute_batch("DROP TRIGGER interrupt_history_retirement")?;
+        Ok(())
+    })
+    .unwrap();
+    drop(repo);
+    drop(db);
+    let repo = EventRepository::new(database(&dir), EventDomainId([2; 16])).unwrap();
+    repo.initialize_history_order().unwrap();
+    let resumed = repo
+        .history_generation(&conv, b"original visibility", 0, None)
+        .unwrap();
+    assert!(
+        !resumed.ready,
+        "a reverted visibility token must not resurrect partially retired ranks"
+    );
+    assert_ne!(resumed.job, generation.job);
+    populate(&repo, resumed.job);
+    let ready = repo
+        .history_generation(&conv, b"original visibility", 0, None)
+        .unwrap();
+    assert_eq!(ready.count, 300);
+    for start in (0..300).step_by(128) {
+        let rows = repo
+            .history_selectors(ready.job, start, (start + 128).min(300), 4096)
+            .unwrap();
+        assert_eq!(rows.first().unwrap().clock, start as u64);
+        assert_eq!(rows.len(), (300 - start).min(128));
+    }
+    assert_eq!(repo.body_read_counts(), (0, 0));
+}
