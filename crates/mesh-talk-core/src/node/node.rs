@@ -471,6 +471,7 @@ pub struct Node {
     pub(in crate::node) profile_receive_work:
         Mutex<super::profile_receive_work::ProfileReceiveWork>,
     /// Durable latest local actions; outbound sealed reactions cannot be reopened by us.
+    pub(in crate::node) reaction_queries: Mutex<super::reactions::ReactionQueryWork>,
     pub(in crate::node) my_dm_reactions: Mutex<super::reaction_store::IndexedReactionStore>,
     // Declared last so every legacy handle drops before the connection and lease.
     pub(in crate::node) storage: Arc<crate::storage::profile::context::ProfileStorage>,
@@ -1322,6 +1323,7 @@ impl Node {
             received: Mutex::new(received),
             received_files: Mutex::new(received_files),
             recalls: Mutex::new(recalls),
+            reaction_queries: Mutex::default(),
             my_dm_reactions: Mutex::new(my_dm_reactions),
         };
         node.reconcile_account_profiles_on_open().map_err(|error| {

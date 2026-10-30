@@ -471,24 +471,35 @@ impl IndexedReactionStore {
         limit: usize,
         budget: usize,
     ) -> Result<ChannelReactionPage, LogError> {
+        self.channel_selected_page(conversation, None, after, limit, budget)
+    }
+    pub(in crate::node) fn channel_selected_page(
+        &self,
+        conversation: ConversationId,
+        query: Option<[u8; 16]>,
+        after: Option<i64>,
+        limit: usize,
+        budget: usize,
+    ) -> Result<ChannelReactionPage, LogError> {
         TranscriptPageLimit::new(limit, budget)?;
         if after.is_some_and(|id| id < 0) {
             return Err(LogError::InvalidPageBudget);
         }
         self.source.profile().database().read(|c| {
             self.check_account(c)?;
-            let mut statement = c.prepare("SELECT ordinal,body_bytes,length(body) FROM private_channel_reactions WHERE account=?1 AND conversation=?2 AND ordinal>?3 ORDER BY ordinal LIMIT ?4")?;
-            let mut rows=statement.query(params![self.account.as_slice(),conversation.as_bytes().as_slice(),after.unwrap_or(0),limit as i64])?;
-            let mut selected=Vec::new(); let mut charge=0usize;
+            let selected = if query.is_some() { "EXISTS(SELECT 1 FROM reaction_query_targets t WHERE t.query=?5 AND t.target=private_channel_reactions.target)" } else { "?5 IS NULL" };
+            let mut statement = c.prepare(&format!("SELECT ordinal,body_bytes,length(body),{selected} FROM private_channel_reactions WHERE account=?1 AND conversation=?2 AND ordinal>?3 ORDER BY ordinal LIMIT ?4"))?;
+            let mut rows=statement.query(params![self.account.as_slice(),conversation.as_bytes().as_slice(),after.unwrap_or(0),limit as i64,query.as_ref().map(|q|q.as_slice())])?;
+            let mut selected=Vec::new(); let mut charge=0usize; let mut next=None;
             while let Some(row)=rows.next()? {
-                let ordinal:i64=row.get(0)?; let encoded:i64=row.get(1)?; let actual:i64=row.get(2)?;
+                let ordinal:i64=row.get(0)?; let encoded:i64=row.get(1)?; let actual:i64=row.get(2)?;let wanted:bool=row.get(3)?;
                 if encoded<0 || encoded!=actual { return Err(invalid("invalid channel reaction length")); }
-                let required=(encoded as usize).checked_mul(3).and_then(|n|n.checked_add(256)).ok_or(LogError::RepositoryCounterExhausted)?;
-                if charge.checked_add(required).is_none_or(|n|n>budget) { if selected.is_empty(){return Err(LogError::PageBudgetTooSmall{required});} break; }
-                charge+=required; selected.push(ordinal);
+                let required=if wanted{(encoded as usize).checked_mul(3).and_then(|n|n.checked_add(256)).ok_or(LogError::RepositoryCounterExhausted)?}else{128};
+                if charge.checked_add(required).is_none_or(|n|n>budget) { if next.is_none(){return Err(LogError::PageBudgetTooSmall{required});} break; }
+                charge+=required;next=Some(ordinal);if wanted{selected.push(ordinal);}
             }
             drop(rows); drop(statement);
-            let next=selected.last().copied(); let mut out=Vec::new();
+            let mut out=Vec::new();
             for ordinal in selected {
                 let bytes:Vec<u8>=c.query_row("SELECT body FROM private_channel_reactions WHERE ordinal=?1",[ordinal],|r|r.get(0))?;
                 let record=decode_channel(&bytes)?;
