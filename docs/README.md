@@ -19,6 +19,7 @@ surfaces to their owners, change triggers, evidence and follow-up records.
 | Run a headless node or relay                  | [Deployment](../specifications/deployment_guide.md)          | [Relay releases](post-office-release.md)                                                                                                         |
 | Understand or change the protocol             | [Architecture](ARCHITECTURE.md)                              | [Domain glossary](../CONTEXT.md) · [DDD conventions](domain-design.md) · [Testing feedback loop](testing-feedback-loop.md)                       |
 | Contribute to the desktop app                 | [Contributing](../CONTRIBUTING.md)                           | [Visual system](../frontend/DESIGN.md) · [Customization packs](CUSTOMIZATION_PACKS.md)                                                           |
+| Implement or review a reliable change         | [AI coding reliability guide](ai-coding-reliability.md)      | [Module ownership](module-boundaries.md) · [Testing feedback loop](testing-feedback-loop.md)                                                     |
 | Review security or past validation            | [Security policy](../SECURITY.md)                            | [Architecture security posture](ARCHITECTURE.md#8-security-posture-summary) · [Validation and evaluation](#validation-and-evaluation)            |
 
 For menu locations and everyday tasks, start with the [user guide](help/README.md).
@@ -69,6 +70,7 @@ subscriptions and incoming HTTP webhooks are later stages.
 | Doc                                                                                           | What it covers                                                                                           |
 | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | [`AGENTS.md`](../AGENTS.md)                                                                   | Repository guidelines for AI agents / contributors — structure, build/test commands, conventions.        |
+| [`docs/ai-coding-reliability.md`](ai-coding-reliability.md)                                     | Risk-triggered coding and review rules, deadlock prevention, failure-path evidence and continuous improvement. |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md)                                                       | How to set up, build, test, and submit changes.                                                          |
 | [`docs/module-boundaries.md`](module-boundaries.md)                                           | Maintained feature owners, reuse seams, sidebar modules and coordination rules for parallel development. |
 | [`specifications/development_conventions.md`](../specifications/development_conventions.md)   | Coding standards, naming, error handling, performance, cross-platform conventions.                       |

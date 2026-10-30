@@ -94,6 +94,10 @@ For every new requirement, the implementation owner follows this sequence:
 4. Add independent assertions derived from the requirement or a historical
    failure. For a reproducible bug, show the regression failing before the fix.
    Run affected checks while editing and replan when scope changes.
+   When a confirmed defect exposes a reusable failure pattern, update the
+   [AI coding reliability guide](ai-coding-reliability.md#keep-the-guide-useful-as-defects-are-found)
+   with its trigger, owning contract and regression evidence; keep incident logs
+   in ignored output or PR/CI artifacts.
 5. Run `make standards-check` and `make verify-changed`. Report the tested source,
    observed outcomes and outstanding obligations in the PR. Complete the existing
    protected CI checks before claiming merge readiness; comprehensive local

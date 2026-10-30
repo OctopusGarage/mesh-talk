@@ -1,5 +1,19 @@
 # Repository Guidelines
 
+## Reliability before implementation
+
+- Before implementing, refactoring, fixing or reviewing code, read the
+  [AI coding reliability guide](docs/ai-coding-reliability.md), select the rules
+  triggered by the changed boundaries, and inspect the owning code and callers.
+  For concurrency/lifecycle changes, trace lock order, wait dependencies, actual
+  work ownership, cancellation and commit authority before editing.
+- Validate the applicable failure and recovery paths, not only the happy path.
+  Record concrete evidence and remaining limits; a timeout, successful build or
+  passing subset is not proof that UI freezes or all deadlocks are impossible.
+- When a confirmed defect exposes a reusable failure pattern, update that guide's
+  existing rule or add a distinct rule with its owner and regression evidence.
+  Maintain the owning contract and test selectors; keep incident logs out of the guide.
+
 ## Project Structure & Module Organization
 
 - Four-crate Rust workspace. `crates/mesh-talk-core/` is the UI-free protocol core (lib
