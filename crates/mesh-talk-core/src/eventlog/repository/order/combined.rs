@@ -2,6 +2,8 @@
 //! roots cannot parent a retained signed event, so merging the current signed
 //! head with the least archive root preserves the existing Kahn semantics.
 use super::*;
+mod incremental;
+pub(crate) use incremental::HistoryAppendPrefix;
 const SCHEMA:&str="
 CREATE TABLE history_order_jobs(domain BLOB NOT NULL,conversation BLOB NOT NULL,job BLOB NOT NULL UNIQUE CHECK(length(job)=16),token BLOB NOT NULL,ready INTEGER NOT NULL CHECK(ready IN(0,1)),next_deadline BLOB,signed_job BLOB,signed_rank INTEGER NOT NULL DEFAULT -1,archive_clock BLOB NOT NULL DEFAULT X'',archive_id BLOB NOT NULL DEFAULT X'',next_rank INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(domain,conversation)) WITHOUT ROWID;
 CREATE TABLE history_order_candidates(job BLOB NOT NULL,id BLOB NOT NULL CHECK(length(id)=32),clock BLOB NOT NULL CHECK(length(clock)=8),source_kind INTEGER NOT NULL,ordinal INTEGER NOT NULL,priority INTEGER NOT NULL,sequence BLOB NOT NULL CHECK(length(sequence)=8),charged_bytes INTEGER NOT NULL CHECK(charged_bytes>=0),archive INTEGER NOT NULL CHECK(archive IN(0,1)),PRIMARY KEY(job,id)) WITHOUT ROWID;
@@ -37,7 +39,8 @@ impl EventRepository {
                 c.execute_batch(SCHEMA)?;
             }
             crate::storage::profile::manifest::validate_ddl(c, SCHEMA)
-        })
+        })?;
+        self.initialize_history_inputs()
     }
     pub(crate) fn history_generation(
         &self,
@@ -77,6 +80,7 @@ impl EventRepository {
                 });
             }
         }
+        let retired = previous.as_ref().map(|row| row.0);
         if let Some((job, ..)) = previous {
             // Retirement commits in chunks. A failure or restart must not let a
             // reverted visibility token reuse this partially retired generation.
@@ -103,6 +107,7 @@ impl EventRepository {
         }
         let job = *uuid::Uuid::new_v4().as_bytes();
         self.database.transaction(|c|{
+            if let Some(retired) = retired { c.execute("DELETE FROM history_order_inputs WHERE job=?1",[retired.as_slice()])?; }
             c.execute("DELETE FROM history_order_jobs WHERE domain=?1 AND conversation=?2",params![self.domain.0.as_slice(),conv.as_bytes().as_slice()])?;
             c.execute("INSERT INTO history_order_jobs(domain,conversation,job,token,ready,signed_job) VALUES(?1,?2,?3,?4,0,?5)",params![self.domain.0.as_slice(),conv.as_bytes().as_slice(),job.as_slice(),token,signed.as_ref().map(|g|g.job.as_slice())])?;Ok(())
         })?;

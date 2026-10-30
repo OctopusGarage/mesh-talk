@@ -221,7 +221,10 @@ rule; network disclosure reuses the existing exact parent authorization.
 deletion markers. Their constructors require validated participant authority;
 production Node history, recovery, recall, and account-sync consumers use these
 indexed stores. Media bytes retain their independent encryption/lifetime owner. `eventlog/repository/order/combined.rs` extends the existing causal
-order owner with disk ranks for signed events and isolated archive roots.
+order owner with disk ranks for signed events and isolated archive roots. Its
+`combined/incremental.rs` input checkpoints preserve a proven append-only prefix;
+visibility changes, expired deadlines, late roots and changed winning selectors
+rebuild that derived order before publication.
 `eventlog/repository/receiving.rs` owns resumable metadata discovery and bounded,
 fair retry selection; exact transcript evidence survives body erasure and commits
 with body/effect installation. These derived selectors do not replace the delivery

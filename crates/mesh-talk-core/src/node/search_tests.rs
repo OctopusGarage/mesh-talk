@@ -1669,3 +1669,58 @@ fn indexed_runtime_recent_history_fetches_only_selected_bodies_after_reopen() {
         "unchanged recent reads reuse persisted ranks"
     );
 }
+
+#[test]
+fn indexed_runtime_recent_history_reuses_metadata_prefix_after_ordinary_append() {
+    use crate::node::conversation::account_conversation_id;
+    use crate::node::transcript_repository::take_header_reads_for_test;
+    for retained in [128, 512] {
+        let dir = tempfile::tempdir().unwrap();
+        let node = recent_search_node(dir.path());
+        let peer = "a".repeat(32);
+        let conversation = account_conversation_id(&node.account_id(), &peer);
+        let append = |sequence: u64, clock: u64| {
+            let mut id = [91; 32];
+            id[24..].copy_from_slice(&sequence.to_be_bytes());
+            let plaintext = DmEnvelope::new(
+                node.account_id(),
+                peer.clone(),
+                id,
+                MessageBody::new(vec![b'x'; 4096], None).encode(),
+            )
+            .encode();
+            node.sentlog
+                .lock()
+                .unwrap()
+                .record(conversation, sequence, clock, &plaintext)
+                .unwrap();
+        };
+        for sequence in 1..=retained {
+            append(sequence, sequence);
+        }
+        assert_eq!(node.account_history(&peer, 50).unwrap().len(), 50);
+        take_header_reads_for_test();
+        append(retained + 1, retained + 1);
+        let recent = node.account_history(&peer, 50).unwrap();
+        let examined = take_header_reads_for_test();
+        assert_eq!(recent.len(), 50);
+        assert_eq!(recent.first().unwrap().wall_clock, retained - 48);
+        assert_eq!(recent.last().unwrap().wall_clock, retained + 1);
+        assert!(
+            examined <= 16,
+            "one ordinary append must not rescan {retained} historical metadata rows (examined {examined})"
+        );
+        append(retained + 2, 0);
+        let reordered = node.account_history(&peer, retained as usize + 2).unwrap();
+        assert_eq!(reordered.len(), retained as usize + 2);
+        assert_eq!(reordered.first().unwrap().wall_clock, 0);
+        assert_eq!(reordered.last().unwrap().wall_clock, retained + 1);
+        let mut deleted = [91; 32];
+        deleted[24..].copy_from_slice(&1u64.to_be_bytes());
+        node.delete_account_message(&peer, EventId::new(deleted))
+            .unwrap();
+        let erased = node.account_history(&peer, retained as usize + 2).unwrap();
+        assert_eq!(erased.len(), retained as usize + 1);
+        assert!(erased.iter().all(|row| row.id != EventId::new(deleted)));
+    }
+}

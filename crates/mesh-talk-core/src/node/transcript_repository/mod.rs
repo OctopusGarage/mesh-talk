@@ -9,6 +9,10 @@ use std::{path::Path, sync::Arc};
 
 mod metadata;
 mod pages;
+#[cfg(test)]
+pub(crate) fn take_header_reads_for_test() -> usize {
+    pages::take_header_reads()
+}
 pub(crate) mod publication;
 #[cfg(test)]
 mod tests;

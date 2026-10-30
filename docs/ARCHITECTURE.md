@@ -1448,7 +1448,13 @@ The explicit standalone `PersistentEventLog::open` remains the collecting legacy
 SDK owner and rejects a retired participant source. Transcripts, crypto and
 projections still have separate migration boundaries. Transcript history ordering
 and account routes use persisted metadata selectors; ordinary recent and
-exact-context reads hydrate selected rows only. Production network authorization
+exact-context reads hydrate selected rows only. Combined-order input checkpoints
+seek after the prior transcript ordinal on ordinary appends and reuse the signed
+order owner’s safe-tail generation. Rewrites, deletion, due expiry, late roots and
+identity changes invalidate this prefix; interrupted retirement or extension
+cannot publish partial ranks. Unsafe changes retain the synchronous metadata
+rebuild, and file-eligibility revisions currently invalidate conservatively.
+Production network authorization
 prepares finite SQL selections through yielded header/edge turns. Individual
 channel-control authority queries and the explicit collecting SDK compatibility
 adapter remain separate; these cuts do not establish the complete participant

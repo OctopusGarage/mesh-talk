@@ -1,5 +1,14 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static HEADER_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(super) fn take_header_reads() -> usize {
+    HEADER_READS.with(|reads| reads.replace(0))
+}
+
 impl Header {
     fn cursor(&self) -> TranscriptCursor {
         TranscriptCursor {
@@ -17,6 +26,8 @@ fn admit(
     let mut selected = Vec::new();
     let mut bytes = 0usize;
     while let Some(row) = rows.next()? {
+        #[cfg(test)]
+        HEADER_READS.with(|reads| reads.set(reads.get() + 1));
         let h = header(row)?;
         let charge = if bodies {
             h.body_bytes

@@ -84,7 +84,8 @@ impl Node {
         use super::delivery_store::DeliveryTransaction;
         use super::transcript_repository::{FILES, RECEIVED, SENT, TranscriptPageLimit};
         use crate::eventlog::repository::order::{
-            CausalOrder, OrderReadiness, OrderWorkBudget, combined::HistorySelector,
+            CausalOrder, OrderReadiness, OrderWorkBudget,
+            combined::{HistoryAppendPrefix, HistorySelector},
         };
         use std::collections::{HashMap, HashSet};
         let selected_ids: Vec<EventId>;
@@ -163,6 +164,23 @@ impl Node {
         token.extend(self.identity.public().ed25519_pub);
         token.push(u8::from(account.is_some()));
         token.push(u8::from(is_channel));
+        let mut stable = token.clone();
+        for revision in [
+            sent.rewrite_revision(),
+            received.rewrite_revision(),
+            files.rewrite_revision(),
+            file_book.revision()?,
+            recovered
+                .as_ref()
+                .map(|r| r.revision())
+                .transpose()?
+                .unwrap_or(0),
+            identities.revision()?,
+            suppression.len()? as u64,
+            repository.destructive_policy_revision()? as u64,
+        ] {
+            stable.extend(revision.to_be_bytes());
+        }
         for revision in [
             sent.conversation_revision(&conversation)?,
             received.conversation_revision(&conversation)?,
@@ -183,6 +201,7 @@ impl Node {
         }
         for tx in pending {
             token.extend(tx.id().as_bytes());
+            stable.extend(tx.id().as_bytes());
         }
         repository.initialize_history_order()?;
         let signed = if is_channel {
@@ -199,10 +218,30 @@ impl Node {
         } else {
             None
         };
-        let mut generation = repository.history_generation(&conversation, &token, now, signed)?;
-        if !generation.ready {
+        let append = repository.history_append_generation(
+            &conversation,
+            &token,
+            &stable,
+            now,
+            signed,
+            (account.is_none() && !is_channel).then_some(author),
+        )?;
+        let (mut generation, mut prefix): (_, Option<HistoryAppendPrefix>) = match append {
+            Some((generation, prefix)) => (generation, Some(prefix)),
+            None => (
+                repository.history_generation(&conversation, &token, now, signed)?,
+                None,
+            ),
+        };
+        loop {
+            if generation.ready {
+                break;
+            }
+            let mut scanned = prefix.map_or([0; 3], |p| p.after);
+            let mut rebuild = false;
             for kind in [SENT, RECEIVED, FILES] {
-                let mut after = None;
+                let input = (kind - SENT) as usize;
+                let mut after = (scanned[input] > 0).then_some(scanned[input]);
                 loop {
                     let page = match kind {
                         SENT => sent.header_scan_page(
@@ -289,22 +328,48 @@ impl Node {
                                 n.checked_add(if kind == FILES { 32 * 1024 } else { 512 })
                             })
                             .ok_or(crate::eventlog::LogError::RepositoryCounterExhausted)?;
-                        repository.history_add(
-                            &conversation,
-                            generation.job,
-                            HistorySelector {
-                                id,
-                                clock: header.wall_clock,
-                                source_kind: kind,
-                                ordinal: header.ordinal,
-                                priority: kind * 2,
-                                sequence: header.sequence,
-                                charged_bytes: bytes,
-                            },
-                            header.deadline,
-                        )?;
+                        let candidate = HistorySelector {
+                            id,
+                            clock: header.wall_clock,
+                            source_kind: kind,
+                            ordinal: header.ordinal,
+                            priority: kind * 2,
+                            sequence: header.sequence,
+                            charged_bytes: bytes,
+                        };
+                        if let Some(prefix) = prefix {
+                            if !repository.history_append_candidate(
+                                &conversation,
+                                generation.job,
+                                prefix,
+                                candidate,
+                                header.deadline,
+                            )? {
+                                rebuild = true;
+                                break;
+                            }
+                        } else {
+                            repository.history_add(
+                                &conversation,
+                                generation.job,
+                                candidate,
+                                header.deadline,
+                            )?;
+                        }
+                    }
+                    if rebuild {
+                        break;
                     }
                 }
+                if rebuild {
+                    break;
+                }
+                scanned[input] = after.unwrap_or(0);
+            }
+            if rebuild {
+                generation = repository.history_generation(&conversation, &token, now, signed)?;
+                prefix = None;
+                continue;
             }
             // The delivery journal is already bounded to 32 transactions/8 MiB.
             // Pending accepted rows remain visible until their ordinary projection commits.
@@ -379,6 +444,14 @@ impl Node {
             while !generation.ready {
                 generation = repository.history_order_step(generation.job)?;
             }
+            repository.history_finish_inputs(
+                &conversation,
+                generation.job,
+                &stable,
+                scanned,
+                sent.maximum_sequence(&conversation)?,
+            )?;
+            break;
         }
         let (start, end, newer) = match selection {
             HistorySelection::Recent(limit) => {
