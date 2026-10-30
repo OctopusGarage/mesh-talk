@@ -125,7 +125,10 @@ impl ReceivedStore {
         })?);
         Ok(())
     }
-    fn check_reception_owner_on(&self, c: &rusqlite::Connection) -> Result<(), LogError> {
+    pub(crate) fn check_reception_owner_on(
+        &self,
+        c: &rusqlite::Connection,
+    ) -> Result<(), LogError> {
         self.repository.profile.check_participant_account_on(c)?;
         let owner = self.reception_owner.as_ref().ok_or(LogError::StaleCursor)?;
         event_ownership::check_event_owner_on(c, owner)

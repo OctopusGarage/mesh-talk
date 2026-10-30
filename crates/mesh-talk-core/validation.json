@@ -2418,7 +2418,9 @@
         "crates/mesh-talk-core/src/node/ui_state.rs",
         "crates/mesh-talk-core/src/node/host_reception.rs",
         "crates/mesh-talk-core/src/bin/mesh-talk-node/reception.rs",
-        "crates/mesh-talk-core/src/node/files/reception.rs"
+        "crates/mesh-talk-core/src/node/files/reception.rs",
+        "crates/mesh-talk-core/src/node/files/channel_receive.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/file_preview.rs"
       ],
       "rust": [
         {
@@ -2427,7 +2429,8 @@
             "node::reception_effects::tests::",
             "node::runtime_delivery::tests::",
             "node::host_reception::tests::",
-            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace"
+            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace",
+            "node::files::channel_receive::tests::"
           ]
         }
       ],

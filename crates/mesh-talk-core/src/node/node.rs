@@ -354,6 +354,7 @@ pub struct Node {
     pub(in crate::node) channel_membership_commit: Mutex<()>,
     pub(in crate::node) channels: Mutex<ChannelBook>,
     pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
+    pub(in crate::node) pending_channel_files: Mutex<Option<super::files::ChannelFileTurn>>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
     pub(in crate::node) group_metadata_cache: Mutex<super::group_metadata::MetadataCache>,
@@ -1258,6 +1259,7 @@ impl Node {
             channel_membership_commit: Mutex::new(()),
             channels: Mutex::new(channels),
             pending_channel_plaintext: Mutex::new(Default::default()),
+            pending_channel_files: Mutex::new(None),
             archived_channels,
             recovery_origins,
             recovery_contacts,
