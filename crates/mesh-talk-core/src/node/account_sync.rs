@@ -3205,6 +3205,10 @@ impl Node {
                 };
                 let owner = id.clone();
                 let task = history.spawn(permit.track(async move {
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        format!("history_begin after={}", state.next.is_some())
+                    });
                     let result = tokio::time::timeout(
                         Duration::from_secs(20),
                         node.pull_account_history_page(&peer, state.next, state.known_digest),
@@ -3215,6 +3219,13 @@ impl Node {
                             "account history exchange timed out".into(),
                         ))
                     });
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        format!(
+                            "history_end outcome={}",
+                            super::account_session::client_trace_outcome(&result)
+                        )
+                    });
                     state.favorite_error = None;
                     if result.is_ok() && node.device_sync_policy().history {
                         if state
@@ -3223,6 +3234,8 @@ impl Node {
                         {
                             state.favorite_retry_at = None;
                             let first = state.favorite_next.is_none();
+                            #[cfg(test)]
+                            node.trace_account_client(&peer.public, || "favorite_begin".into());
                             match tokio::time::timeout(
                                 Duration::from_secs(10),
                                 node.pull_message_favorites_page_at_digest(
@@ -3263,6 +3276,10 @@ impl Node {
                                     }
                                 }
                             }
+                            #[cfg(test)]
+                            node.trace_account_client(&peer.public, || {
+                                format!("favorite_end failed={}", state.favorite_error.is_some())
+                            });
                         }
                     } else if !result.as_ref().is_err_and(local_sync_capacity_busy) {
                         state.favorite_next = None;
