@@ -989,13 +989,14 @@ mod tests {
                 .account_file_proofs
                 .lock()
                 .unwrap()
-                .insert(event)
+                .insert(event.clone())
                 .unwrap();
-            self.receiver
-                .received_files
-                .lock()
-                .unwrap()
-                .record_file_alias_durable(&row)
+            // Legacy fixtures deliberately retain even a late suppressed raw
+            // alias. The signed projection independently decides eligibility.
+            let mut received = self.receiver.received_files.lock().unwrap();
+            received.record_file_alias_durable(&row).unwrap();
+            received
+                .record_file_with_reception(&row, Some(&event), None)
                 .unwrap();
         }
     }
@@ -1522,12 +1523,10 @@ mod tests {
         let old_host = account_conversation_id(&f.sender.account_id(), &f.receiver.account_id());
         let adopted = Account::generate();
         f.sender
-            .delivery
-            .lock()
-            .unwrap()
-            .prepare_profile_adoption(&adopted.account_id())
+            .persist_account_adoption(&adopted.public(), || Ok(()), || Ok(adopted.public()))
             .unwrap();
         let secrets = f.sender.identity.secret_bytes();
+        f.sender.close_profile().unwrap();
         let reopened = open_node(
             &f.dir.path().join("sender"),
             DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
@@ -1586,12 +1585,10 @@ mod tests {
         );
         let adopted = Account::generate();
         f.sender
-            .delivery
-            .lock()
-            .unwrap()
-            .prepare_profile_adoption(&adopted.account_id())
+            .persist_account_adoption(&adopted.public(), || Ok(()), || Ok(adopted.public()))
             .unwrap();
         let secrets = f.sender.identity.secret_bytes();
+        f.sender.close_profile().unwrap();
         let reopened = open_node(
             &f.dir.path().join("sender"),
             DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
@@ -1702,7 +1699,7 @@ mod tests {
             .received_files
             .lock()
             .unwrap()
-            .record_durable(&row)
+            .record_file_with_reception(&row, Some(&destination.event), None)
             .unwrap();
         row.conversation =
             account_conversation_id(&f.sender.account_id(), &f.receiver.account_id());
@@ -1710,7 +1707,7 @@ mod tests {
             .received_files
             .lock()
             .unwrap()
-            .record_file_alias_durable(&row)
+            .record_file_with_reception(&row, Some(&destination.event), None)
             .unwrap();
         assert_ne!(
             f.receiver
@@ -1920,7 +1917,7 @@ mod tests {
                 .received_files
                 .lock()
                 .unwrap()
-                .record_file_alias_durable(&raw)
+                .record_file_with_reception(&raw, Some(&late.event), None)
                 .unwrap();
             f.receiver
                 .media

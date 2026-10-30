@@ -1522,7 +1522,11 @@ cleanup can fail. Signed logical aliases apply this rule in either arrival order
 the indexed author and exact plaintext digest must match the retained offer.
 History and sibling archive selectors qualify FILES ordinals through this validated
 projection before reading bodies, and bind their cached generations to its persisted
-eligibility revision. Selected reads recheck eligibility before hydration. Archive
+eligibility revision. Selected reads recheck eligibility before hydration. Explicit local
+host history can select previously validated offers from a former account namespace;
+current account history, transfer routing and archive export retain the current-account
+gate. A fixed historical revision and current offer acceptance metadata support bounded
+invalidation without retaining deleted-offer history. Archive
 retirement clears its ready marker before deleting the first bounded batch, so an
 interrupted rebuild cannot serve a partially retired generation.
 Metadata pages check row and byte budgets; selected manifest reads verify physical allocation

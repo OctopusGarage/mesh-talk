@@ -281,6 +281,7 @@ impl ReceivedStore {
         self.note_channel_commit(usize::from(inserted));
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn record_file_alias_durable(
         &mut self,
         entry: &ReceivedEntry,

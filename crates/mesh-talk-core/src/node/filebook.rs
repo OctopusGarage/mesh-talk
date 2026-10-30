@@ -6,6 +6,7 @@ use crate::eventlog::event::{ConversationId, EventId};
 use crate::file::AnyManifest;
 use std::collections::{HashMap, HashSet};
 
+mod historical;
 pub(crate) mod indexed;
 mod receiving;
 pub(crate) mod scopes;
