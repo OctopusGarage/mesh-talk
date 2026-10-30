@@ -162,7 +162,7 @@ impl Node {
             let decision = if automatic {
                 ReceiveDecision::Accepted
             } else {
-                self.consent_for_file_account(self.equivalent_offer_decision(file)?, &account)
+                self.consent_for_file_account(self.equivalent_offer_decision(file)?, &account)?
             };
             let delivery = self.delivery.lock().expect("delivery lock not poisoned");
             if self
@@ -175,7 +175,7 @@ impl Node {
                 .attachment_consent
                 .lock()
                 .expect("consent lock not poisoned");
-            let generation = policy.generation();
+            let generation = policy.generation()?;
             let mut store = self
                 .file_consent
                 .lock()

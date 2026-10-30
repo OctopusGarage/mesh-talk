@@ -206,6 +206,10 @@ budget is supplied and using exact file processing evidence for completion.
 Discovery qualifies each commit through the participant-owned account intervals
 before inserting pending work; selection applies its account index before LIMIT.
 Captured adoption generations fence old handles even after returning to an account.
+`attachment_consent/indexed.rs` owns account-local receive preferences, exact offer
+decisions and their durable ordering/generation under source 17. Its selected
+policy reads feed the existing file eligibility and download owners; signed
+remote controls remain the separate `file_consent_store.rs` contract.
 These modules own neither a second payload journal nor a permission
 rule; network disclosure reuses the existing exact parent authorization.
 `sent_store.rs`, `received_store.rs` and the indexed owner in

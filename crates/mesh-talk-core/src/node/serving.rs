@@ -1084,7 +1084,7 @@ impl Node {
             let Ok(_pull) = self.file_pull_gate.try_lock() else {
                 return Ok(());
             };
-            let generation=self.attachment_consent.lock().expect("consent lock").generation();
+            let generation=self.attachment_consent.lock().expect("consent lock").generation()?;
             let book=self.files.lock().expect("files lock").clone();
             book.discover_downloads(generation)?;
             let pending=book.claim_downloads()?;

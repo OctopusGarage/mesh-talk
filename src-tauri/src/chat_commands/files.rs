@@ -108,10 +108,12 @@ pub async fn attachment_receive_policy(
 ) -> Result<AttachmentReceivePolicy, CommandError> {
     let node = state.node_handle().await?;
     Ok(AttachmentReceivePolicy {
-        global_auto: node.attachment_global_auto(),
+        global_auto: node.attachment_global_auto()?,
         contact_auto: account
             .as_deref()
-            .and_then(|id| node.attachment_contact_auto(id)),
+            .map(|id| node.attachment_contact_auto(id))
+            .transpose()?
+            .flatten(),
     })
 }
 

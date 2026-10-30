@@ -2469,6 +2469,8 @@
         "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
         "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
         "crates/mesh-talk-core/src/node/filebook/",
+        "crates/mesh-talk-core/src/node/attachment_consent.rs",
+        "crates/mesh-talk-core/src/node/attachment_consent/",
         "crates/mesh-talk-core/src/node/account_suppression.rs"
       ],
       "rust": [
@@ -2479,6 +2481,9 @@
             "node::account_file_repository::tests::",
             "runtime_metadata_",
             "node::filebook::indexed::tests::",
+            "node::attachment_consent::",
+            "direct_file_approval_shares_signed_revision_with_relay_delivery",
+            "deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_last_key",
             "node::recovered_sent_ids::tests::",
             "node::account_suppression::tests::",
             "indexed_file_runtime_warm_open_does_not_hydrate_retained_manifest_history",
@@ -2503,6 +2508,10 @@
           },
           {
             "name": "Owned fallible lookups and forward, reverse or insertion-order pages preserve exact keys and unsigned ordering; private validated budgets select at most 128 rows and 8 MiB before body reads, while invalid budgets and oversized first rows fail without payload fetches.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
