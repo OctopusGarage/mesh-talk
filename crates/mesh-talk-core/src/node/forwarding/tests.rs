@@ -746,8 +746,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
             .items
             .iter()
             .all(|item| item.status == "pending" || item.status == "accepted"),
-        "logical {role:?}: {:?}",
-        first.items
+        "logical forwarding must be pending or accepted"
     );
     let first_id = reference.forwarding_group_id(&item_identity(
         &text_request.operation_id,
@@ -767,7 +766,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
             status.as_ref().is_some_and(
                 |status| status.phase == AccountGroupOperationPhase::AwaitingAcceptance
             ),
-            "both gated real intents must await acceptance: {status:?}"
+            "both gated real intents must await acceptance"
         );
     }
     assert_eq!(
@@ -854,8 +853,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
             .items
             .iter()
             .all(|item| item.status == "pending" || item.status == "accepted"),
-        "{:?}",
-        file_admission.items
+        "file forwarding must be pending or accepted"
     );
     let file_result = wait_forward_receipts(&reference, &file_request).await;
     let event = crate::eventlog::EventId::new(
@@ -897,8 +895,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
             .items
             .iter()
             .all(|item| item.status == "pending" || item.status == "accepted"),
-        "{:?}",
-        merged_admission.items
+        "merged forwarding must be pending or accepted"
     );
     let merged_result = wait_forward_receipts(&reference, &merged_request).await;
     let count = source

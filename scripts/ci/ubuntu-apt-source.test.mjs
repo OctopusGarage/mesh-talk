@@ -413,3 +413,45 @@ test("a referenced mirror file cannot be a symlink", posixOnly, async (t) => {
   );
   assert.equal(await readFile(outside, "utf8"), original);
 });
+
+test("malformed active source rows reject regardless of hostname text", () => {
+  for (const row of ["deb", "deb-src", "deb [arch=amd64]"]) {
+    assert.throws(
+      () => rewriteUbuntuAptSource(`${row}\n`, false),
+      /Unsupported APT/,
+    );
+  }
+});
+
+test("host matching ignores Azure text in credentials, paths, queries and lookalike hosts", () => {
+  for (const uri of [
+    "https://azure.archive.ubuntu.com.example/ubuntu",
+    "https://notazure.archive.ubuntu.com/ubuntu",
+    "https://azure.archive.ubuntu.com@mirror.example/ubuntu",
+    "https://mirror.example/azure.archive.ubuntu.com",
+    "https://mirror.example/ubuntu?host=azure.archive.ubuntu.com",
+  ]) {
+    const source = `deb ${uri} noble main\n`;
+    assert.equal(rewriteUbuntuAptSource(source, false), source);
+    const deb822 = `URIs: ${uri}\n`;
+    assert.equal(rewriteUbuntuAptSource(deb822, true), deb822);
+    assert.equal(rewriteUbuntuAptMirrorList(`${uri}\n`), `${uri}\n`);
+  }
+});
+
+test("invalid URI tokens reject in source fields and mirror lists", () => {
+  for (const uri of ["not-a-url", "http://[invalid]/ubuntu"]) {
+    assert.throws(
+      () => rewriteUbuntuAptSource(`deb ${uri} noble main\n`, false),
+      /Unsupported APT URI/,
+    );
+    assert.throws(
+      () => rewriteUbuntuAptSource(`URIs: ${uri}\n`, true),
+      /Unsupported APT URI/,
+    );
+    assert.throws(
+      () => rewriteUbuntuAptMirrorList(`${uri}\n`),
+      /Unsupported APT URI/,
+    );
+  }
+});
