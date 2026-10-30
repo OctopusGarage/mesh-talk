@@ -72,6 +72,7 @@
     {
       "id": "core-reception-effects",
       "paths": [
+        "crates/mesh-talk-core/src/storage/profile/context.rs",
         "crates/mesh-talk-core/src/node/reception_effects/",
         "crates/mesh-talk-core/src/node/runtime_delivery.rs",
         "crates/mesh-talk-core/src/node/runtime_startup.rs",
@@ -86,7 +87,8 @@
           "filters": [
             "node::reception_effects::tests::",
             "node::runtime_delivery::tests::",
-            "node::host_reception::tests::"
+            "node::host_reception::tests::",
+            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace"
           ]
         }
       ],
@@ -1220,6 +1222,7 @@
         "crates/mesh-talk-core/src/node/transcript_repository/",
         "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
         "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
+        "crates/mesh-talk-core/src/node/filebook/indexed.rs",
         "crates/mesh-talk-core/src/node/account_suppression.rs"
       ],
       "rust": [
@@ -1229,6 +1232,7 @@
             "node::transcript_repository::tests::",
             "node::account_file_repository::tests::",
             "runtime_metadata_",
+            "node::filebook::indexed::tests::",
             "node::recovered_sent_ids::tests::",
             "node::account_suppression::tests::"
           ]
@@ -1239,7 +1243,7 @@
         "core-recovery"
       ],
       "capability": {
-        "summary": "Provide profile-owned indexed transcript and exact deletion-marker stores for participant consumer integration, without claiming that Node has switched from its legacy stores.",
+        "summary": "Serve production participant history, recall, archive, and exact deletion state from profile-owned indexed stores with bounded metadata discovery and selected-body reads.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
