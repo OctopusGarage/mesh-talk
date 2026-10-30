@@ -178,6 +178,55 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn participant_import_keeps_latest_positive_and_negative_custody() {
+        use crate::{discovery::Roster, identity::device::DeviceIdentity, node::Node};
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        let a = EventId::new([7; 32]);
+        let b = EventId::new([8; 32]);
+        {
+            let mut legacy =
+                ChannelCustodyStore::open(&dir.path().join("channel.custody"), "pw").unwrap();
+            legacy.confirm(a, "bob").unwrap();
+            legacy.revoke(a, "bob").unwrap();
+            legacy.confirm(a, "bob").unwrap();
+            legacy.confirm(b, "carol").unwrap();
+            legacy.revoke(b, "carol").unwrap();
+        }
+        let secret = DeviceIdentity::generate().secret_bytes();
+        let open = || {
+            let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+            let (messages, _) = tokio::sync::mpsc::unbounded_channel();
+            let (files, _) = tokio::sync::mpsc::unbounded_channel();
+            Node::open(
+                DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                messages,
+                files,
+                &dir.path().join("messages.log"),
+                &dir.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap()
+        };
+        for warm in [false, true] {
+            let node = open();
+            {
+                let custody = node.channel_custody.lock().unwrap();
+                assert_eq!(custody.replayed_records, if warm { 0 } else { 5 });
+                assert_eq!(custody.peers(a).unwrap(), HashSet::from(["bob".to_owned()]));
+                assert!(custody.peers(b).unwrap().is_empty());
+                assert_eq!(
+                    custody.observations_after(None).unwrap(),
+                    vec![((a, "bob".into()), true), ((b, "carol".into()), false)]
+                );
+            }
+            node.close_profile().unwrap();
+        }
+    }
+
     #[test]
     fn confirmations_are_distinct_and_survive_restart() {
         let dir = tempfile::tempdir().unwrap();
