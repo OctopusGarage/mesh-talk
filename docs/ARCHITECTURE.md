@@ -1508,6 +1508,11 @@ its persisted revision and retains compact processing evidence. Durable local
 suppression also revokes eligibility in that same transaction, before physical
 cleanup can fail. Signed logical aliases apply this rule in either arrival order;
 the indexed author and exact plaintext digest must match the retained offer.
+History and sibling archive selectors qualify FILES ordinals through this validated
+projection before reading bodies, and bind their cached generations to its persisted
+eligibility revision. Selected reads recheck eligibility before hydration. Archive
+retirement clears its ready marker before deleting the first bounded batch, so an
+interrupted rebuild cannot serve a partially retired generation.
 Metadata pages check row and byte budgets; selected manifest reads verify physical allocation
 charges before loading bytes. Account adoption fences old handles and never
 imports the former account into the new namespace. Production Node imports old

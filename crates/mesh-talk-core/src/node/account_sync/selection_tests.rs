@@ -4117,3 +4117,245 @@ async fn private_control_noise_handshake_overtakes_queued_background_without_mor
     assert!(result.is_ok());
     assert_eq!(actual.as_ref(), Some(&expected));
 }
+
+#[tokio::test]
+async fn indexed_file_eligibility_invalidates_history_and_archive_before_body_reads() {
+    let (dir, source, receiver) = sibling_nodes();
+    let own = source.account_id();
+    let host = account_conversation_id(&own, &own);
+    let path = dir.path().join("eligible.bin");
+    std::fs::write(&path, b"validated eligibility").unwrap();
+    source
+        .enqueue_file_to_account(&own, &path, crate::file::FileKind::File)
+        .await
+        .unwrap();
+    let public = receiver.identity.public();
+    let export = || {
+        source
+            .prepare_account_export(&public, None, false, true, AccountSyncVersion::V2)
+            .unwrap()
+    };
+    assert_eq!(source.account_history(&own, 50).unwrap().len(), 1);
+    assert_eq!(export().0.len(), 1);
+    let header = source
+        .received_files
+        .lock()
+        .unwrap()
+        .header_scan_page(Some(&host), None, Default::default())
+        .unwrap()
+        .rows
+        .remove(0);
+    let entry = source
+        .received_files
+        .lock()
+        .unwrap()
+        .row_by_ordinal(header.ordinal)
+        .unwrap()
+        .unwrap();
+    let proof = source
+        .log
+        .lock()
+        .unwrap()
+        .get(&entry.event_id)
+        .unwrap()
+        .or_else(|| {
+            source
+                .account_file_proofs
+                .lock()
+                .unwrap()
+                .get(&entry.event_id)
+                .unwrap()
+        })
+        .unwrap();
+    let transcript_revision = source.received_files.lock().unwrap().revision();
+    let before = source.received_files.lock().unwrap().body_reads();
+    let book = source.files.lock().unwrap().clone();
+    let revision = book.begin_reconcile().unwrap();
+    book.stage_revoke(header.ordinal).unwrap();
+    book.finish_reconcile(revision).unwrap();
+    assert!(book.revision().unwrap() > revision);
+    assert_eq!(
+        source.received_files.lock().unwrap().revision(),
+        transcript_revision
+    );
+    assert!(
+        source.account_history(&own, 50).unwrap().is_empty(),
+        "retained plaintext and signed proof do not override revoked indexed eligibility"
+    );
+    assert!(export().0.is_empty());
+    assert_eq!(
+        source.received_files.lock().unwrap().body_reads(),
+        before,
+        "revoked selectors must be rejected before body hydration"
+    );
+    source
+        .received_files
+        .lock()
+        .unwrap()
+        .record_file_with_reception(&entry, Some(&proof), None)
+        .unwrap();
+    assert_eq!(
+        source.received_files.lock().unwrap().revision(),
+        transcript_revision
+    );
+    assert_eq!(
+        source.account_history(&own, 50).unwrap().len(),
+        1,
+        "eligibility alone invalidates the empty ready history"
+    );
+    assert_eq!(
+        export().0.len(),
+        1,
+        "eligibility alone invalidates the empty archive"
+    );
+}
+
+#[test]
+fn indexed_archive_interrupted_retirement_cannot_reuse_partial_ready_index() {
+    let (_dir, source, receiver) = sibling_nodes();
+    let own = source.account_id();
+    let host = account_conversation_id(&own, &own);
+    for n in 1u64..=300 {
+        let mut id = [0; 32];
+        id[24..].copy_from_slice(&n.to_be_bytes());
+        let envelope =
+            crate::node::DmEnvelope::new(own.clone(), own.clone(), id, b"retained".to_vec());
+        source
+            .sentlog
+            .lock()
+            .unwrap()
+            .record(host, n, n, &envelope.encode())
+            .unwrap();
+    }
+    let public = receiver.identity.public();
+    source
+        .prepare_account_export(&public, None, true, false, AccountSyncVersion::V2)
+        .unwrap();
+    source.storage.database().transaction(|c| {
+        c.execute_batch("CREATE TEMP TABLE archive_fault_count(n INTEGER NOT NULL); INSERT INTO archive_fault_count VALUES(0);
+CREATE TEMP TRIGGER fail_second_archive_retirement BEFORE DELETE ON account_archive_rows WHEN (SELECT n FROM archive_fault_count)>=128 BEGIN SELECT RAISE(ABORT,'interrupted retirement'); END;
+CREATE TEMP TRIGGER count_archive_retirement AFTER DELETE ON account_archive_rows BEGIN UPDATE archive_fault_count SET n=n+1; END;")?;
+        Ok(())
+    }).unwrap();
+    assert!(
+        source
+            .prepare_account_export(&public, None, false, false, AccountSyncVersion::V2)
+            .is_err()
+    );
+    source.storage.database().transaction(|c| {
+        c.execute_batch("DROP TRIGGER fail_second_archive_retirement; DROP TRIGGER count_archive_retirement; DROP TABLE archive_fault_count;")?;
+        Ok(())
+    }).unwrap();
+    source
+        .prepare_account_export(&public, None, true, false, AccountSyncVersion::V2)
+        .unwrap();
+    let retained: i64 = source
+        .storage
+        .database()
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT count(*) FROM account_archive_rows", [], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        retained, 300,
+        "an interrupted old generation must be rebuilt before reuse"
+    );
+}
+
+#[test]
+fn indexed_file_eligibility_waits_for_late_signed_proof_after_warm_reopen() {
+    use crate::{
+        discovery::Announce,
+        eventlog::{Event, EventKind},
+        identity::device::DeviceIdentity,
+        node::received_log::ReceivedEntry,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let sender = DeviceIdentity::generate();
+    let sender_account = Account::generate();
+    let proof = Announce::new_with_account(&sender, &sender_account, "Sender", 9);
+    let identity = DeviceIdentity::generate();
+    let secrets = identity.secret_bytes();
+    let account = Account::generate();
+    let account_secret = account.secret_bytes();
+    let open = || {
+        crate::node::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
+            Account::from_secret_bytes(account_secret),
+            &proof,
+        )
+        .0
+    };
+    let node = open();
+    let conversation =
+        crate::node::conversation::dm_conversation_id(&sender.public(), &node.identity.public());
+    let host = account_conversation_id(&sender_account.account_id(), &node.account_id());
+    let manifest = crate::file::FileManifest {
+        name: "late-proof.txt".into(),
+        size: 0,
+        mime: "text/plain".into(),
+        checksum: crate::file::file_checksum(&[]),
+        file_key: [6; 32],
+        file_conv: ConversationId::new([99; 32]),
+        chunk_count: 1,
+    };
+    let event = Event::new(
+        &sender,
+        conversation,
+        1,
+        vec![],
+        1,
+        100,
+        EventKind::FileManifest,
+        crate::dm::seal(
+            &sender,
+            &node.identity.public().x25519_pub,
+            &manifest.encode(),
+        )
+        .unwrap(),
+    );
+    let row = ReceivedEntry {
+        event_id: event.id,
+        conversation: host,
+        from: sender.user_id(),
+        wall_clock: 100,
+        plaintext: manifest.encode(),
+    };
+    node.received_files
+        .lock()
+        .unwrap()
+        .record(
+            row.conversation,
+            row.from.clone(),
+            row.wall_clock,
+            &row.plaintext,
+            row.event_id,
+        )
+        .unwrap();
+    drop(node);
+    let node = open();
+    let before = node.received_files.lock().unwrap().body_reads();
+    let revision = node.received_files.lock().unwrap().revision();
+    assert!(
+        node.account_history(&sender_account.account_id(), 50)
+            .unwrap()
+            .is_empty(),
+        "an unproven retained selector must not become visible"
+    );
+    assert_eq!(node.received_files.lock().unwrap().body_reads(), before);
+    node.log.lock().unwrap().append_durable(event).unwrap();
+    node.process_file_events(conversation);
+    assert_eq!(node.received_files.lock().unwrap().revision(), revision);
+    assert_eq!(
+        node.account_history(&sender_account.account_id(), 50)
+            .unwrap()
+            .len(),
+        1,
+        "late authenticated proof must install eligibility for the existing ordinal"
+    );
+}

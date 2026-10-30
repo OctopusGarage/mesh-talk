@@ -132,6 +132,7 @@ impl Node {
             .map(|d| d.public.user_id())
             .collect();
         let recovered_me: HashSet<_> = self.recovery_origins.iter().map(|a| a.user_id()).collect();
+        let file_book = self.files.lock().expect("file book mutex").clone();
         let delivery = self.delivery.lock().expect("delivery mutex");
         let log = self.log.lock().expect("log mutex");
         let repository = log.repository()?;
@@ -166,6 +167,7 @@ impl Node {
             sent.conversation_revision(&conversation)?,
             received.conversation_revision(&conversation)?,
             files.conversation_revision(&conversation)?,
+            file_book.revision()?,
             recovered
                 .as_ref()
                 .map(|r| r.revision())
@@ -224,6 +226,9 @@ impl Node {
                     }
                     for header in page.rows {
                         after = Some(header.ordinal);
+                        if kind == FILES && !file_book.eligible_ordinal(header.ordinal)? {
+                            continue;
+                        }
                         if header.deadline.is_some_and(|d| d <= now) {
                             continue;
                         }
@@ -438,6 +443,11 @@ impl Node {
                     (row.plaintext, None, false)
                 }
                 RECEIVED | FILES => {
+                    if selector.source_kind == FILES
+                        && !file_book.eligible_ordinal(selector.ordinal)?
+                    {
+                        continue;
+                    }
                     let row = if selector.source_kind == RECEIVED {
                         received.row_by_ordinal(selector.ordinal)?
                     } else {

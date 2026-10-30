@@ -1468,6 +1468,7 @@ impl Node {
         file: ConversationId,
         cut: &super::account_documents::personal::PersonalHistoryCut,
     ) -> Result<bool, NodeError> {
+        let file_book = self.files.lock().expect("file book mutex").clone();
         let mut after = None;
         loop {
             let page = self
@@ -1484,7 +1485,9 @@ impl Node {
             }
             for header in page.rows {
                 after = Some(header.ordinal);
-                if !cut.allows(self, &self.personal_host_conversation(header.conversation)) {
+                if !file_book.eligible_ordinal(header.ordinal)?
+                    || !cut.allows(self, &self.personal_host_conversation(header.conversation))
+                {
                     continue;
                 }
                 if let Some(row) = self
@@ -1501,13 +1504,15 @@ impl Node {
         }
     }
     fn has_live_local_file_card(&self, file: ConversationId) -> Result<bool, NodeError> {
+        let file_book = self.files.lock().expect("file book mutex").clone();
         let delivery = self.delivery.lock().expect("delivery mutex");
-        self.has_live_local_file_card_with(file, &delivery)
+        self.has_live_local_file_card_with(file, &delivery, &file_book)
     }
     fn has_live_local_file_card_with(
         &self,
         file: ConversationId,
         delivery: &super::delivery_store::DeliveryStore,
+        file_book: &super::filebook::indexed::IndexedFileBook,
     ) -> Result<bool, NodeError> {
         let mut cursor = None;
         loop {
@@ -1525,6 +1530,9 @@ impl Node {
             }
             for header in page.rows {
                 cursor = Some(header.ordinal);
+                if !file_book.eligible_ordinal(header.ordinal)? {
+                    continue;
+                }
                 let Some(row) = self
                     .received_files
                     .lock()
@@ -1562,6 +1570,7 @@ impl Node {
         if !self.account_private_sibling_current(requester) {
             return Ok(None);
         }
+        let file_book = self.files.lock().expect("file book mutex").clone();
         let own = self.account_id();
         let mut hosts: HashMap<_, Option<String>> = self
             .known_account_ids()?
@@ -1609,6 +1618,9 @@ impl Node {
             }
             for header in page.rows {
                 cursor = Some(header.ordinal);
+                if !file_book.eligible_ordinal(header.ordinal)? {
+                    continue;
+                }
                 let Some(peer) = hosts.get(&header.conversation) else {
                     continue;
                 };
@@ -1674,6 +1686,7 @@ impl Node {
         }
     }
     fn account_file_recalled(&self, file: ConversationId) -> Result<bool, NodeError> {
+        let file_book = self.files.lock().expect("file book mutex").clone();
         let own = self.account_id();
         let mut peers: HashMap<_, _> = self
             .known_account_ids()?
@@ -1697,6 +1710,9 @@ impl Node {
             }
             for header in page.rows {
                 cursor = Some(header.ordinal);
+                if !file_book.eligible_ordinal(header.ordinal)? {
+                    continue;
+                }
                 let Some(peer) = peers.get(&header.conversation) else {
                     continue;
                 };
@@ -2150,6 +2166,7 @@ impl Node {
                 "attachment recall state changed".into(),
             ));
         }
+        let file_book = self.files.lock().expect("file book mutex").clone();
         let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
         let policy = self
             .account_sync_policy
@@ -2157,13 +2174,8 @@ impl Node {
             .expect("account sync policy mutex not poisoned");
         if policy.revision() != revision
             || !policy.current().attachments
-            || self
-                .files
-                .lock()
-                .expect("files mutex not poisoned")
-                .contains_file(file_conv)?
-                == false
-            || !self.has_live_local_file_card_with(file_conv, &delivery)?
+            || !file_book.contains_file(file_conv)?
+            || !self.has_live_local_file_card_with(file_conv, &delivery, &file_book)?
         {
             return Err(NodeError::File("attachment was removed during sync".into()));
         }

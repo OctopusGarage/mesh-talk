@@ -51,6 +51,7 @@ struct ArchiveKey {
     accounts: Vec<String>,
     controls: (u64, [u8; 32]),
     recalls: u64,
+    file_eligibility: u64,
 }
 impl ArchiveKey {
     fn accepts_append_only_change(&self, current: &Self) -> bool {
@@ -63,6 +64,7 @@ impl ArchiveKey {
             && self.accounts == current.accounts
             && self.controls == current.controls
             && self.recalls == current.recalls
+            && self.file_eligibility == current.file_eligibility
             && self.revisions[3..] == current.revisions[3..]
     }
     fn token(&self) -> Result<Vec<u8>, LogError> {
@@ -320,6 +322,12 @@ impl Node {
     ) -> Result<ArchiveKey, NodeError> {
         let channel_scopes = self.account_private_archive_scopes(requester)?;
         let channels = channel_scopes.iter().map(|scope| scope.channel).collect();
+        let file_eligibility = self
+            .files
+            .lock()
+            .expect("file book mutex")
+            .clone()
+            .revision()?;
         let sent = self.sentlog.lock().expect("sent mutex");
         let received = self.received.lock().expect("received mutex");
         let file = self.received_files.lock().expect("files mutex");
@@ -369,6 +377,7 @@ impl Node {
             },
             controls: self.private_dm_control_revision(),
             recalls: self.recalls.lock().expect("recalls mutex").revision(),
+            file_eligibility,
         })
     }
     fn initialize_archive(&self) -> Result<(), LogError> {
@@ -385,6 +394,15 @@ impl Node {
         })
     }
     fn reset_archive(&self, token: &[u8]) -> Result<(), LogError> {
+        // Invalidate the old ready generation before its first bounded delete;
+        // an interrupted retirement must never expose a partially erased index.
+        self.storage.database().transaction(|c| {
+            c.execute(
+                "UPDATE account_archive_state SET ready=0 WHERE singleton=1",
+                [],
+            )?;
+            Ok(())
+        })?;
         // Retiring an interrupted derived build never holds the full selector set in memory.
         loop {
             let n=self.storage.database().transaction(|c|Ok(c.execute("DELETE FROM account_archive_rows WHERE (tag,id) IN(SELECT tag,id FROM account_archive_rows ORDER BY tag,id LIMIT 128)",[])?))?;
@@ -405,6 +423,7 @@ impl Node {
         key: &ArchiveKey,
         cache: &mut ArchiveCache,
     ) -> Result<(), NodeError> {
+        let file_book = self.files.lock().expect("file book mutex").clone();
         let own = self.account_id();
         let mut hosts: HashMap<_, Option<String>> =
             key.channels.iter().map(|id| (*id, None)).collect();
@@ -478,6 +497,9 @@ impl Node {
                             .saturating_add(1024),
                     };
                     if kind == FILES {
+                        if !file_book.eligible_ordinal(header.ordinal)? {
+                            continue;
+                        }
                         row.charge = MAX_RECORD * 3 + 32 * 1024;
                         let Some(peer) = hosts.get(&header.conversation) else {
                             continue;
@@ -653,6 +675,10 @@ impl Node {
             return Ok(None);
         }
         if row.kind == FILES {
+            let file_book = self.files.lock().expect("file book mutex").clone();
+            if !file_book.eligible_ordinal(row.ordinal)? {
+                return Ok(None);
+            }
             let entry = self
                 .received_files
                 .lock()
