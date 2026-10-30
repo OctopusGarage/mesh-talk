@@ -15,6 +15,36 @@ beforeEach(() => {
   useChat.setState({ runEpoch: 0, identityEpoch: 0, ready: true });
   useAvatars.setState({ owner: "host", ownId: "own", local: {}, received: {} });
 });
+it.each(["load", "loadPeers"] as const)(
+  "%s returns after a stalled read and rejects late image data",
+  async (method) => {
+    vi.useFakeTimers();
+    let finish!: (value: Record<string, string>) => void;
+    invoke.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const completed = vi.fn();
+    const loading = useAvatars.getState()[method]().then(completed);
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(completed).toHaveBeenCalledWith(false);
+      invoke.mockResolvedValueOnce({ contact: "fresh" });
+      expect(await useAvatars.getState()[method]()).toBe(true);
+      finish({ contact: "stale" });
+      await loading;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        useAvatars.getState()[method === "load" ? "local" : "received"].contact,
+      ).toBe("fresh");
+    } finally {
+      finish({});
+      await loading;
+      vi.useRealTimers();
+    }
+  },
+);
 
 it("own-avatar publication carries the originating owner and cryptographic account", async () => {
   invoke.mockResolvedValue(undefined);

@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const runtime = vi.hoisted(() => ({ accountId: "root-a" }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("./ownership", () => ({
+  currentRuntimeAccountId: () => runtime.accountId,
+}));
 import { useContactPolicy } from "./contactPolicy";
 
 beforeEach(() => {
   invoke.mockReset();
+  runtime.accountId = "root-a";
   useContactPolicy.getState().reset();
 });
 const snapshot = (owner = "alice", hidden = true) => ({
@@ -12,6 +17,66 @@ const snapshot = (owner = "alice", hidden = true) => ({
   contacts: hidden ? [{ account_id: "bob", name: "Bob" }] : [],
 });
 describe("account-scoped contact visibility", () => {
+  it("exposes a stalled policy read for retry and ignores its late snapshot", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    invoke.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const pending = useContactPolicy.getState().load("alice");
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(useContactPolicy.getState().loading).toBe(false);
+      expect(useContactPolicy.getState().error).toBe("load");
+      invoke.mockResolvedValue(snapshot("alice", false));
+      await useContactPolicy.getState().load("alice");
+      finish(snapshot());
+      await pending;
+      expect(useContactPolicy.getState().contacts).toEqual({});
+    } finally {
+      finish(snapshot());
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+  it("forwards the captured full account when reopening a contact", async () => {
+    invoke.mockResolvedValue(snapshot());
+    await useContactPolicy.getState().load("alice");
+    invoke.mockResolvedValue(snapshot("alice", false));
+    expect(
+      await useContactPolicy
+        .getState()
+        .change("alice", "bob", false, "Bob", "root-a"),
+    ).toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith("set_contact_hidden", {
+      owner: "alice",
+      account: "bob",
+      hidden: false,
+      name: "Bob",
+      expectedAccount: "root-a",
+    });
+  });
+  it("keeps replacement-account policy when an old reopen completes", async () => {
+    invoke.mockResolvedValue(snapshot());
+    await useContactPolicy.getState().load("alice");
+    let resolve!: (value: unknown) => void;
+    invoke.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    const reopening = useContactPolicy
+      .getState()
+      .change("alice", "bob", false, "Bob", "root-a");
+    runtime.accountId = "root-b";
+    resolve(snapshot("alice", false));
+    expect(await reopening).toBe(false);
+    expect(useContactPolicy.getState().contacts.bob).toBeDefined();
+    expect(useContactPolicy.getState().busy).toBe(false);
+  });
   it("loads saved visibility without mutating the raw roster", async () => {
     invoke.mockResolvedValue(snapshot());
     await useContactPolicy.getState().load("alice");

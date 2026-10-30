@@ -225,15 +225,30 @@ fn two_cli_nodes_discover_by_routed_query_and_exchange_a_dm() {
 fn participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error() {
     let dir = tempfile::tempdir().unwrap();
     let keystore = dir.path().join("custom-device.keystore");
-    let reserve = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = reserve.local_addr().unwrap().port();
-    drop(reserve);
+    // Match the CLI's wildcard dual-stack/fallback binding scope. A loopback-only
+    // reservation does not establish that the actual listener can bind this port.
+    let port = {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let reserve = mesh_talk_core::transport::net::bind_dual_stack_listener(0)
+                .await
+                .unwrap();
+            reserve.local_addr().unwrap().port()
+        })
+    };
     let mut identities = Vec::new();
-    for (input, success) in [
+    for (phase, (input, success)) in [
         (&b"/quit\n"[..], true),
         (&b""[..], true),
         (&b"\xff\n"[..], false),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input_class = ["quit", "eof", "invalid_utf8"][phase];
         let mut child = Command::new(env!("CARGO_BIN_EXE_mesh-talk-node"))
             .args([
                 "--password",
@@ -252,6 +267,7 @@ fn participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_inp
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        let child_pid = child.id();
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(input).unwrap();
         drop(stdin);
@@ -263,18 +279,21 @@ fn participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_inp
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("CLI did not retire after input {input:?}");
+                panic!(
+                    "CLI did not retire: phase={phase} input={input_class} port={port} child_pid={child_pid}"
+                );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let startup = stdout.lines().find(|line| line.starts_with("node "));
         assert_eq!(
             output.status.success(),
             success,
-            "{}",
+            "phase={phase} input={input_class} port={port} child_pid={child_pid} stdout_startup={startup:?} stderr={}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(
             stdout.contains(&format!("listening on tcp/{port},")),
             "{stdout}"

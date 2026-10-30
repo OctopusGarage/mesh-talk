@@ -314,6 +314,7 @@
         ".github/workflows/ci.yml",
         ".github/workflows/check-health.yml",
         ".github/workflows/e2e-ui.yml",
+        ".github/workflows/hidden-contacts-native.yml",
         ".github/workflows/e2e-backend.yml",
         ".github/workflows/sanitizers.yml",
         ".github/workflows/mutants.yml",
@@ -326,10 +327,13 @@
         ".github/workflows/dependency-review.yml",
         "scripts/ci/collect-ui-coverage.mjs",
         "scripts/ci/unit-coverage-artifact.mjs",
+        "scripts/ci/ubuntu-apt-source.mjs",
+        "scripts/ci/ubuntu-apt-source.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs",
         ".gitleaks.toml"
       ],
       "node": [
+        "scripts/ci/ubuntu-apt-source.test.mjs",
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
         "scripts/diagnostics/merge-queue.test.mjs",
@@ -337,7 +341,7 @@
         "scripts/diagnostics/health-workflow.test.mjs"
       ],
       "escalation": [
-        "Run actionlint and affected workflow regressions; preserve full mutation sample completion, strict report validation and bounded per-test/per-suite execution. Size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
+        "Run actionlint and affected workflow regressions; preserve full mutation sample completion, strict report validation and bounded per-test/per-suite execution. Size the whole-suite budget from the actual workspace inventory and runner variance while retaining per-test hang detection; size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
       ]
     },
     {

@@ -99,14 +99,18 @@ impl Chain {
             let (dm, _) = mpsc::unbounded_channel();
             let (channel, _) = mpsc::unbounded_channel();
             let (file, _) = mpsc::unbounded_channel();
+            // Sidecars and managed media belong to the directory, not the log
+            // filename. Independent network peers must never share that store.
+            let node_dir = dir.path().join(i.to_string());
+            std::fs::create_dir(&node_dir).unwrap();
             let node = Node::open(
                 DeviceIdentity::generate(),
                 Arc::new(Mutex::new(Roster::default())),
                 dm,
                 channel,
                 file,
-                &dir.path().join(format!("{i}-events.log")),
-                &dir.path().join(format!("{i}-sent.log")),
+                &node_dir.join("events.log"),
+                &node_dir.join("sent.log"),
                 "pw",
             )
             .unwrap();
@@ -392,7 +396,9 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
         chain.nodes[2].decide_attachment(file, true).unwrap();
     }
     chain.round(2, 1, file).await;
+    assert!(chain.nodes[2].log.lock().unwrap().events(&file).is_empty());
     assert_eq!(chain.nodes[2].file_progress(file).unwrap().done, 0);
+    assert!(!chain.nodes[2].file_ready_to_save(file));
     assert_eq!(holder.log.lock().unwrap().events(&file).len(), retained);
     assert_eq!(
         holder.log.lock().unwrap().events(&group).len(),
@@ -928,6 +934,25 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     }
     // Let startup and its immediately-ready interval tick finish before sending.
     tokio::time::sleep(Duration::from_millis(500)).await;
+    let route_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let route_started = std::time::Instant::now();
+    let last_peer = chain.nodes[5].identity.public();
+    let observed_route = route_trace.clone();
+    *chain.nodes[4].account_client_test_hook.lock().unwrap() =
+        Some(Arc::new(move |peer, phase| {
+            if peer != last_peer || !phase.starts_with("dial_") {
+                return;
+            }
+            let mut trace = observed_route.lock().unwrap();
+            if trace.len() == 96 {
+                trace.pop_front();
+            }
+            trace.push_back((
+                route_started.elapsed().as_millis(),
+                tokio::task::try_id(),
+                phase,
+            ));
+        }));
     chain.nodes[0]
         .send_channel_message(group, b"notification-driven background gossip")
         .await
@@ -935,11 +960,64 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let sender = chain.servers[0].take().unwrap();
     sender.abort();
     let _ = sender.await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    let received = tokio::time::timeout(Duration::from_secs(2), async {
         while !chain.has_text(5, group, b"notification-driven background gossip") {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
+    })
+    .await;
+    *chain.nodes[4].account_client_test_hook.lock().unwrap() = None;
+    if received.is_err() {
+        // These additional snapshot reads occur only after the deadline;
+        // do not consume Notify permits or invoke recovery here.
+        let original = chain.nodes[0]
+            .channel_history(group, 10)
+            .into_iter()
+            .find(|row| row.text == b"notification-driven background gossip")
+            .map(|row| row.id);
+        let observations: Vec<_> = chain
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let (events, present) = {
+                    let log = node.log.lock().unwrap();
+                    (
+                        log.events(&group).len(),
+                        original.is_some_and(|id| log.get(&id).is_some()),
+                    )
+                };
+                let surfaced = original.is_some_and(|id| {
+                    node.channel_history(group, 10)
+                        .iter()
+                        .any(|row| row.id == id)
+                });
+                let queued = node
+                    .channel_recovery_pending
+                    .lock()
+                    .unwrap()
+                    .contains(&group);
+                let recovery = node.channel_recovery.lock().unwrap().get(&group).cloned();
+                (
+                    index,
+                    events,
+                    present,
+                    surfaced,
+                    queued,
+                    recovery,
+                    node.sessions.test_capacity_snapshot(),
+                )
+            })
+            .collect();
+        eprintln!(
+            "background group gossip metadata original={original:?} observations={observations:?}"
+        );
+        eprintln!(
+            "last-hop dial phases={:?}",
+            route_trace.try_lock().ok().as_deref()
+        );
+    }
+    received.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
     for index in 1..6 {
         assert!(chain.has_text(index, group, b"notification-driven background gossip"));
     }

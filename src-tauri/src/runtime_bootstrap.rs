@@ -90,58 +90,51 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
             },
             mesh_talk_core::node::RuntimeEvents {
                 on_dm: Box::new(move |dm| {
-                    let app = app_handle_for_dm.clone();
-                    dm_authority.dispatch_current(&app_handle_for_dm, move || {
-                        crate::events::emit_dm_received(&app, dm);
-                    });
+                    crate::events::dispatch_runtime_presentation(
+                        &app_handle_for_dm,
+                        &dm_authority,
+                        move |app| crate::events::emit_dm_received(app, dm),
+                    );
                 }),
                 on_channel: Box::new(move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
-                    let app = app_handle_for_channel.clone();
-                    let runtime_id = format!(
+                    let owner = format!(
                         "{}:{}:{}",
                         channel_authority.lease.owner(),
                         channel_authority.lease.generation(),
                         channel_authority.ticket
                     );
-                    channel_authority.dispatch_current(&app_handle_for_channel, move || {
-                        crate::events::emit_channel_message(
-                            &app,
-                            &runtime_id,
-                            msg,
-                        );
-                    });
+                    crate::events::dispatch_runtime_presentation(
+                        &app_handle_for_channel,
+                        &channel_authority,
+                        move |app| crate::events::emit_channel_message(app, &owner, msg),
+                    );
                 }),
                 on_file: Box::new(move |f: mesh_talk_core::node::ReceivedFile| {
-                    let app = app_handle_for_file.clone();
-                    let runtime_id = format!(
+                    let owner = format!(
                         "{}:{}:{}",
                         file_authority.lease.owner(),
                         file_authority.lease.generation(),
                         file_authority.ticket
                     );
-                    file_authority.dispatch_current(&app_handle_for_file, move || {
-                        crate::events::emit_file_received(
-                            &app,
-                            &runtime_id,
-                            f,
-                        );
-                    });
+                    crate::events::dispatch_runtime_presentation(
+                        &app_handle_for_file,
+                        &file_authority,
+                        move |app| crate::events::emit_file_received(app, &owner, f),
+                    );
                 }),
                 on_profile: Box::new(move |p: mesh_talk_core::node::ReceivedProfile| {
-                    let app = app_handle_for_profile.clone();
-                    profile_authority.dispatch_current(&app_handle_for_profile, move || {
-                        crate::events::emit_profile_received(
-                            &app,
-                            p.account_id,
-                            p.avatar,
-                        );
-                    });
+                    crate::events::dispatch_runtime_presentation(
+                        &app_handle_for_profile,
+                        &profile_authority,
+                        move |app| crate::events::emit_profile_received(app, p.account_id, p.avatar),
+                    );
                 }),
                 on_call_signal: Box::new(move |s: mesh_talk_core::node::ReceivedCallSignal| {
-                    let app = app_handle_for_call.clone();
-                    call_authority.dispatch_current(&app_handle_for_call, move || {
-                        crate::events::emit_call_signal(&app, s.from, s.payload);
-                    });
+                    crate::events::dispatch_runtime_presentation(
+                        &app_handle_for_call,
+                        &call_authority,
+                        move |app| crate::events::emit_call_signal(app, s.from, s.payload),
+                    );
                 }),
             },
             mesh_talk_core::node::RuntimeNetworkOptions {

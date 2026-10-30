@@ -224,3 +224,33 @@ it("publishes healthy members and recovers after a member read never settles", a
     vi.useRealTimers();
   }
 });
+
+it("cannot republish an older list after personal deletion invalidates the lane", async () => {
+  const s = session();
+  const old = deferred<Awaited<ReturnType<typeof s.commands.listChannels>>>();
+  const fresh = deferred<Awaited<ReturnType<typeof s.commands.listChannels>>>();
+  s.commands.listChannels
+    .mockReturnValueOnce(old.promise)
+    .mockReturnValueOnce(fresh.promise);
+  const first = s.refresh.request();
+  await vi.waitFor(() =>
+    expect(s.commands.listChannels).toHaveBeenCalledOnce(),
+  );
+  const invalidated = s.refresh.invalidate();
+  old.resolve([
+    {
+      channel_id: "deleted",
+      name: "Must not return",
+      owner: "alice",
+      member_count: 0,
+    },
+  ]);
+  await vi.waitFor(() =>
+    expect(s.commands.listChannels).toHaveBeenCalledTimes(2),
+  );
+  expect(s.read().channels).toEqual([]);
+  fresh.resolve([]);
+  await first;
+  await invalidated;
+  expect(s.read().channels).toEqual([]);
+});

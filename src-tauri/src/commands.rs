@@ -500,20 +500,10 @@ pub(crate) async fn remember_login_owned<R: tauri::Runtime>(
     .map_err(|_| CommandError::Service("Saved-login worker stopped".into()))?
 }
 
-pub(crate) fn persist_saved_login<R: tauri::Runtime>(
-    handle: &tauri::AppHandle<R>,
-    settings: &crate::settings::SettingsState,
-    user: &User,
-    raw_password: &str,
-) -> SavedSessionStatus {
-    persist_saved_login_checked(handle, settings, user, raw_password, |commit| commit())
-        .unwrap_or(SavedSessionStatus::Failed)
-}
-
 /// Callers own authentication serialization through this whole operation. Native
 /// credential writes are not cancellable: revalidate before advertising them,
 /// and compensate an obsolete write before a replacement login may proceed.
-fn persist_saved_login_checked<R: tauri::Runtime>(
+pub(crate) fn persist_saved_login_checked<R: tauri::Runtime>(
     handle: &tauri::AppHandle<R>,
     settings: &crate::settings::SettingsState,
     user: &User,

@@ -90,6 +90,7 @@ Paths below are relative to the repository root. `core/` abbreviates
 | Message UI transitions                         | `ui/store/chat.ts`, `outgoingIntent.ts`, `conversationState.ts`, `chatRuntimeEffects.ts`                                                                                        | Intents own acceptance, conversation state owns cache transitions, effects bridge feature stores. Do not settle messages independently in components.                                                                                  |
 | Settings/privacy                               | `src-tauri/src/settings.rs`, `privacy_commands.rs`, `ui/store/settings.ts`, `privacy.ts`                                                                                        | `ui/lib/privacySettings.ts` owns presentation defaults/projection; `settingsDialogSession.ts` owns load/save generations. Network admission remains in core.                                                                           |
 | Contact hiding                                 | `src-tauri/src/contact_policy.rs`, `ui/store/contactPolicy.ts`, `ui/lib/contactVisibility.ts`                                                                                   | A presentation filter, not a communication block. Reuse it for search and pickers; preserve shared groups and incoming delivery.                                                                                                       |
+| Personal conversation removal | `core/node/account_documents/personal.rs`, `core/node/lifecycle.rs`, `src-tauri/src/contact_policy/deletion.rs`, `owner_commands/group_operations.rs` | Core owns durable account-scoped intent, deletion floors and retryable local cleanup. Host adapts exact-runtime commands; UI offers history choices and clears projections only after actual cleanup. Personal removal never dissolves a group or recalls other accounts' copies. |
 | Backup/recovery                                | `core/recovery/`, `core/node/recovery.rs`, `src-tauri/src/recovery.rs`                                                                                                          | Core validates archive/snapshot; host owns staging/publication and runtime barriers; UI presents inspection and confirmation.                                                                                                          |
 | Appearance/avatars/packs                       | `ui/store/avatars.ts`, `packs.ts`, `ui/lib/theme.ts`, `pack.ts`, `ui/components/identity/`                                                                                      | Reuse identity rendering and pack validation. Do not create feature-specific avatar stores or variant parsers.                                                                                                                         |
 | Diagnostics/updates/native controls            | `src-tauri/src/diagnostics.rs`, `updates.rs`, `window_geometry.rs`, `window_visibility.rs`, `ui/features/chat/DiagnosticsDialog.tsx`, `diagnostics/useDiagnosticsController.ts` | Keep OS operations in host. Live views reuse `useSerialPoll.ts`; diagnostic observations are not policy authority.                                                                                                                     |
@@ -103,9 +104,14 @@ their distinct authorization contracts.
 ### Inline media presentation
 
 `ui/features/chat/MediaPreview.tsx` owns ordinary inline image/video presentation.
-Receiving, loading, decoded and unsupported states share a responsive frame
-(up to 320 pixels wide, 4:3 for images and 16:9 for video); artwork is contained
-without cropping, and the lightbox retains full-size access. Transfer readiness
+Receiving, loading and unsupported states use a responsive provisional frame
+(up to 320 pixels wide, 4:3 for images and 16:9 for video). On image decode,
+the frame adopts the original aspect ratio within 320 by 320 pixels without
+upscaling or cropping. Images have no padded text bubble; quoted thumbnails
+fit their original ratio within 64 by 48 pixels. The lightbox retains full-size
+access. Decoded image geometry is cached by live Blob URL (at most 64 entries)
+so virtualized remounts can reserve the known size; initial decode may resize
+a row, with reader anchors and live-edge intent owned by the viewport. Transfer readiness
 must not swap an ordinary preview from a compact file card to an image row.
 The ordinary-image lightbox owns pointer-anchored wheel zoom (1–8 times the
 window-fit size), double-click zoom, bounded pointer dragging, fit reset and
@@ -197,9 +203,11 @@ superseding run invalidates delayed results and stops its ticker. These presenta
 deadlines do not cancel native work or establish whether the participant runtime is healthy.
 Verified identity completes the boot indicator independently of roster/archive
 hydration. Draft loading, settings observations (including readback after an
-acknowledged save), account profiles, lock status and diagnostics reuse the same
-ten-second read deadline and pending-native-read budget. Mutation completion is
-never inferred from a read timeout; settings writes retain their serial order.
+acknowledged save), account profiles, lock status, diagnostics, contact/privacy
+policy, avatars, favorites and forwarding-source inspection reuse the same
+ten-second read deadline and pending-native-read budget. Linked read-receipt
+observations do not await the serialized mark-write lane. Mutation completion is
+never inferred from a read timeout; settings and receipt writes retain their order.
 Receipt updates preserve unchanged conversation projections. Persistence coalesces
 the latest immutable snapshot in a fixed 100 ms window and flushes before
 restoration, explicit writes, owner/runtime retirement, page hiding and visibility
@@ -272,6 +280,23 @@ independently of unread entries. Independent messages with equal
 text retain separate IDs and counts. Legacy providers without a logical identity
 retain their compatibility counter path.
 
+`ui/store/accountGroupOperations.ts` coordinates typed group operation IPC through
+explicit lease and state ports. It retains logical operation IDs through
+uncertain replies and separates pending, committed, rejected and cancellation
+outcomes. `outgoingIntent/groupOperations.ts` binds body-free tickets to the
+existing aggregate outgoing state with atomic capacity and protected retention;
+it does not create another message cache. Original native invocation lifetime
+protects terminal tickets from eviction, as do message-intent references.
+The caller observes an invocation for at most ten seconds; expiry returns its
+current ticket while the original native invocation remains owned and protected
+against duplicate submission. A late definitive pre-admission refusal records a
+local admission failure and settles its existing outgoing owner; it never invents
+a committed or rejected core operation. Ambiguous replies preserve the original
+operation ID for observation and explicit retry.
+The existing ticker and action/message owners must supply observation scheduling,
+terminal presentation and exact public-event reconciliation. Session checks also
+cover synchronous retirement caused by reactive state and diagnostic callbacks.
+
 `ui/store/channelActions.ts` owns channel creation, member edits, ownership
 transfer, invitation acceptance, leaving, dissolution and renaming. Its narrow
 state/context defines channel projections and explicit capture, command,
@@ -279,6 +304,8 @@ navigation, refresh and error capabilities. `chat.ts` supplies these capabilitie
 and preserves its existing public actions. The common member-mutation sequence
 is private to the owner; distinct leave/dissolve/acceptance transitions remain
 explicit. Standalone tests exercise the owner without initializing chat.
+Optional member/roster hydration after an acknowledged commit uses the shared
+read deadline, so a stalled refresh cannot keep the completed action dialog busy.
 
 Attachment approval ordering and stale-session checks belong to
 `ui/features/chat/attachments/attachmentDecision.ts`, reused by message bubbles
@@ -662,8 +689,12 @@ superseded audit findings and implementation reports.
 ## Message forwarding
 
 Forwarding source authorization, canonical ordering, accepted request identity and
-attachment restaging belong to the protocol core. The desktop host supplies exact
-session/runtime admission. Chat features own selection, destination confirmation
+attachment restaging belong to the protocol core. Group forwarding reuses the
+account-group operation journal for admission and pending/committed lifecycle;
+forwarding retains batch progress and derives stable item identities without a
+second send journal. Read-only progress queries use retained operation status,
+while the existing forwarding writer reconciles terminal receipts before retirement.
+The desktop host supplies exact session/runtime admission. Chat features own selection, destination confirmation
 and read-only record presentation; shared outgoing owners retain send acceptance
 and delivery meaning. Favorites keeps its independent saved-content lifecycle.
 [Message forwarding](message-forwarding.md) owns user behavior and invariants.
@@ -738,6 +769,255 @@ Markdown rendering, static publication and read-only documentation MCP. These
 modules consume no private messaging state and introduce no core protocol
 responsibility. See [help system maintenance](help-system.md).
 
+### Account and device ownership
+
+User authority belongs to the account; a device supplies an execution context.
+Every consumer must distinguish that authority from current execution
+availability. A group owner account is the owner on every certified device,
+including a device absent from a legacy physical roster. A member account can
+leave from any certified device; an owner account must transfer ownership first
+on every device. Public signer validation remains authoritative for actual
+protocol effects. An inventory row or display name cannot establish authority.
+The canonical channel reducer retains every event in its authorized causal DAG.
+It reconstructs account membership proofs only after channel membership controls;
+content events cannot change those immutable proofs or bypass control validation.
+
+| Account-owned state or action | Device-owned execution or state |
+| --- | --- |
+| Login credentials, nickname, avatar and biography | Device signing identity, local storage namespace and storage encryption secrets |
+| Private contact remarks, contact state, favorites and portable preferences | Physical paths, OS permissions, autostart and local integration grants |
+| Group membership, owner role and permission to administer or leave | Current routes, connections and eligible signers for legacy controls |
+| Logical messages, account read state and synchronized private controls | Original event signatures, local media cache and device sharing choices |
+
+Group send, invitation, membership and administration consumers must use the same
+account authorization decision. The ability to execute one action locally does
+not grant permission to sign another action. In a legacy group, a member device
+can send while an owner action waits for an eligible owner signer. Such waiting
+must not downgrade the displayed account role, manufacture a grant, or report an
+uncommitted effect as successful. A private group reference remains descriptive;
+verified source authority and the public channel rules govern execution.
+
+Account-private role observations trust an authenticated account device to report
+the canonical result of its full public channel reducer. Receivers verify the
+actual source's full signed binding and observation signature. An owner's
+adoption of the account requires that owner's independently signed binding.
+A member device may relay that binding while retaining its own member role.
+Execution always revalidates the actual public membership, lifetime, authority
+and signer through the owning channel implementation.
+Canonical authenticated `Left` or `Dissolved` observations deny direct enqueue
+before WAL or sender-key allocation, even when the local physical public cut is
+stale. A fresh verified membership lifetime can supersede an older departure;
+positive signer authority still requires the existing public channel checks.
+
+Cross-source reconciliation names exact signed heads by full source identity,
+revision and hash. A source attests supersession only after its full public view
+contains and resolves the referenced observation's lifetime and authority
+decisions. Incomparable observations require reconciliation. Source revisions,
+wall clocks, event counts and role ranking cannot establish cross-source
+precedence. Replacement heads invalidate superseded observations; bounded
+revision floors and terminal observations prevent delayed replay from restoring
+obsolete roles. Only real local group observations may be published as a
+device's physical source state.
+
+The existing account-document index owns local publication recovery. An incomplete
+source head and its exact account, full-device, revision and hash-bound recovery
+frontier share one encrypted durable index append. Compaction preserves that
+pair; capacity or write failure preserves the previous pair. A required receipt
+is retained until an atomic replacement makes it unnecessary. These local index
+extensions are excluded from wire metadata and remote ingestion; ordinary index
+rows retain their existing JSON representation.
+
+This trust boundary covers private account replicas. A compromised account
+device can fabricate private observations; public event and signer validation
+remain enforced independently. Account metadata synchronization carries bounded
+observations and reconciliation references, so optional history sharing can stay
+disabled without exporting message bodies or sender keys to prove role state.
+
+The desktop exposes private group control state through typed account group
+interfaces. Generic account document IPC rejects this domain for listing,
+metadata, payload reads, writes and removal; it cannot expose operation payloads
+or bypass verified control ingestion.
+List and member IPC expose the current account role separately from execution
+readiness. Their typed projection contains account and device identifiers,
+role and readiness, without raw keys or private operation bodies. A failed
+observation explicitly requires reconciliation rather than restoring cached
+authority.
+
+Account group observations capture signed identity proofs and current privacy
+eligibility before acquiring the event-log mutex. The log-held projection uses
+only that immutable snapshot: it must not acquire privacy, roster or host-session
+locks, including through identity-resolution helpers. Sync projections already
+acquire privacy state before the event log; reversing that order can deadlock
+both account reconciliation and delivery, then block desktop session queries.
+
+Account-target owner controls share the channel owner's pure preparation rule
+with direct mutations. Preparation captures current signed bindings before the
+event log, freezes every accepted and invited physical lifetime (including
+unresolved bindings), and binds modern targets to their grant incarnation.
+Legacy removal closes all certified devices and invitations for the selected
+account; account transfer chooses a deterministic accepted device only where the
+legacy wire protocol requires one. Existing explicit device-transfer callers
+retain their device selection.
+
+The delivery journal appends a new owner-control variant without changing old
+bincode discriminants or field layouts. Its structural check binds the original
+account input and exact effect. Before replay appends that effect, causal
+validation reconstructs its saved parent view and checks the complete witness
+and public authority. Current peer labels, later account adoption and later
+grants cannot retarget an already prepared effect. Source acceptance preflights
+the complete envelope against the existing journal and transaction budgets.
+
+Each witness row binds its physical membership lifetime, acceptance state and
+corresponding certified identity together. A valid proof or accepted role from a
+different lifetime cannot replace that row. A legacy account leave with a committed
+physical leg rolls forward. When another leg acknowledges cancellation during
+that turn, the next turn replaces the cancelled leg under the original parent
+intent and preserves the committed leg's exact result.
+
+Executor selection requires both a supported operation kind and a current,
+executable source view before preferring the local device. A private authority
+observation can arrive before its public causal events: a reconciling source
+retains the original intent until that public view is available. It must not
+interpret missing causal state as an invalid target or exhausted resources,
+rewrite the signed executor reference, or allocate a replacement operation ID.
+
+Message actions share a pure source preparation rule and an appended delivery
+transaction. Recall selects the original author device, validates the target
+group and retained source expiry at first admission, and records the exact local
+recall mark before durable terminal completion. Expired intents that have not
+entered the effect WAL settle as expired; accepted WAL effects replay their
+saved causal view and clock. Startup and running recovery both validate the
+source's sealed payload before appending the event and share the recall-sidecar
+completion rule. Cancellation and terminal duplicates do not require evicted
+target metadata. Missing expiry evidence never means verified absence of expiry.
+
+The existing reaction projection owns private explicit group-action copies,
+retaining original full source identity and public effect IDs independently of
+optional archive download. Its explicit `MTREAC` to `MTREA2` migration preserves
+legacy DM records through encrypted, synced, atomic replacement. Channel rows
+share the same compaction and pruning owner, with an 8 MiB live-byte budget and
+100,000 distinct source/target/emoji keys; failed admission never evicts an active
+projection. Stored effects retain their original physical author and signature.
+Views reduce certified siblings under one account principal, so a sibling can
+remove the account’s existing reaction without adding a second reacting member.
+Modern public effects use their causal account binding; private explicit copies
+retain the authenticated executor certificate in an appended record variant.
+Unknown or ambiguous authors remain separate device principals until verified
+evidence arrives. Device adoption must not reassign an earlier account’s action,
+and duplicate public/private copies must not increase the reaction count.
+
+The peer directory preserves account-transition ambiguity in its version-three
+snapshot. Earlier snapshots cannot prove which account owned an unbound
+historical action; their loaded identities remain ambiguous for that fallback.
+This does not revoke current device certificates or override an effect's saved
+causal binding. Fresh version-three records distinguish known unchanged bindings
+from old snapshots that already discarded an earlier account.
+
+Explicit group files reuse the existing file preparation, delivery journal and
+account attachment workers. One original operation retains its signed manifest,
+random file identity and ciphertext through retries and executor changes in
+availability. A source may accept execution only after verified ciphertext is
+durable; optional archive and attachment preferences do not suppress the
+account's explicitly requested send. Existing recipient consent, expiry, recall
+and erase rules continue to govern file release.
+The operation journal retains the original result descriptor and a monotonic
+local completion marker independently of rotating source heads. Unfinished
+preparation pins its existing cache; completed copies may be reclaimed by the
+ordinary file owner without automatically downloading them again. This metadata
+does not create another queue, transport or public membership grant.
+
+Modern invitation acceptance and account departure share pure preparation and
+causal delivery replay with direct channel operations. Their appended journal
+envelope preserves old transaction encodings and binds the original account
+intent to its exact grant incarnation. A valid departure retains only the
+original source's bounded public retry route; rejoining cannot revive an older
+departure route. A revoked grant continues to project the account as left even
+when an offline sibling still advertises an older member observation.
+
+Account invitations share their existing signed invitation, authority grant and
+optional encrypted history batch with direct callers. Capability verification
+and history preparation use the existing bounded account data workers before
+membership and delivery guards. The appended invitation envelope binds its
+original target account, full device proof, grant incarnation and causal parent
+view; its request identity selects the first invitation event, while recovery
+retains every event in the unchanged batch.
+
+Explicit invitation refusal uses a versioned nonempty `ChannelLeave` payload
+bound to one pending grant incarnation. Existing empty acceptance and departure
+encodings remain unchanged. Older clients ignore this new refusal until they
+upgrade. A refusal reserves the acceptance epoch as well as revoking the grant,
+so a concurrent acceptance cannot reuse keys exposed by a partial accepted view.
+That reservation never activates membership or emits acceptance or content keys.
+Observed acceptance prevents a later refusal; a later invitation with a different
+incarnation remains independent.
+
+Directory reconciliation and observed history policy are descriptive metadata,
+separate from account permission and execution readiness. Reference list/member
+projections preserve the last coherent source observation, disclose unresolved
+reconciliation, and mark a missing policy as unknown instead of asserting a
+local default. A policy observation cannot authorize archive or attachment
+release; those owners recheck current membership and disclosure policy.
+
+Group creation retains its existing public creation and invitation producer.
+Its owner-scoped desktop adapter checks the expected account and exact runtime
+session before resolving invitees and rechecks at the creation commit. Both
+desktop creation adapters take account IDs, not device IDs. The existing
+`channels/account_invitation.rs` owner authenticates the selected account and
+compatible format over Noise, trying its known routes. Creation reuses that
+resolver and the existing account-authority grants, including one pending grant
+per invited account and an immediately accepted creator-account owner grant.
+The existing atomic new-channel event-store boundary publishes genesis, account
+authority and initial history policy together; interrupted creation cannot expose
+a device-only genesis while losing its account grants.
+It does not invent an existing group lifetime or operation reference before genesis.
+
+Typed desktop operation commands capture the exact local session owner and
+expected account. Durable submission and cancellation recheck that authority at
+the core admission callback; lifecycle reads retain the matching runtime guard.
+The guarded ID factory binds an opaque ID to the full origin device and a random
+nonce without accepting work. Deduplication still belongs to the account and ID;
+a sibling resolves the original reference before resuming a foreign-origin ID.
+Submission rechecks the existing entry under the final journal write lock after
+transport preflight: an authenticated result may arrive during preflight. A
+matching retry returns that retained status; a mismatched group or digest still
+rejects the ID, and lookup admission never replaces an adopted result.
+Logical operation IDs remain separate from committed public event IDs. Bounded
+list and status projections contain lifecycle metadata only. The frontend IPC
+adapter preserves pending outcomes for the existing action and outgoing-intent
+owners; acceptance alone does not finish a dialog or mark a message as sent.
+
+Simple owner controls prepare their exact signed public effect from the same
+locked canonical membership projection used to revalidate the pinned source.
+Their original logical operation, request digest and full executor identity bind
+the existing delivery WAL; durable public effects and sidecars precede the
+immutable completion result. A canonical no-op still requires a durable parent
+view and never invents a public event ID. Affected source access and inventory
+publish through their existing signed owners before public fanout can wait on a
+slow member.
+
+Authenticated body-free sibling invalidations remain active independently of
+optional content categories. Mandatory control requests and results reuse that
+bounded wake and account-document channel; content transfer still applies its
+own category, sharing and read-entitlement checks. The existing two mandatory
+workers reserve one slot for GroupControl and one for group inventory/device
+names. Each lane retains its own full-peer-identity cursor, partial page, refresh
+and retry state. A held directory response cannot delay an explicit operation
+request or result; control traffic cannot consume the directory's reserved slot.
+Combined progress is up to date only when both lanes have settled, and an error
+or required upgrade in either lane remains visible. The shared TCP budget and
+authentication, category and authority checks remain unchanged. The
+[network contract](network-design-reference.md#g-linking-and-ongoing-account-synchronization)
+owns the distinction between an accepted account's private copy and public
+physical membership.
+
+The other two existing synchronization slots are partitioned between optional
+private documents and history/favorites. A held history response cannot delay an
+authorized custody confirmation, profile or preference document. History and
+favorites preserve their own continuations and coalesced refreshes; their errors
+do not replace document progress. Optional document category and entitlement
+checks still apply. Together with control and directory work, these remain four
+workers in the same shared session pool, not additional network capacity.
+
 ### Account profiles and private trust
 
 `identity/account.rs` and `identity/account_keystore.rs` own immutable creation
@@ -787,6 +1067,13 @@ to core; the member dialog presents the policy without independently deciding
 history eligibility. The [channel guide](help/topics/channels.md#history-for-new-members)
 owns user-visible limits and availability.
 
+Native message presentation is queued onto the UI thread before acquiring the
+exact desktop-session guard. The queued callback revalidates its session and runtime
+ticket before emitting private events or notifications. A worker must not hold that
+guard while synchronously querying window focus: the UI thread may itself be waiting
+for the same session. `events.rs` owns this dispatch boundary and its lock-order and
+stale-session regressions; `runtime_bootstrap.rs` uses it for DM, group and file callbacks.
+
 ### Account document projections
 
 `node/account_documents/` owns private typed metadata and blobs, not group
@@ -819,6 +1106,14 @@ The document store keeps a separate bounded custody-key quota and an owned-file
 scan budget consistent with legal document counts. `media_store.rs` prunes the
 enumerated unreferenced regular files in one pass, preserving live files and
 synchronizing the parent directory before successful return.
+
+`account_documents/public_profile.rs` relays original signed contact profiles under
+Profile consent; `account_profile_io.rs` retains signature, revision and avatar
+projection authority. Per-source document heads preserve each contact's original
+profile, with bounded optional publication repair that cannot block login.
+`account_documents/group_activity.rs` owns History-gated source-signed control
+observations tied to the selected inventory snapshot. It cannot install membership
+or keys. Both reuse the existing document worker and certified sibling sessions.
 
 `account_documents/inventory.rs` owns source-certified descriptive group snapshots,
 bounded automatic publication and account-private reference projection. It reuses

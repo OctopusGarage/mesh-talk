@@ -1,3 +1,9 @@
+import { DeleteChatDialog } from "./DeleteChatDialog";
+import {
+  canParticipateChannel,
+  isChannelInvitation,
+} from "./channelPermissions";
+import { PendingGroupControls } from "./GroupControlStatus";
 import {
   ChannelAnnouncementStrip,
   AnnouncementPublication,
@@ -95,6 +101,10 @@ const NO_REACTIONS: ReactionInfo[] = [];
 
 export function ConversationView() {
   const { t } = useTranslation();
+  const [deletingChat, setDeletingChat] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const packs = usePacks((s) => s.packs);
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
@@ -464,29 +474,23 @@ export function ConversationView() {
   const activeChannel = isChannel
     ? channels.find((channel) => channel.channel_id === active.id)
     : undefined;
-  const sharedReference = activeChannel?.shared_reference === true;
-  const archived =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.archived,
-    );
-  const dissolved =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.dissolved,
-    );
-  const left =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.left,
-    );
-  const pendingInvite =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.pending_invite,
-    );
-  const readOnly =
-    sharedReference || archived || dissolved || left || pendingInvite;
+  const accountAccess = activeChannel?.account_access;
+  const accountRoleKnown = accountAccess !== undefined;
+  const sharedReference =
+    activeChannel?.shared_reference === true &&
+    (!accountAccess || accountAccess.role === "unknown");
+  const previousAccount = activeChannel?.previous_account;
+  const archived = !accountRoleKnown && activeChannel?.archived === true;
+  const dissolved = accountRoleKnown
+    ? accountAccess?.role === "dissolved"
+    : activeChannel?.dissolved === true;
+  const left = accountRoleKnown
+    ? accountAccess?.role === "left"
+    : activeChannel?.left === true;
+  const pendingInvite = isChannel && isChannelInvitation(activeChannel);
+  const accessPending =
+    accountRoleKnown && (!accountAccess || accountAccess.role === "unknown");
+  const readOnly = isChannel && !canParticipateChannel(activeChannel);
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
@@ -562,7 +566,9 @@ export function ConversationView() {
             id={active.id}
             name={headerName}
             memberCount={activeChannel?.member_count ?? members.length}
+            accountAccess={accountAccess}
             sharedReference={sharedReference}
+            previousAccount={!!previousAccount}
             archived={archived}
             dissolved={dissolved}
             left={left}
@@ -579,7 +585,9 @@ export function ConversationView() {
         <ConversationHistoryDialog
           conversation={{ ...active, name: headerName }}
         />
-        {isChannel && (sharedReference || (!archived && !pendingInvite)) ? (
+        {isChannel &&
+        !previousAccount &&
+        (sharedReference || (!archived && !pendingInvite)) ? (
           <MembersDialog key={key} dissolved={dissolved} />
         ) : (
           active.kind === "account" &&
@@ -744,7 +752,13 @@ export function ConversationView() {
               aria-hidden="true"
               className="h-6 w-6 text-signal"
             />
-            <p>{t("redesign.emptyConversation")}</p>
+            <p>
+              {t(
+                previousAccount
+                  ? "conversation.previousAccountEmpty"
+                  : "redesign.emptyConversation",
+              )}
+            </p>
           </div>
         )}
         {messages.length > 0 && (
@@ -957,6 +971,11 @@ export function ConversationView() {
         </AnimatePresence>
       </div>
 
+      {isChannel && (
+        <div className="mx-auto max-h-56 w-full max-w-[820px] overflow-y-auto px-5">
+          <PendingGroupControls group={active.id} />
+        </div>
+      )}
       <TransferBar transferKey={active.id} />
 
       <Dialog
@@ -999,23 +1018,52 @@ export function ConversationView() {
         </DialogContent>
       </Dialog>
 
-      {pendingInvite && !sharedReference ? (
+      {pendingInvite &&
+      !previousAccount &&
+      !sharedReference &&
+      !archived &&
+      !dissolved &&
+      !left ? (
         <PendingChannelInvite key={key} channelId={active.id} />
       ) : readOnly ? (
         <div
           className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
           role="status"
         >
+          {deletingChat && (
+            <DeleteChatDialog
+              key={`${owner}:${authGeneration}:${deletingChat.id}`}
+              channelId={deletingChat.id}
+              name={deletingChat.name}
+              onClose={() => setDeletingChat(null)}
+            />
+          )}
           {t(
-            sharedReference
-              ? activeChannel?.legacy_membership
-                ? "conversation.legacySharedReferenceHint"
-                : "conversation.sharedReferenceHint"
-              : dissolved
-                ? "conversation.dissolvedChannelHint"
-                : left
-                  ? "conversation.leftChannelHint"
-                  : "conversation.archivedChannelHint",
+            previousAccount
+              ? "conversation.previousAccountChannelHint"
+              : sharedReference
+                ? activeChannel?.legacy_membership
+                  ? "conversation.legacySharedReferenceHint"
+                  : "conversation.sharedReferenceHint"
+                : accessPending
+                  ? "conversation.groupAccessPending"
+                  : dissolved
+                    ? "conversation.dissolvedChannelHint"
+                    : left
+                      ? "conversation.leftChannelHint"
+                      : "conversation.archivedChannelHint",
+            accessPending ? { defaultValue: "Updating group access…" } : {},
+          )}
+          {!previousAccount && !sharedReference && (left || dissolved) && (
+            <Button
+              variant="ghost"
+              className="ml-3 text-destructive hover:text-destructive"
+              onClick={() =>
+                setDeletingChat({ id: active.id, name: active.name })
+              }
+            >
+              {t("conversationDeletion.delete")}
+            </Button>
           )}
         </div>
       ) : !draftsLoaded ? (

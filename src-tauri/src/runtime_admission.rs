@@ -163,6 +163,27 @@ impl RuntimeAdmission {
     }
 
     /// Run a synchronous observation or mutation while both runtime and session
+    /// guards and one app-lock revision guard are held. A verified sensitive
+    /// action already owns that last guard; never acquire it a second time.
+    pub(crate) fn checked_at_lock_revision<T>(
+        &self,
+        runtime: &NodeRuntime,
+        revision: u64,
+        operation: impl FnOnce() -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        self.node
+            .with_session_runtime(self.app.session(), &self.lease, runtime, || {
+                match &self.sensitive {
+                    Some(proof) => proof.commit_at_revision(revision, operation),
+                    None => self
+                        .app
+                        .app_lock()
+                        .with_unchanged_revision(revision, operation),
+                }
+            })
+    }
+
+    /// Run a synchronous observation or mutation while both runtime and session
     /// guards are held. A returned Node handle does not carry this authority
     /// into later asynchronous work; producers must authorize at their commit.
     pub(crate) async fn with_runtime<T>(

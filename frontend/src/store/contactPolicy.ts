@@ -2,6 +2,8 @@ import { notifySyncInvalidation } from "@/lib/syncInvalidation";
 import { create } from "zustand";
 import { contactPolicy } from "@/lib/api";
 import type { HiddenContact, HiddenContactsSnapshot } from "@/lib/types";
+import { currentRuntimeAccountId } from "./ownership";
+import { readWithDeadline } from "@/lib/readDeadline";
 
 interface ContactPolicyState {
   owner: string | null;
@@ -18,6 +20,7 @@ interface ContactPolicyState {
     account: string,
     hidden: boolean,
     name: string,
+    expectedAccount?: string,
   ) => Promise<boolean>;
 }
 let generation = 0;
@@ -56,29 +59,49 @@ export const useContactPolicy = create<ContactPolicyState>((set, get) => ({
     const sameOwner = get().owner === owner;
     set({ ...(sameOwner ? {} : empty()), owner, loading: true, error: null });
     try {
-      const contacts = contactsFrom(await contactPolicy.get(owner), owner);
+      const contacts = contactsFrom(
+        await readWithDeadline(() => contactPolicy.get(owner)),
+        owner,
+      );
       if (request === generation)
         set({ contacts, loaded: true, loading: false });
     } catch {
       if (request === generation) set({ loading: false, error: "load" });
     }
   },
-  change: async (owner, account, hidden, name) => {
-    if (get().owner !== owner || !get().loaded || get().loading || get().busy)
+  change: async (owner, account, hidden, name, expectedAccount) => {
+    const sameAccount = () =>
+      expectedAccount === undefined ||
+      currentRuntimeAccountId() === expectedAccount;
+    if (
+      get().owner !== owner ||
+      !get().loaded ||
+      get().loading ||
+      get().busy ||
+      !sameAccount()
+    )
       return false;
     const request = generation;
     set({ busy: true, error: null });
     try {
       const contacts = contactsFrom(
-        await contactPolicy.set(owner, account, hidden, name),
+        await contactPolicy.set(owner, account, hidden, name, expectedAccount),
         owner,
       );
       if (request !== generation) return false;
+      if (!sameAccount()) {
+        set({ busy: false });
+        return false;
+      }
       set({ contacts, busy: false });
       notifySyncInvalidation({ owner, kind: "contacts" });
       return true;
     } catch {
-      if (request === generation) set({ busy: false, error: "save" });
+      if (request === generation)
+        set({
+          busy: false,
+          ...(sameAccount() ? { error: "save" as const } : {}),
+        });
       return false;
     }
   },

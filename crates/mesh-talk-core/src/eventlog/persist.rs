@@ -45,6 +45,8 @@ pub struct PersistentEventLog {
     pending_profile_compactions: HashSet<ConversationId>,
     last_profile_compactions: HashMap<ConversationId, Instant>,
     fingerprint_cache: Mutex<HashMap<ConversationId, ([u8; 32], usize)>>,
+    #[cfg(test)]
+    fail_sync: bool,
 }
 
 impl PersistentEventLog {
@@ -79,6 +81,8 @@ impl PersistentEventLog {
             pending_profile_compactions: HashSet::new(),
             last_profile_compactions: HashMap::new(),
             fingerprint_cache: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            fail_sync: false,
         })
     }
 
@@ -112,7 +116,16 @@ impl PersistentEventLog {
 
     /// Transaction boundary for delivery: flush all causal parents before writing
     /// an intent, and synchronize even when recovery finds an existing event.
+    #[cfg(test)]
+    pub(crate) fn fail_sync_for_test(&mut self, enabled: bool) {
+        self.fail_sync = enabled;
+    }
+
     pub fn sync(&self) -> Result<(), LogError> {
+        #[cfg(test)]
+        if self.fail_sync {
+            return Err(std::io::Error::other("injected event-log sync failure").into());
+        }
         self.file.sync()
     }
 

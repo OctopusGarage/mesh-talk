@@ -107,7 +107,12 @@ test("image rows reserve their final geometry before bytes load", async ({
 test("scrolling away and returning to latest reuses media without changing row height", async ({
   page,
 }) => {
-  await seedImages(page);
+  await seedImages(page, 60, {
+    width: 1600,
+    height: 200,
+    video: false,
+    invalid: false,
+  });
   await releaseImages(page);
   const row = page.locator('[data-message-id="scroll-message-59"]');
   await expect
@@ -116,8 +121,29 @@ test("scrolling away and returning to latest reuses media without changing row h
         .getByTestId("file-image")
         .evaluate((el) => (el as HTMLImageElement).naturalWidth),
     )
-    .toBe(800);
+    .toBe(1600);
   await expect(row).toBeVisible();
+  await expect
+    .poll(async () => {
+      const box = await row.getByTestId("file-image").boundingBox();
+      return box ? box.width / box.height : undefined;
+    })
+    .toBeCloseTo(8, 1);
+  const log = page.getByRole("log");
+  // The newest row can render before the virtualizer finishes its initial
+  // scroll. Establish the actual live-edge position before sending wheel input.
+  await expect
+    .poll(() => log.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+  await expect
+    .poll(() =>
+      log.evaluate((element) =>
+        Math.abs(
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+        ),
+      ),
+    )
+    .toBeLessThanOrEqual(1);
   const initialHeight = await row.evaluate(
     (element) => element.getBoundingClientRect().height,
   );
@@ -125,13 +151,16 @@ test("scrolling away and returning to latest reuses media without changing row h
     () =>
       (window as unknown as ProbeWindow).__mediaScroll.reads["scroll-image-59"],
   );
-  const log = page.getByRole("log");
+  const scrollTopBefore = await log.evaluate((element) => element.scrollTop);
   const bounds = (await log.boundingBox())!;
   await page.mouse.move(
     bounds.x + bounds.width / 2,
     bounds.y + bounds.height / 2,
   );
   await page.mouse.wheel(0, -3000);
+  await expect
+    .poll(() => log.evaluate((element) => element.scrollTop))
+    .toBeLessThan(scrollTopBefore);
   await expect(row).toHaveCount(0);
   await page.getByTestId("jump-to-latest").click();
   await expect(row.getByTestId("file-image")).toBeVisible();
@@ -150,17 +179,16 @@ test("scrolling away and returning to latest reuses media without changing row h
 for (const [label, width, height] of [
   ["portrait", 300, 900],
   ["panorama", 1600, 200],
+  ["square", 640, 640],
+  ["small", 48, 32],
 ] as const) {
-  test(`${label} images retain a stable contained frame in a short window`, async ({
+  test(`${label} images fit their original proportions in a short window`, async ({
     page,
   }) => {
     await page.setViewportSize({ width: 820, height: 620 });
     await seedImages(page, 1, { width, height, video: false, invalid: false });
     const row = page.locator('[data-message-id="scroll-message-0"]');
     await expect(row.getByRole("status")).toBeVisible();
-    const before = await row.evaluate(
-      (element) => element.getBoundingClientRect().height,
-    );
     await releaseImages(page);
     const image = row.getByTestId("file-image");
     await expect
@@ -168,10 +196,20 @@ for (const [label, width, height] of [
         image.evaluate((element) => (element as HTMLImageElement).naturalWidth),
       )
       .toBe(width);
-    expect(
-      await row.evaluate((element) => element.getBoundingClientRect().height),
-    ).toBe(before);
+    await expect
+      .poll(async () => {
+        const box = (await image.boundingBox())!;
+        return box.width / box.height;
+      })
+      .toBeCloseTo(width / height, 1);
+    const box = (await image.boundingBox())!;
+    expect(box.width).toBeLessThanOrEqual(Math.min(width, 320));
+    expect(box.height).toBeLessThanOrEqual(Math.min(height, 320));
+    const frame = (await image.locator("..").boundingBox())!;
+    expect(frame.width).toBeCloseTo(box.width, 0);
+    expect(frame.height).toBeCloseTo(box.height, 0);
     await expect(image).toHaveCSS("object-fit", "contain");
+    await page.screenshot({ path: test.info().outputPath(`${label}.png`) });
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,

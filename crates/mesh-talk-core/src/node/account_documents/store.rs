@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    eventlog::{LogError, event::ConversationId},
+    eventlog::{EventId, LogError, event::ConversationId},
+    identity::device::PublicIdentity,
     node::media_store::MediaStore,
     storage::record_log::EncryptedRecordLog,
 };
@@ -11,22 +12,163 @@ use std::{
 const MAX_ORDINARY_KEYS: usize = 4096;
 const MAX_MESSAGE_KEYS: usize = 65536;
 const MAX_REFERENCE_KEYS: usize = 4096;
+const MAX_PRESENTATION_KEYS: usize = 4096;
+const MAX_GROUP_CONTROL_KEYS: usize = 4096;
+const MAX_GROUP_OPERATION_KEYS: usize = 4096;
+const MAX_OPERATION_LIVE: u64 = 32 * 1024 * 1024;
 // Read receipts have no blobs; each other retained key owns at most one blob.
-const MAX_OWNED_BLOBS: usize = MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS;
+const MAX_OWNED_BLOBS: usize = MAX_ORDINARY_KEYS
+    + MAX_MESSAGE_KEYS
+    + MAX_REFERENCE_KEYS
+    + MAX_GROUP_CONTROL_KEYS
+    + MAX_GROUP_OPERATION_KEYS
+    + 2 * MAX_PRESENTATION_KEYS;
 // Include key.salt and one replacement/partial blob interrupted before cleanup.
 const MAX_MEDIA_ENTRIES: usize = MAX_OWNED_BLOBS + 2;
 const MAX_LIVE: u64 = 128 * 1024 * 1024;
+// These are local encrypted-index limits, independent of document wire quotas.
+const MAX_LOCAL_ROW: usize = 12 * 1024 * 1024;
+const MAX_LOCAL_FRONTIER: usize = 131_072;
+const MAX_LOCAL_RECEIPTS: usize = 32 * 1024 * 1024;
+const MAX_COMPACT_INDEX: usize = 112 * 1024 * 1024;
+const INDEX_HEADER: usize = 6 + crate::storage::encryption::SALT_SIZE;
+// bincode Vec length, frame length, nonce, and AES-GCM tag.
+const INDEX_FRAME: usize = 8 + 4 + crate::storage::encryption::NONCE_SIZE + 16;
+
+/// Never serialized into a wire metadata header or accepted from a remote merge.
+#[derive(Clone, Serialize, Deserialize)]
+struct LocalPublicationReceipt {
+    version: u8,
+    account_public: [u8; 32],
+    source: PublicIdentity,
+    group: [u8; 32],
+    revision: u64,
+    content_hash: [u8; 32],
+    frontier_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draft_lifetime: Option<super::super::account_group::MembershipLifetime>,
+}
+impl LocalPublicationReceipt {
+    fn matches(&self, meta: &AccountDocumentMeta, source: &PublicIdentity) -> bool {
+        self.account_public == meta.account_public
+            && self.source == *source
+            && self.revision == meta.revision
+            && self.content_hash == meta.content_hash
+            && !meta.tombstone
+            && match &meta.key {
+                AccountDocumentKey::Draft {
+                    conversation: DocumentConversation::Channel(channel),
+                } => {
+                    self.version == 2
+                        && self.draft_lifetime.is_some()
+                        && *channel == hex::encode(self.group)
+                        && meta.writer_device == source.user_id()
+                }
+                AccountDocumentKey::GroupControl {
+                    channel,
+                    source_device,
+                }
+                | AccountDocumentKey::GroupInventory {
+                    channel,
+                    source_device,
+                } => {
+                    self.version == 1
+                        && self.draft_lifetime.is_none()
+                        && *channel == hex::encode(self.group)
+                        && *source_device == source.user_id()
+                        && meta.writer_device == *source_device
+                }
+                _ => false,
+            }
+    }
+
+    fn frontier(&self) -> Option<Vec<EventId>> {
+        if self.frontier_hex.is_empty()
+            || !self.frontier_hex.len().is_multiple_of(64)
+            || self.frontier_hex.len() > MAX_LOCAL_FRONTIER * 64
+        {
+            return None;
+        }
+        let bytes = hex::decode(&self.frontier_hex).ok()?;
+        let ids: Vec<_> = bytes
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .map(|bytes| EventId::new(*bytes))
+            .collect();
+        ids.windows(2).all(|pair| pair[0] < pair[1]).then_some(ids)
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct LocalIndexRow {
+    #[serde(flatten)]
+    meta: AccountDocumentMeta,
+    #[serde(
+        default,
+        rename = "_local_group_publication",
+        skip_serializing_if = "Option::is_none"
+    )]
+    receipt: Option<serde_json::Value>,
+    #[serde(
+        default,
+        rename = "_local_inventory_source_authenticated",
+        skip_serializing_if = "is_false"
+    )]
+    source_authenticated: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+struct RetainedPublicationReceipt {
+    receipt: LocalPublicationReceipt,
+    encoded_len: usize,
+    row_len: usize,
+}
+fn encode_row(
+    meta: &AccountDocumentMeta,
+    receipt: Option<&LocalPublicationReceipt>,
+    source_authenticated: bool,
+) -> Result<Vec<u8>, LogError> {
+    if receipt.is_none() && !source_authenticated {
+        return serde_json::to_vec(meta).map_err(|_| corrupt());
+    }
+    serde_json::to_vec(&LocalIndexRow {
+        meta: meta.clone(),
+        receipt: receipt
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| corrupt())?,
+        source_authenticated,
+    })
+    .map_err(|_| corrupt())
+}
 pub(in crate::node) struct AccountDocumentStore {
     file: EncryptedRecordLog<Vec<u8>>,
     media: MediaStore,
     current: BTreeMap<AccountDocumentKey, AccountDocumentMeta>,
+    pub(super) personal_pending: BTreeSet<DocumentConversation>,
+    pub(super) personal_floors:
+        BTreeMap<DocumentConversation, (AccountDocumentMeta, super::personal::PersonalControl)>,
+    pub(super) personal_applied: BTreeSet<super::personal::AppliedKey>,
+    pub(super) personal_archive_digest: [u8; 32],
+    pub(super) personal:
+        BTreeMap<AccountDocumentKey, (AccountDocumentMeta, super::personal::PersonalControl)>,
     account: [u8; 32],
     records: usize,
     journal_bytes: usize,
-    counts: [usize; 9],
+    counts: [usize; 12],
     live_bytes: u64,
-    digest_xor: [[u8; 32]; 9],
+    operation_keys: usize,
+    operation_bytes: u64,
+    digest_xor: [[u8; 32]; 12],
     incomplete: BTreeSet<AccountDocumentKey>,
+    local_receipts: BTreeMap<AccountDocumentKey, RetainedPublicationReceipt>,
+    // Bounded by current inventory keys; never exported in document metadata.
+    inventory_source_floors: BTreeSet<AccountDocumentKey>,
+    receipt_bytes: usize,
+    index_bytes: usize,
+    #[cfg(test)]
+    receipt_limit: usize,
 }
 fn metadata_hash(meta: &AccountDocumentMeta) -> [u8; 32] {
     let mut hash = Sha256::new();
@@ -36,6 +178,22 @@ fn metadata_hash(meta: &AccountDocumentMeta) -> [u8; 32] {
 fn corrupt() -> LogError {
     LogError::CorruptFile("invalid account document storage".into())
 }
+fn scope_contains(
+    key: &AccountDocumentKey,
+    domain: AccountDocumentDomain,
+    operations: bool,
+    legacy: bool,
+    personal: bool,
+) -> bool {
+    key.domain() == domain
+        && match key {
+            AccountDocumentKey::ConversationPersonal { .. } => personal,
+            AccountDocumentKey::GroupOperation { .. } => operations,
+            AccountDocumentKey::GroupLegacyOperation { .. } => operations && legacy,
+            _ => true,
+        }
+}
+
 impl AccountDocumentStore {
     pub(in crate::node) fn open(
         dir: &Path,
@@ -93,36 +251,103 @@ impl AccountDocumentStore {
             &id,
         )
         .map_err(LogError::Io)?;
-        let journal_bytes = rows.iter().map(|r| r.len() + 32).sum();
+        let journal_bytes =
+            INDEX_HEADER + rows.iter().map(|r| r.len() + INDEX_FRAME).sum::<usize>();
         let mut store = Self {
             file,
             media,
             current: BTreeMap::new(),
+            personal: BTreeMap::new(),
+            personal_pending: BTreeSet::new(),
+            personal_floors: BTreeMap::new(),
+            personal_applied: BTreeSet::new(),
+            personal_archive_digest: [0; 32],
             account: *account,
             records: rows.len(),
             journal_bytes,
-            counts: [0; 9],
+            counts: [0; 12],
             live_bytes: 0,
-            digest_xor: [[0; 32]; 9],
+            operation_keys: 0,
+            operation_bytes: 0,
+            digest_xor: [[0; 32]; 12],
             incomplete: BTreeSet::new(),
+            local_receipts: BTreeMap::new(),
+            inventory_source_floors: BTreeSet::new(),
+            receipt_bytes: 0,
+            index_bytes: INDEX_HEADER,
+            #[cfg(test)]
+            receipt_limit: MAX_LOCAL_RECEIPTS,
         };
         for bytes in rows {
-            if bytes.len() > 8192 {
+            if bytes.len() > MAX_LOCAL_ROW {
                 return Err(corrupt());
             }
-            let row: AccountDocumentMeta = serde_json::from_slice(&bytes).map_err(|_| corrupt())?;
-            store.validate(&row)?;
-            if store
-                .current
-                .get(&row.key)
-                .is_none_or(|old| old.order() < row.order())
+            let row: LocalIndexRow = serde_json::from_slice(&bytes).map_err(|_| corrupt())?;
+            if bytes.len() > 8192
+                && (row.receipt.is_none()
+                    || !matches!(
+                        row.meta.key,
+                        AccountDocumentKey::GroupControl { .. }
+                            | AccountDocumentKey::GroupInventory { .. }
+                    ))
             {
-                store.install(row);
+                return Err(corrupt());
+            }
+            store.validate(&row.meta)?;
+            let receipt = row
+                .receipt
+                .and_then(|value| serde_json::from_value::<LocalPublicationReceipt>(value).ok())
+                .filter(|receipt| {
+                    receipt.matches(&row.meta, &receipt.source)
+                        && (receipt.version == 2 || receipt.frontier().is_some())
+                });
+            if row.source_authenticated
+                && !matches!(row.meta.key, AccountDocumentKey::GroupInventory { .. })
+            {
+                return Err(corrupt());
+            }
+            let same = store.current.get(&row.meta.key) == Some(&row.meta);
+            let newer = store
+                .current
+                .get(&row.meta.key)
+                .is_none_or(|old| old.order() < row.meta.order());
+            let local_repair = same
+                && (receipt.is_some() && !store.local_receipts.contains_key(&row.meta.key)
+                    || row.source_authenticated
+                        && !store.inventory_source_floors.contains(&row.meta.key));
+            if newer || local_repair {
+                // Local auxiliary state may be durably repaired without changing
+                // the public signed metadata. Replay must retain that same-head
+                // receipt/floor, and cannot erase an already retained receipt.
+                let receipt = if same {
+                    receipt.or_else(|| {
+                        store
+                            .local_receipts
+                            .get(&row.meta.key)
+                            .map(|retained| retained.receipt.clone())
+                    })
+                } else {
+                    receipt
+                };
+                store.install_record(row.meta, receipt, row.source_authenticated);
             }
         }
         for key in store.current.keys() {
             if store.get(key).is_err() {
                 store.incomplete.insert(key.clone());
+            }
+        }
+        let personal_keys: Vec<_> = store
+            .current
+            .keys()
+            .filter(|key| matches!(key, AccountDocumentKey::ConversationPersonal { .. }))
+            .cloned()
+            .collect();
+        for key in personal_keys {
+            if let Some(doc) = store.get(&key)?
+                && let Some(control) = super::personal::decode(&doc.meta, doc.payload())
+            {
+                store.index_personal_control(doc.meta.clone(), control);
             }
         }
         store
@@ -139,6 +364,14 @@ impl AccountDocumentStore {
     pub(super) fn fail_index_for_test(&mut self, fail: bool) {
         self.file.fail_appends_for_test(fail).unwrap();
     }
+    #[cfg(test)]
+    pub(super) fn publication_budget_for_test(&mut self, limit: usize) {
+        self.receipt_limit = limit;
+    }
+    #[cfg(test)]
+    pub(super) fn compact_next_for_test(&mut self) {
+        self.records = self.current.len().saturating_mul(2).saturating_add(32);
+    }
     pub(super) fn meta(&self, key: &AccountDocumentKey) -> Option<AccountDocumentMeta> {
         self.current.get(key).cloned()
     }
@@ -148,12 +381,99 @@ impl AccountDocumentStore {
         after: Option<&AccountDocumentKey>,
         limit: usize,
     ) -> Vec<AccountDocumentMeta> {
-        self.current
-            .values()
-            .filter(|m| m.key.domain() == domain && after.is_none_or(|a| &m.key > a))
-            .take(limit.min(64))
-            .cloned()
-            .collect()
+        self.list_exchange_scope(domain, after, limit, true, true, true)
+    }
+    #[cfg(test)]
+    pub(super) fn list_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        after: Option<&AccountDocumentKey>,
+        limit: usize,
+        include_operations: bool,
+    ) -> Vec<AccountDocumentMeta> {
+        self.list_operation_scope(domain, after, limit, include_operations, false)
+    }
+    #[cfg(test)]
+    pub(super) fn list_operation_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        after: Option<&AccountDocumentKey>,
+        limit: usize,
+        include_operations: bool,
+        include_legacy: bool,
+    ) -> Vec<AccountDocumentMeta> {
+        self.list_exchange_scope(
+            domain,
+            after,
+            limit,
+            include_operations,
+            include_legacy,
+            false,
+        )
+    }
+    pub(super) fn list_exchange_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        after: Option<&AccountDocumentKey>,
+        limit: usize,
+        include_operations: bool,
+        include_legacy: bool,
+        include_personal: bool,
+    ) -> Vec<AccountDocumentMeta> {
+        self.exchange_rows(
+            domain,
+            after,
+            include_operations,
+            include_legacy,
+            include_personal,
+        )
+        .take(limit.min(64))
+        .cloned()
+        .collect()
+    }
+
+    fn exchange_rows<'a>(
+        &'a self,
+        domain: AccountDocumentDomain,
+        after: Option<&'a AccountDocumentKey>,
+        include_operations: bool,
+        include_legacy: bool,
+        include_personal: bool,
+    ) -> impl Iterator<Item = &'a AccountDocumentMeta> {
+        self.current.values().filter(move |meta| {
+            scope_contains(
+                &meta.key,
+                domain,
+                include_operations,
+                include_legacy,
+                include_personal,
+            ) && after.is_none_or(|after| &meta.key > after)
+        })
+    }
+
+    /// A matching access-only digest makes these role rows redundant, not
+    /// unauthorized. Filter them before page limits while preserving key order.
+    pub(super) fn list_operation_patch(
+        &self,
+        after: Option<&AccountDocumentKey>,
+        limit: usize,
+        include_legacy: bool,
+        include_personal: bool,
+        known_roles: [u8; 32],
+    ) -> Vec<AccountDocumentMeta> {
+        let roles_known = known_roles != [0; 32]
+            && known_roles == self.digest_scope(AccountDocumentDomain::GroupControl, false);
+        self.exchange_rows(
+            AccountDocumentDomain::GroupControl,
+            after,
+            true,
+            include_legacy,
+            include_personal,
+        )
+        .filter(|meta| !roles_known || !matches!(meta.key, AccountDocumentKey::GroupControl { .. }))
+        .take(limit.min(64))
+        .cloned()
+        .collect()
     }
     pub(super) fn digest(&self, domain: AccountDocumentDomain) -> [u8; 32] {
         if self.incomplete.iter().any(|key| key.domain() == domain) {
@@ -162,10 +482,87 @@ impl AccountDocumentStore {
         let index = domain as usize;
         let mut hash = Sha256::new();
         hash.update(b"mesh-talk-account-document-index-v1");
-        hash.update([index as u8]);
+        hash.update([domain.digest_discriminator()]);
         hash.update(self.digest_xor[index]);
         hash.update((self.counts[index] as u64).to_be_bytes());
         hash.finalize().into()
+    }
+    pub(super) fn digest_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        include_operations: bool,
+    ) -> [u8; 32] {
+        self.digest_operation_scope(domain, include_operations, false)
+    }
+    pub(super) fn digest_operation_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        include_operations: bool,
+        include_legacy: bool,
+    ) -> [u8; 32] {
+        self.digest_exchange_scope(domain, include_operations, include_legacy, false)
+    }
+    pub(super) fn digest_exchange_scope(
+        &self,
+        domain: AccountDocumentDomain,
+        include_operations: bool,
+        include_legacy: bool,
+        include_personal: bool,
+    ) -> [u8; 32] {
+        if domain != AccountDocumentDomain::GroupControl
+            || (include_operations && include_legacy && include_personal)
+        {
+            return self.digest(domain);
+        }
+        if self.incomplete.iter().any(|key| {
+            scope_contains(
+                key,
+                domain,
+                include_operations,
+                include_legacy,
+                include_personal,
+            )
+        }) {
+            return [0; 32];
+        }
+        let mut xor = [0; 32];
+        let mut count = 0u64;
+        for meta in self.current.values().filter(|meta| {
+            scope_contains(
+                &meta.key,
+                domain,
+                include_operations,
+                include_legacy,
+                include_personal,
+            )
+        }) {
+            count += 1;
+            for (byte, part) in xor.iter_mut().zip(metadata_hash(meta)) {
+                *byte ^= part;
+            }
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"mesh-talk-account-document-index-v1");
+        hash.update([domain.digest_discriminator()]);
+        hash.update(xor);
+        hash.update(count.to_be_bytes());
+        hash.finalize().into()
+    }
+    pub(super) fn legacy_operation_rows(&self) -> Vec<AccountDocumentMeta> {
+        self.current
+            .values()
+            .filter(|meta| matches!(meta.key, AccountDocumentKey::GroupLegacyOperation { .. }))
+            .take(MAX_GROUP_OPERATION_KEYS)
+            .cloned()
+            .collect()
+    }
+    pub(super) fn operation_rows(&self) -> Vec<AccountDocumentMeta> {
+        self.current
+            .values()
+            .filter(|meta| matches!(meta.key, AccountDocumentKey::GroupOperation { .. }))
+            .take(MAX_GROUP_OPERATION_KEYS)
+            .cloned()
+            .collect()
     }
     pub(super) fn list_custody(
         &self,
@@ -190,7 +587,80 @@ impl AccountDocumentStore {
             .cloned()
             .collect()
     }
+    pub(super) fn group_control_rows(&self, channel: &str) -> Vec<AccountDocumentMeta> {
+        let start = AccountDocumentKey::GroupControl {
+            channel: channel.to_owned(),
+            source_device: String::new(),
+        };
+        self.current.range(start..)
+            .take_while(|(key, _)| matches!(key, AccountDocumentKey::GroupControl { channel: id, .. } if id == channel))
+            .take(MAX_GROUP_CONTROL_KEYS).map(|(_, meta)| meta.clone()).collect()
+    }
+    #[cfg(test)]
     fn install(&mut self, meta: AccountDocumentMeta) {
+        self.install_record(meta, None, false);
+    }
+    fn install_record(
+        &mut self,
+        meta: AccountDocumentMeta,
+        receipt: Option<LocalPublicationReceipt>,
+        source_authenticated: bool,
+    ) {
+        if let Some(old) = self.current.get(&meta.key) {
+            let row_len = self.local_receipts.get(&meta.key).map_or_else(
+                || {
+                    encode_row(old, None, self.inventory_source_floors.contains(&meta.key))
+                        .expect("metadata serializes")
+                        .len()
+                },
+                |old| old.row_len,
+            );
+            self.index_bytes -= row_len + INDEX_FRAME;
+        }
+        if let Some(old) = self.local_receipts.remove(&meta.key) {
+            self.receipt_bytes -= old.encoded_len;
+        }
+        if source_authenticated {
+            self.inventory_source_floors.insert(meta.key.clone());
+        }
+        let row_len = encode_row(
+            &meta,
+            receipt.as_ref(),
+            self.inventory_source_floors.contains(&meta.key),
+        )
+        .expect("local metadata serializes")
+        .len();
+        self.index_bytes += row_len + INDEX_FRAME;
+        if let Some(receipt) = receipt {
+            let encoded_len = serde_json::to_vec(&receipt)
+                .expect("local receipt serializes")
+                .len();
+            self.receipt_bytes += encoded_len;
+            self.local_receipts.insert(
+                meta.key.clone(),
+                RetainedPublicationReceipt {
+                    receipt,
+                    encoded_len,
+                    row_len,
+                },
+            );
+        }
+        if matches!(
+            meta.key,
+            AccountDocumentKey::GroupOperation { .. }
+                | AccountDocumentKey::GroupLegacyOperation { .. }
+        ) {
+            if let Some(old) = self.current.get(&meta.key) {
+                if !old.tombstone {
+                    self.operation_bytes -= u64::from(old.content_len);
+                }
+            } else {
+                self.operation_keys += 1;
+            }
+            if !meta.tombstone {
+                self.operation_bytes += u64::from(meta.content_len);
+            }
+        }
         let index = meta.key.domain() as usize;
         if let Some(old) = self.current.get(&meta.key) {
             let old_hash = metadata_hash(old);
@@ -266,6 +736,41 @@ impl AccountDocumentStore {
         expected: Option<&DocumentVersion>,
         removed: bool,
     ) -> Result<AccountDocumentMeta, NodeError> {
+        self.put_with_local_draft(account, writer, key, payload, expected, removed, None)
+    }
+    pub(super) fn put_local_group_draft(
+        &mut self,
+        account: &Account,
+        source: &PublicIdentity,
+        key: AccountDocumentKey,
+        payload: &[u8],
+        expected: Option<&DocumentVersion>,
+        lifetime: &super::super::account_group::MembershipLifetime,
+    ) -> Result<AccountDocumentMeta, NodeError> {
+        self.put_with_local_draft(
+            account,
+            source.user_id(),
+            key,
+            payload,
+            expected,
+            false,
+            Some((source, lifetime)),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn put_with_local_draft(
+        &mut self,
+        account: &Account,
+        writer: String,
+        key: AccountDocumentKey,
+        payload: &[u8],
+        expected: Option<&DocumentVersion>,
+        removed: bool,
+        local_draft: Option<(
+            &PublicIdentity,
+            &super::super::account_group::MembershipLifetime,
+        )>,
+    ) -> Result<AccountDocumentMeta, NodeError> {
         if account.public().ed25519_pub != self.account
             || key.is_private_control()
             || !key.valid()
@@ -285,17 +790,198 @@ impl AccountDocumentStore {
             .ok_or_else(invalid)?
             .max(super::super::node::now_millis());
         let meta = AccountDocumentMeta::new(account, writer, key, revision, payload, removed);
-        self.merge(meta.clone(), payload).map_err(NodeError::Log)?;
+        let receipt = if let Some((source, lifetime)) = local_draft {
+            let AccountDocumentKey::Draft {
+                conversation: DocumentConversation::Channel(channel),
+            } = &meta.key
+            else {
+                return Err(invalid());
+            };
+            let group: [u8; 32] = hex::decode(channel)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(invalid)?;
+            let receipt = LocalPublicationReceipt {
+                version: 2,
+                account_public: self.account,
+                source: source.clone(),
+                group,
+                revision: meta.revision,
+                content_hash: meta.content_hash,
+                frontier_hex: String::new(),
+                draft_lifetime: Some(lifetime.clone()),
+            };
+            if !receipt.matches(&meta, source) {
+                return Err(invalid());
+            }
+            Some(receipt)
+        } else {
+            None
+        };
+        self.merge_record(meta.clone(), payload, receipt)
+            .map_err(NodeError::Log)?;
         Ok(meta)
+    }
+    pub(super) fn local_draft_lifetime(
+        &self,
+        meta: &AccountDocumentMeta,
+        source: &PublicIdentity,
+    ) -> Option<super::super::account_group::MembershipLifetime> {
+        let receipt = &self.local_receipts.get(&meta.key)?.receipt;
+        (receipt.version == 2 && receipt.matches(meta, source))
+            .then(|| receipt.draft_lifetime.clone())
+            .flatten()
+    }
+    pub(super) fn group_control_payload_fits(
+        &self,
+        key: &AccountDocumentKey,
+        bytes: usize,
+    ) -> bool {
+        let old = self.current.get(key);
+        (old.is_some()
+            || self.counts[AccountDocumentDomain::GroupControl as usize]
+                .saturating_sub(self.operation_keys)
+                < MAX_GROUP_CONTROL_KEYS)
+            && self
+                .live_bytes
+                .saturating_sub(
+                    old.filter(|meta| !meta.tombstone)
+                        .map_or(0, |meta| u64::from(meta.content_len)),
+                )
+                .saturating_add(bytes as u64)
+                <= MAX_LIVE
+    }
+    pub(super) fn operation_payload_fits(&self, key: &AccountDocumentKey, bytes: usize) -> bool {
+        let old = self
+            .current
+            .get(key)
+            .filter(|meta| !meta.tombstone)
+            .map_or(0, |meta| u64::from(meta.content_len));
+        (self.current.contains_key(key) || self.operation_keys < MAX_GROUP_OPERATION_KEYS)
+            && self
+                .operation_bytes
+                .saturating_sub(old)
+                .saturating_add(bytes as u64)
+                <= MAX_OPERATION_LIVE
+            && self
+                .live_bytes
+                .saturating_sub(old)
+                .saturating_add(bytes as u64)
+                <= MAX_LIVE
     }
     pub(super) fn merge(
         &mut self,
         meta: AccountDocumentMeta,
         payload: &[u8],
     ) -> Result<bool, LogError> {
+        self.merge_record(meta, payload, None)
+    }
+    pub(super) fn merge_local_group_control(
+        &mut self,
+        meta: AccountDocumentMeta,
+        payload: &[u8],
+        frontier: Vec<EventId>,
+    ) -> Result<bool, LogError> {
+        let head =
+            crate::node::account_group::wire::GroupControlHead::decode(payload, &self.account)
+                .ok_or_else(corrupt)?;
+        self.merge_local_publication(
+            meta,
+            payload,
+            frontier,
+            head.proof.public(),
+            *head.group.as_bytes(),
+            head.access.complete_frontier,
+        )
+    }
+    pub(super) fn merge_local_group_inventory(
+        &mut self,
+        meta: AccountDocumentMeta,
+        payload: &[u8],
+        frontier: Vec<EventId>,
+    ) -> Result<bool, LogError> {
+        let (source, group, complete) =
+            super::inventory::local_publication(payload, &self.account).ok_or_else(corrupt)?;
+        self.merge_local_publication(meta, payload, frontier, source, *group.as_bytes(), complete)
+    }
+    fn merge_local_publication(
+        &mut self,
+        meta: AccountDocumentMeta,
+        payload: &[u8],
+        frontier: Vec<EventId>,
+        source: PublicIdentity,
+        group: [u8; 32],
+        complete: bool,
+    ) -> Result<bool, LogError> {
+        let receipt = if complete {
+            None
+        } else {
+            if frontier.is_empty() || frontier.len() > MAX_LOCAL_FRONTIER {
+                return Err(corrupt());
+            }
+            let receipt = LocalPublicationReceipt {
+                version: 1,
+                draft_lifetime: None,
+                account_public: self.account,
+                source: source.clone(),
+                group,
+                revision: meta.revision,
+                content_hash: meta.content_hash,
+                frontier_hex: frontier.iter().map(EventId::to_hex).collect(),
+            };
+            if !receipt.matches(&meta, &source) || receipt.frontier().as_ref() != Some(&frontier) {
+                return Err(corrupt());
+            }
+            Some(receipt)
+        };
+        self.merge_record(meta, payload, receipt)
+    }
+    pub(super) fn local_publication_frontier(
+        &self,
+        meta: &AccountDocumentMeta,
+        source: &PublicIdentity,
+    ) -> Option<Vec<EventId>> {
+        let retained = self.local_receipts.get(&meta.key)?;
+        retained
+            .receipt
+            .matches(meta, source)
+            .then(|| retained.receipt.frontier())
+            .flatten()
+    }
+    fn merge_record(
+        &mut self,
+        meta: AccountDocumentMeta,
+        payload: &[u8],
+        receipt: Option<LocalPublicationReceipt>,
+    ) -> Result<bool, LogError> {
         self.validate(&meta)?;
+        if matches!(meta.key, AccountDocumentKey::ConversationPersonal { .. })
+            && self.current.get(&meta.key).is_some_and(|old| old != &meta)
+        {
+            return Err(corrupt());
+        }
         if meta.key.is_private_control()
             && !match meta.key {
+                AccountDocumentKey::ConversationPersonal { .. } => {
+                    super::personal::decode(&meta, payload).is_some()
+                }
+                AccountDocumentKey::PublicProfile { .. } => {
+                    super::public_profile::valid_payload(&meta, payload)
+                }
+                AccountDocumentKey::GroupActivity { .. } => {
+                    super::group_activity::valid_payload(&meta, payload)
+                }
+                AccountDocumentKey::GroupLegacyOperation { .. } => {
+                    crate::node::account_group::operations::legacy_wire::valid_payload(
+                        &meta, payload,
+                    )
+                }
+                AccountDocumentKey::GroupOperation { .. } => {
+                    crate::node::account_group::operations::valid_payload(&meta, payload)
+                }
+                AccountDocumentKey::GroupControl { .. } => {
+                    super::group_control::valid_payload(&meta, payload)
+                }
                 AccountDocumentKey::DeviceHostname { .. } => {
                     super::device_hostname::valid_payload(&meta, payload)
                 }
@@ -322,21 +1008,97 @@ impl AccountDocumentStore {
             .get(&meta.key)
             .filter(|old| old.order() >= meta.order())
         {
-            if old == &meta
-                && !meta.tombstone
-                && (self.incomplete.contains(&meta.key) || self.get(&meta.key).is_err())
-            {
-                self.media
-                    .store_bytes(
-                        ConversationId::new(meta.content_hash),
-                        "document.bin",
-                        payload,
-                    )
-                    .map_err(LogError::Io)?;
-                self.incomplete.remove(&meta.key);
-                return Ok(true);
+            // An ordinary import intentionally cannot carry a source's private
+            // recovery receipt. The real source can reconstruct it from its
+            // exact validated public view without changing the signed head.
+            let recovering_local_receipt =
+                old == &meta && receipt.is_some() && !self.local_receipts.contains_key(&meta.key);
+            if !recovering_local_receipt {
+                if old == &meta
+                    && !meta.tombstone
+                    && (self.incomplete.contains(&meta.key) || self.get(&meta.key).is_err())
+                {
+                    self.media
+                        .store_bytes(
+                            ConversationId::new(meta.content_hash),
+                            "document.bin",
+                            payload,
+                        )
+                        .map_err(LogError::Io)?;
+                    self.incomplete.remove(&meta.key);
+                    return Ok(true);
+                }
+                return Ok(false);
             }
-            return Ok(false);
+        }
+        let inventory = matches!(meta.key, AccountDocumentKey::GroupInventory { .. });
+        let source_authenticated =
+            inventory && !meta.tombstone && super::inventory::source_authenticated(payload);
+        let old_floor = self.inventory_source_floors.contains(&meta.key);
+        if inventory && !meta.tombstone && !source_authenticated {
+            if old_floor {
+                return Err(corrupt());
+            }
+            if self
+                .current
+                .get(&meta.key)
+                .is_some_and(|old| !old.tombstone)
+            {
+                match self.get(&meta.key) {
+                    Ok(Some(old)) if super::inventory::source_authenticated(old.payload()) => {
+                        return Err(corrupt());
+                    }
+                    Err(_) => return Err(corrupt()),
+                    _ => {}
+                }
+            }
+        }
+        let source_authenticated = old_floor || source_authenticated;
+        let bytes = encode_row(&meta, receipt.as_ref(), source_authenticated)?;
+        let old_receipt = self.local_receipts.get(&meta.key);
+        let receipt_len = receipt
+            .as_ref()
+            .map(|receipt| serde_json::to_vec(receipt).map(|bytes| bytes.len()))
+            .transpose()
+            .map_err(|_| corrupt())?
+            .unwrap_or(0);
+        let old_row_len = self
+            .current
+            .get(&meta.key)
+            .map(|old| {
+                old_receipt.map_or_else(
+                    || encode_row(old, None, old_floor).map(|bytes| bytes.len()),
+                    |old| Ok(old.row_len),
+                )
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let index_bytes = self
+            .index_bytes
+            .saturating_sub(if self.current.contains_key(&meta.key) {
+                old_row_len + INDEX_FRAME
+            } else {
+                0
+            })
+            .saturating_add(bytes.len() + INDEX_FRAME);
+        let receipt_bytes = self
+            .receipt_bytes
+            .saturating_sub(old_receipt.map_or(0, |old| old.encoded_len))
+            .saturating_add(receipt_len);
+        let receipt_limit = MAX_LOCAL_RECEIPTS;
+        #[cfg(test)]
+        let receipt_limit = receipt_limit.min(self.receipt_limit);
+        if bytes.len()
+            > if receipt.is_some() {
+                MAX_LOCAL_ROW
+            } else {
+                8192
+            }
+            || receipt_bytes > receipt_limit
+            || index_bytes > MAX_COMPACT_INDEX
+        {
+            // Never orphan a retained incomplete head by evicting its receipt.
+            return Err(corrupt());
         }
         if meta.content_len > 0 && !meta.tombstone {
             self.media
@@ -347,7 +1109,6 @@ impl AccountDocumentStore {
                 )
                 .map_err(LogError::Io)?;
         }
-        let bytes = serde_json::to_vec(&meta).map_err(|_| corrupt())?;
         let old_hash = self
             .current
             .get(&meta.key)
@@ -355,14 +1116,26 @@ impl AccountDocumentStore {
             .map(|m| m.content_hash);
         let commit = (|| {
             if self.records >= self.current.len().saturating_mul(2).saturating_add(32)
-                || self.journal_bytes + bytes.len() + 32 > 120 * 1024 * 1024
+                || self.journal_bytes + bytes.len() + INDEX_FRAME > 120 * 1024 * 1024
             {
-                let rows: Result<Vec<_>, _> =
-                    self.current.values().map(serde_json::to_vec).collect();
+                let rows: Result<Vec<_>, _> = self
+                    .current
+                    .values()
+                    .map(|meta| {
+                        encode_row(
+                            meta,
+                            self.local_receipts
+                                .get(&meta.key)
+                                .map(|retained| &retained.receipt),
+                            self.inventory_source_floors.contains(&meta.key),
+                        )
+                    })
+                    .collect();
                 let rows = rows.map_err(|_| corrupt())?;
                 self.file.rewrite(&rows)?;
                 self.records = self.current.len();
-                self.journal_bytes = rows.iter().map(|r| r.len() + 32).sum();
+                self.journal_bytes =
+                    INDEX_HEADER + rows.iter().map(|r| r.len() + INDEX_FRAME).sum::<usize>();
             }
             self.file.append_durable(&bytes)
         })();
@@ -375,9 +1148,30 @@ impl AccountDocumentStore {
             }
             return Err(error);
         }
-        self.journal_bytes += bytes.len() + 32;
+        self.journal_bytes += bytes.len() + INDEX_FRAME;
         self.records += 1;
-        self.install(meta);
+        if let Some(control) = super::personal::decode(&meta, payload) {
+            self.index_personal_control(meta.clone(), control);
+        }
+        if let AccountDocumentKey::GroupOperation { channel, .. }
+        | AccountDocumentKey::GroupControl { channel, .. }
+        | AccountDocumentKey::GroupLegacyOperation { channel, .. } = &meta.key
+        {
+            let conversation = DocumentConversation::Channel(channel.clone());
+            let first = AccountDocumentKey::ConversationPersonal {
+                conversation: conversation.clone(),
+                action_id: String::new(),
+            };
+            if self
+                .personal
+                .range(first..)
+                .next()
+                .is_some_and(|(_, (_, c))| c.conversation == conversation)
+            {
+                self.personal_pending.insert(conversation);
+            }
+        }
+        self.install_record(meta, receipt, source_authenticated);
         if let Some(old_hash) = old_hash
             && !self.live().contains(&ConversationId::new(old_hash))
         {
@@ -389,10 +1183,31 @@ impl AccountDocumentStore {
         if !meta.valid(&self.account) {
             return Err(corrupt());
         }
+        let presentation = matches!(
+            meta.key,
+            AccountDocumentKey::PublicProfile { .. } | AccountDocumentKey::GroupActivity { .. }
+        );
         let seen = matches!(meta.key, AccountDocumentKey::ReadReceipt { .. });
         let custody = matches!(meta.key, AccountDocumentKey::ChannelCustody { .. });
         let reference = matches!(meta.key, AccountDocumentKey::GroupInventory { .. });
-        let count = if reference {
+        let operation = matches!(
+            meta.key,
+            AccountDocumentKey::GroupOperation { .. }
+                | AccountDocumentKey::GroupLegacyOperation { .. }
+        );
+        let group_control = matches!(
+            meta.key,
+            AccountDocumentKey::GroupControl { .. }
+                | AccountDocumentKey::ConversationPersonal { .. }
+        );
+        let count = if presentation {
+            self.counts[meta.key.domain() as usize]
+        } else if operation {
+            self.operation_keys
+        } else if group_control {
+            self.counts[AccountDocumentDomain::GroupControl as usize]
+                .saturating_sub(self.operation_keys)
+        } else if reference {
             self.counts[AccountDocumentDomain::GroupInventory as usize]
         } else if custody {
             self.counts[AccountDocumentDomain::ChannelCustody as usize]
@@ -403,10 +1218,19 @@ impl AccountDocumentStore {
                 - self.counts[AccountDocumentDomain::ReadReceipt as usize]
                 - self.counts[AccountDocumentDomain::ChannelCustody as usize]
                 - self.counts[AccountDocumentDomain::GroupInventory as usize]
+                - self.counts[AccountDocumentDomain::GroupControl as usize]
+                - self.counts[AccountDocumentDomain::PublicProfile as usize]
+                - self.counts[AccountDocumentDomain::GroupActivity as usize]
         };
         if !self.current.contains_key(&meta.key)
             && count
-                >= if reference {
+                >= if presentation {
+                    MAX_PRESENTATION_KEYS
+                } else if operation {
+                    MAX_GROUP_OPERATION_KEYS
+                } else if group_control {
+                    MAX_GROUP_CONTROL_KEYS
+                } else if reference {
                     MAX_REFERENCE_KEYS
                 } else if seen || custody {
                     MAX_MESSAGE_KEYS
@@ -427,6 +1251,19 @@ impl AccountDocumentStore {
             } else {
                 u64::from(meta.content_len)
             };
+        if operation
+            && self
+                .operation_bytes
+                .saturating_sub(previous)
+                .saturating_add(if meta.tombstone {
+                    0
+                } else {
+                    u64::from(meta.content_len)
+                })
+                > MAX_OPERATION_LIVE
+        {
+            return Err(corrupt());
+        }
         if bytes > MAX_LIVE {
             return Err(corrupt());
         }
@@ -441,8 +1278,449 @@ impl AccountDocumentStore {
     }
 }
 #[cfg(test)]
-mod budget_tests {
+mod tests {
     use super::*;
+    #[test]
+    fn legacy_child_rows_are_negotiated_before_digest_paging_and_share_operation_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let node = super::super::tests::node(&dir.path().join("node"), &account);
+        let writer = node.user_id();
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        let control = AccountDocumentKey::GroupControl {
+            channel: "a".repeat(64),
+            source_device: writer.clone(),
+        };
+        let ordinary = AccountDocumentKey::GroupOperation {
+            channel: "a".repeat(64),
+            source_device: writer.clone(),
+        };
+        let group = ConversationId::new([0xaa; 32]);
+        let genesis = crate::eventlog::Event::new(
+            &node.identity,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            crate::eventlog::EventKind::MembershipChange,
+            crate::channel::ChannelMeta {
+                name: "Negotiated document fixture".into(),
+                members: vec![node.identity.public()],
+                epoch: 0,
+                owner: writer.clone(),
+            }
+            .encode(),
+        );
+        node.log.lock().unwrap().append(genesis).unwrap();
+        node.process_channel(group);
+        node.publish_account_group_access(&mut None);
+        let document = node.account_document(&control).unwrap().unwrap();
+        store
+            .merge(document.meta.clone(), document.payload())
+            .unwrap();
+        let payload = crate::node::account_group::operations::wire::OperationFrame::new(
+            &node,
+            ConversationId::new([0xaa; 32]),
+            1,
+            crate::node::account_group::operations::wire::OperationProjection::default(),
+        )
+        .encode();
+        store
+            .merge(
+                AccountDocumentMeta::new(
+                    &account,
+                    writer.clone(),
+                    ordinary.clone(),
+                    1,
+                    &payload,
+                    false,
+                ),
+                &payload,
+            )
+            .unwrap();
+        let before = store.digest_scope(AccountDocumentDomain::GroupControl, true);
+        let legacy = AccountDocumentKey::GroupLegacyOperation {
+            channel: "a".repeat(64),
+            source_device: writer.clone(),
+        };
+        store
+            .merge(
+                AccountDocumentMeta::new(&account, writer.clone(), legacy.clone(), 1, &[], true),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store.operation_keys, 2,
+            "ordinary and child projections share their existing key quota"
+        );
+        assert_eq!(
+            store.digest_scope(AccountDocumentDomain::GroupControl, true),
+            before,
+            "an old operation peer must compare only its negotiated scope"
+        );
+        assert_ne!(
+            store.digest_operation_scope(AccountDocumentDomain::GroupControl, true, true),
+            before
+        );
+        assert_eq!(
+            store
+                .list_scope(AccountDocumentDomain::GroupControl, None, 64, true)
+                .len(),
+            2
+        );
+        assert!(
+            store
+                .list_operation_scope(
+                    AccountDocumentDomain::GroupControl,
+                    Some(&ordinary),
+                    1,
+                    true,
+                    false
+                )
+                .is_empty()
+        );
+        let page = store.list_operation_scope(
+            AccountDocumentDomain::GroupControl,
+            Some(&ordinary),
+            1,
+            true,
+            true,
+        );
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].key, legacy);
+        assert!(
+            store
+                .list_operation_scope(
+                    AccountDocumentDomain::GroupControl,
+                    Some(&legacy),
+                    1,
+                    true,
+                    true
+                )
+                .is_empty()
+        );
+        store.operation_keys = MAX_GROUP_OPERATION_KEYS;
+        let blocked = AccountDocumentKey::GroupLegacyOperation {
+            channel: "b".repeat(64),
+            source_device: writer.clone(),
+        };
+        assert!(
+            store
+                .merge(
+                    AccountDocumentMeta::new(&account, writer, blocked, 1, &[], true),
+                    &[]
+                )
+                .is_err()
+        );
+    }
+    fn historical_appended_domain_digest(meta: &AccountDocumentMeta) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"mesh-talk-account-document-index-v1");
+        // Both pre-merge implementations independently appended their domain at8.
+        hash.update([8]);
+        hash.update(metadata_hash(meta));
+        hash.update(1u64.to_be_bytes());
+        hash.finalize().into()
+    }
+    #[test]
+    fn device_hostname_digest_preserves_exact_premerge_byte_eight() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = super::super::tests::node(dir.path(), &Account::generate());
+        node.set_device_hostname(Some("private host")).unwrap();
+        let store = node.account_documents.lock().unwrap();
+        let meta = store
+            .meta(&AccountDocumentKey::DeviceHostname {
+                device_id: node.user_id(),
+            })
+            .unwrap();
+        assert_eq!(AccountDocumentDomain::DeviceHostname as usize, 8);
+        assert_eq!(
+            store.digest(AccountDocumentDomain::DeviceHostname),
+            historical_appended_domain_digest(&meta)
+        );
+    }
+    #[tokio::test]
+    async fn group_control_digest_preserves_exact_premerge_byte_eight_at_new_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = super::super::tests::node(dir.path(), &Account::generate());
+        let group = node
+            .create_channel("digest compatibility", vec![])
+            .await
+            .unwrap();
+        node.publish_account_group_access_for(group);
+        let store = node.account_documents.lock().unwrap();
+        let meta = store
+            .meta(&AccountDocumentKey::GroupControl {
+                channel: hex::encode(group.as_bytes()),
+                source_device: node.user_id(),
+            })
+            .unwrap();
+        assert_eq!(AccountDocumentDomain::GroupControl as usize, 9);
+        let expected = historical_appended_domain_digest(&meta);
+        assert_eq!(store.digest(AccountDocumentDomain::GroupControl), expected);
+        assert_eq!(
+            store.digest_scope(AccountDocumentDomain::GroupControl, false),
+            expected
+        );
+    }
+
+    #[test]
+    fn account_document_index_reopen_counts_physical_encrypted_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let path = dir
+            .path()
+            .join(format!("account-documents-{}.log", account.account_id()));
+        let open =
+            || AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        let check = |store: &AccountDocumentStore| {
+            assert_eq!(
+                store.journal_bytes as u64,
+                std::fs::metadata(&path).unwrap().len(),
+                "index budget must count physical encrypted bytes after reopen or compaction"
+            );
+        };
+        let mut store = open();
+        check(&store);
+        drop(store);
+        store = open();
+        check(&store);
+        for revision in 1..=4 {
+            if revision == 4 {
+                store.compact_next_for_test();
+            }
+            let payload = format!("draft revision {revision}");
+            let meta = AccountDocumentMeta::new(
+                &account,
+                "a".repeat(32),
+                AccountDocumentKey::Draft {
+                    conversation: DocumentConversation::Account("b".repeat(32)),
+                },
+                revision,
+                payload.as_bytes(),
+                false,
+            );
+            assert!(store.merge(meta, payload.as_bytes()).unwrap());
+            check(&store);
+            drop(store);
+            store = open();
+            check(&store);
+        }
+    }
+
+    #[test]
+    fn ordinary_index_rows_remain_exact_raw_metadata_json() {
+        let account = Account::generate();
+        let meta = AccountDocumentMeta::new(
+            &account,
+            "a".repeat(32),
+            AccountDocumentKey::Draft {
+                conversation: DocumentConversation::Account("b".repeat(32)),
+            },
+            1,
+            b"private draft",
+            false,
+        );
+        let raw = serde_json::to_vec(&meta).unwrap();
+        assert!(encode_row(&meta, None, false).unwrap() == raw);
+        let row: LocalIndexRow = serde_json::from_slice(&raw).unwrap();
+        assert!(row.meta == meta && row.receipt.is_none());
+        // Match the storage owner's actual bincode/encrypted frame shape.
+        assert_eq!(
+            bincode::serialized_size(&raw).unwrap() as usize + 4 + 12 + 16,
+            raw.len() + INDEX_FRAME
+        );
+    }
+    #[test]
+    fn local_publication_frontier_accepts_exact_limit_and_rejects_empty_or_larger_replacements() {
+        use crate::node::account_group::wire::GroupControlHead;
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let node = super::super::tests::node(&dir.path().join("source"), &account);
+        let source = node.identity.public();
+        let group = ConversationId::new([23; 32]);
+        let genesis = crate::eventlog::Event::new(
+            &node.identity,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            crate::eventlog::EventKind::MembershipChange,
+            crate::channel::ChannelMeta {
+                name: "Local publication index boundary".into(),
+                members: vec![source.clone()],
+                epoch: 0,
+                owner: source.user_id(),
+            }
+            .encode(),
+        );
+        node.log.lock().unwrap().append_durable(genesis).unwrap();
+        node.process_channel(group);
+        node.publish_account_group_access_for(group);
+        let mut head = node
+            .group_control_heads(group)
+            .into_iter()
+            .find(|head| head.proof.public() == source)
+            .unwrap();
+        // A conservative partial publication retains the authentic role and
+        // bounded public anchors. Only its private receipt exercises the limit.
+        head.access.complete_frontier = false;
+        let key = AccountDocumentKey::GroupControl {
+            channel: hex::encode(group.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let publication = |revision| {
+            let signed = GroupControlHead::new(
+                &node.identity,
+                group,
+                revision,
+                head.proof.clone(),
+                head.access.clone(),
+            );
+            let payload = signed.encode();
+            let meta = AccountDocumentMeta::new(
+                &account,
+                source.user_id(),
+                key.clone(),
+                revision,
+                &payload,
+                false,
+            );
+            assert!(super::super::group_control::valid_payload(&meta, &payload));
+            (meta, payload)
+        };
+        // Local receipt IDs are storage-boundary input, not imported public
+        // events or additional authority. They remain distinct and sorted.
+        let frontier: Vec<_> = (1..=MAX_LOCAL_FRONTIER)
+            .map(|index| {
+                let mut bytes = [0; 32];
+                bytes[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                EventId::new(bytes)
+            })
+            .collect();
+        let (meta, payload) = publication(1);
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        assert!(
+            store
+                .merge_local_group_control(meta.clone(), &payload, frontier.clone())
+                .unwrap()
+        );
+        assert_eq!(
+            store.local_publication_frontier(&meta, &source).as_ref(),
+            Some(&frontier)
+        );
+        drop(store);
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        assert_eq!(
+            store.local_publication_frontier(&meta, &source).as_ref(),
+            Some(&frontier)
+        );
+        let mut over_limit = frontier.clone();
+        let mut last = [0; 32];
+        last[..8].copy_from_slice(&((MAX_LOCAL_FRONTIER + 1) as u64).to_be_bytes());
+        over_limit.push(EventId::new(last));
+        for (index, invalid) in [Vec::new(), over_limit].into_iter().enumerate() {
+            let (replacement, payload) = publication(2 + index as u64);
+            assert!(
+                store
+                    .merge_local_group_control(replacement, &payload, invalid)
+                    .is_err()
+            );
+            assert_eq!(store.meta(&key).as_ref(), Some(&meta));
+            assert_eq!(
+                store.local_publication_frontier(&meta, &source).as_ref(),
+                Some(&frontier)
+            );
+        }
+    }
+
+    #[test]
+    fn publication_receipts_bind_exact_metadata_and_reject_invalid_frontiers() {
+        let account = Account::generate();
+        let device = DeviceIdentity::generate().public();
+        let meta = AccountDocumentMeta::new(
+            &account,
+            device.user_id(),
+            AccountDocumentKey::GroupControl {
+                channel: hex::encode([1; 32]),
+                source_device: device.user_id(),
+            },
+            9,
+            b"signed head placeholder for local record scope",
+            false,
+        );
+        let receipt = LocalPublicationReceipt {
+            version: 1,
+            draft_lifetime: None,
+            account_public: meta.account_public,
+            source: device.clone(),
+            group: [1; 32],
+            revision: meta.revision,
+            content_hash: meta.content_hash,
+            frontier_hex: hex::encode([2; 32]),
+        };
+        assert!(receipt.matches(&meta, &device));
+        assert_eq!(receipt.frontier().unwrap(), vec![EventId::new([2; 32])]);
+        for field in 0..6 {
+            let mut wrong = receipt.clone();
+            match field {
+                0 => wrong.account_public[0] ^= 1,
+                1 => wrong.source.x25519_pub[0] ^= 1,
+                2 => wrong.group[0] ^= 1,
+                3 => wrong.revision += 1,
+                4 => wrong.content_hash[0] ^= 1,
+                _ => wrong.version += 1,
+            }
+            assert!(!wrong.matches(&meta, &device));
+        }
+        for frontier in [
+            String::new(),
+            "00".into(),
+            hex::encode([2; 32]).repeat(2),
+            "00".repeat((MAX_LOCAL_FRONTIER + 1) * 32),
+        ] {
+            let mut wrong = receipt.clone();
+            wrong.frontier_hex = frontier;
+            assert!(wrong.frontier().is_none());
+        }
+        let ordinary = encode_row(&meta, None, false).unwrap();
+        let augmented = encode_row(&meta, Some(&receipt), false).unwrap();
+        assert!(augmented.len() > ordinary.len());
+        let parsed: LocalIndexRow = serde_json::from_slice(&augmented).unwrap();
+        assert!(parsed.meta == meta && parsed.receipt.is_some());
+    }
+    #[test]
+    fn group_control_quota_is_separate_and_existing_heads_can_advance_at_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let mut store =
+            AccountDocumentStore::open(dir.path(), "pw", &account.public().ed25519_pub).unwrap();
+        let writer = "a".repeat(32);
+        let key = AccountDocumentKey::GroupControl {
+            channel: "1".repeat(64),
+            source_device: writer.clone(),
+        };
+        let meta = AccountDocumentMeta::new(&account, writer.clone(), key.clone(), 1, &[], false);
+        store.counts[AccountDocumentDomain::Draft as usize] = MAX_ORDINARY_KEYS;
+        store.counts[AccountDocumentDomain::ReadReceipt as usize] = MAX_MESSAGE_KEYS;
+        store.counts[AccountDocumentDomain::ChannelCustody as usize] = MAX_MESSAGE_KEYS;
+        store.counts[AccountDocumentDomain::GroupInventory as usize] = MAX_REFERENCE_KEYS;
+        assert!(store.validate(&meta).is_ok());
+        store.counts[AccountDocumentDomain::GroupControl as usize] = MAX_GROUP_CONTROL_KEYS;
+        assert!(store.validate(&meta).is_err());
+        store.counts[AccountDocumentDomain::GroupControl as usize] -= 1;
+        store.install(meta);
+        let updated = AccountDocumentMeta::new(&account, writer, key, 2, &[], false);
+        assert!(
+            store.validate(&updated).is_ok(),
+            "a head revision must not allocate a new document key"
+        );
+    }
     #[test]
     fn group_inventory_quota_is_independent_and_bounded() {
         let dir = tempfile::tempdir().unwrap();
@@ -458,6 +1736,7 @@ mod budget_tests {
         store.counts[AccountDocumentDomain::Draft as usize] = MAX_ORDINARY_KEYS;
         store.counts[AccountDocumentDomain::ReadReceipt as usize] = MAX_MESSAGE_KEYS;
         store.counts[AccountDocumentDomain::ChannelCustody as usize] = MAX_MESSAGE_KEYS;
+        store.counts[AccountDocumentDomain::GroupControl as usize] = MAX_GROUP_CONTROL_KEYS;
         assert!(
             store.validate(&meta).is_ok(),
             "other domains must not exhaust reference quota"
@@ -466,7 +1745,12 @@ mod budget_tests {
         assert!(store.validate(&meta).is_err());
         assert_eq!(
             MAX_OWNED_BLOBS,
-            MAX_ORDINARY_KEYS + MAX_MESSAGE_KEYS + MAX_REFERENCE_KEYS
+            MAX_ORDINARY_KEYS
+                + MAX_MESSAGE_KEYS
+                + MAX_REFERENCE_KEYS
+                + MAX_GROUP_CONTROL_KEYS
+                + MAX_GROUP_OPERATION_KEYS
+                + 2 * MAX_PRESENTATION_KEYS
         );
     }
 

@@ -21,6 +21,23 @@ pub(crate) struct AccountGrantId {
     pub account_pub: [u8; 32],
     pub incarnation: [u8; 16],
 }
+/// Explicit self-decline of one invitation incarnation. Older empty-only
+/// ChannelLeave reducers reject this payload rather than treating it as leave.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AccountDeclinePayload {
+    pub version: u8,
+    pub grant: AccountGrantId,
+}
+impl AccountDeclinePayload {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        frame(b"MTCD1", self)
+    }
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        let payload: Self = unframe(b"MTCD1", bytes)?;
+        (payload.version == 1).then_some(payload)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AccountGrant {
     pub incarnation: [u8; 16],
@@ -98,6 +115,7 @@ impl AccountAuthorityControl {
 }
 /// Produced from the canonical legacy projection at this control's ancestry.
 /// These are accepted grant incarnations, not arbitrary current roster members.
+#[derive(Clone, Debug)]
 pub(crate) struct LegacyAccountMember {
     pub public: PublicIdentity,
     pub membership_event: EventId,
@@ -109,7 +127,28 @@ pub(crate) struct LegacyAuthorityContext {
     pub epoch: u64,
     pub accepted: Vec<LegacyAccountMember>,
     pub invited: Vec<LegacyAccountMember>,
+    pub live: Vec<PublicIdentity>,
 }
+#[derive(Clone, Debug)]
+pub(crate) struct LegacyDeparture {
+    pub member: LegacyAccountMember,
+    pub event: EventId,
+}
+type LegacyLifetimeKey = (EventId, Option<EventId>, [u8; 32], [u8; 32]);
+fn lifetime_key(member: &LegacyAccountMember) -> LegacyLifetimeKey {
+    (
+        member.membership_event,
+        member.acceptance_event,
+        member.public.ed25519_pub,
+        member.public.x25519_pub,
+    )
+}
+#[derive(Clone)]
+struct InitialLegacyCohort {
+    grant: AccountGrant,
+    originals: Vec<LegacyAccountMember>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AuthorityError {
     Invalid,
@@ -133,14 +172,232 @@ pub(crate) struct AccountAuthority {
     originals: Vec<Announce>,
     device_grants: HashMap<([u8; 32], [u8; 32]), AccountGrantId>,
     activated: HashSet<AccountGrantId>,
+    // Every authenticated acceptance matters to a later decline's causal view,
+    // including a concurrent acceptance that was already idempotent on replay.
+    acceptance_events: HashMap<AccountGrantId, HashSet<EventId>>,
+    // Reserve the acceptance epoch for a declined incarnation without activating
+    // it. A later full view must not reuse a partial Accept view's content epoch.
+    declined_epoch_reservations: HashSet<AccountGrantId>,
     origins: HashMap<AccountGrantId, EventId>,
     inherited: HashMap<([u8; 32], [u8; 32]), (AccountGrantId, EventId)>,
+    initial_legacy: HashMap<AccountGrantId, InitialLegacyCohort>,
+    legacy_candidates: Vec<LegacyDeparture>,
+    legacy_seen: HashMap<LegacyLifetimeKey, EventId>,
+    legacy_base: HashSet<LegacyLifetimeKey>,
+    legacy_omitted: Vec<LegacyAccountMember>,
 }
 impl AccountAuthority {
+    fn cohort_departed(&self, id: AccountGrantId, all: bool) -> bool {
+        self.initial_legacy.get(&id).is_some_and(|cohort| {
+            !cohort.originals.is_empty()
+                && cohort.originals.iter().all(|original| {
+                    if all {
+                        self.legacy_candidates.iter().any(|departure| {
+                            lifetime_key(&departure.member) == lifetime_key(original)
+                        })
+                    } else {
+                        self.legacy_seen.contains_key(&lifetime_key(original))
+                    }
+                })
+        })
+    }
+    fn cohort_closed(&self, id: AccountGrantId, all: bool) -> bool {
+        let protected_owner = Some(id.account_pub) == self.owner
+            && self.grants.get(&id.account_pub).and_then(AccountGrant::id) == Some(id);
+        !protected_owner && self.cohort_departed(id, all)
+    }
+    pub(crate) fn set_legacy_candidates(&mut self, candidates: Vec<LegacyDeparture>) {
+        self.legacy_candidates = candidates;
+    }
+    pub(crate) fn note_legacy_departure(&mut self, departure: &LegacyDeparture) {
+        self.legacy_seen
+            .entry(lifetime_key(&departure.member))
+            .and_modify(|event| *event = (*event).min(departure.event))
+            .or_insert(departure.event);
+    }
+    pub(crate) fn legacy_retired_source(
+        &self,
+        public: &PublicIdentity,
+        proof: &Announce,
+    ) -> Option<(AccountGrant, LegacyAccountMember, EventId)> {
+        if proof.public() != *public || !proof.valid_presence() {
+            return None;
+        }
+        let account = proof.account_cert.as_ref()?.account_ed25519_pub;
+        let (id, cohort) = self
+            .initial_legacy
+            .iter()
+            .find(|(id, _)| id.account_pub == account)?;
+        if !self.cohort_closed(*id, false) {
+            return None;
+        }
+        if self
+            .origins
+            .keys()
+            .any(|other| other.account_pub == account && other != id)
+        {
+            return None;
+        }
+        if self
+            .grants
+            .get(&account)
+            .is_some_and(|grant| grant.id() != Some(*id))
+        {
+            return None;
+        }
+        let original = cohort
+            .originals
+            .iter()
+            .find(|member| member.public == *public)?;
+        let event = *self.legacy_seen.get(&lifetime_key(original))?;
+        Some((cohort.grant.clone(), original.clone(), event))
+    }
+    pub(crate) fn omitted_legacy_departure(
+        &self,
+        public: &PublicIdentity,
+        proof: &Announce,
+    ) -> Option<EventId> {
+        if proof.public() != *public || !proof.verify() {
+            return None;
+        }
+        let account = proof.account_cert.as_ref()?.account_ed25519_pub;
+        // A later account incarnation owns its own terminal/acceptance rules.
+        if self
+            .origins
+            .iter()
+            .any(|(id, origin)| id.account_pub == account && Some(*origin) != self.genesis)
+        {
+            return None;
+        }
+        let original = self
+            .legacy_omitted
+            .iter()
+            .find(|member| member.public == *public)?;
+        self.legacy_seen.get(&lifetime_key(original)).copied()
+    }
+    pub(crate) fn legacy_closing_events(
+        &self,
+        public: &PublicIdentity,
+        proof: &Announce,
+    ) -> Vec<EventId> {
+        let retired = self
+            .legacy_retired_source(public, proof)
+            .and_then(|(grant, _, _)| grant.id());
+        let omitted = self.omitted_legacy_departure(public, proof).is_some();
+        let account = proof
+            .account_cert
+            .as_ref()
+            .map(|cert| cert.account_ed25519_pub);
+        let mut events: Vec<_> = self
+            .initial_legacy
+            .iter()
+            .filter(|(id, _)| {
+                retired == Some(**id)
+                    || omitted && Some(id.account_pub) == account && self.cohort_closed(**id, false)
+            })
+            .flat_map(|(_, cohort)| {
+                cohort
+                    .originals
+                    .iter()
+                    .filter_map(|member| self.legacy_seen.get(&lifetime_key(member)).copied())
+            })
+            .collect();
+        events.sort_by_key(|event| *event.as_bytes());
+        events.dedup();
+        events
+    }
+    pub(crate) fn legacy_closing_basis(
+        &self,
+        public: &PublicIdentity,
+        proof: &Announce,
+    ) -> Vec<EventId> {
+        let mut events = self.legacy_closing_events(public, proof);
+        // An individually retired omitted device may still observe a live
+        // initial sibling; freeze a negative account cut only once that cohort
+        // is wholly closed (or the initial cut omitted the account entirely).
+        let account_has_initial_grant = proof.account_cert.as_ref().is_some_and(|cert| {
+            self.origins
+                .keys()
+                .any(|id| id.account_pub == cert.account_ed25519_pub)
+        });
+        if !events.is_empty() || !account_has_initial_grant {
+            events.extend(self.omitted_legacy_departure(public, proof));
+        }
+        if !events.is_empty() {
+            events.extend(self.genesis);
+        }
+        events.sort_by_key(|event| *event.as_bytes());
+        events.dedup();
+        events
+    }
+    pub(crate) fn legacy_closed_device_proofs(&self) -> Vec<Announce> {
+        self.originals
+            .iter()
+            .filter(|proof| {
+                let Some(id) = self
+                    .device_grants
+                    .get(&(proof.ed25519_pub, proof.x25519_pub))
+                else {
+                    return false;
+                };
+                self.cohort_closed(*id, false)
+                    && self.grants.get(&id.account_pub).and_then(AccountGrant::id) == Some(*id)
+            })
+            .cloned()
+            .collect()
+    }
+    pub(crate) fn legacy_departure_account(&self, event: EventId) -> Option<[u8; 32]> {
+        let departure = self
+            .legacy_candidates
+            .iter()
+            .find(|departure| departure.event == event)?;
+        self.initial_legacy
+            .iter()
+            .find(|(_, cohort)| {
+                cohort
+                    .originals
+                    .iter()
+                    .any(|member| lifetime_key(member) == lifetime_key(&departure.member))
+            })
+            .map(|(id, _)| id.account_pub)
+    }
+    pub(crate) fn legacy_departure_current(&self, event: EventId) -> bool {
+        self.legacy_departure_account(event).is_some_and(|account| {
+            self.grants
+                .get(&account)
+                .and_then(AccountGrant::id)
+                .is_some_and(|id| self.initial_legacy.contains_key(&id))
+        })
+    }
     pub(crate) fn key_epoch(&self) -> Option<u64> {
+        let original_keys: HashSet<_> = self
+            .initial_legacy
+            .values()
+            .flat_map(|cohort| cohort.originals.iter().map(lifetime_key))
+            .collect();
+        let legacy = self
+            .legacy_seen
+            .keys()
+            .filter(|key| original_keys.contains(*key) && !self.legacy_base.contains(*key))
+            .count();
+        let ordinary = self
+            .revoked
+            .keys()
+            .filter(|id| !self.cohort_departed(**id, false))
+            .count();
         self.base_epoch?
-            .checked_add(self.added_grants.len() as u64)?
-            .checked_add(self.revoked.len() as u64)
+            .checked_add(
+                self.added_grants
+                    .union(&self.declined_epoch_reservations)
+                    .count() as u64,
+            )?
+            .checked_add(legacy as u64)?
+            .checked_add(ordinary as u64)
+    }
+    pub(crate) fn control_grants(&self) -> Vec<AccountGrant> {
+        let mut grants: Vec<_> = self.grants.values().cloned().collect();
+        grants.sort_by_key(|grant| grant.id().map(|id| id.account_pub));
+        grants
     }
     pub(crate) fn original_device_proofs(&self) -> Vec<Announce> {
         self.originals
@@ -160,29 +417,54 @@ impl AccountAuthority {
             .map(|ed25519_pub| AccountPublic { ed25519_pub }.account_id())
     }
     pub(crate) fn grants(&self) -> Vec<AccountGrant> {
-        let mut grants: Vec<_> = self.grants.values().cloned().collect();
-        grants.sort_by_key(|grant| grant.id().map(|id| id.account_pub));
-        grants
+        self.control_grants()
+            .into_iter()
+            .filter(|grant| grant.id().is_some_and(|id| !self.cohort_closed(id, false)))
+            .collect()
     }
     pub(crate) fn revoked(&self) -> Vec<AccountGrantId> {
-        let mut ids: Vec<_> = self.revoked.keys().copied().collect();
+        let mut ids: Vec<_> = self
+            .revoked
+            .keys()
+            .copied()
+            .chain(
+                self.initial_legacy
+                    .keys()
+                    .filter(|id| self.cohort_closed(**id, false))
+                    .copied(),
+            )
+            .collect();
         ids.sort_by_key(|id| (id.account_pub, id.incarnation));
+        ids.dedup();
         ids
     }
-    pub(crate) fn revocation_events(&self, account_pub: &[u8; 32]) -> Vec<EventId> {
-        let mut events: Vec<_> = self
-            .revoked
+    pub(crate) fn explicit_revocation_events(&self, account_pub: &[u8; 32]) -> Vec<EventId> {
+        self.revoked
             .iter()
             .filter(|(id, _)| &id.account_pub == account_pub)
             .map(|(_, event)| *event)
-            .collect();
+            .collect()
+    }
+    pub(crate) fn revocation_events(&self, account_pub: &[u8; 32]) -> Vec<EventId> {
+        let mut events = self.explicit_revocation_events(account_pub);
+        for (id, cohort) in &self.initial_legacy {
+            if &id.account_pub == account_pub && self.cohort_closed(*id, false) {
+                events.extend(
+                    cohort
+                        .originals
+                        .iter()
+                        .filter_map(|member| self.legacy_seen.get(&lifetime_key(member)).copied()),
+                );
+            }
+        }
         events.sort_by_key(|id| *id.as_bytes());
         events.dedup();
         events
     }
     pub(crate) fn account_grant(&self, account_pub: &[u8; 32]) -> Option<&AccountGrant> {
         let grant = self.grants.get(account_pub)?;
-        (!self.revoked.contains_key(&grant.id()?)).then_some(grant)
+        (!self.revoked.contains_key(&grant.id()?) && !self.cohort_closed(grant.id()?, false))
+            .then_some(grant)
     }
     pub(crate) fn inherit_device(
         &mut self,
@@ -264,7 +546,8 @@ impl AccountAuthority {
         {
             return None;
         }
-        (!self.revoked.contains_key(&grant.id()?)).then_some(grant)
+        (!self.revoked.contains_key(&grant.id()?) && !self.cohort_closed(grant.id()?, false))
+            .then_some(grant)
     }
     pub(crate) fn grant_for_device(
         &self,
@@ -332,12 +615,21 @@ impl AccountAuthority {
         ) {
             return Err(AuthorityError::Stale);
         }
-        if !grant.pending || self.activated.contains(&id) {
+        if !grant.pending {
             return Ok(false);
         }
-        self.key_epoch()
-            .and_then(|epoch| epoch.checked_add(1))
-            .ok_or(AuthorityError::Unsupported)?;
+        if !self.activated.contains(&id) {
+            self.key_epoch()
+                .and_then(|epoch| epoch.checked_add(1))
+                .ok_or(AuthorityError::Unsupported)?;
+        }
+        self.acceptance_events
+            .entry(id)
+            .or_default()
+            .insert(event.id);
+        if self.activated.contains(&id) {
+            return Ok(false);
+        }
         self.activated.insert(id);
         self.added_grants.insert(id);
         Ok(true)
@@ -376,6 +668,113 @@ impl AccountAuthority {
             .ok_or(AuthorityError::Unsupported)?;
         self.revoked.entry(id).or_insert(event.id);
         self.grants.remove(&id.account_pub);
+        Ok(true)
+    }
+    pub(crate) fn replay_leave_after_legacy_closure(
+        &mut self,
+        event: &Event,
+        proof: &Announce,
+        graph: &EventGraph<'_>,
+    ) -> Result<bool, AuthorityError> {
+        self.validate_self_action(event, proof, EventKind::ChannelLeave)?;
+        let account = proof
+            .account_cert
+            .as_ref()
+            .ok_or(AuthorityError::Invalid)?
+            .account_ed25519_pub;
+        let grant = self.grants.get(&account).ok_or(AuthorityError::Invalid)?;
+        let id = grant.id().ok_or(AuthorityError::Invalid)?;
+        if !self.cohort_closed(id, false)
+            || self
+                .inherited
+                .get(&(proof.ed25519_pub, proof.x25519_pub))
+                .is_some_and(|(_, binding)| !descends(event.id, *binding, graph))
+            || Some(account) == self.owner
+            || self
+                .device_grants
+                .get(&(proof.ed25519_pub, proof.x25519_pub))
+                != Some(&id)
+            || !self.originals.iter().any(|original| {
+                original.public() == proof.public() && original.account_id() == proof.account_id()
+            })
+            || !descends(
+                event.id,
+                self.grant_origin(id)
+                    .ok_or(AuthorityError::MissingAncestry)?,
+                graph,
+            )
+        {
+            return Err(AuthorityError::Stale);
+        }
+        self.revoked.entry(id).or_insert(event.id);
+        self.grants.remove(&account);
+        Ok(true)
+    }
+    /// Revoke only an incarnation that was still pending in this action's own
+    /// causal view. Concurrent Accept cannot defeat decline or reuse its epoch.
+    pub(crate) fn decline_account(
+        &mut self,
+        event: &Event,
+        proof: &Announce,
+        graph: &EventGraph<'_>,
+    ) -> Result<bool, AuthorityError> {
+        let payload =
+            AccountDeclinePayload::decode(&event.ciphertext).ok_or(AuthorityError::Invalid)?;
+        if self.channel != Some(event.conversation_id)
+            || event.kind != EventKind::ChannelLeave
+            || !valid_event(event)
+            || !proof.valid_presence()
+            || proof.post_office
+            || event.author.ed25519_pub() != &proof.ed25519_pub
+            || Some(payload.grant.account_pub) == self.owner
+        {
+            return Err(AuthorityError::Invalid);
+        }
+        let grant = self
+            .proof_grant(&proof.public(), proof)
+            .ok_or(AuthorityError::Invalid)?;
+        if !grant.pending || grant.id() != Some(payload.grant) {
+            return Err(AuthorityError::Invalid);
+        }
+        if !descends(
+            event.id,
+            self.grant_origin(payload.grant)
+                .ok_or(AuthorityError::MissingAncestry)?,
+            graph,
+        ) || self
+            .inherited
+            .get(&(proof.ed25519_pub, proof.x25519_pub))
+            .is_some_and(|(_, binding)| !descends(event.id, *binding, graph))
+        {
+            return Err(AuthorityError::MissingAncestry);
+        }
+        if let Some(accepted) = self.acceptance_events.get(&payload.grant) {
+            let mut pending = event.parents.clone();
+            let mut visited = HashSet::new();
+            while let Some(id) = pending.pop() {
+                if accepted.contains(&id) {
+                    return Err(AuthorityError::Invalid);
+                }
+                if visited.insert(id)
+                    && let Some(parent) = graph.get(&id)
+                {
+                    pending.extend(parent.parents.iter().copied());
+                }
+            }
+        }
+        let increment = if self.added_grants.contains(&payload.grant)
+            || self.declined_epoch_reservations.contains(&payload.grant)
+        {
+            1
+        } else {
+            2
+        };
+        self.key_epoch()
+            .and_then(|epoch| epoch.checked_add(increment))
+            .ok_or(AuthorityError::Unsupported)?;
+        self.declined_epoch_reservations.insert(payload.grant);
+        self.revoked.entry(payload.grant).or_insert(event.id);
+        self.grants.remove(&payload.grant.account_pub);
         Ok(true)
     }
     fn validate_self_action(
@@ -490,15 +889,35 @@ impl AccountAuthority {
         let mut pins = self.pinned.clone();
         let mut originals = self.originals.clone();
         if initial {
-            if control.legacy_bindings.len() != legacy.accepted.len() + legacy.invited.len() {
+            if control.legacy_bindings.len() > legacy.accepted.len() + legacy.invited.len()
+                || legacy
+                    .accepted
+                    .iter()
+                    .chain(&legacy.invited)
+                    .filter(|member| {
+                        legacy.live.contains(&member.public)
+                            || legacy
+                                .invited
+                                .iter()
+                                .any(|invited| lifetime_key(invited) == lifetime_key(member))
+                            || !self.legacy_seen.contains_key(&lifetime_key(member))
+                    })
+                    .any(|member| {
+                        !control
+                            .legacy_bindings
+                            .iter()
+                            .any(|proof| proof.public() == member.public)
+                    })
+            {
                 return Err(AuthorityError::Invalid);
             }
             let mut seen = HashSet::new();
-            for member in legacy.accepted.iter().chain(&legacy.invited) {
-                let proof = control
-                    .legacy_bindings
+            for proof in &control.legacy_bindings {
+                let member = legacy
+                    .accepted
                     .iter()
-                    .find(|proof| proof.public() == member.public)
+                    .chain(&legacy.invited)
+                    .find(|member| member.public == proof.public())
                     .ok_or(AuthorityError::MissingAncestry)?;
                 if !proof.valid_presence()
                     || proof.post_office
@@ -591,6 +1010,12 @@ impl AccountAuthority {
             }
             next.insert(id.account_pub, grant.clone());
         }
+        if next
+            .get(&control.owner_account)
+            .is_some_and(|grant| grant.id().is_some_and(|id| self.cohort_closed(id, true)))
+        {
+            return Err(AuthorityError::Invalid);
+        }
         if next.get(&control.owner_account).is_none_or(|grant| {
             self.revoked
                 .contains_key(&grant.id().expect("validated grant"))
@@ -603,15 +1028,25 @@ impl AccountAuthority {
         }
         if initial {
             let binding_accounts: HashSet<_> = pins.values().copied().collect();
-            if legacy.accepted.iter().any(|member| {
-                control
-                    .legacy_bindings
-                    .iter()
-                    .find(|proof| proof.public() == member.public)
-                    .and_then(|proof| proof.account_cert.as_ref())
-                    .and_then(|cert| next.get(&cert.account_ed25519_pub))
-                    .is_none_or(|grant| grant.pending)
-            }) {
+            if legacy
+                .accepted
+                .iter()
+                .filter(|member| {
+                    control
+                        .legacy_bindings
+                        .iter()
+                        .any(|proof| proof.public() == member.public)
+                })
+                .any(|member| {
+                    control
+                        .legacy_bindings
+                        .iter()
+                        .find(|proof| proof.public() == member.public)
+                        .and_then(|proof| proof.account_cert.as_ref())
+                        .and_then(|cert| next.get(&cert.account_ed25519_pub))
+                        .is_none_or(|grant| grant.pending)
+                })
+            {
                 return Err(AuthorityError::Invalid);
             }
             if binding_accounts != next.keys().copied().collect()
@@ -668,7 +1103,7 @@ impl AccountAuthority {
             tombstones.entry(*id).or_insert(event.id);
         }
         let base = self.base_epoch.unwrap_or(legacy.epoch);
-        base.checked_add(added.len() as u64)
+        base.checked_add(added.union(&self.declined_epoch_reservations).count() as u64)
             .and_then(|epoch| epoch.checked_add(tombstones.len() as u64))
             .ok_or(AuthorityError::Unsupported)?;
         if !stale {
@@ -719,6 +1154,54 @@ impl AccountAuthority {
             if initial {
                 self.genesis = Some(event.id);
                 self.base_epoch = Some(legacy.epoch);
+                // The initial legacy epoch already accounts for each departure in
+                // its causal cut, even when another fork of that lifetime is
+                // later chosen as the canonical evidence event.
+                self.legacy_base = self.legacy_seen.keys().copied().collect();
+                self.legacy_base.extend(
+                    self.legacy_candidates
+                        .iter()
+                        .filter(|departure| descends(event.id, departure.event, graph))
+                        .map(|departure| lifetime_key(&departure.member)),
+                );
+                self.legacy_omitted = legacy
+                    .accepted
+                    .iter()
+                    .filter(|member| {
+                        !control
+                            .legacy_bindings
+                            .iter()
+                            .any(|proof| proof.public() == member.public)
+                            && self.legacy_seen.contains_key(&lifetime_key(member))
+                    })
+                    .cloned()
+                    .collect();
+                for grant in &control.grants {
+                    let id = grant.id().expect("validated grant");
+                    if grant.pending {
+                        continue;
+                    }
+                    let originals = legacy
+                        .accepted
+                        .iter()
+                        .filter(|member| {
+                            control.legacy_bindings.iter().any(|proof| {
+                                proof.public() == member.public
+                                    && proof.account_cert.as_ref().is_some_and(|cert| {
+                                        cert.account_ed25519_pub == id.account_pub
+                                    })
+                            })
+                        })
+                        .cloned()
+                        .collect();
+                    self.initial_legacy.insert(
+                        id,
+                        InitialLegacyCohort {
+                            grant: grant.clone(),
+                            originals,
+                        },
+                    );
+                }
             }
         }
         self.valid_controls.insert(event.id);
@@ -917,6 +1400,7 @@ mod tests {
                 channel: self.channel,
                 owner: self.owner.public(),
                 epoch: 7,
+                live: vec![self.owner.public(), self.a.public(), self.b.public()],
                 invited: vec![],
                 accepted: vec![self.owner.public(), self.a.public(), self.b.public()]
                     .into_iter()
@@ -977,6 +1461,317 @@ mod tests {
                 .retain(|grant| grant.id().unwrap().account_pub != account.public().ed25519_pub);
             control
         }
+    }
+    fn projected(f: &Fixture, events: &[&Event]) -> AccountAuthority {
+        crate::node::channel::ChannelBook::project_membership(f.channel, events).authority
+    }
+    fn same_account_initial(
+        f: &Fixture,
+        root: EventId,
+        owner_cohort: bool,
+    ) -> AccountAuthorityControl {
+        let mut initial = f.control(root);
+        let account = if owner_cohort {
+            &f.owner_account
+        } else {
+            &f.aa
+        };
+        initial.legacy_bindings[2] =
+            Announce::new_with_account(&f.b, account, "second original", 1);
+        initial.grants.remove(2);
+        initial
+    }
+    #[test]
+    fn initial_cohort_departures_preserve_remaining_member_and_distinct_epoch_ledger() {
+        let f = Fixture::new();
+        let root = f.genesis();
+        let initial = same_account_initial(&f, root.id, false);
+        let upgrade = f.event(
+            &f.owner,
+            2,
+            vec![root.id],
+            EventKind::ChannelAccountAuthority,
+            initial.encode(),
+        );
+        let first = f.event(&f.a, 3, vec![root.id], EventKind::ChannelLeave, vec![]);
+        let second = f.event(&f.b, 4, vec![root.id], EventKind::ChannelLeave, vec![]);
+        let partial = projected(&f, &[&root, &upgrade, &first]);
+        assert!(partial.account_grant(&f.aa.public().ed25519_pub).is_some());
+        assert_eq!(partial.key_epoch(), Some(8));
+        let modern = f.event(
+            &f.b,
+            5,
+            vec![upgrade.id, first.id],
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let modern_partial = projected(&f, &[&root, &upgrade, &first, &modern]);
+        assert!(
+            modern_partial
+                .account_grant(&f.aa.public().ed25519_pub)
+                .is_none()
+        );
+        assert_eq!(modern_partial.key_epoch(), Some(9));
+        for events in [
+            vec![&root, &upgrade, &first, &second],
+            vec![&second, &first, &upgrade, &root],
+            vec![&root, &upgrade, &first, &modern, &second],
+        ] {
+            let projection =
+                crate::node::channel::ChannelBook::project_membership(f.channel, &events);
+            if events.iter().any(|event| event.id == modern.id) {
+                assert!(
+                    projection.authorized.contains(&modern.id),
+                    "a valid modern departure remains admitted after concurrent legacy closure"
+                );
+            }
+            let closed = projection.authority;
+            assert!(closed.account_grant(&f.aa.public().ed25519_pub).is_none());
+            assert_eq!(closed.key_epoch(), Some(9));
+            assert!(
+                closed
+                    .account_grant(&f.owner_account.public().ed25519_pub)
+                    .is_some()
+            );
+        }
+    }
+    #[test]
+    fn closed_initial_account_cannot_receive_ownership_but_unrelated_controls_survive() {
+        let f = Fixture::new();
+        let root = f.genesis();
+        let initial = f.control(root.id);
+        let upgrade = f.event(
+            &f.owner,
+            2,
+            vec![root.id],
+            EventKind::ChannelAccountAuthority,
+            initial.encode(),
+        );
+        let leave = f.event(&f.a, 5, vec![root.id], EventKind::ChannelLeave, vec![]);
+        let mut transfer = initial.clone();
+        transfer.previous = Some(upgrade.id);
+        transfer.legacy_bindings.clear();
+        transfer.owner_account = f.aa.public().ed25519_pub;
+        let invalid = f.event(
+            &f.owner,
+            3,
+            vec![upgrade.id],
+            EventKind::ChannelAccountAuthority,
+            transfer.encode(),
+        );
+        let rejected = projected(&f, &[&root, &upgrade, &invalid, &leave]);
+        assert_eq!(
+            rejected.owner_account_id(),
+            Some(f.owner_account.account_id())
+        );
+        assert_eq!(rejected.current_event(), Some(upgrade.id));
+        transfer.owner_account = f.b_account.public().ed25519_pub;
+        let valid = f.event(
+            &f.owner,
+            4,
+            vec![upgrade.id],
+            EventKind::ChannelAccountAuthority,
+            transfer.encode(),
+        );
+        let accepted = projected(&f, &[&root, &upgrade, &valid, &leave]);
+        assert_eq!(accepted.current_event(), Some(valid.id));
+        assert_eq!(accepted.owner_account_id(), Some(f.b_account.account_id()));
+        assert!(accepted.account_grant(&f.aa.public().ed25519_pub).is_none());
+        assert_eq!(accepted.key_epoch(), Some(8));
+    }
+    #[test]
+    fn initial_owner_sibling_departure_rotates_epoch_without_retiring_owner() {
+        let f = Fixture::new();
+        let root = f.genesis();
+        let initial = same_account_initial(&f, root.id, true);
+        let upgrade = f.event(
+            &f.owner,
+            2,
+            vec![root.id],
+            EventKind::ChannelAccountAuthority,
+            initial.encode(),
+        );
+        let leave = f.event(&f.b, 3, vec![root.id], EventKind::ChannelLeave, vec![]);
+        let state = projected(&f, &[&root, &upgrade, &leave]);
+        assert_eq!(state.current_event(), Some(upgrade.id));
+        assert_eq!(state.key_epoch(), Some(8));
+        assert!(state.can_admin(&f.owner.public(), &initial.issuer));
+        assert!(
+            state
+                .account_grant(&f.owner_account.public().ed25519_pub)
+                .is_some()
+        );
+    }
+    #[test]
+    fn fresh_account_incarnation_is_not_revoked_by_concurrent_initial_legacy_leave() {
+        let f = Fixture::new();
+        let root = f.genesis();
+        let initial = f.control(root.id);
+        let upgrade = f.event(
+            &f.owner,
+            2,
+            vec![root.id],
+            EventKind::ChannelAccountAuthority,
+            initial.encode(),
+        );
+        let modern_leave = f.event(&f.a, 3, vec![upgrade.id], EventKind::ChannelLeave, vec![]);
+        let fresh_root = f.event(
+            &f.owner,
+            4,
+            vec![modern_leave.id],
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "fresh accepted lifetime".into(),
+                members: vec![f.owner.public(), f.a.public(), f.b.public()],
+                epoch: 9,
+                owner: f.owner.user_id(),
+            }
+            .encode(),
+        );
+        let mut regrant = initial.clone();
+        regrant.previous = Some(upgrade.id);
+        regrant.legacy_bindings.clear();
+        regrant.grants[1].incarnation = [99; 16];
+        regrant.grants[1].membership_event = fresh_root.id;
+        let fresh = f.event(
+            &f.owner,
+            5,
+            vec![fresh_root.id],
+            EventKind::ChannelAccountAuthority,
+            regrant.encode(),
+        );
+        let old_leave = f.event(&f.a, 6, vec![root.id], EventKind::ChannelLeave, vec![]);
+        let graph = HashMap::from([
+            (root.id, &root),
+            (upgrade.id, &upgrade),
+            (modern_leave.id, &modern_leave),
+            (fresh_root.id, &fresh_root),
+            (fresh.id, &fresh),
+            (old_leave.id, &old_leave),
+        ]);
+        assert!(!descends(fresh.id, old_leave.id, &graph));
+        let before = projected(&f, &[&root, &upgrade, &modern_leave, &fresh_root, &fresh]);
+        assert_eq!(before.current_event(), Some(fresh.id));
+        let after = projected(
+            &f,
+            &[
+                &root,
+                &upgrade,
+                &modern_leave,
+                &fresh_root,
+                &fresh,
+                &old_leave,
+            ],
+        );
+        assert_eq!(after.current_event(), Some(fresh.id));
+        let active = after
+            .account_grant(&f.aa.public().ed25519_pub)
+            .expect("fresh accepted grant remains active");
+        assert_eq!(active.id(), regrant.grants[1].id());
+        assert_ne!(active.id(), initial.grants[1].id());
+        assert!(after.is_member(&f.a.public(), &initial.grants[1].original));
+        assert!(after.key_epoch().unwrap() >= before.key_epoch().unwrap());
+    }
+    #[test]
+    fn initial_cut_acknowledges_a_departure_lifetime_not_only_its_selected_fork_id() {
+        let f = Fixture::new();
+        let root = f.genesis();
+        // Force the later imported fork to become the canonical lower ID;
+        // the initial cut still causally acknowledges only the other fork.
+        // Vary both signed candidates, rather than retaining a potentially
+        // near-minimal fixed hash as the search target.
+        let (left, fork) = (0..1024)
+            .find_map(|timestamp| {
+                let left = Event::new(
+                    &f.a,
+                    f.channel,
+                    2,
+                    vec![root.id],
+                    2,
+                    timestamp,
+                    EventKind::ChannelLeave,
+                    vec![],
+                );
+                let fork = Event::new(
+                    &f.a,
+                    f.channel,
+                    5,
+                    vec![root.id],
+                    5,
+                    timestamp,
+                    EventKind::ChannelLeave,
+                    vec![],
+                );
+                (fork.id < left.id).then_some((left, fork))
+            })
+            .expect("an ordered pair of content-addressed signed forks");
+        assert!(fork.id < left.id);
+        let initial = f.control(root.id);
+        let upgrade = f.event(
+            &f.owner,
+            4,
+            vec![left.id],
+            EventKind::ChannelAccountAuthority,
+            initial.encode(),
+        );
+        let first = projected(&f, &[&root, &left, &upgrade]);
+        assert_eq!(first.current_event(), Some(upgrade.id));
+        assert_eq!(first.key_epoch(), Some(8));
+        let duplicate = projected(&f, &[&root, &left, &upgrade, &fork]);
+        assert_eq!(duplicate.key_epoch(), first.key_epoch());
+        assert!(
+            duplicate
+                .account_grant(&f.aa.public().ed25519_pub)
+                .is_none()
+        );
+    }
+    #[test]
+    fn initial_cut_cannot_omit_pending_legacy_invitation_bindings() {
+        let f = Fixture::new();
+        let root = f.event(
+            &f.owner,
+            1,
+            vec![],
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "pending originals".into(),
+                members: vec![f.owner.public(), f.a.public(), f.b.public()],
+                epoch: 7,
+                owner: f.owner.user_id(),
+            }
+            .encode_invitation(),
+        );
+        let mut context = f.context(root.id);
+        context.invited = context.accepted.split_off(1);
+        context.live = vec![f.owner.public()];
+        let mut initial = f.control(root.id);
+        initial.grants[1].pending = true;
+        initial.grants[2].pending = true;
+        let valid = f.event(
+            &f.owner,
+            2,
+            vec![root.id],
+            EventKind::ChannelAccountAuthority,
+            initial.encode(),
+        );
+        let graph = HashMap::from([(root.id, &root), (valid.id, &valid)]);
+        AccountAuthority::default()
+            .apply(&valid, &context, &graph)
+            .unwrap();
+        initial.legacy_bindings.pop();
+        initial.grants.pop();
+        let omission = f.event(
+            &f.owner,
+            3,
+            vec![root.id],
+            EventKind::ChannelAccountAuthority,
+            initial.encode(),
+        );
+        let graph = HashMap::from([(root.id, &root), (omission.id, &omission)]);
+        assert_eq!(
+            AccountAuthority::default().apply(&omission, &context, &graph),
+            Err(AuthorityError::Invalid)
+        );
     }
     #[test]
     fn stolen_device_signing_key_cannot_substitute_exchange_key_or_manage_account() {
@@ -1606,6 +2401,152 @@ mod tests {
             state
                 .leave_account(&legitimate_leave, &proof, &graph)
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn pending_decline_epoch_reservation_overflow_is_atomic() {
+        let f = crate::node::channels::account_self_control::tests::fixture(true);
+        let grant = f.witness().grant;
+        let mut state = f.projection().authority;
+        state.base_epoch = Some(u64::MAX - 1);
+        let decline = Event::new(
+            &f.member,
+            f.group,
+            1,
+            vec![f.events.last().unwrap().id],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            AccountDeclinePayload { version: 1, grant }.encode(),
+        );
+        let mut events = f.events.clone();
+        events.push(decline.clone());
+        let graph = events.iter().map(|event| (event.id, event)).collect();
+        assert_eq!(
+            state.decline_account(&decline, &f.proof, &graph),
+            Err(AuthorityError::Unsupported)
+        );
+        assert_eq!(state.key_epoch(), Some(u64::MAX - 1));
+        assert!(state.revoked.is_empty() && state.declined_epoch_reservations.is_empty());
+        assert!(
+            state
+                .invitation_for_device(&f.member.public(), &f.proof)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn declined_incarnation_cannot_resurrect_or_revoke_a_later_invitation() {
+        let f = crate::node::channels::account_self_control::tests::fixture(true);
+        let original_id = f.witness().grant;
+        let original = AccountAuthorityControl::decode(&f.events[1].ciphertext).unwrap();
+        let mut state = f.projection().authority;
+        let decline = Event::new(
+            &f.member,
+            f.group,
+            1,
+            vec![f.events[1].id],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            AccountDeclinePayload {
+                version: 1,
+                grant: original_id,
+            }
+            .encode(),
+        );
+        let fresh_root = Event::new(
+            &f.owner,
+            f.group,
+            3,
+            vec![decline.id],
+            4,
+            4,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "reinvite".into(),
+                members: vec![f.owner.public(), f.member.public()],
+                epoch: 2,
+                owner: f.owner.user_id(),
+            }
+            .encode_invitation(),
+        );
+        let mut fresh = original.clone();
+        fresh.previous = Some(f.events[1].id);
+        fresh.legacy_bindings.clear();
+        let fresh_member = fresh
+            .grants
+            .iter_mut()
+            .find(|grant| grant.id() == Some(original_id))
+            .unwrap();
+        fresh_member.incarnation = [99; 16];
+        fresh_member.membership_event = fresh_root.id;
+        let fresh_id = fresh_member.id().unwrap();
+        let fresh_event = Event::new(
+            &f.owner,
+            f.group,
+            4,
+            vec![fresh_root.id],
+            5,
+            5,
+            EventKind::ChannelAccountAuthority,
+            fresh.signed_encode(f.group, &f.owner_account),
+        );
+        let mut stale = original.clone();
+        stale.previous = Some(f.events[1].id);
+        stale.legacy_bindings.clear();
+        let stale_event = Event::new(
+            &f.owner,
+            f.group,
+            5,
+            vec![fresh_event.id],
+            6,
+            6,
+            EventKind::ChannelAccountAuthority,
+            stale.signed_encode(f.group, &f.owner_account),
+        );
+        let mut events = f.events.clone();
+        events.extend([
+            decline.clone(),
+            fresh_root.clone(),
+            fresh_event.clone(),
+            stale_event.clone(),
+        ]);
+        let graph = events.iter().map(|event| (event.id, event)).collect();
+        state.decline_account(&decline, &f.proof, &graph).unwrap();
+        assert_eq!(state.key_epoch(), Some(2));
+        let context = LegacyAuthorityContext {
+            channel: f.group,
+            owner: f.owner.public(),
+            epoch: 2,
+            live: vec![f.owner.public(), f.member.public()],
+            accepted: vec![LegacyAccountMember {
+                public: f.owner.public(),
+                membership_event: f.events[0].id,
+                acceptance_event: None,
+            }],
+            invited: vec![LegacyAccountMember {
+                public: f.member.public(),
+                membership_event: fresh_root.id,
+                acceptance_event: None,
+            }],
+        };
+        state.apply(&fresh_event, &context, &graph).unwrap();
+        assert_eq!(
+            state
+                .invitation_for_device(&f.member.public(), &f.proof)
+                .and_then(AccountGrant::id),
+            Some(fresh_id)
+        );
+        assert!(state.decline_account(&decline, &f.proof, &graph).is_err());
+        state.apply(&stale_event, &context, &graph).unwrap();
+        assert_eq!(
+            state
+                .invitation_for_device(&f.member.public(), &f.proof)
+                .and_then(AccountGrant::id),
+            Some(fresh_id),
+            "an old owner snapshot or old decline must neither resurrect the old incarnation nor revoke the fresh one"
         );
     }
 }

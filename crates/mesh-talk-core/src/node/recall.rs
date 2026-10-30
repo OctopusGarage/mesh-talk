@@ -134,6 +134,17 @@ impl RecallLog {
             .unwrap_or_default()
     }
 
+    pub(in crate::node) fn mark(
+        &self,
+        conversation: &ConversationId,
+        target: EventId,
+    ) -> Option<&RecallMark> {
+        self.by_conversation
+            .get(conversation)?
+            .iter()
+            .find(|mark| mark.target == target)
+    }
+
     /// Own recall tombstones retained for a portable snapshot.
     pub(crate) fn snapshot_marks(&self) -> Vec<RecallMark> {
         let mut marks: Vec<_> = self.by_conversation.values().flatten().cloned().collect();
@@ -198,21 +209,14 @@ impl Node {
         authorize(&mut || Ok(()))?;
         let my_account = self.account.account_id();
         let acct_conv = account_conversation_id(&my_account, target_account_id);
-        // Authorship + window: the message must be ours, i.e. present in our sent sidecar
-        // under this account conversation. Its original wall_clock gauges the window.
-        let wall = {
-            let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
-            sent.entries(&acct_conv)
-                .into_iter()
-                .find(|e| {
-                    super::DmEnvelope::decode(&e.plaintext).is_some_and(|env| {
-                        env.msg_id == *target.as_bytes()
-                            && env.route.sender_account == my_account
-                            && env.route.recipient_account == target_account_id
-                    })
-                })
-                .map(|e| e.wall_clock)
-        };
+        // Sibling imports retain their original account route and wall clock
+        // in received history, without manufacturing this device's sentlog.
+        let wall = self
+            .private_dm_target_route(target_account_id, target)
+            .filter(|(sender, recipient, _)| {
+                sender == &my_account && recipient == target_account_id
+            })
+            .map(|(_, _, wall)| wall);
         let wall = wall.or_else(|| {
             let files = self.received_files.lock().expect("received files lock");
             files
@@ -225,6 +229,7 @@ impl Node {
                 })
                 .map(|row| row.wall_clock)
         });
+
         let Some(wall) = wall else {
             return Err(NodeError::Channel(
                 "can only recall your own message".into(),
@@ -663,6 +668,210 @@ mod acceptance_tests {
     use super::*;
     use crate::discovery::Announce;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[tokio::test]
+    async fn sibling_recalls_imported_account_message_without_original_device_sentlog() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let account = Account::generate();
+        let source_identity = DeviceIdentity::generate();
+        let sibling_identity = DeviceIdentity::generate();
+        let recipient_identity = DeviceIdentity::generate();
+        let recipient_account = Account::generate();
+        let source_proof = Announce::new_with_account(&source_identity, &account, "source", 9);
+        let sibling_proof = Announce::new_with_account(&sibling_identity, &account, "sibling", 9);
+        let recipient_proof = Announce::new_with_account(
+            &recipient_identity,
+            &recipient_account,
+            "recipient",
+            listener.local_addr().unwrap().port(),
+        );
+        let (source, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("source"),
+            source_identity,
+            Account::from_secret_bytes(account.secret_bytes()),
+            &recipient_proof,
+        );
+        let (sibling, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("sibling"),
+            sibling_identity,
+            account,
+            &recipient_proof,
+        );
+        let (recipient, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("recipient"),
+            recipient_identity,
+            recipient_account,
+            &source_proof,
+        );
+        for (node, folder, proof) in [
+            (&source, "source", &source_proof),
+            (&sibling, "sibling", &sibling_proof),
+            (&recipient, "recipient", &recipient_proof),
+        ] {
+            node.configure_privacy(
+                &dir.path().join(folder),
+                "pw",
+                proof,
+                Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
+            )
+            .unwrap();
+        }
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(recipient.clone().run_accept_loop(listener));
+        let id = source
+            .enqueue_to_account(&recipient.account_id(), b"account-owned original", None)
+            .await
+            .unwrap();
+        source.flush_delivery(id).await;
+        assert_eq!(
+            recipient.account_history(&source.account_id(), 10)[0].id,
+            id
+        );
+        sibling
+            .import_account_backfill(&source.export_account_backfill())
+            .unwrap();
+        let conversation = account_conversation_id(&sibling.account_id(), &recipient.account_id());
+        assert!(
+            sibling
+                .sentlog
+                .lock()
+                .unwrap()
+                .entries(&conversation)
+                .is_empty()
+        );
+        let imported = sibling.account_history(&recipient.account_id(), 10);
+        assert_eq!(imported[0].id, id);
+        assert!(imported[0].from_me);
+        sibling
+            .recall_account(&recipient.account_id(), id)
+            .await
+            .expect("a certified sibling can recall the account's imported own message");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if recipient.account_history(&source.account_id(), 10)[0].recalled {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("external recipient accepts the sibling's account-authorized recall");
+        let recalled = sibling.account_history(&recipient.account_id(), 10);
+        assert!(recalled[0].recalled);
+        assert_eq!(
+            recalled[0].recalled_text.as_deref(),
+            Some(b"account-owned original".as_slice())
+        );
+        tasks.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn imported_recall_keeps_original_window_and_rejects_foreign_or_wrong_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let foreign_account = Account::generate();
+        let foreign =
+            Announce::new_with_account(&DeviceIdentity::generate(), &foreign_account, "foreign", 9);
+        let (source, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("source"),
+            DeviceIdentity::generate(),
+            Account::from_secret_bytes(account.secret_bytes()),
+            &foreign,
+        );
+        let (sibling, _, _) = super::super::test_support::node_with_files(
+            &dir.path().join("sibling"),
+            DeviceIdentity::generate(),
+            account,
+            &foreign,
+        );
+        let own = source.account_id();
+        let peer = foreign_account.account_id();
+        let personal = account_conversation_id(&own, &own);
+        let external = account_conversation_id(&own, &peer);
+        let old = EventId::new([51; 32]);
+        let incoming = EventId::new([52; 32]);
+        let old_wall = now_millis() - RECALL_WINDOW_MS - 10_000;
+        let body = super::super::MessageBody::new(b"original".to_vec(), None).encode();
+        source
+            .sentlog
+            .lock()
+            .unwrap()
+            .record(
+                personal,
+                1,
+                old_wall,
+                &super::super::DmEnvelope::new(
+                    own.clone(),
+                    own.clone(),
+                    *old.as_bytes(),
+                    body.clone(),
+                )
+                .encode(),
+            )
+            .unwrap();
+        source
+            .received
+            .lock()
+            .unwrap()
+            .record(
+                external,
+                peer.clone(),
+                now_millis(),
+                &super::super::DmEnvelope::new(
+                    peer.clone(),
+                    own.clone(),
+                    *incoming.as_bytes(),
+                    body,
+                )
+                .encode(),
+                incoming,
+            )
+            .unwrap();
+        sibling
+            .import_account_backfill(&source.export_account_backfill())
+            .unwrap();
+        assert!(
+            sibling
+                .sentlog
+                .lock()
+                .unwrap()
+                .entries(&personal)
+                .is_empty()
+        );
+        assert_eq!(sibling.account_history(&own, 10)[0].wall_clock, old_wall);
+        assert!(sibling.account_history(&own, 10)[0].from_me);
+        assert!(!sibling.account_history(&peer, 10)[0].from_me);
+        assert!(matches!(
+            sibling.recall_account(&own, old).await,
+            Err(NodeError::Channel(message)) if message.contains("2-minute"),
+        ));
+        for target in [old, incoming] {
+            assert!(matches!(
+                sibling.recall_account(&peer, target).await,
+                Err(NodeError::Channel(message)) if message.contains("own message"),
+            ));
+        }
+        for conversation in [personal, external] {
+            assert!(
+                sibling
+                    .recalls
+                    .lock()
+                    .unwrap()
+                    .targets(&conversation)
+                    .is_empty()
+            );
+        }
+        assert!(
+            sibling
+                .account_documents(super::super::AccountDocumentDomain::DmRecall, None, 64,)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn rejected_channel_recall_append_does_not_create_tombstone() {

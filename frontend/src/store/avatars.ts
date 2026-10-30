@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { avatars as avatarsApi } from "@/lib/api";
 import { captureRuntimeOwner } from "./ownership";
 import { useAuth } from "./auth";
+import { readWithDeadline } from "@/lib/readDeadline";
 
 /**
  * Custom avatars slice. A user can set a profile photo for themselves or any contact,
@@ -105,7 +106,9 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     if (!lease.current() || !current()) return false;
     try {
       const local =
-        (await avatarsApi.get(lease.owner!, get().ownId || undefined)) ?? EMPTY;
+        (await readWithDeadline(() =>
+          avatarsApi.get(lease.owner!, get().ownId || undefined),
+        )) ?? EMPTY;
       if (
         lease.current() &&
         current() &&
@@ -139,7 +142,8 @@ export const useAvatars = create<AvatarsState>((set, get) => ({
     const peerRevision = receivedRevision;
     if (!lease.current() || !current()) return false;
     try {
-      const profiles = (await avatarsApi.peers()) ?? EMPTY;
+      const profiles =
+        (await readWithDeadline(() => avatarsApi.peers())) ?? EMPTY;
       if (
         lease.current() &&
         current() &&

@@ -2,19 +2,17 @@
 use super::*;
 
 impl HiddenContactsState {
+    #[cfg(test)]
     pub(super) fn delete_unlocked(
         &self,
         owner: &str,
         account: &str,
         own_account: &str,
-        online: bool,
+        _online: bool,
         clear_history: impl FnOnce() -> Result<(), String>,
     ) -> Result<HiddenContactsSnapshot, String> {
         if !valid_account(account) || account == own_account {
             return Err("Cannot delete this contact".into());
-        }
-        if online {
-            return Err("Contact is online. Only offline contacts can be deleted.".into());
         }
         let mut snapshot = self.load(owner)?;
         snapshot.contacts.retain(|c| c.account_id != account);
@@ -33,31 +31,59 @@ impl HiddenContactsState {
         Ok(snapshot)
     }
 
-    // Called under transaction: fresh online discovery clears a deletion, so a
-    // rediscovered contact remains available even after it goes offline again.
+    // Discovery is evidence of presence, never an explicit visibility restore.
+    #[cfg(test)]
     pub(crate) fn visible_accounts(
         &self,
         owner: &str,
-        online: &[String],
+        _online: &[String],
         accounts: Vec<String>,
     ) -> Result<Vec<String>, String> {
-        let mut snapshot = self.load(owner)?;
-        let before = snapshot.deleted.len();
-        snapshot.deleted.retain(|id| !online.contains(id));
-        if snapshot.deleted.len() != before {
-            self.save(&snapshot)?;
-        }
+        let snapshot = self.load(owner)?;
         Ok(accounts
             .into_iter()
             .filter(|id| !snapshot.deleted.contains(id))
             .collect())
+    }
+
+    pub(crate) fn personal_snapshot(
+        &self,
+        owner: &str,
+        node: &mesh_talk_core::node::Node,
+    ) -> Result<HiddenContactsSnapshot, String> {
+        let mut snapshot = self.load(owner)?;
+        let accounts: std::collections::BTreeSet<_> = node
+            .known_account_ids()
+            .into_iter()
+            .chain(node.personal_account_ids())
+            .chain(snapshot.deleted.iter().cloned())
+            .chain(snapshot.contacts.iter().map(|row| row.account_id.clone()))
+            .collect();
+        for account in accounts {
+            let personal = node.conversation_personal_state(
+                &mesh_talk_core::node::DocumentConversation::Account(account.clone()),
+            );
+            if !personal.known {
+                continue;
+            }
+            snapshot.deleted.retain(|id| id != &account);
+            if personal.hidden && personal.local_cleanup_complete {
+                snapshot.contacts.retain(|row| row.account_id != account);
+                snapshot.deleted.push(account);
+            }
+        }
+        snapshot.deleted.sort();
+        snapshot.deleted.dedup();
+        Ok(snapshot)
     }
 }
 
 #[tauri::command]
 pub async fn delete_contact(
     owner: String,
+    expected_account: String,
     account: String,
+    clear_history: Option<bool>,
     app: tauri::State<'_, crate::state::AppState>,
     node: tauri::State<'_, crate::chat_commands::NodeState>,
     policy: tauri::State<'_, HiddenContactsState>,
@@ -85,20 +111,27 @@ pub async fn delete_contact(
             if runtime.host_account_id() != Some(owner.as_str()) {
                 return Err("Deleting a contact requires this account's running node".into());
             }
-            let online = crate::chat_commands::online_account_ids(runtime.peers());
-            policy.delete_unlocked(
-                &owner,
-                &account,
-                runtime.account_id(),
-                online.contains(&account),
-                || {
-                    runtime
-                        .handle()
-                        .clear_account_conversation(&account)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                },
-            )
+            if runtime.account_id() != expected_account {
+                return Err("Contact deletion belongs to another account".into());
+            }
+            if !valid_account(&account) || account == runtime.account_id() {
+                return Err("Cannot delete this contact".into());
+            }
+            let handle = runtime.handle();
+            // The exact installation/session guard already encloses the entire
+            // synchronous producer. Do not reacquire that session in its callback.
+            handle
+                .delete_account_contact_if(
+                    &expected_account,
+                    &account,
+                    clear_history.unwrap_or(true),
+                    |commit| commit(),
+                )
+                .map_err(|error| error.to_string())?;
+            // New deletions are account-scoped core controls. Retire the old
+            // local projection so it cannot override a later genuine reopen.
+            policy.update_unlocked(&owner, &account, false, "", Some(runtime.account_id()))?;
+            policy.personal_snapshot(&owner, &handle)
         })
     })
     .await

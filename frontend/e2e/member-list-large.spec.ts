@@ -21,8 +21,13 @@ test("large channel member list stays bounded and keyboard reachable", async ({
   await rows.first().focus();
   await page.keyboard.press("End");
   await expect(dialog.locator('[data-member-row="1002"]')).toBeFocused();
+  await expect(dialog.locator('[data-member-row="1002"]')).toContainText(
+    "tester",
+  );
+  await page.keyboard.press("ArrowUp");
+  await expect(dialog.locator('[data-member-row="1001"]')).toBeFocused();
   await expect(
-    dialog.locator('[data-member-row="1002"] span[title="Colleague 1000"]'),
+    dialog.locator('[data-member-row="1001"] span[title="Colleague 1000"]'),
   ).toBeVisible();
   await dialog.getByTestId("member-dm-device_member_bulk_999").click();
   await expect(dialog).not.toBeVisible();

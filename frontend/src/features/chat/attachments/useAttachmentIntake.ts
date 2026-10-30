@@ -16,6 +16,7 @@ import {
 } from "@/lib/mediaTypes";
 import { captureChatOwnership, convKey, useChat } from "@/store/chat";
 
+import { canParticipateChannel } from "../channelPermissions";
 import { AttachmentBatchError } from "./attachmentBatch";
 import { useScreenshotShortcuts } from "../screenshot/useScreenshotShortcuts";
 
@@ -33,20 +34,10 @@ interface AttachmentSendOptions extends ProtectionPolicy {
 }
 
 function writable({ active, channels } = useChat.getState()) {
-  return (
-    !!active &&
-    !(
-      active.kind === "channel" &&
-      channels.some(
-        (channel) =>
-          channel.channel_id === active.id &&
-          (channel.shared_reference ||
-            channel.archived ||
-            channel.dissolved ||
-            channel.left ||
-            channel.pending_invite),
-      )
-    )
+  if (!active) return false;
+  if (active.kind !== "channel") return true;
+  return canParticipateChannel(
+    channels.find((channel) => channel.channel_id === active.id),
   );
 }
 

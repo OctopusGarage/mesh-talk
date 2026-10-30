@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,8 @@ for (const scenario of ["caught", "missed", "baseline failure", "empty", "hangin
           GITHUB_RUN_NUMBER: scenario === "empty" ? "256" : "1",
           MUTATION_WORKER: "0",
           MUTATION_WORKERS: "1",
-          CARGO_INCREMENTAL: "1",
+          // Match the environment exported by rust-cache before the runner.
+          CARGO_INCREMENTAL: "0",
           CARGO_TARGET_DIR: join(root, "target"),
           GITHUB_STEP_SUMMARY: join(root, "summary.md"),
         },
@@ -48,6 +49,11 @@ for (const scenario of ["caught", "missed", "baseline failure", "empty", "hangin
       const output = result.stdout + result.stderr;
       assert.equal(result.status, scenario.includes("baseline") ? 1 : 0, output);
       assert.equal(readFileSync(sourcePath, "utf8"), source, "in-place mutation must restore source");
+      if (scenario === "caught") {
+        const incremental = join(root, "target/mutants/incremental");
+        const crates = readdirSync(incremental, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("mutation_smoke-"));
+        assert.ok(crates.some((crate) => readdirSync(join(incremental, crate.name), { withFileTypes: true }).some((session) => session.isDirectory() && session.name.startsWith("s-") && statSync(join(incremental, crate.name, session.name, "query-cache.bin"), { throwIfNoEntry: false })?.size > 0)), "the real Rust compilation must populate its incremental query cache even when the parent environment disables it");
+      }
       if (scenario.includes("baseline")) {
         assert.match(output, /mutation tool exit indicates failure: 4/);
       } else {

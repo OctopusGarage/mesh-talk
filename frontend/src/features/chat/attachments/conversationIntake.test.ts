@@ -1524,6 +1524,48 @@ it.each([
   },
 );
 
+it.each(["member", "owner"] as const)(
+  "allows certified reference-only %s File intake through existing handoff",
+  async (role) => {
+    let intake!: ReturnType<typeof useAttachmentIntake>;
+    function Probe() {
+      intake = useAttachmentIntake(i18n.t);
+      return null;
+    }
+    await act(async () => root.render(createElement(Probe)));
+    await act(async () =>
+      useChat.setState({
+        active: { kind: "channel", id: "team", name: "Team" },
+        channels: [
+          {
+            channel_id: "team",
+            name: "Team",
+            owner: "sibling",
+            member_count: 1,
+            shared_reference: true,
+            account_access: {
+              account_id: useChat.getState().myAccountId,
+              role,
+              execution: { kind: "waiting_for_device" },
+            },
+          },
+        ],
+      }),
+    );
+    await act(async () =>
+      native.drop!({ payload: { type: "over", paths: [] } }),
+    );
+    expect(intake.dragOver).toBe(true);
+    await act(async () =>
+      native.drop!({ payload: { type: "drop", paths: ["/native/file"] } }),
+    );
+    expect(useChat.getState().sendFile).toHaveBeenCalledWith(
+      "/native/file",
+      false,
+    );
+  },
+);
+
 it("stages a confirmed camera photo without sending it", async () => {
   let intake!: ReturnType<typeof useAttachmentIntake>;
   function Probe() {

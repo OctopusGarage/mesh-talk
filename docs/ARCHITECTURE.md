@@ -249,12 +249,14 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   membership controls before granting a group route.
   Departure, acceptance, and ownership-transfer delivery are retried to channel
   members after an offline first push (bounded batches).
-  Membership is keyed to the device identity. When a channel owner discovers a
-  certified sibling of an accepted member, and local group-owner provenance is
-  established, it signs and distributes one invitation
-  per recovery pass; the sibling must still accept it. If the owner is offline, the
-  invitation waits until its node runs and learns the sibling's verified route.
-  Restored groups remain read-only archives until the new device is invited.
+  Membership and ownership in account-authorized groups belong to accounts.
+  New desktop groups authenticate selected account IDs and commit account grants
+  at creation. An invitation is accepted once per account; certified linked
+  devices inherit the role through authenticated sibling synchronization without
+  another owner invitation. Legacy device-only groups retain their signed device
+  lifetimes until an authorized account-format migration is available. A restored
+  archive alone does not prove membership. See the
+  [account/device boundaries](multi-device-sync-design.md#account-and-device-decision-boundaries).
   In Invisible mode, a manually trusted carrier may send
   a new channel's earlier signed ancestry, but the receiving sync connection
   stages it only in bounded memory (8 MiB). It is never advertised as durable
@@ -524,6 +526,14 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   serialization remains with the worker, including after caller cancellation, so a
   late same-user write or cleanup cannot overwrite a replacement login's credential.
   Legacy credential reads that can migrate native items use the same ordering.
+  Shared-account login reconciliation keeps the runtime guard through local
+  credential-envelope and profile publication, then releases it before native
+  saved-login persistence. Retirement can stop the graceful observer while the
+  credential worker retains authentication ordering. Metadata and profile events
+  recheck the exact runtime instance, session and app-lock revision; an obsolete
+  native write is removed before another authentication operation can proceed.
+  Verified device-linking admission combines its existing sensitive proof with
+  that revision check under one app-lock guard, without recursively locking it.
   Automatic login rechecks saved-login consent when admitting the loaded secret.
   Saved-login retry rechecks its exact session and app-lock revision before publishing
   resume metadata and removes a completed native write if that authority changed.

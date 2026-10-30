@@ -256,7 +256,7 @@ mod tests {
             loop {
                 b.pull_pending_files().await;
                 if b.read_media(file).as_ref() == Some(&bytes)
-                    && b.file_progress(file).is_some_and(|p| p.done == 0)
+                    && matches!(b.read_file(file), Err(mesh_talk_core::node::NodeError::File(error)) if error.starts_with("file incomplete: 0/"))
                 {
                     break;
                 }
@@ -265,6 +265,12 @@ mod tests {
         })
         .await
         .unwrap();
+        // Progress includes a verified managed copy after ciphertext pruning.
+        // The chunk-only reader above proves that this late callback must export
+        // from that copy rather than from the original transfer chunks.
+        let progress = b.file_progress(file).unwrap();
+        assert!(progress.total > 0 && progress.done == progress.total);
+        assert!(b.file_ready_to_save(file));
         let destination = bd.path().join("downloads");
         std::fs::create_dir(&destination).unwrap();
         let (output, mut printed) = mpsc::unbounded_channel();
@@ -291,7 +297,11 @@ mod tests {
             std::fs::read(destination.join("channel.png")).unwrap(),
             bytes
         );
-        assert_eq!(b.file_progress(file).unwrap().done, 0);
+        assert!(
+            matches!(b.read_file(file), Err(mesh_talk_core::node::NodeError::File(error)) if error.starts_with("file incomplete: 0/"))
+        );
+        let progress = b.file_progress(file).unwrap();
+        assert!(progress.total > 0 && progress.done == progress.total);
         assert!(
             tokio::time::timeout(Duration::from_millis(250), printed.recv())
                 .await
