@@ -905,6 +905,7 @@ mod permission_tests {
         assert!(!store.requires_channel_v2(&mailbox.id()).unwrap());
         assert!(!store.requires_channel_v3(&mailbox.id()).unwrap());
         assert!(!store.requires_channel_v4(&mailbox.id()).unwrap());
+        assert!(!store.requires_channel_v5(&mailbox.id()).unwrap());
         assert_eq!(
             wrappers.lock().unwrap().generated,
             0,
