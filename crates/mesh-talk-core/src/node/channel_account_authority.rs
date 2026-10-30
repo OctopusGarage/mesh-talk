@@ -1,5 +1,6 @@
 //! Account principals for upgraded channels. Legacy membership is evidence for
 //! the one-time owner-authorized commitment, never an implicit account mapping.
+use super::channel::graph::AuthorityGraph;
 use super::wire::{frame, unframe};
 use crate::{
     discovery::Announce,
@@ -12,7 +13,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) type EventGraph<'a> = HashMap<EventId, &'a Event>;
+mod facts;
+pub(in crate::node) use facts::AuthorityHistory;
 pub(crate) const MAX_AUTHORITY_BYTES: usize = 48 * 1024;
 const MAX_GRANTS: usize = 256;
 
@@ -110,35 +112,73 @@ pub(crate) struct LegacyAuthorityContext {
     pub accepted: Vec<LegacyAccountMember>,
     pub invited: Vec<LegacyAccountMember>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum AuthorityError {
     Invalid,
     Unsupported,
     MissingAncestry,
     Stale,
+    Storage(crate::eventlog::LogError),
+}
+impl From<crate::eventlog::LogError> for AuthorityError {
+    fn from(error: crate::eventlog::LogError) -> Self {
+        Self::Storage(error)
+    }
+}
+pub(in crate::node) fn admitted(
+    result: Result<bool, AuthorityError>,
+) -> Result<bool, crate::eventlog::LogError> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(AuthorityError::Storage(error)) => Err(error),
+        Err(_) => Ok(false),
+    }
+}
+#[cfg(test)]
+impl PartialEq for AuthorityError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Invalid, Self::Invalid)
+            | (Self::Unsupported, Self::Unsupported)
+            | (Self::MissingAncestry, Self::MissingAncestry)
+            | (Self::Stale, Self::Stale) => true,
+            (Self::Storage(left), Self::Storage(right)) => std::ptr::eq(left, right),
+            _ => false,
+        }
+    }
 }
 /// The single role decision consumed by replay, admission and channel controls.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub(crate) struct AccountAuthority {
     channel: Option<ConversationId>,
     current: Option<EventId>,
     owner: Option<[u8; 32]>,
     grants: HashMap<[u8; 32], AccountGrant>,
+    #[serde(skip)]
     valid_controls: HashSet<EventId>,
+    #[serde(skip)]
     revoked: HashMap<AccountGrantId, EventId>,
     genesis: Option<EventId>,
     base_epoch: Option<u64>,
+    #[serde(skip)]
     added_grants: HashSet<AccountGrantId>,
+    #[serde(skip)]
     pinned: HashMap<LegacyBindingKey, [u8; 32]>,
     originals: Vec<Announce>,
     device_grants: HashMap<([u8; 32], [u8; 32]), AccountGrantId>,
     activated: HashSet<AccountGrantId>,
     origins: HashMap<AccountGrantId, EventId>,
     inherited: HashMap<([u8; 32], [u8; 32]), (AccountGrantId, EventId)>,
+    historical_added: u64,
+    historical_revoked: u64,
+    #[serde(skip)]
+    history: Option<std::sync::Arc<AuthorityHistory>>,
 }
 impl AccountAuthority {
     pub(crate) fn key_epoch(&self) -> Option<u64> {
         self.base_epoch?
+            .checked_add(self.historical_added)?
+            .checked_add(self.historical_revoked)?
             .checked_add(self.added_grants.len() as u64)?
             .checked_add(self.revoked.len() as u64)
     }
@@ -149,8 +189,25 @@ impl AccountAuthority {
             .cloned()
             .collect()
     }
-    pub(crate) fn knows_authority(&self, event: EventId) -> bool {
-        self.valid_controls.contains(&event)
+    /// Current admitted sibling bindings, with the exact signed authorization.
+    /// Retired grant incarnations are pruned by the current authority owner.
+    pub(in crate::node) fn inherited_device_proofs(
+        &self,
+    ) -> Vec<(AccountGrantId, EventId, Announce)> {
+        let mut bindings: Vec<_> = self
+            .original_device_proofs()
+            .into_iter()
+            .filter_map(|proof| {
+                let (grant, event) = self.inherited.get(&(proof.ed25519_pub, proof.x25519_pub))?;
+                (self
+                    .grant_for_device(&proof.public(), &proof)
+                    .and_then(AccountGrant::id)
+                    == Some(*grant))
+                .then_some((*grant, *event, proof))
+            })
+            .collect();
+        bindings.sort_by_key(|(_, event, proof)| (*event, proof.ed25519_pub));
+        bindings
     }
     pub(crate) fn current_event(&self) -> Option<EventId> {
         self.current
@@ -164,6 +221,7 @@ impl AccountAuthority {
         grants.sort_by_key(|grant| grant.id().map(|id| id.account_pub));
         grants
     }
+    #[cfg(test)]
     pub(crate) fn revoked(&self) -> Vec<AccountGrantId> {
         let mut ids: Vec<_> = self.revoked.keys().copied().collect();
         ids.sort_by_key(|id| (id.account_pub, id.incarnation));
@@ -187,14 +245,14 @@ impl AccountAuthority {
     pub(crate) fn inherit_device(
         &mut self,
         event: &Event,
-        graph: &EventGraph<'_>,
+        graph: &impl AuthorityGraph,
     ) -> Result<bool, AuthorityError> {
         let (authority, id, proof) =
             super::channel_account_bootstrap::DeviceControl::signed_inheritance(event)
                 .ok_or(AuthorityError::Invalid)?;
         if self.channel != Some(event.conversation_id)
-            || !self.valid_controls.contains(&authority)
-            || !descends(event.id, authority, graph)
+            || !self.known_control(authority)?
+            || !descends(event.id, authority, graph)?
             || self
                 .account_grant(&id.account_pub)
                 .and_then(AccountGrant::id)
@@ -204,7 +262,7 @@ impl AccountAuthority {
                 self.grant_origin(id)
                     .ok_or(AuthorityError::MissingAncestry)?,
                 graph,
-            )
+            )?
         {
             return Err(AuthorityError::Stale);
         }
@@ -212,6 +270,7 @@ impl AccountAuthority {
             .originals
             .iter()
             .any(|old| old.ed25519_pub == proof.ed25519_pub && old.public() != proof.public())
+            || self.conflicting_original(&proof.public())?
         {
             return Err(AuthorityError::Invalid);
         }
@@ -310,13 +369,11 @@ impl AccountAuthority {
         &mut self,
         event: &Event,
         proof: &Announce,
-        graph: &EventGraph<'_>,
+        graph: &impl AuthorityGraph,
     ) -> Result<bool, AuthorityError> {
         self.validate_self_action(event, proof, EventKind::ChannelAccept)?;
-        if self
-            .inherited
-            .get(&(proof.ed25519_pub, proof.x25519_pub))
-            .is_some_and(|(_, binding)| !descends(event.id, *binding, graph))
+        if let Some((_, binding)) = self.inherited.get(&(proof.ed25519_pub, proof.x25519_pub))
+            && !descends(event.id, *binding, graph)?
         {
             return Err(AuthorityError::MissingAncestry);
         }
@@ -329,7 +386,7 @@ impl AccountAuthority {
             self.grant_origin(id)
                 .ok_or(AuthorityError::MissingAncestry)?,
             graph,
-        ) {
+        )? {
             return Err(AuthorityError::Stale);
         }
         if !grant.pending || self.activated.contains(&id) {
@@ -339,20 +396,20 @@ impl AccountAuthority {
             .and_then(|epoch| epoch.checked_add(1))
             .ok_or(AuthorityError::Unsupported)?;
         self.activated.insert(id);
-        self.added_grants.insert(id);
+        if !self.had_added(id)? {
+            self.added_grants.insert(id);
+        }
         Ok(true)
     }
     pub(crate) fn leave_account(
         &mut self,
         event: &Event,
         proof: &Announce,
-        graph: &EventGraph<'_>,
+        graph: &impl AuthorityGraph,
     ) -> Result<bool, AuthorityError> {
         self.validate_self_action(event, proof, EventKind::ChannelLeave)?;
-        if self
-            .inherited
-            .get(&(proof.ed25519_pub, proof.x25519_pub))
-            .is_some_and(|(_, binding)| !descends(event.id, *binding, graph))
+        if let Some((_, binding)) = self.inherited.get(&(proof.ed25519_pub, proof.x25519_pub))
+            && !descends(event.id, *binding, graph)?
         {
             return Err(AuthorityError::MissingAncestry);
         }
@@ -368,13 +425,15 @@ impl AccountAuthority {
             self.grant_origin(id)
                 .ok_or(AuthorityError::MissingAncestry)?,
             graph,
-        ) {
+        )? {
             return Err(AuthorityError::Stale);
         }
         self.key_epoch()
             .and_then(|epoch| epoch.checked_add(1))
             .ok_or(AuthorityError::Unsupported)?;
-        self.revoked.entry(id).or_insert(event.id);
+        if self.revoked_event(id)?.is_none() {
+            self.revoked.insert(id, event.id);
+        }
         self.grants.remove(&id.account_pub);
         Ok(true)
     }
@@ -409,7 +468,7 @@ impl AccountAuthority {
         &mut self,
         event: &Event,
         legacy: &LegacyAuthorityContext,
-        graph: &EventGraph<'_>,
+        graph: &impl AuthorityGraph,
     ) -> Result<bool, AuthorityError> {
         if event.kind != EventKind::ChannelAccountAuthority
             || event.conversation_id != legacy.channel
@@ -418,7 +477,7 @@ impl AccountAuthority {
         {
             return Err(AuthorityError::Invalid);
         }
-        if self.valid_controls.contains(&event.id) {
+        if self.known_control(event.id)? {
             return Ok(false);
         }
         let control = AccountAuthorityControl::decode(&event.ciphertext)
@@ -454,15 +513,15 @@ impl AccountAuthority {
             {
                 return Err(AuthorityError::Invalid);
             }
-            if self
+            if let Some((_, binding)) = self
                 .inherited
                 .get(&(control.issuer.ed25519_pub, control.issuer.x25519_pub))
-                .is_some_and(|(_, binding)| !descends(event.id, *binding, graph))
+                && !descends(event.id, *binding, graph)?
             {
                 return Err(AuthorityError::MissingAncestry);
             }
             let previous = control.previous.ok_or(AuthorityError::MissingAncestry)?;
-            if !self.valid_controls.contains(&previous) || !descends(event.id, previous, graph) {
+            if !self.known_control(previous)? || !descends(event.id, previous, graph)? {
                 return Err(AuthorityError::MissingAncestry);
             }
         }
@@ -471,7 +530,7 @@ impl AccountAuthority {
             Some(
                 AccountAuthorityControl::decode(
                     &graph
-                        .get(&previous)
+                        .event(previous)?
                         .ok_or(AuthorityError::MissingAncestry)?
                         .ciphertext,
                 )
@@ -545,7 +604,7 @@ impl AccountAuthority {
                     return Err(AuthorityError::Stale);
                 }
             } else {
-                if self.revoked.contains_key(&id) {
+                if self.revoked_event(id)?.is_some() {
                     if previous_control
                         .as_ref()
                         .is_none_or(|previous| !previous.grants.contains(grant))
@@ -565,14 +624,18 @@ impl AccountAuthority {
                         return Err(AuthorityError::Invalid);
                     }
                     validate_legacy_grant(grant, event, legacy, graph)?;
-                    match pins.get(&legacy_key(grant)) {
-                        Some(account) if *account != id.account_pub => {
+                    match pins
+                        .get(&legacy_key(grant))
+                        .copied()
+                        .or(self.previous_pin(legacy_key(grant))?)
+                    {
+                        Some(account) if account != id.account_pub => {
                             return Err(AuthorityError::Invalid);
                         }
                         Some(_) => {}
                         None => {
                             if let Some(genesis) = self.genesis
-                                && !descends(grant.membership_event, genesis, graph)
+                                && !descends(grant.membership_event, genesis, graph)?
                             {
                                 return Err(AuthorityError::MissingAncestry);
                             }
@@ -580,25 +643,20 @@ impl AccountAuthority {
                             originals.push(grant.original.clone());
                         }
                     }
-                    for (old, removed) in &self.revoked {
-                        if old.account_pub == id.account_pub
-                            && !descends(grant.membership_event, *removed, graph)
-                        {
-                            return Err(AuthorityError::Stale);
-                        }
+                    if !self.observed_revocations(id.account_pub, grant.membership_event, graph)? {
+                        return Err(AuthorityError::Stale);
                     }
                 }
             }
             next.insert(id.account_pub, grant.clone());
         }
-        if next.get(&control.owner_account).is_none_or(|grant| {
-            self.revoked
-                .contains_key(&grant.id().expect("validated grant"))
-                || (grant.pending
-                    && !self
-                        .activated
-                        .contains(&grant.id().expect("validated grant")))
-        }) {
+        let owner_grant = next
+            .get(&control.owner_account)
+            .ok_or(AuthorityError::Invalid)?;
+        let owner_id = owner_grant.id().ok_or(AuthorityError::Invalid)?;
+        if self.revoked_event(owner_id)?.is_some()
+            || (owner_grant.pending && !self.activated.contains(&owner_id))
+        {
             return Err(AuthorityError::Invalid);
         }
         if initial {
@@ -651,24 +709,27 @@ impl AccountAuthority {
         }
         let mut added = self.added_grants.clone();
         if !initial && !stale {
-            added.extend(
-                next_ids
-                    .difference(&previous_grants)
-                    .filter(|id| {
-                        !self.revoked.contains_key(id)
-                            && next
-                                .get(&id.account_pub)
-                                .is_some_and(|grant| !grant.pending)
-                    })
-                    .copied(),
-            );
+            for id in next_ids.difference(&previous_grants) {
+                if self.revoked_event(*id)?.is_none()
+                    && !self.had_added(*id)?
+                    && next
+                        .get(&id.account_pub)
+                        .is_some_and(|grant| !grant.pending)
+                {
+                    added.insert(*id);
+                }
+            }
         }
         let mut tombstones = self.revoked.clone();
         for id in &revoked {
-            tombstones.entry(*id).or_insert(event.id);
+            if self.revoked_event(*id)?.is_none() {
+                tombstones.entry(*id).or_insert(event.id);
+            }
         }
         let base = self.base_epoch.unwrap_or(legacy.epoch);
-        base.checked_add(added.len() as u64)
+        base.checked_add(self.historical_added)
+            .and_then(|epoch| epoch.checked_add(self.historical_revoked))
+            .and_then(|epoch| epoch.checked_add(added.len() as u64))
             .and_then(|epoch| epoch.checked_add(tombstones.len() as u64))
             .ok_or(AuthorityError::Unsupported)?;
         if !stale {
@@ -678,18 +739,24 @@ impl AccountAuthority {
         }
         self.revoked = tombstones;
         self.added_grants = added;
+        let candidate = if stale { &self.grants } else { &next };
+        let mut excluded = Vec::new();
+        for (account, grant) in candidate {
+            if self
+                .revoked_event(grant.id().ok_or(AuthorityError::Invalid)?)?
+                .is_some()
+            {
+                excluded.push(*account);
+            }
+        }
         if stale {
-            self.grants.retain(|_, grant| {
-                !self
-                    .revoked
-                    .contains_key(&grant.id().expect("validated grant"))
-            });
+            for account in excluded {
+                self.grants.remove(&account);
+            }
         } else {
-            next.retain(|_, grant| {
-                !self
-                    .revoked
-                    .contains_key(&grant.id().expect("validated grant"))
-            });
+            for account in excluded {
+                next.remove(&account);
+            }
             if initial {
                 for proof in &originals {
                     if let Some(grant) = proof
@@ -737,7 +804,7 @@ fn validate_legacy_grant(
     grant: &AccountGrant,
     event: &Event,
     legacy: &LegacyAuthorityContext,
-    graph: &EventGraph<'_>,
+    graph: &impl AuthorityGraph,
 ) -> Result<(), AuthorityError> {
     let accepted = (if grant.pending {
         &legacy.invited
@@ -750,13 +817,13 @@ fn validate_legacy_grant(
             && member.membership_event == grant.membership_event
             && member.acceptance_event == grant.acceptance_event
     });
-    if !accepted || !descends(event.id, grant.membership_event, graph) {
+    if !accepted || !descends(event.id, grant.membership_event, graph)? {
         return Err(AuthorityError::MissingAncestry);
     }
     let membership = graph
-        .get(&grant.membership_event)
+        .event(grant.membership_event)?
         .ok_or(AuthorityError::MissingAncestry)?;
-    if !valid_event(membership)
+    if !valid_event(&membership)
         || membership.kind != EventKind::MembershipChange
         || membership.conversation_id != event.conversation_id
     {
@@ -778,15 +845,15 @@ fn validate_legacy_grant(
     }
     if let Some(acceptance) = grant.acceptance_event {
         let acceptance_event = graph
-            .get(&acceptance)
+            .event(acceptance)?
             .ok_or(AuthorityError::MissingAncestry)?;
         if acceptance_event.kind != EventKind::ChannelAccept
             || !acceptance_event.ciphertext.is_empty()
-            || !valid_event(acceptance_event)
+            || !valid_event(&acceptance_event)
             || acceptance_event.author.ed25519_pub() != &grant.original.ed25519_pub
             || acceptance_event.conversation_id != event.conversation_id
-            || !descends(acceptance, membership.id, graph)
-            || !descends(event.id, acceptance, graph)
+            || !descends(acceptance, membership.id, graph)?
+            || !descends(event.id, acceptance, graph)?
         {
             return Err(AuthorityError::Invalid);
         }
@@ -798,22 +865,12 @@ fn validate_legacy_grant(
     Ok(())
 }
 /// Causality uses content-address ancestry, never wall clocks or roster freshness.
-fn descends(child: EventId, ancestor: EventId, graph: &EventGraph<'_>) -> bool {
-    let mut pending = vec![child];
-    let mut seen = HashSet::new();
-    while let Some(id) = pending.pop() {
-        if id == ancestor {
-            return true;
-        }
-        if !seen.insert(id) {
-            continue;
-        }
-        let Some(event) = graph.get(&id) else {
-            continue;
-        };
-        pending.extend(event.parents.iter().copied());
-    }
-    false
+fn descends(
+    child: EventId,
+    ancestor: EventId,
+    graph: &impl AuthorityGraph,
+) -> Result<bool, AuthorityError> {
+    graph.descends(child, ancestor).map_err(Into::into)
 }
 
 fn valid_event(event: &Event) -> bool {

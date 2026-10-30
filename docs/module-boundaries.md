@@ -126,8 +126,12 @@ Nodes; `persist/legacy.rs` retains the explicit standalone compatibility owner.
 `core/node/privacy_sync/network.rs` applies participant authorization to finite
 repository network pages. `core/eventlog/repository/selection.rs` owns disposable
 SQL authorization IDs, causal closure, and bounded retirement cleanup; views use
-scalar revision checks until source/proof state changes. The initial temporary
-metadata/control reducer and startup channel replay still scale with history. Other participant domains retain their
+scalar revision checks until source/proof state changes. Initial and changed-source
+principal selection still uses the temporary collecting authorization reducer.
+`core/node/channel/checkpoint/` owns indexed current membership, canonical authority,
+receiver checkpoints, exact processing evidence, activity pages and pending retries.
+Ordinary warm channel opens load current metadata and the active sending epoch;
+completed signed history is not replayed. Other participant domains retain their
 legacy owners until their own cutovers. `core/node/runtime_startup.rs` composes
 startup inputs and completion through `runtime_work.rs`; blocking captures and
 undelivered results remain admitted until their resources are destroyed.
@@ -600,8 +604,8 @@ runs remain CI/pre-PR/release or explicit-request gates, as described in the
   authenticated replay can recover earlier noncausal file ordering. Local clock
   and author-sequence allocation return errors on exhaustion. Public `prepare`
   now returns `Result`; SDK callers must handle it despite unchanged wire formats.
-- Archived channel summaries and admission use `ChannelBook::projected_metadata`
-  and its signed control reducer. Key distribution/decryption remains separate;
+- Archived channel summaries and admission use the indexed channel checkpoint's
+  current metadata and its signed control reducer. Key distribution/decryption remains separate;
   archives share membership epochs, leaves, acceptance, ownership, rename and
   terminal dissolution rules with the metadata projection.
 - Peer-avatar journals reclaim obsolete versions using encrypted record-log

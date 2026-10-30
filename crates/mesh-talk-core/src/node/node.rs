@@ -88,27 +88,28 @@ pub struct ChannelSummary {
 }
 
 fn archived_channel_summaries(
-    log: &PersistentEventLog,
-    book: &ChannelBook,
+    checkpoints: &super::channel::checkpoint::ChannelCheckpointStore,
 ) -> Result<Vec<ChannelSummary>, LogError> {
     let mut summaries = Vec::new();
-    for id in log.conversations()? {
-        if book.state(&id).is_some() {
-            continue;
+    let mut after = None;
+    loop {
+        let page = checkpoints.metadata_page(after, false)?;
+        if page.is_empty() {
+            break;
         }
-        let Some(state) = ChannelBook::projected_metadata(id, &log.events(&id)?) else {
-            continue;
-        };
-        summaries.push(ChannelSummary {
-            id,
-            name: state.name().to_string(),
-            member_count: state.members().len(),
-            owner: state.owner().to_string(),
-            archived: true,
-            dissolved: state.is_dissolved(),
-            left: false,
-            pending_invite: false,
-        });
+        for state in page {
+            after = Some(state.id());
+            summaries.push(ChannelSummary {
+                id: state.id(),
+                name: state.name().to_string(),
+                member_count: state.members().len(),
+                owner: state.owner().to_string(),
+                archived: true,
+                dissolved: state.is_dissolved(),
+                left: false,
+                pending_invite: false,
+            });
+        }
     }
     Ok(summaries)
 }
@@ -349,6 +350,7 @@ pub struct Node {
     pub(in crate::node) channel_migration:
         Mutex<super::channel_account_maintenance::ChannelMigrationStore>,
     pub(in crate::node) channel_senders: Mutex<ChannelSenderStore>,
+    pub(in crate::node) channel_checkpoints: super::channel::checkpoint::ChannelCheckpointStore,
     /// Last confirmed durable holders of our own channel events.
     pub(in crate::node) channel_custody: Mutex<ChannelCustodyStore>,
     #[cfg(test)]
@@ -696,8 +698,13 @@ impl Node {
             let h_sent = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::sentlog::SentEntry>(&storage,sent_path,password,super::transcript_repository::SENT,b"MTSENT"));
             let h_sess = s.spawn(|| RatchetSessions::open(&dir.join("ratchet.sessions"), password));
             let h_recv = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::received_log::ReceivedEntry>(&storage,&dir.join("received.log"),password,super::transcript_repository::RECEIVED,b"MTRECV"));
-            let h_csnd =
-                s.spawn(|| ChannelSenderStore::open(&dir.join("channel.senders"), password));
+            let h_csnd = s.spawn(|| {
+                ChannelSenderStore::authenticate_legacy(
+                    &storage,
+                    &dir.join("channel.senders"),
+                    password,
+                )
+            });
             let h_custody =
                 s.spawn(|| ChannelCustodyStore::open(&dir.join("channel.custody"), password));
             // Durable record of surfaced file manifests (reuses the ReceivedLog format),
@@ -762,7 +769,7 @@ impl Node {
         sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let mut channel_senders = csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        csenders_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let channel_custody = custody_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         recv_files_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let profiles = profiles_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -927,6 +934,11 @@ impl Node {
                 password,
             )?,
         );
+        let mut channel_senders = ChannelSenderStore::from_profile(
+            storage.clone(),
+            &dir.join("channel.senders"),
+            password,
+        )?;
         let mut log = PersistentEventLog::open_profile(storage.clone(), password)?;
         let manifest_scopes = super::filebook::scopes::IndexedManifestScopes::from_profile(
             storage.clone(),
@@ -942,6 +954,9 @@ impl Node {
             .initialize_receiving(crate::eventlog::Author::from_ed25519(
                 identity.public().ed25519_pub,
             ))?;
+        log.repository()?.initialize_ancestry()?;
+        let channel_checkpoints =
+            super::channel::checkpoint::ChannelCheckpointStore::open(storage.clone())?;
         while delivery
             .recover_next_with_channels(
                 &mut dm_ratchet,
@@ -957,62 +972,43 @@ impl Node {
             received_files.remove_exact(conversation, id)?;
         }
         let delivery_control_ids = delivery.control_ids();
-        let own_device_ids: HashSet<_> = account_devices
-            .devices()
-            .into_iter()
-            .map(|device| device.public.user_id())
-            .collect();
+        // Discovery and authority replay resume from durable metadata cursors.
+        // An ordinary warm open reads current channel state without decoding
+        // retained channel messages or restoring historical receiver epochs.
+        while channel_checkpoints.discover_step(log.repository()?)? {}
+        while let Some(channel) = channel_checkpoints.next_dirty()? {
+            while !channel_checkpoints.project_step(log.repository()?, &identity, channel)? {}
+        }
         let mut channels = ChannelBook::new();
-        for conv in log.conversations()? {
-            let events = log.events(&conv)?;
-            let mut replay = super::channel::ChannelReplay::new(&events);
-            // Reinstall projections lost between signed-log ingestion and a
-            // failed/crashed sidecar write. Erases are authoritative; recipient
-            // deadlines keep the existing conservative restart policy.
-            loop {
-                let (messages, limited) = channels.process_replay(
+        let mut channel_after = None;
+        loop {
+            let page = channel_checkpoints.current_page(channel_after)?;
+            if page.is_empty() {
+                break;
+            }
+            for state in page {
+                channel_after = Some(state.id());
+                channel_checkpoints.install_book_metadata(
+                    log.repository()?,
                     &identity,
-                    conv,
-                    &mut replay,
-                    64,
-                    super::channel::CHANNEL_PENDING_BYTES,
-                );
-                let done = !limited;
-                for msg in messages {
-                    if received.contains(msg.event_id)?
-                        || account_suppression.contains(conv, msg.event_id)?
-                    {
-                        continue;
-                    }
-                    let own = own_device_ids.contains(&msg.from);
-                    if !own && crate::expiry::deadline(&msg.wrapped).is_some() {
-                        continue;
-                    }
-                    received.record_durable(&super::received_log::ReceivedEntry {
-                        event_id: msg.event_id,
-                        conversation: conv,
-                        from: msg.from,
-                        wall_clock: msg.wall_clock,
-                        plaintext: msg.wrapped,
-                    })?;
-                }
-                if done {
-                    break;
-                }
+                    &mut channels,
+                    state,
+                )?;
             }
         }
-        let archived_channels = archived_channel_summaries(&log, &channels)?;
+        let archived_channels = archived_channel_summaries(&channel_checkpoints)?;
         // Restore our persisted sending chains into each channel state. The event log
         // only carries OTHER members' sender keys, so `my_sender` rebuilds empty above;
         // without this, a post-restart send would mint a fresh chain that receivers
         // (first-wins on the chain they already hold) cannot follow.
         for channel in channels.channel_ids() {
-            for (epoch, bytes) in channel_senders.get(&channel) {
-                if let Some(sk) = SenderKey::deserialize(&bytes)
-                    && let Some(state) = channels.state_mut(&channel)
-                {
-                    state.import_my_sender(epoch, sk);
-                }
+            if let Some(state) = channels.state_mut(&channel)
+                && let Some(bytes) = channel_senders.current(&channel, state.epoch())?
+            {
+                let key = SenderKey::deserialize(&bytes).ok_or_else(|| {
+                    LogError::CorruptFile("invalid channel sender checkpoint".into())
+                })?;
+                state.import_my_sender(state.epoch(), key);
             }
         }
         super::files::import_file_book(
@@ -1142,6 +1138,7 @@ impl Node {
             outgoing_requests_gate: tokio::sync::Mutex::new(()),
             channel_migration: Mutex::new(channel_migration),
             channel_senders: Mutex::new(channel_senders),
+            channel_checkpoints,
             channel_custody: Mutex::new(channel_custody),
             channel_projection_cache: Mutex::new(Default::default()),
             #[cfg(test)]
@@ -1221,12 +1218,31 @@ impl Node {
         // only after the existing authenticated adoption owner has committed.
         node.reception_effects =
             super::reception_effects::ReceptionEffects::open(node.storage.clone())?;
+        node.channel_checkpoints =
+            super::channel::checkpoint::ChannelCheckpointStore::open(node.storage.clone())?;
         node.profile_receive_work = Mutex::new(
             super::profile_receive_work::ProfileReceiveWork::open(node.storage.clone())?,
         );
         node.files = Mutex::new(IndexedFileBook::open(node.storage.clone())?);
         node.manifest_scopes.recapture()?;
         node.queue_approved_incomplete_files();
+        // Receiver progress and plaintext projection share one SQL commit.
+        // Only pending ciphertext work is resumed; completed history has no
+        // startup body reads. Imported deadlines retain the conservative policy.
+        let mut after = None;
+        loop {
+            let page = node.channel_checkpoints.current_page(after)?;
+            if page.is_empty() {
+                break;
+            }
+            for state in page {
+                after = Some(state.id());
+                node.process_channel_reception_inner(state.id(), "catch_up", true)
+                    .map_err(|error| {
+                        LogError::CorruptFile(format!("channel reception recovery: {error}"))
+                    })?;
+            }
+        }
         node.bootstrap_private_dm_controls().map_err(|error| {
             LogError::CorruptFile(format!("account control projection: {error}"))
         })?;
@@ -1459,11 +1475,13 @@ impl Node {
             .unwrap_or_default()
     }
 
-    pub fn channel_activity(&self, channel: ConversationId) -> Vec<super::ChannelActivity> {
-        self.channels
-            .lock()
-            .expect("channels mutex not poisoned")
-            .activity(&channel)
+    pub fn channel_activity(
+        &self,
+        channel: ConversationId,
+    ) -> Result<Vec<super::ChannelActivity>, super::NodeError> {
+        Ok(self
+            .channel_activity_page(channel, None, Default::default())?
+            .items)
     }
 
     /// The current owner of `channel`, or empty if the channel is unknown.
@@ -1495,6 +1513,27 @@ impl Node {
         ciphertext: Vec<u8>,
         required_profile_parent: Option<EventId>,
     ) -> Result<(u64, EventId), NodeError> {
+        self.append_event_with_source(channel, kind, ciphertext, required_profile_parent, None)
+    }
+
+    pub(in crate::node) fn append_channel_control_from_source(
+        &self,
+        source: &super::channel::checkpoint::ChannelSource,
+        kind: EventKind,
+        ciphertext: Vec<u8>,
+    ) -> Result<(), NodeError> {
+        self.append_event_with_source(source.channel, kind, ciphertext, None, Some(source))?;
+        Ok(())
+    }
+
+    fn append_event_with_source(
+        &self,
+        channel: ConversationId,
+        kind: EventKind,
+        ciphertext: Vec<u8>,
+        required_profile_parent: Option<EventId>,
+        source: Option<&super::channel::checkpoint::ChannelSource>,
+    ) -> Result<(u64, EventId), NodeError> {
         if self
             .channels
             .lock()
@@ -1516,6 +1555,11 @@ impl Node {
             .map_err(NodeError::Log)?;
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut log = self.log.lock().expect("log mutex not poisoned");
+        if let Some(source) = source {
+            // The allocation lock excludes remote appends until this control
+            // is installed. Recheck after pending local WAL recovery as well.
+            self.channel_checkpoints.check_source(source)?;
+        }
         let (mut parents, lamport) = log.prepare(&channel).map_err(NodeError::Log)?;
         if independent_profile {
             // Signed profile leaves must remain ingestible while sibling content

@@ -147,6 +147,9 @@ pub use account_sync::{DeviceSyncStatus, SyncPhase};
 pub use account_sync_policy::{DeviceSyncPolicy, SyncCategory};
 pub use attachment_consent::ReceiveDecision;
 pub use call::{CallSignal, ReceivedCallSignal};
+pub use channel::checkpoint::activity::{
+    ChannelActivityCursor, ChannelActivityPage, ChannelActivityPageLimit,
+};
 pub use channel::{ChannelActivity, ReceivedChannelMessage};
 pub use delivery_observation::{
     DeliveryObservation, DeliveryObservationKind, DeliveryRecoveryReason,

@@ -14,7 +14,7 @@ use crate::{
     identity::device::PublicIdentity,
 };
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     net::SocketAddr,
     sync::atomic::Ordering,
     time::{Duration, Instant},
@@ -636,99 +636,72 @@ impl Node {
         {
             return Ok(false);
         }
-        let snapshots = {
-            let book = self.channels.lock().expect("channels lock");
-            let Some(current) = book.state(&channel) else {
-                return Ok(false);
-            };
-            current
-                .current_receive_distributions()
-                .into_iter()
-                .filter_map(|(author, epoch, mut distribution)| {
-                    if let Some(public) = state.members().iter().find(|member| {
-                        member.user_id() == author && state.is_accepted_member(&author)
-                    }) {
-                        Some(ReceiveDistribution {
-                            author: public.clone(),
-                            epoch,
-                            distribution,
-                        })
-                    } else {
-                        zeroize::Zeroize::zeroize(&mut distribution.chain_key);
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        let log = self.log.lock().expect("log lock");
-        let events = log.events(&channel)?;
-        let mut examined = HashSet::new();
-        let mut selected = None;
-        for (inheritance, grant, proof) in events
+        let source = self
+            .channel_checkpoints
+            .source_binding(channel)?
+            .ok_or(LogError::StaleCursor)?;
+        let mut snapshots = Vec::new();
+        for member in state
+            .members()
             .iter()
-            .filter(|event| projection.authorized.contains(&event.id))
-            .filter_map(|event| {
-                DeviceControl::signed_inheritance(event)
-                    .map(|(_, grant, proof)| (event.id, grant, proof))
-            })
+            .filter(|member| state.is_accepted_member(&member.user_id()))
         {
+            let distribution = if member.user_id() == self.user_id() {
+                self.channel_senders
+                    .lock()
+                    .expect("sender store lock")
+                    .current(&channel, state.epoch())?
+                    .map(zeroize::Zeroizing::new)
+                    .map(|bytes| {
+                        crate::channel::sender_key::SenderKey::deserialize(&bytes)
+                            .map(|sender| sender.distribution())
+                            .ok_or_else(|| {
+                                LogError::CorruptFile("invalid current channel sender".into())
+                            })
+                    })
+                    .transpose()?
+            } else {
+                self.channel_checkpoints.receiver_distribution(
+                    &source,
+                    &member.user_id(),
+                    state.epoch(),
+                )?
+            };
+            if let Some(distribution) = distribution {
+                snapshots.push(ReceiveDistribution {
+                    author: member.clone(),
+                    epoch: state.epoch(),
+                    distribution,
+                });
+            }
+        }
+        let mut selected = None;
+        for (grant, inheritance, proof) in projection.authority.inherited_device_proofs() {
             let recipient = proof.public();
             if recipient == self.identity.public()
                 || proof.account_id().as_deref() != Some(self.account_id().as_str())
                 || !state.is_accepted_member(&proof.user_id)
-                || projection
-                    .authority
-                    .grant_for_device(&recipient, &proof)
-                    .and_then(AccountGrant::id)
-                    != Some(grant)
+                || !projection.is_authorized(inheritance)?
             {
                 continue;
             }
-            if !examined.insert(recipient.user_id()) {
-                continue;
-            }
-            let mut shipped = BTreeMap::<String, u32>::new();
-            for (author, position) in events
-                .iter()
-                .filter(|event| {
-                    event.author.ed25519_pub() == &self.identity.public().ed25519_pub
-                        && projection.authorized.contains(&event.id)
-                })
-                .filter_map(|event| match DeviceControl::decode(&event.ciphertext) {
-                    Some(DeviceControl::ReceiveKeys {
-                        grant: prior,
-                        recipient: target,
-                        epoch,
-                        authors,
-                        positions,
-                        ..
-                    }) if prior == grant && target == recipient && epoch == state.epoch() => {
-                        Some(authors.into_iter().zip(positions))
-                    }
-                    _ => None,
-                })
-                .flatten()
-            {
-                shipped
-                    .entry(author.user_id())
-                    .and_modify(|old| *old = (*old).max(position))
-                    .or_insert(position);
-            }
+            let shipped = self
+                .channel_checkpoints
+                .shipped_distributions(&source, state, grant, &recipient)?;
             let key = (*channel.as_bytes(), recipient.ed25519_pub);
             let refresh = work
                 .refresh_after
                 .get(&key)
                 .is_none_or(|deadline| Instant::now() >= *deadline);
-            if snapshots.iter().any(|value| {
-                value.epoch == state.epoch()
-                    && snapshot_needed(value, &recipient, &shipped, refresh)
-            }) {
+            if snapshots
+                .iter()
+                .any(|value| snapshot_needed(value, &recipient, &shipped, refresh))
+            {
                 selected = Some((inheritance, grant, recipient, shipped, refresh));
                 break;
             }
         }
-        drop(events);
-        drop(log);
+        self.channel_checkpoints.check_source(&source)?;
         let Some((inheritance, grant, recipient, shipped, refresh)) = selected else {
             return Ok(false);
         };
@@ -740,6 +713,7 @@ impl Node {
             })
             .collect();
         let mut changed = false;
+        let mut source = source;
         for chunk in values.chunks(64).take(4) {
             let Some(bytes) = ReceiveDistribution::encode_batch(chunk) else {
                 continue;
@@ -757,12 +731,31 @@ impl Node {
                 positions: chunk.iter().map(|item| item.distribution.n).collect(),
                 sealed,
             };
-            self.append_event(
-                channel,
+            self.append_channel_control_from_source(
+                &source,
                 EventKind::ChannelDeviceInheritance,
                 control.encode(),
             )?;
             changed = true;
+            let next = self.account_group_projection(channel)?;
+            if next.authority.current_event() != Some(authority)
+                || !next
+                    .authority
+                    .grants()
+                    .iter()
+                    .any(|candidate| candidate.id() == Some(grant))
+                || !next.state.as_ref().is_some_and(|current| {
+                    current.epoch() == state.epoch()
+                        && current.is_accepted_member(&recipient.user_id())
+                        && current.is_accepted_member(&self.user_id())
+                })
+            {
+                break;
+            }
+            source = self
+                .channel_checkpoints
+                .source_binding(channel)?
+                .ok_or(LogError::StaleCursor)?;
         }
         if changed {
             let key = (*channel.as_bytes(), recipient.ed25519_pub);
@@ -1215,6 +1208,32 @@ mod tests {
             shared_authors().len(),
             shared_count,
             "restarting the coordinator uses durable author coverage and does not republish keys"
+        );
+        let projection = source.account_group_projection(channel).unwrap();
+        let before = source
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        for _ in 0..3 {
+            assert!(
+                !source
+                    .share_account_receive_keys(channel, &projection, &mut source_work)
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            source
+                .log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before,
+            "unchanged current receiver sharing must not reopen signed history"
         );
         assert!(
             source

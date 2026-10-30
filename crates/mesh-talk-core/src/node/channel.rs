@@ -6,12 +6,20 @@
 
 use crate::channel::sender_key::SenderKeyDistribution;
 use crate::channel::{ChannelMeta, ChannelState};
-use crate::eventlog::event::{Author, ConversationId, Event, EventId, EventKind};
+#[cfg(test)]
+use crate::eventlog::Author;
+use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
 use crate::identity::device::{DeviceIdentity, PublicIdentity};
+#[cfg(test)]
 use crate::node::message::MessageBody;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+
+pub(in crate::node) mod checkpoint;
+pub(in crate::node) mod graph;
+mod projection;
+mod projection_facts;
 
 /// The `KeyRotation` event payload: the author's epoch sender-key distribution
 /// sealed to each member. `sender` is the author's user id (whose chain the SKD
@@ -182,28 +190,8 @@ impl std::fmt::Debug for ReceivedChannelMessage {
     }
 }
 
+#[cfg(test)]
 impl ReceivedChannelMessage {
-    pub(in crate::node) fn terminal(&self, batch_id: Option<String>, batch_size: usize) -> Self {
-        Self {
-            channel_id: self.channel_id,
-            channel_name: self.channel_name.clone(),
-            from: self.from.clone(),
-            text: Vec::new(),
-            protection: None,
-            reply_to: None,
-            event_id: self.event_id,
-            wall_clock: self.wall_clock,
-            wrapped: Vec::new(),
-            received_at: self.received_at,
-            arrival_kind: "catch_up",
-            own_device: self.own_device,
-            batch_id,
-            batch_complete: true,
-            batch_size,
-            reception_only: true,
-        }
-    }
-
     pub(in crate::node) fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.wrapped.capacity()
@@ -222,20 +210,25 @@ pub struct ChannelActivity {
     pub wall_clock: u64,
 }
 
-/// A node's view of all the channels it knows: each channel's [`ChannelState`]
-/// keyed by channel id. [`ChannelBook::process`] replays a channel's events (in the
-/// causal order the log returns them) to update membership/keys and surface
-/// decrypted messages.
+/// Current channel metadata and the active local sending chain. Production
+/// receiver keys, processed identities and activity history belong to SQL.
+/// The full replay adapter remains available only to the pure protocol tests.
 #[derive(Default)]
 pub struct ChannelBook {
     states: HashMap<ConversationId, ChannelState>,
+    #[cfg(test)]
     emitted: HashSet<EventId>,
+    #[cfg(test)]
     applied_leaves: HashSet<EventId>,
+    #[cfg(test)]
     applied_transfers: HashSet<EventId>,
     transferred: HashSet<(ConversationId, String)>,
     departed: HashSet<(ConversationId, String)>,
+    #[cfg(test)]
     activities: HashMap<ConversationId, Vec<ChannelActivity>>,
+    #[cfg(test)]
     activity_emitted: HashSet<EventId>,
+    #[cfg(test)]
     lineage_owner: HashMap<ConversationId, String>,
     history_policies: HashMap<ConversationId, crate::channel::HistoryPolicy>,
     replica_preferences: HashMap<(ConversationId, String), (u64, EventId, bool)>,
@@ -243,6 +236,7 @@ pub struct ChannelBook {
 
 /// One validated snapshot traversal, resumed across bounded plaintext batches.
 /// Ordering and ancestry indices are built once, independent of batch count.
+#[cfg(test)]
 pub(in crate::node) struct ChannelReplay<'a> {
     events: Vec<&'a Event>,
     by_id: HashMap<EventId, &'a Event>,
@@ -252,6 +246,7 @@ pub(in crate::node) struct ChannelReplay<'a> {
     history: Option<std::collections::VecDeque<ReceivedChannelMessage>>,
 }
 
+#[cfg(test)]
 impl<'a> ChannelReplay<'a> {
     pub(in crate::node) fn new<E: std::borrow::Borrow<Event>>(events: &'a [E]) -> Self {
         let events: Vec<&Event> = events.iter().map(std::borrow::Borrow::borrow).collect();
@@ -307,11 +302,29 @@ pub(in crate::node) struct ChannelInfoProjection {
 
 pub(super) struct ChannelMembershipProjection {
     pub state: Option<ChannelState>,
+    #[cfg(test)]
     pub departures: Vec<(String, EventId)>,
     pub authority: super::channel_account_authority::AccountAuthority,
     pub accepted: Vec<super::channel_account_authority::LegacyAccountMember>,
     pub authorized: HashSet<EventId>,
+    historical: Option<std::sync::Arc<projection_facts::ProjectionFacts>>,
     pub invited: Vec<super::channel_account_authority::LegacyAccountMember>,
+}
+
+impl ChannelMembershipProjection {
+    pub(in crate::node) fn empty(channel: ConversationId) -> Self {
+        projection::MembershipReducer::new(channel).finish()
+    }
+    pub(in crate::node) fn is_authorized(
+        &self,
+        event: EventId,
+    ) -> Result<bool, crate::eventlog::LogError> {
+        if let Some(history) = &self.historical {
+            history.is_authorized(event)
+        } else {
+            Ok(self.authorized.contains(&event))
+        }
+    }
 }
 
 impl ChannelBook {
@@ -353,6 +366,7 @@ impl ChannelBook {
     /// Replay signed channel metadata without opening sender keys or messages.
     /// Late-invite reconstruction, admission and archived summaries share these
     /// membership/ownership/terminal-state rules.
+    #[cfg(test)]
     pub(super) fn membership_view(
         channel_id: ConversationId,
         events: &[&Event],
@@ -369,347 +383,18 @@ impl ChannelBook {
         before: Option<EventId>,
         by_id: &HashMap<EventId, &Event>,
     ) -> ChannelMembershipProjection {
-        use super::channel_account_authority::{
-            AccountAuthority, LegacyAccountMember, LegacyAuthorityContext,
-        };
-        use super::channel_account_bootstrap::DeviceControl;
-        let mut authority = AccountAuthority::default();
-        let mut authorized = HashSet::new();
-        let mut bindings: HashMap<String, crate::discovery::Announce> = HashMap::new();
-        let mut roots: HashMap<String, (PublicIdentity, EventId, Option<EventId>, bool)> =
-            HashMap::new();
-        let mut prior: Option<ChannelState> = None;
-        let mut departures: Vec<(String, EventId)> = Vec::new();
+        let mut reducer = projection::MembershipReducer::new(channel_id);
         for event in events {
             if before == Some(event.id) {
                 break;
             }
-            if prior.as_ref().is_some_and(ChannelState::is_dissolved) {
-                break;
-            }
-            let author = event.author.user_id();
-            let old_members: HashSet<_> = prior
-                .as_ref()
-                .map(|state| {
-                    state
-                        .members()
-                        .iter()
-                        .map(PublicIdentity::user_id)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let was_accepted = prior
-                .as_ref()
-                .is_some_and(|state| state.is_accepted_member(&author));
-            let mut valid = was_accepted
-                && !matches!(
-                    event.kind,
-                    EventKind::MembershipChange
-                        | EventKind::ChannelRename
-                        | EventKind::ChannelDissolve
-                        | EventKind::ChannelAccept
-                        | EventKind::ChannelLeave
-                        | EventKind::ChannelOwnerTransfer
-                        | EventKind::ChannelAccountAuthority
-                        | EventKind::ChannelDeviceInheritance
-                );
-            match event.kind {
-                EventKind::MembershipChange => {
-                    let Some(mut meta) = ChannelMeta::decode(&event.ciphertext) else {
-                        continue;
-                    };
-                    let original_member_count = meta.members.len();
-                    meta.members.retain(|member| {
-                        !departures.iter().any(|(uid, leave_id)| {
-                            uid == &member.user_id() && !descends_from(event, *leave_id, by_id)
-                        })
-                    });
-                    if let Some(state) = prior.as_mut() {
-                        if !state.can_admin(&author) {
-                            continue;
-                        }
-                        valid = true;
-                        let old: HashSet<_> = state
-                            .members()
-                            .iter()
-                            .map(PublicIdentity::user_id)
-                            .collect();
-                        let invited = ChannelMeta::is_invitation(&event.ciphertext);
-                        if meta.members.len() < original_member_count {
-                            state.apply_meta_after_concurrent_leave(meta);
-                        } else {
-                            state.apply_meta(meta);
-                        }
-                        let added: Vec<_> = state
-                            .members()
-                            .iter()
-                            .map(PublicIdentity::user_id)
-                            .filter(|uid| !old.contains(uid))
-                            .collect();
-                        for uid in added {
-                            if invited {
-                                state.mark_invited(&uid);
-                            } else {
-                                state.auto_accept_legacy_member(&uid);
-                            }
-                        }
-                    } else if event.parents.is_empty()
-                        && author == meta.owner
-                        && meta.is_member(&author)
-                    {
-                        valid = true;
-                        let invited = ChannelMeta::is_invitation(&event.ciphertext);
-                        let mut state = ChannelState::from_meta(channel_id, meta);
-                        if invited {
-                            let invitees: Vec<_> = state
-                                .members()
-                                .iter()
-                                .map(PublicIdentity::user_id)
-                                .filter(|uid| uid != &author)
-                                .collect();
-                            for uid in invitees {
-                                state.mark_invited(&uid);
-                            }
-                        }
-                        prior = Some(state);
-                    }
-                }
-                EventKind::ChannelRename => {
-                    if let Some(state) = prior.as_mut()
-                        && state.can_admin(&author)
-                        && let Ok(name) = std::str::from_utf8(&event.ciphertext)
-                    {
-                        valid = true;
-                        state.apply_rename(name, event.lamport, event.id);
-                    }
-                }
-                EventKind::ChannelDissolve => {
-                    if event.ciphertext.is_empty()
-                        && let Some(state) = prior.as_mut()
-                        && state.can_admin(&author)
-                    {
-                        valid = true;
-                        state.dissolve();
-                    }
-                }
-                EventKind::ChannelAccept => {
-                    if authority.current_event().is_some() {
-                        let proof = bindings.get(&author).cloned().or_else(|| {
-                            authority
-                                .original_device_proofs()
-                                .into_iter()
-                                .chain(authority.invited_device_proofs())
-                                .find(|proof| proof.user_id == author)
-                        });
-                        if let Some(proof) = proof
-                            && (authority.is_member(&proof.public(), &proof)
-                                || authority
-                                    .invitation_for_device(&proof.public(), &proof)
-                                    .is_some())
-                        {
-                            valid = authority.accept_account(event, &proof, by_id).is_ok();
-                        }
-                    } else if event.ciphertext.is_empty()
-                        && let Some(state) = prior.as_mut()
-                    {
-                        valid = state.is_member(&author);
-                        state.accept_invite(&author, event.id);
-                    }
-                }
-                EventKind::ChannelOwnerTransfer => {
-                    if authority.current_event().is_some() {
-                        continue;
-                    }
-                    if let Some(state) = prior.as_mut()
-                        && state.can_admin(&author)
-                        && let Ok(next) = std::str::from_utf8(&event.ciphertext)
-                    {
-                        valid = state.transfer_owner(next);
-                    }
-                }
-                EventKind::ChannelLeave => {
-                    if authority.current_event().is_some() {
-                        let proof = bindings.get(&author).cloned().or_else(|| {
-                            authority
-                                .original_device_proofs()
-                                .into_iter()
-                                .find(|proof| proof.user_id == author)
-                        });
-                        if let Some(proof) = proof
-                            && authority.is_member(&proof.public(), &proof)
-                        {
-                            valid = authority.leave_account(event, &proof, by_id).is_ok();
-                        }
-                    } else if event.ciphertext.is_empty()
-                        && let Some(state) = prior.as_mut()
-                        && state.leave_member(&author)
-                    {
-                        valid = true;
-                        departures.push((author.clone(), event.id));
-                    }
-                }
-                EventKind::ChannelAccountAuthority => {
-                    valid = false;
-                    if let Some(state) = prior.as_ref() {
-                        let issuer =
-                            super::channel_account_authority::AccountAuthorityControl::decode(
-                                &event.ciphertext,
-                            )
-                            .map(|control| control.issuer.public());
-                        if let Some(owner) = state
-                            .members()
-                            .iter()
-                            .find(|member| member.user_id() == state.owner())
-                            .cloned()
-                            .or(issuer)
-                        {
-                            let accepted = roots
-                                .values()
-                                .filter(|(_, _, _, accepted)| *accepted)
-                                .map(|(public, membership_event, acceptance_event, _)| {
-                                    LegacyAccountMember {
-                                        public: public.clone(),
-                                        membership_event: *membership_event,
-                                        acceptance_event: *acceptance_event,
-                                    }
-                                })
-                                .collect();
-                            let context = LegacyAuthorityContext {
-                                channel: channel_id,
-                                owner,
-                                accepted,
-                                invited: roots
-                                    .values()
-                                    .filter(|(_, _, _, accepted)| !*accepted)
-                                    .map(|(public, membership_event, acceptance_event, _)| {
-                                        LegacyAccountMember {
-                                            public: public.clone(),
-                                            membership_event: *membership_event,
-                                            acceptance_event: *acceptance_event,
-                                        }
-                                    })
-                                    .collect(),
-                                epoch: state.epoch(),
-                            };
-                            valid = authority.apply(event, &context, by_id).is_ok();
-                        }
-                    }
-                }
-                EventKind::ChannelDeviceInheritance => {
-                    valid = false;
-                    if let Some((_, _, proof)) = DeviceControl::signed_inheritance(event)
-                        && authority.inherit_device(event, by_id).is_ok()
-                    {
-                        valid = true;
-                        bindings.insert(proof.user_id.clone(), proof);
-                    } else if let Some(state) = prior.as_ref() {
-                        valid = super::channel_account_bootstrap::receive_keys_admitted(
-                            state, event, &authority, by_id,
-                        ) || super::join_history::account_release_admitted(
-                            state, event, &authority, by_id,
-                        );
-                    }
-                }
-                _ => {}
-            }
-            if valid
-                && event
-                    .parents
-                    .iter()
-                    .all(|parent| authorized.contains(parent))
-            {
-                authorized.insert(event.id);
-            }
-            if let Some(state) = prior.as_ref() {
-                if event.kind == EventKind::MembershipChange {
-                    roots.retain(|uid, _| state.is_member(uid));
-                    for member in state.members() {
-                        if !old_members.contains(&member.user_id()) {
-                            roots.insert(
-                                member.user_id(),
-                                (
-                                    member.clone(),
-                                    event.id,
-                                    None,
-                                    state.is_accepted_member(&member.user_id()),
-                                ),
-                            );
-                        }
-                    }
-                }
-                if event.kind == EventKind::ChannelAccept
-                    && !was_accepted
-                    && state.is_accepted_member(&author)
-                    && let Some(root) = roots.get_mut(&author)
-                {
-                    root.2 = Some(event.id);
-                    root.3 = true;
-                }
-            }
-            if let Some(state) = prior.as_mut()
-                && let Some(owner) = authority.owner_account_id()
-                && let Some(epoch) = authority.key_epoch()
-            {
-                let mut proofs = authority.original_device_proofs();
-                proofs.extend(authority.grants().into_iter().map(|grant| grant.original));
-                proofs.extend(bindings.values().cloned());
-                let participants = proofs
-                    .into_iter()
-                    .filter(|proof| authority.is_member(&proof.public(), proof))
-                    .filter_map(|proof| proof.account_id().map(|account| (proof.public(), account)))
-                    .collect();
-                state.install_account_projection(owner, participants, epoch);
-                let mut invites = authority.invited_device_proofs();
-                invites.extend(
-                    bindings
-                        .values()
-                        .filter(|proof| {
-                            authority
-                                .invitation_for_device(&proof.public(), proof)
-                                .is_some()
-                        })
-                        .cloned(),
-                );
-                state.install_account_invites(
-                    invites
-                        .into_iter()
-                        .filter_map(|proof| {
-                            proof.account_id().map(|account| (proof.public(), account))
-                        })
-                        .collect(),
-                );
-            }
+            // This adapter constructs only memory owners; production indexed
+            // replay calls the fallible step directly and propagates storage errors.
+            reducer
+                .step(event, by_id)
+                .expect("in-memory channel graph cannot fail");
         }
-        let invited = roots
-            .values()
-            .filter(|(_, _, _, accepted)| !*accepted)
-            .map(
-                |(public, membership_event, acceptance_event, _)| LegacyAccountMember {
-                    public: public.clone(),
-                    membership_event: *membership_event,
-                    acceptance_event: *acceptance_event,
-                },
-            )
-            .collect();
-        let accepted = roots
-            .into_values()
-            .filter(|(_, _, _, accepted)| *accepted)
-            .map(
-                |(public, membership_event, acceptance_event, _)| LegacyAccountMember {
-                    public,
-                    membership_event,
-                    acceptance_event,
-                },
-            )
-            .collect();
-        ChannelMembershipProjection {
-            state: prior,
-            departures,
-            authority,
-            accepted,
-            authorized,
-            invited,
-        }
+        reducer.finish()
     }
 
     pub(super) fn project_membership<E: std::borrow::Borrow<Event>>(
@@ -749,6 +434,17 @@ impl ChannelBook {
         ChannelBook::default()
     }
 
+    pub(in crate::node) fn install_indexed_state(&mut self, mut state: ChannelState) {
+        let channel = state.id();
+        if let Some(current) = self.states.get_mut(&channel) {
+            current.install_membership_projection(state);
+            current.use_indexed_receivers();
+        } else {
+            state.use_indexed_receivers();
+            self.states.insert(channel, state);
+        }
+    }
+
     /// The state for a known channel, if any.
     pub fn state(&self, channel_id: &ConversationId) -> Option<&ChannelState> {
         self.states.get(channel_id)
@@ -765,6 +461,7 @@ impl ChannelBook {
         self.states.keys().copied().collect()
     }
 
+    #[cfg(test)]
     pub fn activity(&self, channel_id: &ConversationId) -> Vec<ChannelActivity> {
         self.activities.get(channel_id).cloned().unwrap_or_default()
     }
@@ -878,8 +575,10 @@ impl ChannelBook {
             limit,
             byte_budget,
         )
+        .expect("in-memory channel replay cannot fail")
     }
 
+    #[cfg(test)]
     pub(in crate::node) fn process_replay(
         &mut self,
         me: &DeviceIdentity,
@@ -887,13 +586,13 @@ impl ChannelBook {
         replay: &mut ChannelReplay<'_>,
         limit: usize,
         byte_budget: usize,
-    ) -> (Vec<ReceivedChannelMessage>, bool) {
+    ) -> Result<(Vec<ReceivedChannelMessage>, bool), crate::eventlog::LogError> {
         let my_author = Author::from_ed25519(me.public().ed25519_pub);
         if replay.history.is_none() {
             self.history_policies
                 .insert(channel_id, super::join_history::policy(&replay.events));
             replay.history =
-                Some(super::join_history::received(me, channel_id, &replay.events).into());
+                Some(super::join_history::received(me, channel_id, &replay.events)?.into());
         }
         let ChannelReplay {
             events,
@@ -970,7 +669,7 @@ impl ChannelBook {
                             event,
                             &projection.authority,
                             by_id,
-                        );
+                        )?;
                     }
                 }
                 continue;
@@ -1320,7 +1019,7 @@ impl ChannelBook {
                 out.push(message);
             }
         }
-        (out, limited)
+        Ok((out, limited))
     }
 }
 
@@ -1414,8 +1113,9 @@ mod tests {
         let mut identities = HashSet::new();
         let mut batches = 0;
         loop {
-            let (messages, limited) =
-                book.process_replay(&bob, channel, &mut replay, 64, CHANNEL_PENDING_BYTES);
+            let (messages, limited) = book
+                .process_replay(&bob, channel, &mut replay, 64, CHANNEL_PENDING_BYTES)
+                .unwrap();
             batches += 1;
             assert!(messages.len() <= 64);
             assert!(

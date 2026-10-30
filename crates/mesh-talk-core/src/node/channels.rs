@@ -1,5 +1,6 @@
 //! Channel lifecycle: create, membership, sender-key distribution, and sends. Split out of node.rs (one `impl Node` block per domain).
 
+#[cfg(test)]
 use super::channel::ChannelBook;
 use super::node::now_millis;
 use super::*;
@@ -222,28 +223,27 @@ impl Node {
         };
         let members = match members {
             Some(members) => members,
-            None => {
-                let log = self.log.lock().expect("log mutex not poisoned");
-                super::channel::ChannelBook::projected_metadata(channel, &log.events(&channel)?)
-                    .map(|state| {
-                        state
-                            .members()
-                            .iter()
-                            .filter(|member| state.is_accepted_member(&member.user_id()))
-                            .cloned()
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            }
+            None => self
+                .account_group_projection(channel)?
+                .state
+                .map(|state| {
+                    state
+                        .members()
+                        .iter()
+                        .filter(|member| state.is_accepted_member(&member.user_id()))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
         };
         Ok(self.project_channel_member_accounts(&members))
     }
 
     /// Read validated controls independently of delayed plaintext persistence.
     fn channel_control_state(&self, channel: ConversationId) -> Result<ChannelState, NodeError> {
-        let log = self.log.lock().expect("log mutex not poisoned");
-        let events = log.events(&channel)?;
-        let state = ChannelBook::projected_metadata(channel, &events)
+        let state = self
+            .account_group_projection(channel)?
+            .state
             .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
         if state.is_dissolved() {
             return Err(NodeError::Channel("channel is dissolved".into()));
@@ -667,6 +667,31 @@ impl Node {
         Ok(())
     }
 
+    /// Stable selected-content cache binding. Ordinary content tails preserve
+    /// this token; control changes and reordered canonical history replace it.
+    pub(in crate::node) fn channel_content_generation(
+        &self,
+        channel: ConversationId,
+    ) -> Result<Option<([u8; 16], i64)>, NodeError> {
+        let Some(source) = self.channel_checkpoints.source_binding(channel)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            source.job,
+            self.channel_checkpoints.control_stamp(&source)?,
+        )))
+    }
+
+    /// Exact invitation cutoff for one selected event, including own authors.
+    /// Receive-chain admission has a separate stricter owner.
+    pub(in crate::node) fn channel_content_visible(
+        &self,
+        channel: ConversationId,
+        event: crate::eventlog::EventId,
+    ) -> Result<bool, NodeError> {
+        Ok(self.channel_checkpoints.content_visible(channel, event)?)
+    }
+
     /// Event ids visible to this device after it accepted an invitation.
     /// `None` means this channel has no acceptance cutoff (or is not a channel).
     pub(in crate::node) fn channel_content_gate(
@@ -863,6 +888,8 @@ impl Node {
         drop(book);
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
+        drop(delivery);
+        self.process_channel(channel);
         Ok(())
     }
 

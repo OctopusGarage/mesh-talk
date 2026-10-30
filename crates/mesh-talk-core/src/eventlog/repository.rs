@@ -7,6 +7,7 @@ use bincode::Options;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::sync::Arc;
 
+mod ancestry;
 mod decode;
 pub(crate) mod import;
 pub(crate) mod maintenance;

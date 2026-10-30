@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use zeroize::{Zeroize, Zeroizing};
 
+mod checkpoint;
+pub(crate) use checkpoint::{CheckpointMessageError, PreparedChannelMessage};
+
 /// The plaintext membership snapshot carried by a `MembershipChange` event: the full
 /// member set + channel name + epoch. A snapshot (not a delta) so the latest one
 /// fully defines current membership on replay.
@@ -433,6 +436,7 @@ impl ChannelState {
     /// Current-epoch receive material for an authorized sibling. The caller owns
     /// account membership admission and encrypted transport. These distributions
     /// seed receive chains only; a new device must generate its own sending key.
+    #[cfg(test)]
     pub(crate) fn current_receive_distributions(
         &self,
     ) -> Vec<(String, u64, SenderKeyDistribution)> {
@@ -463,6 +467,7 @@ impl ChannelState {
     /// Ordinary sender-key distributions remain first-wins; only this explicit
     /// recovery path may advance an existing receiver past an unavailable gap
     /// beyond the normal skip bound. Routine snapshots preserve pending delivery.
+    #[cfg(test)]
     pub(crate) fn refresh_sender_chain(
         &mut self,
         author: String,

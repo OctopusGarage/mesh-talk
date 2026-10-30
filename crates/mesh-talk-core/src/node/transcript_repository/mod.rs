@@ -262,6 +262,9 @@ impl TranscriptRepository {
         if self.fail_writes || self.fail_next.replace(false) {
             return Err(std::io::Error::other("injected transcript write failure").into());
         }
+        self.check_publication()
+    }
+    pub(super) fn check_publication(&self) -> Result<(), LogError> {
         self.source.check_write()
     }
     pub(crate) fn revision(&self) -> u64 {

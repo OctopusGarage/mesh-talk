@@ -1167,6 +1167,9 @@ impl Node {
                     .state_mut(&channel)
             {
                 for (epoch, bytes) in senders {
+                    if epoch != state.epoch() {
+                        continue;
+                    }
                     if let Some(key) = crate::channel::sender_key::SenderKey::deserialize(&bytes) {
                         state.import_my_sender(epoch, key);
                     }

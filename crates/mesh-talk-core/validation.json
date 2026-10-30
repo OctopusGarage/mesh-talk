@@ -3,7 +3,9 @@
   "contracts": [
     {
       "id": "core-opaque-receive-hints",
-      "paths": ["crates/mesh-talk-core/src/node/opaque_receive_cache.rs"],
+      "paths": [
+        "crates/mesh-talk-core/src/node/opaque_receive_cache.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -14,7 +16,9 @@
           ]
         }
       ],
-      "consumers": ["core-node"],
+      "consumers": [
+        "core-node"
+      ],
       "capability": {
         "summary": "Keep optional opaque receive mappings on encrypted disk and load only the active mailbox's bounded protocol identifiers.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
@@ -564,7 +568,8 @@
         "crates/mesh-talk-core/src/node/channel_account_authority.rs",
         "crates/mesh-talk-core/src/node/channel_account_bootstrap.rs",
         "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
-        "crates/mesh-talk-core/src/node/channel_account_controls.rs"
+        "crates/mesh-talk-core/src/node/channel_account_controls.rs",
+        "crates/mesh-talk-core/src/node/channel_account_authority/"
       ],
       "rust": [
         {
@@ -631,7 +636,8 @@
       "paths": [
         "crates/mesh-talk-core/src/channel/history.rs",
         "crates/mesh-talk-core/src/node/join_history.rs",
-        "crates/mesh-talk-core/src/node/join_history_tests.rs"
+        "crates/mesh-talk-core/src/node/join_history_tests.rs",
+        "crates/mesh-talk-core/src/node/join_history/"
       ],
       "rust": [
         {
@@ -670,6 +676,10 @@
           {
             "name": "Protected rows do not consume invitation history budgets or become ordinary snapshots, and incoming protected copies retain concealed projections",
             "reference": "docs/privacy-controls.md#protected-messages"
+          },
+          {
+            "name": "Indexed offer/release selectors retain canonical and causal invitation authority and exact received identities; unchanged source retry turns decode no historical controls.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -788,18 +798,25 @@
       "id": "core-channel",
       "paths": [
         "crates/mesh-talk-core/src/channel/",
-        "crates/mesh-talk-core/tests/forward_secrecy_boundaries.rs"
+        "crates/mesh-talk-core/tests/forward_secrecy_boundaries.rs",
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/node/channel/",
+        "crates/mesh-talk-core/src/node/channel_senders.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/ancestry.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
-            "channel::"
+            "channel::",
+            "node::channel_senders::tests::",
+            "node::node::tests::channel_checkpoint_",
+            "node::node::tests::group_reception_"
           ]
         }
       ],
       "capability": {
-        "summary": "Preserve exact channel receiver state through authenticated candidate preparation and reject exhausted sender-key counters before mutation.",
+        "summary": "Keep current channel metadata and exact receiver progress on encrypted disk, with bounded pending work and atomic transcript/reception installation.",
         "guide": "docs/ARCHITECTURE.md",
         "invariants": [
           {
@@ -809,6 +826,14 @@
           {
             "name": "The strict bounded device-local codec preserves skipped-key identity and eviction order; exhausted u32 advancement cannot wrap, while terminal skipped keys remain consumable.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Exact discard evidence and independent role terminal facts survive retries and restart.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Failed authentication waits for new key material, gaps wait for the existing skip bound, and legal oversized work remains pending without silent completion.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },

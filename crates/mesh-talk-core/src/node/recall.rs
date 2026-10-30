@@ -187,7 +187,7 @@ mod recovery_snapshot_tests {
 }
 
 pub(in crate::node) enum ChannelRecallPreparation {
-    Retry,
+    Retry(Option<EventId>),
     Ignored,
     Mark(RecallMark),
 }
@@ -210,7 +210,7 @@ impl Node {
             self.historical_author(event.author.ed25519_pub())
                 .map(|p| p.x25519_pub)
         }) else {
-            return Ok(ChannelRecallPreparation::Retry);
+            return Ok(ChannelRecallPreparation::Retry(None));
         };
         let Some(payload) = super::channel::SealedPayload::decode(&event.ciphertext)
             .and_then(|sealed| sealed.open(&self.identity, &author_x))
@@ -225,7 +225,7 @@ impl Node {
             .repository()?
             .header(&payload.target)?
         else {
-            return Ok(ChannelRecallPreparation::Retry);
+            return Ok(ChannelRecallPreparation::Retry(Some(payload.target)));
         };
         if target.author != event.author || target.conversation != event.conversation_id {
             return Ok(ChannelRecallPreparation::Ignored);
