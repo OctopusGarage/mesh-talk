@@ -2051,17 +2051,23 @@ async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancel
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     sibling_peer(&receiver, &source, listener.local_addr().unwrap());
     let started = Arc::new(tokio::sync::Notify::new());
-    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let (cancelled_tx, mut cancelled) = tokio::sync::watch::channel(false);
+    let continuation_waiting = Arc::new(tokio::sync::Notify::new());
+    let (release_history, history_gate) = tokio::sync::watch::channel(false);
     let server_source = source.clone();
     let server_started = started.clone();
-    let server_cancelled = cancelled.clone();
+    let server_continuation_waiting = continuation_waiting.clone();
     let server = tokio::spawn(async move {
         let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 accepted = listener.accept() => {
                     let (stream, _) = accepted.unwrap();
-                    let source = server_source.clone(); let started = server_started.clone(); let cancelled = server_cancelled.clone();
+                    let source = server_source.clone();
+                    let started = server_started.clone();
+                    let cancelled = cancelled_tx.clone();
+                    let continuation_waiting = server_continuation_waiting.clone();
+                    let mut history_gate = history_gate.clone();
                     connections.spawn(async move {
                         let Ok(mut io) = source.privacy_accept(stream).await else { return; };
                         let Ok(bytes) = io.recv().await else { return; };
@@ -2069,13 +2075,17 @@ async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancel
                         match request {
                             AccountHistoryFrame::SessionRequest { .. } | AccountHistoryFrame::DocumentsRequest {..} | AccountHistoryFrame::AttachmentRequestChecked {..} => {},
                             AccountHistoryFrame::Request { account_id, cursor, known_digest, wanted, .. } => {
+                                if cursor.is_some() {
+                                    continuation_waiting.notify_one();
+                                    history_gate.wait_for(|released| *released).await.unwrap();
+                                }
                                 source.serve_account_history(&mut io, version, &account_id, cursor, known_digest, wanted).await;
                             }
                             AccountHistoryFrame::AttachmentRequest { .. } => {
                                 started.notify_one();
                                 // No reply: only receiver cancellation can close this channel promptly.
                                 assert!(io.recv().await.is_err());
-                                cancelled.notify_one();
+                                cancelled.send_replace(true);
                             }
                             // Frozen legacy implementations close unknown optional requests.
                             _ => {},
@@ -2086,20 +2096,52 @@ async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancel
             }
         }
     });
+    let worker_started = tokio::time::Instant::now();
     let worker = tokio::spawn(receiver.clone().run_account_history_loop());
-    let outcome = tokio::time::timeout(Duration::from_secs(3), async {
-        started.notified().await;
-        loop {
-            if receiver.account_history(&receiver.account_id(), 100).len() >= 41 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+    let outcome = async {
+        // Cold authentication and legacy capability fallback are setup. Hold a
+        // continuation page until the attachment is demonstrably stalled, so
+        // history cannot finish before the measured liveness check begins.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            started.notified().await;
+            continuation_waiting.notified().await;
+        })
+        .await
+        .map_err(|_| "setup did not reach the stalled attachment and held history continuation")?;
+        if receiver.account_history(&receiver.account_id(), 100).len() >= 41 {
+            return Err("history completed before the attachment stall was established");
         }
-        receiver
-            .set_device_sync_category(SyncCategory::Attachments, false)
-            .unwrap();
-        cancelled.notified().await;
-    })
+        // A durable release also admits all later continuation pages.
+        release_history.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if receiver.account_history(&receiver.account_id(), 100).len() >= 41 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| "history did not progress while the attachment remained stalled")?;
+        if *cancelled.borrow() {
+            return Err("attachment closed before its policy was disabled");
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            receiver
+                .set_device_sync_category(SyncCategory::Attachments, false)
+                .unwrap();
+            cancelled.wait_for(|closed| *closed).await.unwrap();
+        })
+        .await
+        .map_err(|_| "disabling attachments did not close the pending network exchange")?;
+        // No attachment task existed before this worker. Observe EOF before
+        // its earliest possible read timeout, so timeout cannot impersonate
+        // policy cancellation even when fixture setup was unusually slow.
+        if worker_started.elapsed() >= READ_TIMEOUT {
+            return Err("cancellation evidence is inconclusive after the earliest read timeout");
+        }
+        Ok(())
+    }
     .await;
     worker.abort();
     server.abort();

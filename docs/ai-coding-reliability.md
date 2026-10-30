@@ -307,6 +307,12 @@ arbitrary sleep or a test that checks only that a timeout helper was called.
 Verify successful behavior, failure, cleanup and replacement through the same
 production owner; a mock that bypasses the problematic lock proves little.
 
+Give connection setup and capability negotiation their own bounded watchdog.
+Start a progress deadline only after the required stalled operation is admitted,
+and prove the competing work is still incomplete at that point. Release only
+that work's barrier while retaining the stall. Measure cancellation separately
+from setup and history progress; preserve each behavior's required bound.
+
 A deadlock regression must not hang its own runner: bound coordination, arrange
 fixture release even when assertions fail, and use an isolated process with an
 outer deadline when a synchronous lock cycle cannot be safely unwound. An async
