@@ -466,6 +466,20 @@ phase includes unrelated lanes and is not a prerequisite for group admission.
 Keep the original role, capability and retained-membership proofs alongside these
 scope completions; the observations neither issue requests nor stop workers.
 
+Same-source partial-page fixtures prepare their immutable signed prefix before
+arming the held request. Require matching metadata at both endpoints and a current
+Control completion without an outstanding pair in every participating sibling
+direction; possessing the rows alone does not settle an older comparison. Only
+then add the controlled tail through the existing source owner. A natural origin
+and an unprotected dispatch do not imply an unpaired task. Preserve the complete
+corpus, exact live-request checks and checkpoint repayment assertions when moving
+this preparation outside the operation budget.
+If a real Wake retires that preparation request, a later eligible comparison may
+advance the same signed tail key within the existing setup bound. Stop preparation
+once a live hold is captured; never retry the measured operation. The fault
+regression must prove cancellation, retirement and capture of a distinct live
+request before admission.
+
 Once the original operation is admitted, or the external possession proof starts,
 the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit

@@ -176,12 +176,98 @@ impl ControlTestDispatch {
     pub fn natural_origin(self) -> bool {
         !self.resumed && !self.replacement
     }
+    fn unpaired_background(self) -> bool {
+        !self.paired && !self.protected && self.natural_origin()
+    }
     fn turn_origin(self) -> String {
         format!(
             "control_turn_origin resumed={} replacement={}",
             self.resumed, self.replacement
         )
     }
+}
+
+#[derive(Default)]
+struct ColdControlScope {
+    settled: bool,
+    paired: bool,
+}
+impl ColdControlScope {
+    fn observe(&mut self, event: &str, corpus_present: bool) {
+        if event.starts_with("control_task ") {
+            self.settled = false;
+            // The parent can cancel before the child's first trace. Only an
+            // explicit retirement clears the announced comparison debt.
+            self.paired |= event.starts_with("control_task paired=true ");
+        } else if event.starts_with("control_cancel ") && event.ends_with("reason=same_source") {
+            // The child can finish before abort takes effect. Its late scope
+            // completion cannot pay the pair the parent is about to create.
+            self.settled = false;
+            self.paired = true;
+        } else if event == "document_scope_settled scope=Control" {
+            self.settled = corpus_present;
+        } else if event == "control_pair_retired" {
+            self.paired = false;
+        }
+    }
+    fn ready(&self) -> bool {
+        self.settled && !self.paired
+    }
+}
+
+#[test]
+fn initial_background_hold_rejects_a_paid_but_live_control_pair() {
+    let natural = ControlTestDispatch {
+        paired: false,
+        protected: false,
+        resumed: false,
+        replacement: false,
+        hint: false,
+    };
+    assert!(natural.unpaired_background());
+    let paid_pair = ControlTestDispatch {
+        paired: true,
+        ..natural
+    };
+    assert!(paid_pair.natural_origin() && !paid_pair.protected);
+    assert!(
+        !paid_pair.unpaired_background(),
+        "an existing pair cannot establish the fresh same-source cancellation boundary"
+    );
+
+    let mut scope = ColdControlScope::default();
+    scope.observe("control_task paired=true protected=true", false);
+    scope.observe("document_scope_settled scope=Control", true);
+    assert!(
+        !scope.ready(),
+        "a completed prefix cannot hide an unpaid original comparison"
+    );
+    scope.observe("control_pair_retired", false);
+    assert!(scope.ready());
+    scope.observe("control_task paired=false protected=false", false);
+    assert!(
+        !scope.ready(),
+        "an earlier completed scope is not current readiness"
+    );
+    scope.observe("document_scope_settled scope=Control", false);
+    assert!(!scope.ready(), "the exact corpus must already be present");
+    scope.observe("control_cancel task=Id(1) reason=same_source", false);
+    scope.observe("document_scope_settled scope=Control", true);
+    assert!(
+        !scope.ready(),
+        "a late child completion cannot settle an announced same-source cancellation"
+    );
+    scope.observe("control_task paired=false protected=false", false);
+    scope.observe("document_scope_settled scope=Control", true);
+    assert!(
+        !scope.ready(),
+        "a late first child poll cannot erase its parent's announced comparison debt"
+    );
+    scope.observe("control_task paired=true protected=true", false);
+    scope.observe("document_scope_settled scope=Control", true);
+    assert!(!scope.ready());
+    scope.observe("control_pair_retired", false);
+    assert!(scope.ready());
 }
 impl ControlTestPage {
     pub fn dispatch(&self) -> Option<ControlTestDispatch> {
@@ -700,22 +786,36 @@ impl Drop for ReleaseReadOnDrop {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_source_receipt_overtakes_its_own_preoperation_background_control_read() {
-    run_same_source_receipt(false, false, false).await;
+    run_same_source_receipt(SameSourceScenario::Fresh).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selected_source_lower_key_receipt_preserves_both_partial_control_comparisons() {
-    run_same_source_receipt(true, false, false).await;
+    run_same_source_receipt(SameSourceScenario::Partial).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_selected_executor_overtakes_a_completed_operations_paired_background_page() {
-    run_same_source_receipt(true, true, false).await;
+    run_same_source_receipt(SameSourceScenario::OtherSelected).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn incoming_operation_wake_runs_after_paid_pair_pages_before_unrelated_continuation() {
-    run_same_source_receipt(true, true, true).await;
+    run_same_source_receipt(SameSourceScenario::PaidBoundary).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_source_cold_preparation_replaces_a_retired_partial_candidate() {
+    run_same_source_receipt(SameSourceScenario::InterruptedPreparation).await;
+}
+
+#[derive(Clone, Copy)]
+enum SameSourceScenario {
+    Fresh,
+    Partial,
+    OtherSelected,
+    PaidBoundary,
+    InterruptedPreparation,
 }
 
 type PostHandoffPage = (u128, tokio::task::Id, Option<[u8; 32]>, bool, String);
@@ -1019,10 +1119,7 @@ async fn hold_original_pair_resume(
                         Some(crate::node::AccountDocumentKey::GroupLegacyOperation { .. })
                     ) =>
                     {
-                        if !page
-                            .origin
-                            .starts_with("control_task paired=false protected=false ")
-                        {
+                        if !dispatch.unpaired_background() {
                             return;
                         }
                         assert!(
@@ -1211,7 +1308,14 @@ async fn hold_original_pair_resume(
     gates
 }
 
-async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_boundary: bool) {
+async fn run_same_source_receipt(scenario: SameSourceScenario) {
+    let partial = !matches!(scenario, SameSourceScenario::Fresh);
+    let other_selected = matches!(
+        scenario,
+        SameSourceScenario::OtherSelected | SameSourceScenario::PaidBoundary
+    );
+    let paid_boundary = matches!(scenario, SameSourceScenario::PaidBoundary);
+    let preparation_wake = matches!(scenario, SameSourceScenario::InterruptedPreparation);
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let owner = node(&dir.path().join("owner"), &account);
@@ -1309,6 +1413,63 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
             install(target, &invited);
         }
     }
+    // Import the immutable prefix through the real background workers before
+    // arming a held request. Only row 66 is introduced at the natural snapshot;
+    // the operation budgets must not include cold replication of rows 1..65.
+    let partial_keys = Arc::new(Mutex::new(Vec::new()));
+    if partial {
+        for value in 1..=65u8 {
+            partial_keys.lock().unwrap().push(
+                crate::node::account_documents::sync::seed_legacy_control_page_for_test(
+                    &owner,
+                    crate::eventlog::ConversationId::new([value; 32]),
+                ),
+            );
+        }
+    }
+    let prefix_metadata = Arc::new(
+        partial_keys
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|key| owner.account_document_meta(key).unwrap())
+            .collect::<Vec<_>>(),
+    );
+    let mut siblings = vec![owner.clone(), reference.clone()];
+    siblings.extend(other.iter().cloned());
+    let mut cold_scopes = Vec::new();
+    for target in &siblings {
+        let mut peers = Vec::new();
+        for peer in &siblings {
+            if peer.user_id() == target.user_id() {
+                continue;
+            }
+            let scope = Arc::new(Mutex::new(ColdControlScope::default()));
+            cold_scopes.push((target.clone(), peer.clone(), scope.clone()));
+            peers.push((peer.identity.public(), Arc::downgrade(peer), scope));
+        }
+        *target.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let target = Arc::downgrade(target);
+            let expected = prefix_metadata.clone();
+            move |public, event| {
+                let Some((_, peer, scope)) = peers.iter().find(|(exact, _, _)| *exact == public)
+                else {
+                    return;
+                };
+                let corpus_present = event == "document_scope_settled scope=Control"
+                    && target
+                        .upgrade()
+                        .zip(peer.upgrade())
+                        .is_some_and(|(target, peer)| {
+                            expected.iter().all(|meta| {
+                                target.account_document_meta(&meta.key).as_ref() == Some(meta)
+                                    && peer.account_document_meta(&meta.key).as_ref() == Some(meta)
+                            })
+                        });
+                scope.lock().unwrap().observe(&event, corpus_present);
+            }
+        }));
+    }
     let mut devices = vec![
         ("owner", owner.clone()),
         ("reference", reference.clone()),
@@ -1352,19 +1513,12 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     }
     super::cold_account_control_setup(
         super::observe_account_fixture_condition(|| {
-            let mut required = vec![(&owner, &reference), (&reference, &owner)];
-            if let Some(other) = &other {
-                required.extend([(other, &reference), (&reference, other)]);
-            }
-            required.into_iter().all(|(node, peer)| {
+            cold_scopes.iter().all(|(node, peer, scope)| {
                 super::has_account_group_operation_support(
                     node,
                     peer,
                     Some(AccountGroupOperationKind::Rename),
-                ) && node.device_sync_status().into_iter().any(|status| {
-                    status.device_id == peer.user_id()
-                        && status.document_phase == crate::node::SyncPhase::UpToDate
-                })
+                ) && scope.lock().unwrap().ready()
             })
         }),
         async {
@@ -1393,6 +1547,18 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     );
     assert!(reference.channel_members(group).is_empty());
     assert!(reference.pending_account_operation_sources().is_empty());
+    if partial {
+        let last = crate::node::AccountDocumentKey::GroupLegacyOperation {
+            channel: hex::encode([66; 32]),
+            source_device: owner.user_id(),
+        };
+        assert!(
+            siblings
+                .iter()
+                .all(|node| node.account_document_meta(&last).is_none()),
+            "the controlled tail must remain absent until the natural snapshot"
+        );
+    }
 
     let b_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let b_critical = Arc::new(Mutex::new(CriticalControlTrace::default()));
@@ -1436,6 +1602,10 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
     // not earlier natural publication/cold setup traffic.
     let abort_window = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let preparation_candidate =
+        Arc::new(Mutex::new(None::<(tokio::task::Id, std::sync::Weak<()>)>));
+    let preparation_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let preparation_wake_acknowledged = Arc::new(std::sync::atomic::AtomicBool::new(false));
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let classes = classes.clone();
         let aborts = aborts.clone();
@@ -1451,9 +1621,21 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
         let abort_trace = abort_trace.clone();
         let active_a_page = active_a_page.clone();
         let control_pages = control_pages.clone();
+        let preparation_candidate = preparation_candidate.clone();
+        let preparation_cancelled = preparation_cancelled.clone();
         move |peer, phase| {
             if peer == exact_owner {
                 control_pages.lock().unwrap().observe(&phase);
+                if preparation_candidate
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(task, _)| {
+                        phase == format!("control_cancel task={task:?} reason=same_source")
+                    })
+                {
+                    preparation_cancelled.store(true, std::sync::atomic::Ordering::Release);
+                }
             }
             let side = if peer == exact_owner {
                 Some("requester_to_A")
@@ -1603,8 +1785,8 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
         }
     }));
     let checkpoints = Arc::new(Mutex::new(Vec::new()));
-    let partial_keys = Arc::new(Mutex::new(Vec::new()));
-    let seeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let tail_revision = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let rejected = Arc::new(Mutex::new([0usize; 6]));
     *owner.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let release = release.clone();
         let checkpoints = checkpoints.clone();
@@ -1616,11 +1798,14 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
         let resumed_signal = resumed_signal.clone();
         let resumed_release = resumed_release.clone();
         let partial_keys = partial_keys.clone();
-        let seeded = seeded.clone();
+        let tail_revision = tail_revision.clone();
+        let preparation_candidate = preparation_candidate.clone();
+        let preparation_wake_acknowledged = preparation_wake_acknowledged.clone();
         let abort_trace = abort_trace.clone();
         let abort_window = abort_window.clone();
         let held_pages = held_pages.clone();
         let control_pages = control_pages.clone();
+        let rejected = rejected.clone();
         move |peer, frame| {
             let owner_id = owner_id.clone();
             let source = source.clone();
@@ -1629,7 +1814,9 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
             let resumed_signal = resumed_signal.clone();
             let resumed_release = resumed_release.clone();
             let partial_keys = partial_keys.clone();
-            let seeded = seeded.clone();
+            let tail_revision = tail_revision.clone();
+            let preparation_candidate = preparation_candidate.clone();
+            let preparation_wake_acknowledged = preparation_wake_acknowledged.clone();
             let abort_trace = abort_trace.clone();
             let abort_window = abort_window.clone();
             let held_pages = held_pages.clone();
@@ -1638,6 +1825,7 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
             let checkpoints = checkpoints.clone();
             let exact_reference = exact_reference.clone();
             let control_pages = control_pages.clone();
+            let rejected = rejected.clone();
             Box::pin(async move {
                 if peer != exact_reference {
                     return;
@@ -1660,14 +1848,18 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                     );
                 }
                 let Some(page) = control_pages.lock().unwrap().live_request(&request) else {
+                    rejected.lock().unwrap()[0] += 1;
                     return;
                 };
                 let Some(dispatch) = page.dispatch() else {
+                    rejected.lock().unwrap()[1] += 1;
                     return;
                 };
-                if arrived.lock().unwrap().is_some()
-                    && (dispatch.protected || !dispatch.natural_origin())
-                {
+                if arrived.lock().unwrap().is_some() && !dispatch.unpaired_background() {
+                    let mut rejected = rejected.lock().unwrap();
+                    rejected[2] += usize::from(dispatch.paired);
+                    rejected[3] += usize::from(dispatch.protected);
+                    rejected[4] += usize::from(!dispatch.natural_origin());
                     return;
                 }
                 let effective_after = request.operation.as_ref().and_then(|probe| probe.after.as_ref()).map(|after| {
@@ -1712,23 +1904,58 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                 }
                 if partial
                     && effective_after.is_none()
-                    && !dispatch.protected
-                    && !seeded.swap(true, std::sync::atomic::Ordering::Relaxed)
+                    && dispatch.unpaired_background()
+                    && arrived.lock().unwrap().is_some()
                 {
-                    // Insert before this natural request's immutable snapshot;
-                    // earlier protected cold-start comparisons cannot consume
-                    // the intended partial checkpoint before we observe it.
+                    // The immutable prefix is already imported and its old
+                    // comparisons are paid. A newer Wake may retire a candidate
+                    // during preparation. Revise the same tail at the next
+                    // genuine unpaired comparison, within the original cold
+                    // budget; stop changing it as soon as the hold is captured.
                     let source = source.upgrade().unwrap();
-                    for value in 1..=66u8 {
-                        partial_keys.lock().unwrap().push(
-                            crate::node::account_documents::sync::seed_legacy_control_page_for_test(
-                                &source,
-                                crate::eventlog::ConversationId::new([value; 32]),
-                            ),
+                    let revision = {
+                        // Capture takes this same mutex. Keep the final check,
+                        // revision and synchronous publication indivisible so
+                        // an old responder cannot mutate after another holds.
+                        let admission = arrived.lock().unwrap();
+                        if admission.is_none() {
+                            return;
+                        }
+                        let revision =
+                            tail_revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                        let key = crate::node::account_documents::sync::seed_legacy_control_page_revision_for_test(
+                            &source,
+                            crate::eventlog::ConversationId::new([66; 32]),
+                            revision,
                         );
+                        if revision == 1 {
+                            partial_keys.lock().unwrap().push(key);
+                        } else {
+                            assert!(
+                                partial_keys.lock().unwrap().last() == Some(&key),
+                                "preparation may revise only the same controlled tail key"
+                            );
+                        }
+                        revision
+                    };
+                    if preparation_wake && revision == 1 {
+                        let lifetime = control_pages
+                            .lock()
+                            .unwrap()
+                            .origins
+                            .iter()
+                            .find(|origin| origin.task == page.task)
+                            .and_then(|origin| origin.lifetime.clone())
+                            .expect("the first preparation request owns a live child");
+                        *preparation_candidate.lock().unwrap() = Some((page.task, lifetime));
+                        source.note_account_local_change();
+                        send_boundary_wake(&source, &requester.upgrade().unwrap()).await;
+                        preparation_wake_acknowledged
+                            .store(true, std::sync::atomic::Ordering::Release);
                     }
                 }
                 if partial && !matches!(&effective_after, Some(crate::node::account_documents::AccountDocumentKey::GroupLegacyOperation { .. })) {
+                    rejected.lock().unwrap()[5] += 1;
                     return;
                 }
                 checkpoints.lock().unwrap().push((
@@ -1742,6 +1969,11 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
                     // This is a completed SessionReady and an authenticated
                     // read, not an accepted operation or mutation transaction.
                     if partial {
+                        assert!(
+                            tail_revision.load(std::sync::atomic::Ordering::Acquire) > 0
+                                && partial_keys.lock().unwrap().len() == 66,
+                            "the held tail must follow the prepared prefix and its one new row"
+                        );
                         let operation_key =
                             crate::node::account_documents::AccountDocumentKey::GroupOperation {
                                 channel: hex::encode(group.as_bytes()),
@@ -1815,10 +2047,55 @@ async fn run_same_source_receipt(partial: bool, other_selected: bool, paid_bound
         }
     }));
     reference.account_sync_notify.notify_one();
-    super::cold_account_setup(held)
+    super::cold_account_setup(async {
+        held.await?;
+        if preparation_wake {
+            super::observe_account_fixture_condition(|| {
+                preparation_wake_acknowledged.load(std::sync::atomic::Ordering::Acquire)
+            })
+            .await;
+        }
+        Ok::<(), oneshot::error::RecvError>(())
+    })
         .await
-        .expect("the natural same-source background read must be held before admission")
+        .unwrap_or_else(|error| {
+            let pages = control_pages.lock().unwrap();
+            panic!(
+                "the natural same-source background read must be held before admission: {error:?}; tail_revision={} checkpoints={} observed_pages={} live_pages={} preparation_cancelled={} preparation_retired={} wake_acknowledged={} rejected_missing_live_dispatch_paired_protected_origin_continuation={:?}",
+                tail_revision.load(std::sync::atomic::Ordering::Acquire),
+                checkpoints.lock().unwrap().len(),
+                pages.pages.len(),
+                pages.pages.iter().filter(|page| pages.is_active(page.task)).count(),
+                preparation_cancelled.load(std::sync::atomic::Ordering::Acquire),
+                preparation_candidate.lock().unwrap().as_ref().is_some_and(|(_, lifetime)| lifetime.upgrade().is_none()),
+                preparation_wake_acknowledged.load(std::sync::atomic::Ordering::Acquire),
+                rejected.lock().unwrap()
+            )
+        })
         .unwrap();
+    if preparation_wake {
+        let candidate = preparation_candidate.lock().unwrap();
+        let (original, lifetime) = candidate
+            .as_ref()
+            .expect("the authenticated Wake must target the first real preparation request");
+        assert!(
+            preparation_cancelled.load(std::sync::atomic::Ordering::Acquire)
+                && lifetime.upgrade().is_none()
+                && held_pages
+                    .lock()
+                    .unwrap()
+                    .first()
+                    .is_some_and(|(task, _)| task != original)
+                && tail_revision.load(std::sync::atomic::Ordering::Acquire) >= 2,
+            "the retired preparation request must be replaced by a newly revised, genuinely unpaired live hold"
+        );
+        assert!(
+            prefix_metadata
+                .iter()
+                .all(|meta| owner.account_document_meta(&meta.key).as_ref() == Some(meta)),
+            "re-arming the tail must preserve all 65 signed prefix rows"
+        );
+    }
     assert!(reference.pending_account_operation_sources().is_empty());
     let preoperation_classes = classes.lock().unwrap().clone();
     assert!(
