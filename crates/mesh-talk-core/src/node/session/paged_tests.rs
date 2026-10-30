@@ -149,6 +149,8 @@ struct TinyPagedStore {
     export_calls: AtomicUsize,
     revoked: AtomicBool,
     ingests: usize,
+    preparation_rows: AtomicUsize,
+    preparation_calls: AtomicUsize,
 }
 impl TinyPagedStore {
     fn new(repo: EventRepository) -> Self {
@@ -159,6 +161,8 @@ impl TinyPagedStore {
             export_calls: AtomicUsize::new(0),
             revoked: AtomicBool::new(false),
             ingests: 0,
+            preparation_rows: AtomicUsize::new(0),
+            preparation_calls: AtomicUsize::new(0),
         }
     }
     fn append_control(&self) -> Result<(), LogError> {
@@ -199,6 +203,25 @@ impl NetworkSyncStore for TinyPagedStore {
     type ExportCursor = <EventRepository as NetworkSyncStore>::ExportCursor;
     fn open_view(&self, c: &ConversationId) -> Result<Self::View, LogError> {
         self.repo.open_view(c)
+    }
+    fn prepare_view_step(
+        &self,
+        view: &Self::View,
+        budget: crate::eventlog::sync::network::PreparationBudget,
+    ) -> Result<crate::eventlog::sync::network::PreparationStep, LogError> {
+        budget.validate()?;
+        self.validate_view(view)?;
+        self.preparation_calls.fetch_add(1, Ordering::Relaxed);
+        let before = self.preparation_rows.load(Ordering::Relaxed);
+        let rows = before.min(budget.rows);
+        self.preparation_rows
+            .store(before - rows, Ordering::Relaxed);
+        Ok(crate::eventlog::sync::network::PreparationStep {
+            ready: before == rows,
+            rows,
+            bytes: rows * 32,
+            edges: 0,
+        })
     }
     fn metadata(&self, v: &Self::View) -> Result<SyncMetadata, LogError> {
         if matches!(self.fault, Fault::Metadata) {
@@ -842,6 +865,9 @@ async fn legacy_cached_probe_never_collects_local_ids_or_bodies() {
         fn requires_channel_v4(&self, _: &ConversationId) -> Result<bool, LogError> {
             Ok(false)
         }
+        fn requires_channel_v5(&self, _: &ConversationId) -> Result<bool, LogError> {
+            Ok(false)
+        }
         fn event_ids(&self, _: &ConversationId) -> Result<Vec<EventId>, LogError> {
             panic!("cached legacy probe collected IDs")
         }
@@ -1407,4 +1433,55 @@ async fn budgeted_round_saturation_cancellation_and_healthy_retry_release_reserv
     for _ in 0..4 {
         held.push(budget.try_admit().unwrap());
     }
+}
+
+#[tokio::test]
+async fn paged_preparation_yields_unlocked_and_observes_concurrent_revocation() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = Arc::new(
+        EncryptedDatabase::open(&directory.path().join("profile.db"), "pw", b"profile").unwrap(),
+    );
+    let store = Arc::new(Mutex::new(TinyPagedStore::new(
+        EventRepository::new(database, EventDomainId([1; 16])).unwrap(),
+    )));
+    store
+        .lock()
+        .unwrap()
+        .preparation_rows
+        .store(4096, Ordering::Relaxed);
+    let observer = store.clone();
+    let revoke = tokio::spawn(async move {
+        loop {
+            let revoked = {
+                let guard = observer
+                    .try_lock()
+                    .expect("preparation must release the store mutex before yielding");
+                let ready = guard.preparation_calls.load(Ordering::Relaxed) > 0;
+                if ready {
+                    guard.revoked.store(true, Ordering::Relaxed);
+                }
+                ready
+            };
+            if revoked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    let result = backend::open_prepared_view(
+        &PagedNetworkBackend(&store, None),
+        &ConversationId::new([7; 32]),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(SessionError::Store(LogError::StaleCursor))
+    ));
+    revoke.await.unwrap();
+    let guard = store.lock().unwrap();
+    assert!(
+        guard.preparation_calls.load(Ordering::Relaxed) < 64,
+        "a competing task must run before preparation drains the source"
+    );
+    assert!(guard.preparation_rows.load(Ordering::Relaxed) > 0);
 }

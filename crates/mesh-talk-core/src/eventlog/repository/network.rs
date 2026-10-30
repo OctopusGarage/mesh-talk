@@ -12,7 +12,7 @@ use std::collections::HashSet;
 pub(super) struct Binding {
     store_uuid: [u8; 16],
     domain: EventDomainId,
-    conversation: ConversationId,
+    pub(super) conversation: ConversationId,
     pub(super) cutoff: i64,
     epoch: i64,
 }

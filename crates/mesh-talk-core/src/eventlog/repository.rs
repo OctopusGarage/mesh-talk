@@ -33,7 +33,7 @@ mod tests;
 pub(crate) struct EventDomainId(pub [u8; 16]);
 
 /// No parent Vec or body allocation is hidden in a header. Edges have their own pages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct EventHeader {
     pub id: EventId,
     pub conversation: ConversationId,
@@ -419,7 +419,7 @@ impl EventRepository {
     }
 }
 impl EventHeader {
-    fn of(event: &Event, stored_bytes: usize) -> Self {
+    pub(crate) fn of(event: &Event, stored_bytes: usize) -> Self {
         Self {
             id: event.id,
             conversation: event.conversation_id,

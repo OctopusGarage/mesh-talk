@@ -381,6 +381,15 @@ pub(in crate::node) fn valid_sealed_wire(wire: &[u8]) -> bool {
     (16..=MAX_RECEIPT_PLAINTEXT + 16).contains(&envelope.ciphertext.len())
 }
 
+/// Metadata prefilter for indexed history selection. A possible match still
+/// requires the normal complete, authenticated Event and sealed-wire parser.
+pub(in crate::node) fn possible_sealed_wire_length(length: usize) -> bool {
+    (RECEIPT_FRAME.len()..=MAX_RECEIPT_WIRE).contains(&length)
+}
+pub(in crate::node) fn possible_sealed_wire(length: usize, prefix: &[u8]) -> bool {
+    possible_sealed_wire_length(length) && prefix == RECEIPT_FRAME
+}
+
 fn valid_signed_message(event: &Event) -> bool {
     matches!(event.kind, EventKind::Message | EventKind::FileManifest)
         && event.ciphertext.len() <= MAX_DM_PLAINTEXT

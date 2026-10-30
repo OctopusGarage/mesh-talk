@@ -446,7 +446,16 @@ impl AccountAuthority {
         account: &[u8; 32],
         after: Option<&[u8]>,
     ) -> Result<RevocationPage, LogError> {
+        self.revocation_page_with_limit(account, after, 64)
+    }
+    pub(in crate::node) fn revocation_page_with_limit(
+        &self,
+        account: &[u8; 32],
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<RevocationPage, LogError> {
         self.check_fact_source()?;
+        let limit = crate::eventlog::sync::network::scan_limit(limit.min(64))? - 1;
         let Some(history) = &self.history else {
             let mut selected = std::collections::BTreeMap::new();
             for (id, event) in &self.revoked {
@@ -458,7 +467,7 @@ impl AccountAuthority {
                     continue;
                 }
                 selected.insert(key, (*id, *event));
-                if selected.len() > 64 {
+                if selected.len() > limit as usize {
                     selected.pop_last();
                 }
             }
@@ -473,8 +482,8 @@ impl AccountAuthority {
         };
         history.profile.database().read(|c| {
             history.guard_on(c)?;
-            let mut statement=c.prepare("SELECT key,value FROM channel_authority_facts WHERE job=?1 AND channel=?2 AND kind=2 AND account=?3 AND (?4 IS NULL OR key>?4) ORDER BY key LIMIT 64")?;
-            let mut rows=statement.query(params![history.job.as_slice(),history.channel.as_bytes().as_slice(),account.as_slice(),after])?;
+            let mut statement=c.prepare("SELECT key,value FROM channel_authority_facts WHERE job=?1 AND channel=?2 AND kind=2 AND account=?3 AND (?4 IS NULL OR key>?4) ORDER BY key LIMIT ?5")?;
+            let mut rows=statement.query(params![history.job.as_slice(),history.channel.as_bytes().as_slice(),account.as_slice(),after,limit])?;
             let mut events=Vec::new();let mut grants=Vec::new();let mut next=None;
             while let Some(row)=rows.next()? {let key:Vec<u8>=row.get(0)?;let bytes:Vec<u8>=row.get(1)?;let event=decode(&bytes)?;grants.push((decode(&key)?,event));events.push(event);next=Some(key);}
             Ok(RevocationPage{events,grants,next})

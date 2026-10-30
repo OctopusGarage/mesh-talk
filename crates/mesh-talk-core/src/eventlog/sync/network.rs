@@ -16,6 +16,53 @@ pub struct SyncMetadata {
     pub fingerprint: Option<[u8; 32]>,
 }
 
+/// Work includes rejected rows and graph edges, not just selected output. The
+/// transport releases the store lock and yields after each preparation step.
+#[derive(Clone, Copy, Debug)]
+pub struct PreparationBudget {
+    pub rows: usize,
+    pub edges: usize,
+    pub bytes: usize,
+}
+impl Default for PreparationBudget {
+    fn default() -> Self {
+        Self {
+            rows: 64,
+            edges: 512,
+            bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+impl PreparationBudget {
+    pub fn validate(self) -> Result<(), LogError> {
+        scan_limit(self.rows)?;
+        scan_limit(self.edges)?;
+        if self.bytes == 0 {
+            return Err(LogError::InvalidPageBudget);
+        }
+        Ok(())
+    }
+    pub(crate) fn rows_for_bytes(self, row_bytes: usize) -> Result<usize, LogError> {
+        let rows = self.bytes / row_bytes;
+        if rows == 0 {
+            return Err(LogError::PageBudgetTooSmall {
+                required: row_bytes,
+            });
+        }
+        Ok(rows)
+    }
+    pub(crate) fn rows_for(self, row_bytes: usize) -> Result<usize, LogError> {
+        Ok(self.rows.min(self.rows_for_bytes(row_bytes)?))
+    }
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PreparationStep {
+    pub ready: bool,
+    pub rows: usize,
+    pub edges: usize,
+    pub bytes: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct IdPageBudget {
     pub ids: usize,
@@ -82,6 +129,51 @@ pub trait NetworkSyncStore {
     type HaveCursor;
     type ExportCursor;
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
+    /// Opening captures a finite source. Implementations with derived authority
+    /// prepare it here; there is no collecting fallback in the session adapter.
+    fn prepare_view_step(
+        &self,
+        view: &Self::View,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        budget.validate()?;
+        self.validate_view(view)?;
+        Ok(PreparationStep {
+            ready: true,
+            ..Default::default()
+        })
+    }
+    /// Have-dependent closure has the same bounded, cancellable work boundary.
+    fn reset_export_step(
+        &self,
+        view: &Self::View,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        budget.validate()?;
+        self.validate_view(view)?;
+        Ok(PreparationStep {
+            ready: true,
+            ..Default::default()
+        })
+    }
+    /// The session walks its already admitted Have set once, yielding between
+    /// batches. Implementations never copy it into another resident ID set.
+    fn stage_export_have(&self, view: &Self::View, _ids: &[EventId]) -> Result<(), LogError> {
+        self.validate_view(view)
+    }
+    fn prepare_export_step(
+        &self,
+        view: &Self::View,
+        _have: &HashSet<EventId>,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        budget.validate()?;
+        self.validate_view(view)?;
+        Ok(PreparationStep {
+            ready: true,
+            ..Default::default()
+        })
+    }
     fn metadata(&self, view: &Self::View) -> Result<SyncMetadata, LogError>;
     /// Last policy check immediately before a bounded frame is handed to transport.
     fn validate_view(&self, view: &Self::View) -> Result<(), LogError>;

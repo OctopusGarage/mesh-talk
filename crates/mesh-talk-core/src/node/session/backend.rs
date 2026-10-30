@@ -1,8 +1,8 @@
 //! Explicit legacy collection boundary and direct mandatory paged backend.
 use super::*;
 use crate::eventlog::sync::network::{
-    ExportPage, ExportPageBudget, IdPageBudget, NetworkSyncStore, SyncMetadata, SyncPage,
-    apply_received_events,
+    ExportPage, ExportPageBudget, IdPageBudget, NetworkSyncStore, PreparationBudget,
+    PreparationStep, SyncMetadata, SyncPage, apply_received_events,
 };
 use crate::eventlog::{Event, LogError};
 use std::collections::{HashSet, VecDeque};
@@ -17,8 +17,48 @@ pub(super) trait SessionBackend {
     fn probe_metadata(
         &self,
         conversation: &ConversationId,
-    ) -> Result<(SyncMetadata, Option<Self::View>), LogError>;
+    ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError>;
     fn open_view(&self, conversation: &ConversationId) -> Result<Self::View, LogError>;
+    fn prepare_view_step(
+        &self,
+        view: &Self::View,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        budget.validate()?;
+        self.validate_view(view)?;
+        Ok(PreparationStep {
+            ready: true,
+            ..Default::default()
+        })
+    }
+    fn reset_export_step(
+        &self,
+        view: &Self::View,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        budget.validate()?;
+        self.validate_view(view)?;
+        Ok(PreparationStep {
+            ready: true,
+            ..Default::default()
+        })
+    }
+    fn stage_export_have(&self, view: &Self::View, _ids: &[EventId]) -> Result<(), LogError> {
+        self.validate_view(view)
+    }
+    fn prepare_export_step(
+        &self,
+        view: &Self::View,
+        _have: &HashSet<EventId>,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        budget.validate()?;
+        self.validate_view(view)?;
+        Ok(PreparationStep {
+            ready: true,
+            ..Default::default()
+        })
+    }
     fn metadata(&self, view: &Self::View) -> Result<SyncMetadata, LogError>;
     fn advertised_count(&self, view: &Self::View) -> Result<u64, LogError>;
     fn validate_view(&self, view: &Self::View) -> Result<(), LogError>;
@@ -86,18 +126,18 @@ impl<S: SyncStore> SessionBackend for LegacyCollectingNetworkAdapter<'_, S> {
     fn probe_metadata(
         &self,
         conv: &ConversationId,
-    ) -> Result<(SyncMetadata, Option<Self::View>), LogError> {
+    ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError> {
         let store = self.0.lock().expect("store mutex not poisoned");
         let (fp, count) = store.fingerprint_and_len(conv)?;
         Ok((
-            SyncMetadata {
+            Some(SyncMetadata {
                 count: count as u64,
                 fingerprint: Some(fp),
                 channel_v2: store.requires_channel_v2(conv)?,
                 channel_v3: store.requires_channel_v3(conv)?,
                 channel_v4: store.requires_channel_v4(conv)?,
                 channel_v5: store.requires_channel_v5(conv)?,
-            },
+            }),
             None,
         ))
     }
@@ -275,16 +315,53 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
     fn probe_metadata(
         &self,
         c: &ConversationId,
-    ) -> Result<(SyncMetadata, Option<Self::View>), LogError> {
+    ) -> Result<(Option<SyncMetadata>, Option<Self::View>), LogError> {
         let store = self.0.lock().expect("store mutex not poisoned");
         let view = store.open_view(c)?;
-        Ok((store.metadata(&view)?, Some(view)))
+        Ok((None, Some(view)))
     }
     fn open_view(&self, c: &ConversationId) -> Result<S::View, LogError> {
         self.0
             .lock()
             .expect("store mutex not poisoned")
             .open_view(c)
+    }
+    fn prepare_view_step(
+        &self,
+        v: &S::View,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .prepare_view_step(v, budget)
+    }
+    fn reset_export_step(
+        &self,
+        view: &Self::View,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .reset_export_step(view, budget)
+    }
+    fn stage_export_have(&self, view: &Self::View, ids: &[EventId]) -> Result<(), LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .stage_export_have(view, ids)
+    }
+    fn prepare_export_step(
+        &self,
+        v: &S::View,
+        have: &HashSet<EventId>,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        self.0
+            .lock()
+            .expect("store mutex not poisoned")
+            .prepare_export_step(v, have, budget)
     }
     fn metadata(&self, v: &S::View) -> Result<SyncMetadata, LogError> {
         self.0.lock().expect("store mutex not poisoned").metadata(v)
@@ -400,6 +477,48 @@ impl<S: NetworkSyncStore> SessionBackend for PagedNetworkBackend<'_, S> {
             .expect("store mutex not poisoned")
             .sticker_file_proof(file, manifest)
     }
+}
+
+pub(super) async fn prepare_view<B: SessionBackend>(
+    backend: &B,
+    view: &B::View,
+) -> Result<(), SessionError> {
+    loop {
+        if backend
+            .prepare_view_step(view, PreparationBudget::default())?
+            .ready
+        {
+            backend.validate_view(view)?;
+            return Ok(());
+        }
+        tokio::task::yield_now().await;
+    }
+}
+pub(super) async fn open_prepared_view<B: SessionBackend>(
+    backend: &B,
+    conversation: &ConversationId,
+) -> Result<B::View, SessionError> {
+    let view = backend.open_view(conversation)?;
+    prepare_view(backend, &view).await?;
+    Ok(view)
+}
+pub(super) async fn prepared_probe<B: SessionBackend>(
+    backend: &B,
+    conversation: &ConversationId,
+) -> Result<(SyncMetadata, Option<B::View>), SessionError> {
+    let (metadata, view) = backend.probe_metadata(conversation)?;
+    if let Some(view) = &view {
+        prepare_view(backend, view).await?;
+    }
+    let metadata =
+        match metadata {
+            Some(metadata) => metadata,
+            None => backend
+                .metadata(view.as_ref().ok_or_else(|| {
+                    LogError::CorruptFile("probe has no metadata or view".into())
+                })?)?,
+        };
+    Ok((metadata, view))
 }
 
 pub(super) fn have_count(count: u64) -> Result<usize, SessionError> {
@@ -529,6 +648,36 @@ pub(super) async fn select_export_frames<B: SessionBackend>(
     have: &HashSet<EventId>,
     max_frames: usize,
 ) -> Result<Vec<SyncFollowup>, SessionError> {
+    loop {
+        if backend
+            .reset_export_step(view, PreparationBudget::default())?
+            .ready
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let mut have_batch = Vec::with_capacity(PreparationBudget::default().rows);
+    for id in have {
+        have_batch.push(*id);
+        if have_batch.len() == PreparationBudget::default().rows {
+            backend.stage_export_have(view, &have_batch)?;
+            have_batch.clear();
+            tokio::task::yield_now().await;
+        }
+    }
+    if !have_batch.is_empty() {
+        backend.stage_export_have(view, &have_batch)?;
+    }
+    loop {
+        if backend
+            .prepare_export_step(view, have, PreparationBudget::default())?
+            .ready
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     let frame_budget = event_frame_budget(conversation)?;
     let mut frames = Vec::new();
     let mut cursor = None;
