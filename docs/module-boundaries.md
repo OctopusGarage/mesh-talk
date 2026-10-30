@@ -224,7 +224,9 @@ indexed stores. Media bytes retain their independent encryption/lifetime owner. 
 order owner with disk ranks for signed events and isolated archive roots. Its
 `combined/incremental.rs` input checkpoints preserve a proven append-only prefix;
 visibility changes, expired deadlines, late roots and changed winning selectors
-rebuild that derived order before publication.
+rebuild that derived order before publication. FileBook's current offer revisions
+and `file_message_identity/indexed/acceptance.rs` accepted binding keys supply
+bounded metadata deltas; neither keeps a second historical change journal.
 `eventlog/repository/receiving.rs` owns resumable metadata discovery and bounded,
 fair retry selection; exact transcript evidence survives body erasure and commits
 with body/effect installation. These derived selectors do not replace the delivery
