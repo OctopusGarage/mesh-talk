@@ -735,8 +735,7 @@ async fn reconciling_local_owner_without_a_ready_peer_retains_the_original_inten
                 | AccountGroupOperationPhase::Cancelled
                 | AccountGroupOperationPhase::Committed
         ),
-        "missing execution readiness must remain retryable: {:?}",
-        status.phase
+        "missing execution readiness must remain retryable"
     );
     assert!(status.committed_events.is_empty());
     public_group_from(a, b, fixture.addresses[4], fixture.group).await;
