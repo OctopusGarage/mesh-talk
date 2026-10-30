@@ -22,6 +22,23 @@ pub(crate) trait DeliverySentProjection {
 }
 pub(crate) trait DeliveryReceivedProjection {
     fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError>;
+    fn record_manifest(
+        &mut self,
+        entry: &ReceivedEntry,
+        _original: Option<&Event>,
+        _metadata: Option<&super::reception_effects::ReceptionMetadata>,
+    ) -> Result<(), LogError> {
+        self.record_durable(entry)
+    }
+    fn record_manifest_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        scopes: &[&Event],
+    ) -> Result<(), LogError> {
+        let _ = scopes;
+        self.record_manifest(entry, original, None)
+    }
     fn record_incoming(
         &mut self,
         original: &Event,
@@ -55,6 +72,22 @@ impl DeliveryReceivedProjection for ReceivedLog {
 impl DeliveryReceivedProjection for super::received_store::ReceivedStore {
     fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
         Self::record_durable(self, entry)
+    }
+    fn record_manifest(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        metadata: Option<&super::reception_effects::ReceptionMetadata>,
+    ) -> Result<(), LogError> {
+        self.record_file_with_reception(entry, original, metadata)
+    }
+    fn record_manifest_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        scopes: &[&Event],
+    ) -> Result<(), LogError> {
+        self.record_file_with_scopes(entry, original, None, scopes)
     }
     fn record_incoming(
         &mut self,
@@ -1034,13 +1067,17 @@ impl DeliveryStore {
                 {
                     files
                         .ok_or_else(|| invalid("file recovery adapter required"))?
-                        .record_durable(&ReceivedEntry {
-                            event_id: event.id,
-                            conversation: entry.conversation,
-                            from: event.author.user_id(),
-                            wall_clock: entry.wall_clock,
-                            plaintext: entry.plaintext.clone(),
-                        })?;
+                        .record_manifest(
+                            &ReceivedEntry {
+                                event_id: event.id,
+                                conversation: entry.conversation,
+                                from: event.author.user_id(),
+                                wall_clock: entry.wall_clock,
+                                plaintext: entry.plaintext.clone(),
+                            },
+                            Some(event),
+                            None,
+                        )?;
                 }
             }
             DeliveryTransaction::Outgoing {
@@ -1092,15 +1129,53 @@ impl DeliveryStore {
                 }
                 files
                     .ok_or_else(|| invalid("file recovery adapter required"))?
-                    .record_durable(received)?;
+                    .record_manifest_scopes(
+                        received,
+                        message
+                            .destinations
+                            .iter()
+                            .find(|destination| destination.event.id == received.event_id)
+                            .map(|destination| &destination.event),
+                        &message
+                            .destinations
+                            .iter()
+                            .map(|destination| &destination.event)
+                            .collect::<Vec<_>>(),
+                    )?;
             }
             DeliveryTransaction::IncomingManifest {
-                original, received, ..
+                original,
+                received,
+                file,
+                ..
             } => {
                 log.append_durable((**original).clone())?;
+                let own_device = self.profile.as_ref().is_some_and(|(_, owner)| {
+                    original.author.ed25519_pub() == &owner.device.ed25519_pub
+                        || file
+                            .completion_binding
+                            .as_ref()
+                            .and_then(|binding| binding.certificate.as_ref())
+                            .is_some_and(|certificate| {
+                                certificate.verify()
+                                    && &certificate.device_ed25519_pub
+                                        == original.author.ed25519_pub()
+                                    && certificate.account_id() == owner.account
+                            })
+                });
+                let metadata = super::reception_effects::ReceptionMetadata {
+                    from_device: original.author.user_id(),
+                    received_at: super::node::now_millis(),
+                    arrival_kind: super::reception_effects::ArrivalKind::Live,
+                    own_device,
+                    batch_id: None,
+                    batch_complete: true,
+                    batch_size: 1,
+                    reception_only: false,
+                };
                 files
                     .ok_or_else(|| invalid("file recovery adapter required"))?
-                    .record_durable(received)?;
+                    .record_manifest(received, Some(original), Some(&metadata))?;
             }
         }
         if let DeliveryTransaction::OutgoingManifest { file, .. }
@@ -1336,6 +1411,11 @@ impl DeliveryStore {
         }
     }
 
+    pub(crate) fn file_erasures(&self) -> impl Iterator<Item = (ConversationId, EventId)> + '_ {
+        self.erased_files
+            .iter()
+            .map(|(conversation, id)| (ConversationId::new(*conversation), *id))
+    }
     pub(crate) fn file_erased(&self, conversation: ConversationId, original: EventId) -> bool {
         self.erased_files
             .contains(&(*conversation.as_bytes(), original))

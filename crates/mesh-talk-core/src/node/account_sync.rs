@@ -708,7 +708,7 @@ impl Node {
         self.account_file_proofs
             .lock()
             .expect("file proofs mutex not poisoned")
-            .insert(payload.proof)
+            .insert(payload.proof.clone())
             .map_err(NodeError::Log)?;
         let mut files = self
             .received_files
@@ -716,11 +716,9 @@ impl Node {
             .expect("files mutex not poisoned");
         let fresh = !files.contains_in(&host, event_id)?;
         files
-            .record_file_alias_durable(&row)
+            .record_file_with_reception(&row, Some(&payload.proof), None)
             .map_err(NodeError::Log)?;
         drop(files);
-        let delivery = self.delivery.lock().expect("delivery mutex not poisoned");
-        self.reseed_live_file_book(&delivery)?;
         if fresh {
             self.note_account_history_change();
         }
@@ -993,12 +991,13 @@ impl Node {
         account_id: &str,
         file_conv: ConversationId,
     ) -> bool {
-        let size = self
-            .files
-            .lock()
-            .expect("files mutex not poisoned")
-            .manifest(&file_conv)
-            .map_or(0, |manifest| manifest.size());
+        let size = match self.files.lock().expect("files lock").manifest(file_conv) {
+            Ok(manifest) => manifest.map_or(0, |manifest| manifest.size()),
+            Err(error) => {
+                log::warn!("attachment serving deferred: {error}");
+                return false;
+            }
+        };
         let deadline = attachment_deadline(size);
         tokio::time::timeout(
             deadline,
@@ -1178,8 +1177,7 @@ impl Node {
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)
-            .cloned()
+            .manifest(&file_conv)?
             .ok_or_else(|| NodeError::File("unknown attachment".into()))?;
         let mut channel = self
             .begin_account_exchange(
@@ -1323,8 +1321,8 @@ impl Node {
                 .files
                 .lock()
                 .expect("files mutex not poisoned")
-                .manifest(&file_conv)
-                .is_none()
+                .contains_file(file_conv)?
+                == false
             || !self.has_live_local_file_card_with(file_conv, &delivery)?
         {
             return Err(NodeError::File("attachment was removed during sync".into()));
@@ -1356,8 +1354,7 @@ impl Node {
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)
-            .cloned()
+            .manifest(&file_conv)?
             .ok_or_else(|| NodeError::File("unknown attachment".into()))?;
         let controls = self.private_dm_control_revision();
         let staging =
@@ -2022,9 +2019,8 @@ impl Node {
                                 attachment_unsupported.retain(|_, until| *until > tokio::time::Instant::now());
                                 let favorites_supported=state.favorites_supported;
                                 let missing = self.account_blocking(move |node| {
-                                    let mut missing = node.files.lock().expect("files mutex not poisoned").file_convs();
-                                    missing.sort_by_key(|id| *id.as_bytes());
-                                    let mut visible=Vec::new();for file in missing{if !node.media.contains(file)&&!node.account_file_recalled(file)?{visible.push(file);}}let missing=visible;
+                                    let missing=node.files.lock().expect("files lock").files();
+                                    let mut visible=Vec::new();for file in missing{let file=file?;if !node.media.contains(file)&&!node.account_file_recalled(file)?{visible.push(file);}}let missing=visible;
                                     let mut queue:Vec<_>=missing.into_iter().map(|file|(file,false)).collect();
                                     if favorites_supported && node.device_sync_policy().history {queue.extend(node.missing_favorite_files().into_iter().map(|file|(file,true)));}
                                     Ok(queue)
@@ -2041,7 +2037,7 @@ impl Node {
                                     let node = self.clone(); let peer = peer.clone(); let id = id.clone();
                                     let version = if status.legacy_file_metadata { AccountSyncVersion::V1 } else { AccountSyncVersion::V2 };
                                     let transfer_size = if favorite { self.favorite_file_size(file).unwrap_or(0) } else { self.files.lock().expect("files mutex not poisoned")
-                                        .manifest(&file).map_or(0, |manifest| manifest.size()) };
+                                        .manifest(&file).map(|manifest|manifest.map_or(0,|manifest|manifest.size())).unwrap_or_else(|error| {log::warn!("attachment size lookup deferred: {error}");0}) };
                                     // Bound the complete exchange without rejecting large legitimate
                                     // archives solely because they need more than a fixed short timeout.
                                     let deadline = attachment_deadline(transfer_size);

@@ -393,15 +393,21 @@ impl EventRepository {
         Ok(Some(event))
     }
     pub(crate) fn header(&self, id: &EventId) -> Result<Option<EventHeader>, LogError> {
-        self.database.read(|c| {
-            self.require_visible_id_on(c, id)?;
-            let mut stmt = c.prepare(&format!(
-                "SELECT {HEADER_COLUMNS} FROM retained_events WHERE domain=?1 AND id=?2"
-            ))?;
-            let mut rows =
-                stmt.query(params![self.domain.0.as_slice(), id.as_bytes().as_slice()])?;
-            rows.next()?.map(read_header).transpose()
-        })
+        self.database.read(|c| self.header_on(c, id))
+    }
+    /// Reuse the retained-event owner inside a same-profile projection transaction.
+    pub(crate) fn header_on(
+        &self,
+        c: &Connection,
+        id: &EventId,
+    ) -> Result<Option<EventHeader>, LogError> {
+        self.require_visible_id_on(c, id)?;
+        let mut statement = c.prepare_cached(&format!(
+            "SELECT {HEADER_COLUMNS} FROM retained_events WHERE domain=?1 AND id=?2"
+        ))?;
+        let mut rows =
+            statement.query(params![self.domain.0.as_slice(), id.as_bytes().as_slice()])?;
+        rows.next()?.map(read_header).transpose()
     }
 }
 impl EventHeader {

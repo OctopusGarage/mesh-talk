@@ -117,28 +117,18 @@ impl Node {
         if !self.group_file_sharing_status().paused || self.certified_sibling(peer) {
             return Ok(false);
         }
-        let manifests = self
-            .files
-            .lock()
-            .expect("files lock not poisoned")
-            .manifest_events(*file);
-        if manifests.is_empty() {
-            return Ok(false);
-        }
-        let parents: Vec<_> = {
-            let log = self.log.lock().expect("log lock not poisoned");
-            let mut parents = Vec::new();
-            for id in &manifests {
-                if let Some(conversation) = log.event_conversation(id)? {
-                    parents.push(conversation);
-                }
+        for scope in self.manifest_scopes(*file) {
+            if self
+                .channels
+                .lock()
+                .expect("channels lock")
+                .state(&scope?.parent)
+                .is_some()
+            {
+                return Ok(true);
             }
-            parents
-        };
-        let book = self.channels.lock().expect("channels lock not poisoned");
-        Ok(parents
-            .into_iter()
-            .any(|parent| book.state(&parent).is_some()))
+        }
+        Ok(false)
     }
 }
 

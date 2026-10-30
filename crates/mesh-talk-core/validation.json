@@ -2,8 +2,34 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-opaque-receive-hints",
+      "paths": ["crates/mesh-talk-core/src/node/opaque_receive_cache.rs"],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::opaque_receive_cache::tests::",
+            "node::opaque_relay::permission_tests::",
+            "federated_file_consent_and_complete_bytes_need_no_direct_client_route"
+          ]
+        }
+      ],
+      "consumers": ["core-node"],
+      "capability": {
+        "summary": "Keep optional opaque receive mappings on encrypted disk and load only the active mailbox's bounded protocol identifiers.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Warm open decodes no historical hints; only retained inner events qualify durable hints, session progress cannot survive restart, and corrupt or foreign optional sources remain preserved without blocking login.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
+    },
+    {
       "id": "core-reception-effects",
       "paths": [
+        "crates/mesh-talk-core/src/storage/profile/context.rs",
         "crates/mesh-talk-core/src/node/reception_effects/",
         "crates/mesh-talk-core/src/node/runtime_delivery.rs",
         "crates/mesh-talk-core/src/node/runtime_startup.rs",
@@ -18,7 +44,8 @@
           "filters": [
             "node::reception_effects::tests::",
             "node::runtime_delivery::tests::",
-            "node::host_reception::tests::"
+            "node::host_reception::tests::",
+            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace"
           ]
         }
       ],
@@ -1152,6 +1179,7 @@
         "crates/mesh-talk-core/src/node/transcript_repository/",
         "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
         "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
+        "crates/mesh-talk-core/src/node/filebook/",
         "crates/mesh-talk-core/src/node/account_suppression.rs"
       ],
       "rust": [
@@ -1161,8 +1189,14 @@
             "node::transcript_repository::tests::",
             "node::account_file_repository::tests::",
             "runtime_metadata_",
+            "node::filebook::indexed::tests::",
             "node::recovered_sent_ids::tests::",
-            "node::account_suppression::tests::"
+            "node::account_suppression::tests::",
+            "indexed_file_runtime_warm_open_does_not_hydrate_retained_manifest_history",
+            "incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_and_delivers_ack",
+            "sent_scope_repair_failure_installs_no_permission_and_retry_recovers",
+            "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
+            "failed_media_"
           ]
         }
       ],
@@ -1171,7 +1205,7 @@
         "core-recovery"
       ],
       "capability": {
-        "summary": "Provide profile-owned indexed transcript and exact deletion-marker stores for participant consumer integration, without claiming that Node has switched from its legacy stores.",
+        "summary": "Serve production participant history, recall, archive, and exact deletion state from profile-owned indexed stores with bounded metadata discovery and selected-body reads.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {

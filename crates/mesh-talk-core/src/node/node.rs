@@ -17,7 +17,8 @@ use crate::node::channel::{ChannelBook, ReceivedChannelMessage};
 use crate::node::channel_custody::ChannelCustodyStore;
 use crate::node::channel_senders::ChannelSenderStore;
 use crate::node::dm_ratchet::DmRatchet;
-use crate::node::filebook::{FileBook, ReceivedFile};
+use crate::node::filebook::ReceivedFile;
+use crate::node::filebook::indexed::IndexedFileBook;
 use crate::node::pairing::PendingLink;
 use crate::node::ratchet_sessions::RatchetSessions;
 use crate::node::received_store::ReceivedStore as ReceivedLog;
@@ -249,6 +250,8 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
     #[cfg(test)]
+    pub(in crate::node) withheld_file_scopes: Mutex<HashSet<ConversationId>>,
+    #[cfg(test)]
     pub(in crate::node) untracked_chunk_validations: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(in crate::node) profile_read_hook: BlockingTestHook,
@@ -271,11 +274,9 @@ pub struct Node {
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_send_enabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) post_office_receive_enabled: std::sync::atomic::AtomicBool,
-    /// Optional encrypted mappings, validated against retained history on open.
+    /// Optional disk hints, checked against retained history during mailbox sync.
     pub(in crate::node) opaque_receive_cache:
         Mutex<super::opaque_receive_cache::OpaqueReceiveCache>,
-    /// Active transfer hints. Discarding them causes safe re-downloads.
-    pub(in crate::node) opaque_seen: Mutex<HashMap<ConversationId, HashSet<EventId>>>,
     // Fields are `pub(in crate::node)` so the per-domain `impl Node` blocks in sibling
     // files (dm/channels/files/queries/linking/serving) can reach them; they stay
     // private to the `node` module (no wider exposure).
@@ -353,15 +354,10 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) channel_last_send: Mutex<Option<(usize, u64)>>,
     pub(in crate::node) file_incoming: super::runtime_delivery::HostPayload<ReceivedFile>,
-    pub(in crate::node) files: Mutex<FileBook>,
+    pub(in crate::node) files: Mutex<IndexedFileBook>,
+    pub(in crate::node) manifest_scopes: super::filebook::scopes::IndexedManifestScopes,
     pub(super) group_file_sharing: super::network_cost::GroupFileSharingPolicy,
-    /// Per-file conversations we've seen a manifest for but don't yet hold all chunks of —
-    /// surfaced this session and awaiting their data. A background task pulls these DIRECTLY
-    /// from peers (the post-office drain only covers files when a PO exists; on a plain
-    /// peer-to-peer LAN the sender's one-shot push is otherwise the only delivery, so a
-    /// missed push would strand the file at 0 chunks). Cleared once a file completes; not
-    /// seeded from saved files (whose chunks are pruned), so we never re-pull a saved file.
-    pub(in crate::node) pending_files: Mutex<HashSet<ConversationId>>,
+    /// Coalesced hint for the durable download work owned by `files`.
     pub(in crate::node) file_pull_notify: tokio::sync::Notify,
     pub(in crate::node) file_pull_cursor: std::sync::atomic::AtomicUsize,
     pub(in crate::node) file_pull_gate: tokio::sync::Mutex<()>,
@@ -696,16 +692,7 @@ impl Node {
             origin_res,
             contacts_res,
             recovered_ids_res,
-            opaque_cache_res,
         ) = std::thread::scope(|s| {
-            let h_opaque = s.spawn(|| {
-                super::opaque_receive_cache::OpaqueReceiveCache::open(
-                    log_path,
-                    password,
-                    &identity.public(),
-                    &account.account_id(),
-                )
-            });
             let h_sent = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::sentlog::SentEntry>(&storage,sent_path,password,super::transcript_repository::SENT,b"MTSENT"));
             let h_sess = s.spawn(|| RatchetSessions::open(&dir.join("ratchet.sessions"), password));
             let h_recv = s.spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::received_log::ReceivedEntry>(&storage,&dir.join("received.log"),password,super::transcript_repository::RECEIVED,b"MTRECV"));
@@ -768,13 +755,10 @@ impl Node {
                 h_origin.join(),
                 h_contacts.join(),
                 h_recovered_ids.join(),
-                h_opaque.join(),
             )
         });
         // A join() error means the opening thread panicked; re-raise the panic so it
         // is not silently swallowed. A normal open failure surfaces as the inner Err.
-        let opaque_receive_cache =
-            opaque_cache_res.unwrap_or_else(|e| std::panic::resume_unwind(e));
         sent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let sessions = sessions_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         received_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
@@ -844,6 +828,11 @@ impl Node {
         super::file_message_identity::IndexedFileMessageIdentities::authenticate(
             &storage,
             &dir.join("file-message-identities.log"),
+            password,
+        )?;
+        super::filebook::scopes::IndexedManifestScopes::authenticate(
+            &storage,
+            &dir.join("sent-manifest-scopes.log"),
             password,
         )?;
         let media = crate::node::media_store::MediaStore::open(dir, password, &identity.user_id())
@@ -939,6 +928,16 @@ impl Node {
             )?,
         );
         let mut log = PersistentEventLog::open_profile(storage.clone(), password)?;
+        let manifest_scopes = super::filebook::scopes::IndexedManifestScopes::from_profile(
+            storage.clone(),
+            &dir.join("sent-manifest-scopes.log"),
+            password,
+            log.repository()?,
+            crate::eventlog::Author::from_ed25519(identity.public().ed25519_pub),
+        )?;
+        // Derived file eligibility must exist before a manifest WAL intent can
+        // install its body, exact evidence and reception effect atomically.
+        let files = IndexedFileBook::open(storage.clone())?;
         log.repository()?
             .initialize_receiving(crate::eventlog::Author::from_ed25519(
                 identity.public().ed25519_pub,
@@ -954,8 +953,9 @@ impl Node {
             )?
             .is_some()
         {}
-        received_files
-            .remove_where(|entry| delivery.file_erased(entry.conversation, entry.event_id))?;
+        for (conversation, id) in delivery.file_erasures() {
+            received_files.remove_exact(conversation, id)?;
+        }
         let delivery_control_ids = delivery.control_ids();
         let own_device_ids: HashSet<_> = account_devices
             .devices()
@@ -1015,52 +1015,28 @@ impl Node {
                 }
             }
         }
-        // Seed the file book from the durable `received_files` record — the manifests we
-        // actually SURFACED last session (restoring them so they stay saveable), and only
-        // THOSE ids into the emitted set. A manifest that was ingested durably but never
-        // opened (its author not yet in the roster — the DM-convergence race) is absent
-        // here, so `process_file_events` retries it after restart instead of dropping the
-        // file forever. (Mirrors the message-path `emitted` seeding above.)
-        let mut files = FileBook::new();
-        let mut live_media = std::collections::HashSet::new();
-        let mut file_after = None;
-        loop {
-            let page = received_files.scan_page(None, file_after, Default::default())?;
-            for entry in page.rows {
-                if file_message_identities.row_suppressed(&entry, &account_suppression)? {
-                    continue;
-                }
-                let decoded = super::files::validated_manifest(&entry.plaintext);
-                if let Some(manifest) = &decoded {
-                    live_media.insert(manifest.file_conv());
-                }
-                if delivery.file_erased(entry.conversation, entry.event_id)
-                    || delivery.manifest_event_erased(entry.event_id)
-                {
-                    continue;
-                }
-                let existing = decoded
-                    .as_ref()
-                    .and_then(|m| files.manifest(&m.file_conv()));
-                let proof = match log.get(&entry.event_id)? {
-                    Some(event) => Some(event),
-                    None => account_file_proofs.get(&entry.event_id)?,
-                };
-                if let Some(manifest) =
-                    super::files::eligible_manifest_row(&entry, proof.as_ref(), existing)
-                {
-                    files.record_event(entry.event_id, proof.as_ref().unwrap().author, manifest);
-                    files.mark_emitted(entry.event_id);
-                }
-            }
-            match page.next {
-                Some(next) => file_after = Some(next),
-                None => break,
-            }
-        }
+        super::files::import_file_book(
+            &files,
+            &received_files,
+            &log,
+            &account_file_proofs,
+            &delivery,
+            &file_message_identities,
+            &account_suppression,
+        )?;
+        // Retained metadata can conservatively keep bytes without granting read
+        // authority; no history-sized set or manifest bodies are needed for GC.
+        let media_gc_page_limit = super::transcript_repository::TranscriptPageLimit::new(1, 4096)?;
         media
-            .prune_unreferenced(&live_media)
-            .map_err(|e| LogError::Io(std::io::Error::other(format!("media prune: {e}"))))?;
+            .prune_unreferenced_where(|file| {
+                received_files
+                    .file_headers(&file, None, media_gc_page_limit)
+                    .map(|page| !page.rows.is_empty())
+                    .map_err(std::io::Error::other)
+            })
+            .map_err(|error| {
+                LogError::Io(std::io::Error::other(format!("media prune: {error}")))
+            })?;
         let (profile_tx, profile_rx, call_signal_tx, call_signal_rx) = if legacy_delivery {
             let (profile_tx, profile_rx) = mpsc::unbounded_channel();
             let (call_tx, call_rx) = mpsc::unbounded_channel();
@@ -1081,7 +1057,13 @@ impl Node {
         favorite_media
             .prune_unreferenced(&favorites.live_files(now_millis()))
             .map_err(LogError::Io)?;
-        let opaque_seen = opaque_receive_cache.restored(&log)?;
+        let opaque_receive_cache = super::opaque_receive_cache::OpaqueReceiveCache::open(
+            storage.clone(),
+            log_path,
+            password,
+            &identity.public(),
+            &account.account_id(),
+        );
         let privacy = Arc::new(super::privacy_runtime::PrivacyControl::with_storage(
             storage.clone(),
         ));
@@ -1092,6 +1074,8 @@ impl Node {
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            withheld_file_scopes: Mutex::new(HashSet::new()),
             #[cfg(test)]
             untracked_chunk_validations: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -1166,8 +1150,8 @@ impl Node {
             channel_last_send: Mutex::new(None),
             file_incoming,
             files: Mutex::new(files),
+            manifest_scopes,
             group_file_sharing: Default::default(),
-            pending_files: Mutex::new(HashSet::new()),
             file_pull_notify: tokio::sync::Notify::new(),
             file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),
             file_pull_gate: tokio::sync::Mutex::new(()),
@@ -1209,7 +1193,6 @@ impl Node {
             post_office_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_send_enabled: std::sync::atomic::AtomicBool::new(true),
             post_office_receive_enabled: std::sync::atomic::AtomicBool::new(true),
-            opaque_seen: Mutex::new(opaque_seen),
             opaque_receive_cache: Mutex::new(opaque_receive_cache),
             preferred_routes: Mutex::new(HashMap::new()),
             received: Mutex::new(received),
@@ -1222,7 +1205,6 @@ impl Node {
         })?;
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
-        node.queue_approved_incomplete_files();
         node.storage
             .complete_participant(password, legacy_previous.as_deref())?;
         node.delivery
@@ -1242,6 +1224,9 @@ impl Node {
         node.profile_receive_work = Mutex::new(
             super::profile_receive_work::ProfileReceiveWork::open(node.storage.clone())?,
         );
+        node.files = Mutex::new(IndexedFileBook::open(node.storage.clone())?);
+        node.manifest_scopes.recapture()?;
+        node.queue_approved_incomplete_files();
         node.bootstrap_private_dm_controls().map_err(|error| {
             LogError::CorruptFile(format!("account control projection: {error}"))
         })?;

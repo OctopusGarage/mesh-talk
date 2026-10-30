@@ -375,7 +375,7 @@ async fn v2_sticker_media_delivers_label_after_source_removal_without_receiver_i
     .expect("automatic sticker bytes become durable without installing a pack");
     // Existing peers can decode this as ordinary MFM3 media, without new enum tags.
     assert!(matches!(
-        b.files.lock().unwrap().manifest(&file),
+        b.files.lock().unwrap().manifest(&file).unwrap(),
         Some(crate::file::AnyManifest::V3(_))
     ));
     assert!(
@@ -450,7 +450,15 @@ async fn sticker_alias_after_chunk_reclamation_gets_exact_completion_control() {
         .enqueue_file_to_account(&target, &path, FileKind::Media)
         .await
         .unwrap();
-    let manifest = match a.files.lock().unwrap().manifest(&file).unwrap().clone() {
+    let manifest = match a
+        .files
+        .lock()
+        .unwrap()
+        .manifest(&file)
+        .unwrap()
+        .unwrap()
+        .clone()
+    {
         crate::file::AnyManifest::V3(manifest) => manifest,
         _ => unreachable!(),
     };
@@ -517,7 +525,15 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
         .enqueue_file_to_account(&target, &path, FileKind::Media)
         .await
         .unwrap();
-    let manifest = match a.files.lock().unwrap().manifest(&file).unwrap().clone() {
+    let manifest = match a
+        .files
+        .lock()
+        .unwrap()
+        .manifest(&file)
+        .unwrap()
+        .unwrap()
+        .clone()
+    {
         crate::file::AnyManifest::V3(manifest) => manifest,
         _ => unreachable!(),
     };
@@ -1214,6 +1230,7 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
         .unwrap()
         .manifest(&file)
         .unwrap()
+        .unwrap()
         .clone()
     else {
         panic!("fixture must use deployed MFM3")
@@ -1274,6 +1291,7 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
                 .lock()
                 .unwrap()
                 .manifest(&alternate_file)
+                .unwrap()
                 .is_some(),
             "alternate media is a valid admitted offer"
         );
@@ -1315,17 +1333,42 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
         .unwrap()
         .manifest(&original)
         .unwrap()
+        .unwrap()
         .clone();
     let AnyManifest::V3(base) = manifest else {
         panic!("fixture must use deployed MFM3")
     };
+    let install = |manifest: AnyManifest| {
+        let bytes = match manifest {
+            AnyManifest::V3(value) => value.encode(),
+            AnyManifest::V4(value) => value.encode(),
+            _ => panic!("fixture manifest"),
+        };
+        let host =
+            super::conversation::account_conversation_id(&node.account_id(), &node.account_id());
+        let original = node.build_personal_manifest_proof(host, 0, &bytes).unwrap();
+        node.account_file_proofs
+            .lock()
+            .unwrap()
+            .insert(original.clone())
+            .unwrap();
+        let row = super::received_log::ReceivedEntry {
+            event_id: original.id,
+            conversation: host,
+            from: node.user_id(),
+            wall_clock: 0,
+            plaintext: bytes,
+        };
+        node.received_files
+            .lock()
+            .unwrap()
+            .record_file_with_reception(&row, Some(&original), None)
+            .unwrap();
+    };
     let mut unsupported = base.clone();
     unsupported.v2.file_conv = ConversationId::new([71; 32]);
     unsupported.v2.chunk_hashes.clear();
-    node.files
-        .lock()
-        .unwrap()
-        .record(AnyManifest::V4(FileManifestV4 { v3: unsupported }));
+    install(AnyManifest::V4(FileManifestV4 { v3: unsupported }));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([71; 32]))
             .unwrap()
@@ -1334,7 +1377,7 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
     );
     let mut missing = base.clone();
     missing.v2.file_conv = ConversationId::new([72; 32]);
-    node.files.lock().unwrap().record(AnyManifest::V3(missing));
+    install(AnyManifest::V3(missing));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([72; 32]))
             .unwrap()
@@ -1344,7 +1387,7 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
     let mut ordinary = base.clone();
     ordinary.v2.file_conv = ConversationId::new([73; 32]);
     ordinary.kind = FileKind::File;
-    node.files.lock().unwrap().record(AnyManifest::V3(ordinary));
+    install(AnyManifest::V3(ordinary));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([73; 32]))
             .unwrap()
@@ -1368,7 +1411,7 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
         ciphertext,
     );
     node.log.lock().unwrap().append_durable(event).unwrap();
-    node.files.lock().unwrap().record(AnyManifest::V3(copied));
+    install(AnyManifest::V3(copied));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([74; 32]))
             .unwrap()

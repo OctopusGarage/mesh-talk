@@ -37,10 +37,10 @@ impl Node {
             .files
             .lock()
             .expect("files lock not poisoned")
-            .manifest(&conversation)
+            .manifest(&conversation)?
             .is_some_and(|manifest| {
                 crate::file::sticker::is_sticker_name(manifest.name())
-                    && super::media_store::manifest_is_media(manifest)
+                    && super::media_store::manifest_is_media(&manifest)
                     && manifest.protection().is_none()
             });
         if !sticker || self.expired_received_file(conversation)? {
@@ -65,11 +65,11 @@ impl Node {
     ) -> Result<bool, super::NodeError> {
         let manifest = {
             let files = self.files.lock().expect("files lock not poisoned");
-            let Some(manifest) = files.manifest(&conversation) else {
+            let Some(manifest) = files.manifest(&conversation)? else {
                 return Ok(false);
             };
             if !crate::file::sticker::is_sticker_name(manifest.name())
-                || !super::media_store::manifest_is_media(manifest)
+                || !super::media_store::manifest_is_media(&manifest)
                 || manifest.protection().is_some()
             {
                 return Ok(false);
@@ -92,11 +92,6 @@ impl Node {
         {
             return Ok(false);
         }
-        let rows: std::collections::HashMap<_, _> = self
-            .retained_file_rows(conversation)?
-            .into_iter()
-            .map(|row| (row.event_id, row))
-            .collect();
         let retained = |card: &FileCard| -> Result<Option<Option<u64>>, super::NodeError> {
             let Some(binding) = card.completion_binding.as_ref() else {
                 return Ok(None);
@@ -118,7 +113,20 @@ impl Node {
             if proof.public() != binding.source || proof.account_cert != binding.certificate {
                 return Ok(None);
             }
-            let Some(row) = rows.get(&card.id) else {
+            if !self
+                .files
+                .lock()
+                .expect("files lock")
+                .has_manifest_event(conversation, card.id)?
+            {
+                return Ok(None);
+            }
+            let Some(row) = self
+                .received_files
+                .lock()
+                .expect("file rows lock")
+                .entry(card.id)?
+            else {
                 return Ok(None);
             };
             let Some(stored) = super::files::validated_manifest(&row.plaintext) else {
@@ -164,7 +172,20 @@ impl Node {
             let Some(final_chunk) = completion else {
                 continue;
             };
-            let Some(row) = rows.get(&card.id) else {
+            if !self
+                .files
+                .lock()
+                .expect("files lock")
+                .has_manifest_event(conversation, card.id)?
+            {
+                continue;
+            }
+            let Some(row) = self
+                .received_files
+                .lock()
+                .expect("file rows lock")
+                .entry(card.id)?
+            else {
                 continue;
             };
             if card.completion_binding.is_none() {
@@ -334,10 +355,13 @@ impl Node {
             && (!eligible.is_empty() || untracked)
             && self.is_channel_file_replica(conversation)?
         {
-            let own_source = self
-                .retained_file_rows(conversation)?
-                .iter()
-                .any(|row| row.from == self.user_id());
+            let mut own_source = false;
+            for row in self.retained_file_rows(conversation) {
+                if row?.from == self.user_id() {
+                    own_source = true;
+                    break;
+                }
+            }
             own_source || self.shares_replica(&conversation)?
         } else {
             false
@@ -371,17 +395,19 @@ impl Node {
     ) -> Result<bool, super::NodeError> {
         let media = {
             let files = self.files.lock().expect("files lock not poisoned");
-            let Some(manifest) = files.manifest(&conversation) else {
+            let Some(manifest) = files.manifest(&conversation)? else {
                 return Ok(false);
             };
             match manifest.kind() {
                 Some(crate::file::FileKind::File) => false,
-                _ if super::media_store::manifest_is_media(manifest) => true,
+                _ if super::media_store::manifest_is_media(&manifest) => true,
                 _ => return Ok(false),
             }
         };
-        Ok(self.retained_file_rows(conversation)?.iter().any(|row| {
-            self.channels
+        for row in self.retained_file_rows(conversation) {
+            let row = row?;
+            if self
+                .channels
                 .lock()
                 .expect("channels lock not poisoned")
                 .state(&row.conversation)
@@ -395,7 +421,11 @@ impl Node {
                             .iter()
                             .any(|member| member.user_id() != self.user_id())
                 })
-        }))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Keep complete channel files newest-first within a fixed local storage budget.
@@ -404,25 +434,26 @@ impl Node {
     /// again from another source if its local replica has been evicted.
     fn prune_channel_file_replicas(&self) {
         let result = (|| -> Result<(), NodeError> {
-            let file_convs = self
-                .files
-                .lock()
-                .expect("files lock not poisoned")
-                .file_convs();
+            let file_convs = self.files.lock().expect("files lock not poisoned").files();
             let mut replicas = Vec::new();
             for file in file_convs {
+                let file = file?;
                 if !self.is_channel_file_replica(file)? {
                     continue;
                 }
-                let rows = self.retained_file_rows(file)?;
-                if rows.is_empty() {
-                    continue;
+                let mut newest = None;
+                for row in self.retained_file_rows(file) {
+                    let clock = row?.wall_clock;
+                    newest = Some(newest.unwrap_or(0).max(clock));
                 }
+                let Some(newest) = newest else {
+                    continue;
+                };
                 let Some(total) = self
                     .files
                     .lock()
                     .expect("files lock not poisoned")
-                    .manifest(&file)
+                    .manifest(&file)?
                     .map(|manifest| manifest.chunk_count() as usize)
                 else {
                     continue;
@@ -436,7 +467,6 @@ impl Node {
                     .iter()
                     .map(|event| event.ciphertext.len() + 256)
                     .sum::<usize>();
-                let newest = rows.iter().map(|row| row.wall_clock).max().unwrap_or(0);
                 replicas.push((file, newest, bytes));
             }
             let drop = channel_file_evictions(replicas, CHANNEL_FILE_REPLICA_BUDGET);
@@ -459,20 +489,6 @@ impl Node {
         conversation: ConversationId,
         store: &super::delivery_store::DeliveryStore,
     ) -> Result<bool, super::NodeError> {
-        let rows: Vec<_> = self
-            .retained_file_rows(conversation)?
-            .into_iter()
-            .filter(|row| {
-                !store.manifest_event_erased(row.event_id)
-                    && self
-                        .channels
-                        .lock()
-                        .expect("channels lock not poisoned")
-                        .state(&row.conversation)
-                        .is_some()
-            })
-            .map(|row| (row.event_id, row.conversation))
-            .collect();
         let log = self.log.lock().expect("log lock not poisoned");
         let chunks = log.events(&conversation)?;
         let Some(first) = chunks.first() else {
@@ -481,7 +497,20 @@ impl Node {
         let source = first.author;
         let mut allowed = source.ed25519_pub() == &self.identity.public().ed25519_pub;
         if !allowed {
-            for (id, parent) in &rows {
+            for row in self.retained_file_rows(conversation) {
+                let row = row?;
+                if store.manifest_event_erased(row.event_id)
+                    || self
+                        .channels
+                        .lock()
+                        .expect("channels lock")
+                        .state(&row.conversation)
+                        .is_none()
+                {
+                    continue;
+                }
+                let id = &row.event_id;
+                let parent = &row.conversation;
                 if log.get(id)?.is_some_and(|event| {
                     event.conversation_id == *parent
                         && event.kind == EventKind::FileManifest
@@ -517,25 +546,27 @@ impl Node {
     fn retained_file_rows(
         &self,
         conversation: ConversationId,
-    ) -> Result<Vec<super::received_log::ReceivedEntry>, super::NodeError> {
-        let (manifest, ids) = {
-            let files = self.files.lock().expect("files lock not poisoned");
-            let Some(manifest) = files.manifest(&conversation).cloned() else {
-                return Ok(vec![]);
+    ) -> impl Iterator<Item = Result<super::received_log::ReceivedEntry, NodeError>> + '_ {
+        let offers = self
+            .files
+            .lock()
+            .expect("files lock")
+            .offers(Some(conversation), None);
+        offers.filter_map(move |offer| {
+            let offer = match offer {
+                Ok(offer) => offer,
+                Err(error) => return Some(Err(error.into())),
             };
-            (manifest, files.manifest_events(conversation))
-        };
-        let records = self.received_files.lock().expect("files lock not poisoned");
-        let mut rows = Vec::new();
-        for id in ids {
-            if let Some(row) = records.entry(id)?
-                && super::files::validated_manifest(&row.plaintext)
-                    .is_some_and(|stored| super::files::same_file_transfer(&manifest, &stored))
+            match self
+                .received_files
+                .lock()
+                .expect("file rows lock")
+                .row_by_ordinal(offer.ordinal)
             {
-                rows.push(row);
+                Ok(row) => row.map(Ok),
+                Err(error) => Some(Err(error.into())),
             }
-        }
-        Ok(rows)
+        })
     }
 
     /// A local export backing path. Group/own media eligibility never enters network proofs.
@@ -554,7 +585,8 @@ impl Node {
         if self.has_verified_file_completion(conversation) {
             return Ok(Some(path));
         }
-        for row in self.retained_file_rows(conversation)? {
+        for row in self.retained_file_rows(conversation) {
+            let row = row?;
             if self
                 .delivery
                 .lock()

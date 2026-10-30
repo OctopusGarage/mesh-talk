@@ -206,6 +206,7 @@ impl ReceivedStore {
         }
         self.check_write()?;
         let inserted = self.repository.profile.database().transaction(|c| {
+            self.repository.profile.check_participant_account_on(c)?;
             Self::install_received_on(
                 c,
                 entry,
@@ -233,6 +234,114 @@ impl ReceivedStore {
             true,
             false,
         )
+    }
+    /// FILES plaintext, validated eligibility, exact processed evidence and host
+    /// reception facts share the existing profile transaction. The journal may
+    /// retire its intent only after this returns successfully.
+    pub(crate) fn record_file_with_reception(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&crate::eventlog::Event>,
+        metadata: Option<&super::reception_effects::ReceptionMetadata>,
+    ) -> Result<(), LogError> {
+        self.record_file_with_scopes(entry, original, metadata, &[])
+    }
+    pub(crate) fn record_file_with_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&crate::eventlog::Event>,
+        metadata: Option<&super::reception_effects::ReceptionMetadata>,
+        scopes: &[&crate::eventlog::Event],
+    ) -> Result<(), LogError> {
+        if self.repository.kind != FILES {
+            return Err(repository::invalid("file reception requires FILES owner"));
+        }
+        self.check_write()?;
+        let inserted = self.repository.profile.database().transaction(|c| {
+            self.repository.profile.check_participant_account_on(c)?;
+            let stored;
+            let original = match original {
+                Some(original) => original,
+                None => {
+                    stored = super::account_file_repository::IndexedAccountFileProofs::get_on(
+                        c,
+                        &entry.event_id,
+                    )?
+                    .ok_or_else(|| repository::invalid("file reception has no signed proof"))?;
+                    &stored
+                }
+            };
+            let inserted = Self::install_file_on(c, entry, original, metadata)?;
+            if !scopes.is_empty() {
+                let manifest = super::files::validated_manifest(&entry.plaintext)
+                    .ok_or_else(|| repository::invalid("invalid file manifest"))?;
+                for scope in scopes {
+                    if scope.kind != crate::eventlog::EventKind::FileManifest
+                        || scope.author != original.author
+                        || !scope.verify_integrity()
+                        || !scope.verify_signature()
+                    {
+                        return Err(repository::invalid("invalid sent manifest scope"));
+                    }
+                    super::filebook::scopes::IndexedManifestScopes::put_on(
+                        c,
+                        &super::privacy_runtime::StoredManifestScope {
+                            file: manifest.file_conv(),
+                            parent: scope.conversation_id,
+                            author: scope.author,
+                            event: scope.id,
+                        },
+                    )?;
+                }
+            }
+            Ok(inserted)
+        })?;
+        self.note_channel_commit(usize::from(inserted));
+        Ok(())
+    }
+    /// The channel owner calls this after its receiver CAS and before batch
+    /// progress, all in one transaction. Return value counts newly retained rows.
+    pub(crate) fn install_file_on(
+        c: &rusqlite::Connection,
+        entry: &ReceivedEntry,
+        original: &crate::eventlog::Event,
+        metadata: Option<&super::reception_effects::ReceptionMetadata>,
+    ) -> Result<bool, LogError> {
+        if super::files::eligible_manifest_row(entry, Some(original), None).is_none() {
+            return Err(LogError::AdmissionRejected(
+                "invalid signed file reception".into(),
+            ));
+        }
+        if super::file_message_identity::IndexedFileMessageIdentities::row_suppressed_on(c, entry)?
+        {
+            super::filebook::indexed::mark_processed_on(c, entry.event_id)?;
+            return Ok(false);
+        }
+        let inserted = TranscriptRepository::put_on(
+            c,
+            FILES,
+            entry.conversation,
+            entry.event_id.as_bytes(),
+            entry.wall_clock,
+            0,
+            &entry.from,
+            &entry.plaintext,
+            true,
+            false,
+        )?;
+        super::filebook::indexed::install_on(c, entry, original)?;
+        if let Some(metadata) = metadata {
+            super::reception_effects::install_on(
+                c,
+                super::reception_effects::ReceptionSource {
+                    kind: super::reception_effects::ReceptionKind::File,
+                    conversation: entry.conversation,
+                    event_id: entry.event_id,
+                },
+                metadata,
+            )?;
+        }
+        Ok(inserted)
     }
     pub(crate) fn record(
         &mut self,
@@ -459,6 +568,19 @@ impl ReceivedStore {
             Ok(!found)
         })?;
         Ok(found)
+    }
+    pub(crate) fn remove_exact(
+        &mut self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> Result<usize, LogError> {
+        match self
+            .repository
+            .ordinal_for_key(conversation, id.as_bytes())?
+        {
+            Some(ordinal) => self.repository.remove_ordinals(&[ordinal]),
+            None => Ok(0),
+        }
     }
     pub(crate) fn remove_ordinals(&mut self, ordinals: &[i64]) -> Result<usize, LogError> {
         self.repository.remove_ordinals(ordinals)

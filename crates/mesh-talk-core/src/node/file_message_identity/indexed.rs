@@ -291,17 +291,37 @@ impl IndexedFileMessageIdentities {
     pub(in crate::node) fn row_suppressed(
         &self,
         row: &ReceivedEntry,
-        suppression: &crate::node::account_suppression::IndexedAccountSuppression,
+        _suppression: &crate::node::account_suppression::IndexedAccountSuppression,
     ) -> Result<bool, LogError> {
-        if suppression.contains(row.conversation, row.event_id)? {
+        self.source
+            .profile()
+            .database()
+            .read(|c| Self::row_suppressed_on(c, row))
+    }
+    /// Exact metadata selector shared by the FILES transaction. Identity headers
+    /// have already passed the signed binding owner's admission checks.
+    pub(crate) fn row_suppressed_on(c: &Connection, row: &ReceivedEntry) -> Result<bool, LogError> {
+        let direct: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transcript_suppression WHERE conversation=?1 AND id=?2)",
+            params![
+                row.conversation.as_bytes().as_slice(),
+                row.event_id.as_bytes().as_slice()
+            ],
+            |r| r.get(0),
+        )?;
+        if direct {
             return Ok(true);
         }
-        let Some((_, identity)) = self.identity_for(row.event_id)? else {
-            return Ok(false);
-        };
-        Ok(identity.matches_content(row)
-            && (suppression.contains(identity.host(), identity.logical)?
-                || suppression.contains(identity.host(), row.event_id)?))
+        let mut statement = c.prepare_cached("SELECT h.author FROM file_identity_aliases a JOIN file_identity_headers h ON h.host=a.host AND h.logical=a.logical WHERE a.manifest=?1 AND h.manifest_digest=?2 AND EXISTS(SELECT 1 FROM transcript_suppression s WHERE s.conversation=h.host AND (s.id=h.logical OR s.id=a.manifest))")?;
+        let mut rows = statement.query(params![
+            row.event_id.as_bytes().as_slice(),
+            digest(&row.plaintext).as_slice()
+        ])?;
+        Ok(rows
+            .next()?
+            .map(|r| blob(r, 0).map(|author| Author::from_ed25519(author).user_id() == row.from))
+            .transpose()?
+            .unwrap_or(false))
     }
     pub(crate) fn row_author_account(
         &self,

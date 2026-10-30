@@ -1703,7 +1703,15 @@ mod tests {
                     .len(),
                 2
             );
-            assert!(f.receiver.files.lock().unwrap().manifest(&file).is_some());
+            assert!(
+                f.receiver
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(&file)
+                    .unwrap()
+                    .is_some()
+            );
             assert_eq!(
                 f.receiver
                     .account_history(&f.sender.account_id(), 10)
@@ -1808,7 +1816,13 @@ mod tests {
                 usize::from(keep_other_message)
             );
             assert_eq!(
-                f.receiver.files.lock().unwrap().manifest(&file).is_some(),
+                f.receiver
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(&file)
+                    .unwrap()
+                    .is_some(),
                 keep_other_message,
                 "accepted deletion retires its key while an independent same-artwork message keeps its own scope"
             );
@@ -1822,7 +1836,13 @@ mod tests {
                 &f.account,
             );
             assert_eq!(
-                reopened.files.lock().unwrap().manifest(&file).is_some(),
+                reopened
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(&file)
+                    .unwrap()
+                    .is_some(),
                 keep_other_message
             );
             assert_eq!(reopened.read_media(file).is_some(), keep_other_message);
@@ -1851,7 +1871,13 @@ mod tests {
                 usize::from(keep_other_message)
             );
             assert_eq!(
-                restored.files.lock().unwrap().manifest(&file).is_some(),
+                restored
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(&file)
+                    .unwrap()
+                    .is_some(),
                 keep_other_message
             );
             assert_eq!(restored.read_media(file).is_some(), keep_other_message);

@@ -76,6 +76,27 @@ impl ProfileStorage {
     pub(crate) fn participant_database(&self) -> Option<&EncryptedDatabase> {
         self.database.get()
     }
+    /// A producer keeps the authenticated account captured when this context
+    /// opened. Check it inside the effect transaction so a retired context can
+    /// never write reception work into a newly adopted account's namespace.
+    pub(crate) fn check_participant_account_on(
+        &self,
+        connection: &rusqlite::Connection,
+    ) -> Result<(), LogError> {
+        let owner = self
+            .participant
+            .as_ref()
+            .ok_or_else(|| manifest::invalid("not a participant context"))?;
+        let account: Vec<u8> = connection.query_row(
+            "SELECT account FROM participant_profile WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if account.as_slice() != owner.account.ed25519_pub.as_slice() {
+            return Err(LogError::StaleCursor);
+        }
+        Ok(())
+    }
     pub(crate) fn validate_participant_request(
         &self,
         identity: &PublicIdentity,

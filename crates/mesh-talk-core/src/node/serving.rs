@@ -710,8 +710,7 @@ impl Node {
                         .files
                         .lock()
                         .expect("files lock not poisoned")
-                        .manifest(&conv)
-                        .is_some();
+                        .contains_file(conv)?;
                     if file {
                         self.persist_media_if_complete(conv);
                         self.note_file_change();
@@ -758,7 +757,7 @@ impl Node {
                     .files
                     .lock()
                     .expect("files mutex not poisoned")
-                    .is_emitted(&event.id)
+                    .processed(event.id)?
                 {
                     continue;
                 }
@@ -813,7 +812,7 @@ impl Node {
                     self.files
                         .lock()
                         .expect("files mutex not poisoned")
-                        .mark_emitted(event.id);
+                        .mark_processed(event.id)?;
                     continue;
                 }
                 let Some(manifest) = super::files::validated_manifest(&plaintext) else {
@@ -823,7 +822,7 @@ impl Node {
                     .files
                     .lock()
                     .expect("files lock not poisoned")
-                    .accepts(&manifest)
+                    .accepts(&manifest)?
                 {
                     continue;
                 }
@@ -898,7 +897,7 @@ impl Node {
                     self.received_files
                         .lock()
                         .expect("files lock not poisoned")
-                        .record_durable(&entry)
+                        .record_file_with_reception(&entry, Some(&event), None)
                 } else {
                     match self.historical_author(event.author.ed25519_pub()) {
                         Some(proof) => self.accept_manifest_event(&event, &proof, entry),
@@ -919,11 +918,6 @@ impl Node {
                     self.note_account_local_change();
                 }
                 self.remember_manifest_scope(manifest.file_conv(), conv, event.author, event.id);
-                {
-                    let mut files = self.files.lock().expect("files mutex not poisoned");
-                    files.mark_emitted(event.id);
-                    files.record_event(event.id, event.author, manifest);
-                }
                 surfaced.push(received);
             }
             let total = surfaced.len();
@@ -957,10 +951,6 @@ impl Node {
                 } == Some(super::attachment_consent::ReceiveDecision::Accepted)
                     && matches!(self.file_progress(fc)?, Some(p) if p.done < p.total)
                 {
-                    self.pending_files
-                        .lock()
-                        .expect("pending_files mutex not poisoned")
-                        .insert(fc);
                     self.file_pull_notify.notify_one();
                 } else {
                     // All chunks already arrived with the manifest (the push landed): if this is
@@ -991,25 +981,14 @@ impl Node {
             let Ok(_pull) = self.file_pull_gate.try_lock() else {
                 return Ok(());
             };
-            let mut pending: Vec<_> = self
-                .pending_files
-                .lock()
-                .expect("pending files mutex not poisoned")
-                .iter()
-                .copied()
-                .collect();
-            pending.sort_unstable_by_key(|id| *id.as_bytes());
-            if pending.is_empty() {
-                return Ok(());
-            }
-            let cursor = self
-                .file_pull_cursor
-                .fetch_add(8, std::sync::atomic::Ordering::Relaxed);
-            let offset = cursor % pending.len();
-            pending.rotate_left(offset);
-            pending.truncate(8);
+            let generation=self.attachment_consent.lock().expect("consent lock").generation();
+            let book=self.files.lock().expect("files lock").clone();
+            book.discover_downloads(generation)?;
+            let pending=book.claim_downloads()?;
+            let cursor=self.file_pull_cursor.fetch_add(8,std::sync::atomic::Ordering::Relaxed);
             stream::iter(pending)
-                .for_each_concurrent(2, |fc| async move {
+                .for_each_concurrent(2, |work| async move {
+                    let fc=work.file;
                     let result: Result<(), NodeError> = async {
                         if match self.attachment_consent_status(fc) {
                             Ok(status) => status,
@@ -1019,10 +998,7 @@ impl Node {
                             }
                         } != Some(super::attachment_consent::ReceiveDecision::Accepted)
                         {
-                            self.pending_files
-                                .lock()
-                                .expect("pending files mutex not poisoned")
-                                .remove(&fc);
+                            self.files.lock().expect("files lock").finish_download(work)?;
                             return Ok(());
                         }
                         if self.media.contains(fc) && self.has_verified_file_completion(fc) {
@@ -1035,10 +1011,7 @@ impl Node {
                             };
                             let pending = self.pending_sticker_aliases(fc)?;
                             if !pending {
-                                self.pending_files
-                                    .lock()
-                                    .expect("pending files mutex not poisoned")
-                                    .remove(&fc);
+                                self.files.lock().expect("files lock").finish_download(work)?;
                             }
                             if progressed || !pending {
                                 return Ok(());
@@ -1077,9 +1050,10 @@ impl Node {
                                         return;
                                     }
                                     let store = self.sync_store(channel.peer_identity());
-                                    let manifests = self.files.lock().expect("files lock").manifest_events(fc);
+                                    let manifests = self.files.lock().expect("files lock").offers(Some(fc),None);
                                     let mut offered_manifest = None;
-                                    for manifest in manifests {
+                                    for offer in manifests {
+                                        let manifest=match offer {Ok(offer)=>offer.event,Err(error)=>{log::warn!("file offer lookup deferred: {error}");return;}};
                                         match self.incoming_offer(fc, Some(manifest), Some(&peer.public)) {
                                             Ok(Some(_)) => { offered_manifest = Some(manifest); break; },
                                             Ok(None) => {},
@@ -1147,24 +1121,18 @@ impl Node {
                                 .files
                                 .lock()
                                 .expect("files lock not poisoned")
-                                .manifest(&fc)
-                                .is_some_and(super::media_store::manifest_is_media);
+                                .manifest(&fc)?
+                                .as_ref().is_some_and(super::media_store::manifest_is_media);
                             if !managed
                                 || (self.media.contains(fc)
                                     && self.has_verified_file_completion(fc))
                             {
-                                self.pending_files
-                                    .lock()
-                                    .expect("pending files mutex not poisoned")
-                                    .remove(&fc);
+                                self.files.lock().expect("files lock").finish_download(work)?;
                             } else {
                                 // The byte store may succeed before completion metadata.
                                 // Its helper clears the transient queue; restore recovery
                                 // ownership until both durable writes have succeeded.
-                                self.pending_files
-                                    .lock()
-                                    .expect("pending files mutex not poisoned")
-                                    .insert(fc);
+                                self.file_pull_notify.notify_one();
                             }
                             self.note_file_change();
                         }
@@ -1190,58 +1158,30 @@ impl Node {
         file: ConversationId,
         cursor: usize,
     ) -> Result<Vec<PeerRecord>, NodeError> {
-        let (authors, manifests) = {
-            let files = self.files.lock().expect("files lock not poisoned");
-            (files.authors(file), files.manifest_events(file))
-        };
-        let parents: Vec<_> = {
-            let log = self.log.lock().expect("log lock not poisoned");
-            let mut parents = Vec::new();
-            for id in &manifests {
-                if let Some(event) = log.get(id)? {
-                    parents.push(event.conversation_id);
-                }
+        let files = self.files.lock().expect("files lock").clone();
+        let mut peers = Vec::new();
+        for peer in self.routing_peers() {
+            if peer.post_office || peer.public == self.identity.public() {
+                continue;
             }
-            parents
-        };
-        let mut identities = authors
-            .into_iter()
-            .filter_map(|author| {
-                self.historical_author(author.ed25519_pub())
-                    .map(|proof| proof.public())
-            })
-            .collect::<Vec<_>>();
-        {
-            let book = self.channels.lock().expect("channels lock not poisoned");
-            let mut members = Vec::new();
             let mut channel_bound = false;
-            for parent in parents {
+            let mut channel_allowed = false;
+            for scope in self.manifest_scopes(file) {
+                let parent = scope?.parent;
+                let book = self.channels.lock().expect("channels lock");
                 if let Some(state) = book.state(&parent) {
                     channel_bound = true;
-                    members.extend(
-                        state
-                            .members()
-                            .iter()
-                            .filter(|member| {
-                                state.is_accepted_member(&member.user_id())
-                                    && book.replica_enabled(parent, &member.user_id())
-                            })
-                            .cloned(),
-                    );
+                    channel_allowed |= state.is_accepted_member(&peer.public.user_id())
+                        && book.replica_enabled(parent, &peer.public.user_id());
                 }
             }
-            if channel_bound {
-                identities = members;
+            if channel_allowed
+                || (!channel_bound
+                    && files.has_author(file, Author::from_ed25519(peer.public.ed25519_pub))?)
+            {
+                peers.push(peer);
             }
         }
-        let mut peers = identities
-            .into_iter()
-            .filter(|identity| *identity != self.identity.public())
-            .filter_map(|identity| {
-                self.routing_peer(&identity.user_id())
-                    .filter(|peer| !peer.post_office && peer.public == identity)
-            })
-            .collect::<Vec<_>>();
         peers.sort_unstable_by_key(|peer| peer.public.user_id());
         peers.dedup_by_key(|peer| peer.public.user_id());
         if !peers.is_empty() {

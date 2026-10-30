@@ -140,11 +140,18 @@ metadata counters and independent source publication on the shared profile
 connection. `account_file_repository.rs` and `file_message_identity/indexed.rs`
 reuse that publication owner for signed file proofs and exact logical-file
 bindings, with fixed headers, bounded owned payload reads and persisted revisions.
+`filebook/indexed.rs` owns validated file eligibility metadata and
+exact processed facts tied to existing FILES ordinals; its account namespace,
+resumable import and persisted revision use the same connection. Production Node
+uses this owner directly. `filebook/scopes.rs` owns source 9 sent fanout references;
+`filebook/work.rs` owns metadata-only download discovery, fair bounded admission and
+revision-qualified completion. Neither owns a second payload journal or permission
+rule; network disclosure reuses the existing exact parent authorization.
 `sent_store.rs`, `received_store.rs` and the indexed owner in
 `account_suppression.rs` expose owned lookups, bounded pages and exact local
 deletion markers. Their constructors require validated participant authority;
-the existing Node consumers remain on the legacy stores until their coordinated
-integration. `eventlog/repository/order/combined.rs` extends the existing causal
+production Node history, recovery, recall, and account-sync consumers use these
+indexed stores. Media bytes retain their independent encryption/lifetime owner. `eventlog/repository/order/combined.rs` extends the existing causal
 order owner with disk ranks for signed events and isolated archive roots.
 `eventlog/repository/receiving.rs` owns resumable metadata discovery and bounded,
 fair retry selection; exact transcript evidence survives body erasure and commits
@@ -152,6 +159,14 @@ with body/effect installation. These derived selectors do not replace the delive
 journal. Account-route selectors retain the first envelope per conversation and
 advance transactionally when its row is erased.
 See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
+
+`core/node/opaque_receive_cache.rs` owns optional disk-backed mailbox hints on
+that same profile connection. Its independent source publication streams legacy
+mappings once; warm open reads metadata only. Active mailbox sync rechecks exact
+inner-event retention before using durable hints, while session-only progress is
+fenced by a fresh run identifier. ID sets exist only for the bounded active wire
+exchange. Corrupt or foreign hint sources remain preserved and unavailable; hints
+never establish admission, delivery, or deletion authority.
 
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary

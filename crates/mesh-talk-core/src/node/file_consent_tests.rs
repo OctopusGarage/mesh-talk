@@ -172,11 +172,12 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     qs.lock().unwrap().accept(malformed_outer.clone()).unwrap();
     b.drain_from_post_office().await;
     assert!(
-        b.opaque_seen
+        b.opaque_receive_cache
             .lock()
             .unwrap()
-            .get(&identity_mailbox.id())
-            .is_some_and(|seen| seen.contains(&malformed_outer.id)),
+            .seen(identity_mailbox.id(), &b.log.lock().unwrap())
+            .unwrap()
+            .contains(&malformed_outer.id),
         "malformed reserved identity controls must be consumed, not retained in the deferred queue"
     );
     assert!(!b.log.lock().unwrap().has(&malformed.id).unwrap());
@@ -276,11 +277,12 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap();
     let deferred_control = retry_mailbox.wrap(&control).unwrap().id;
     assert!(
-        a.opaque_seen
+        !a.opaque_receive_cache
             .lock()
             .unwrap()
-            .get(&retry_mailbox.id())
-            .is_none_or(|seen| !seen.contains(&deferred_control)),
+            .seen(retry_mailbox.id(), &a.log.lock().unwrap())
+            .unwrap()
+            .contains(&deferred_control),
         "failed controls must not enter the node-wide seen cache"
     );
     tokio::time::timeout(
@@ -328,11 +330,22 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             vec![],
         );
         b.log.lock().unwrap().append(event.clone()).unwrap();
-        let manifest = b.files.lock().unwrap().manifest(&file).unwrap().clone();
-        b.files
+        let original_id = b.files.lock().unwrap().manifest_events(file)[0];
+        let mut row = b
+            .received_files
             .lock()
             .unwrap()
-            .record_event(event.id, event.author, manifest);
+            .entry(original_id)
+            .unwrap()
+            .unwrap();
+        row.event_id = event.id;
+        row.conversation = event.conversation_id;
+        row.wall_clock = event.wall_clock;
+        b.received_files
+            .lock()
+            .unwrap()
+            .record_file_with_reception(&row, Some(&event), None)
+            .unwrap();
         event.id
     };
     assert!(
