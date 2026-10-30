@@ -1256,6 +1256,9 @@ mod tests {
         )
         .unwrap();
         participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        assert!(matches!(effects.head(), Err(LogError::StaleCursor)));
+        let effects =
+            crate::node::reception_effects::ReceptionEffects::open(f.book.profile.clone()).unwrap();
         let write = |store: &mut ReceivedStore| {
             if files {
                 store.record_file_with_reception(&entry, Some(&original), Some(&metadata))

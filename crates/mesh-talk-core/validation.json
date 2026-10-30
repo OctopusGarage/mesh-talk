@@ -2448,7 +2448,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Fixed-consumer ACKs advance a committed prefix; incremental pending retirement waits for every enrolled consumer and never treats RAM autosave admission as durable completion.",
+            "name": "Fixed-consumer ACKs advance a committed prefix; incremental pending retirement waits for every enrolled consumer and never treats RAM autosave admission as durable completion. Captured adoption generations reject former readers and ACK handles even after their account returns, while a fresh reader resumes its existing stream.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]

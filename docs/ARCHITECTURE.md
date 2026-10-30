@@ -1562,9 +1562,10 @@ participant account and adoption generation there before installing effects.
 Message and file producers are recaptured after adoption publication; a former
 account's producer cannot revive when that same account later returns. Migration
 handles may import historical bodies but cannot install new reception effects.
-Open readers capture the key and
-reject pages, ACKs, and retirement after account adoption; retained accounts keep
-their own pending work and epochs. Runtime/session authority additionally fences
+Open readers capture the same adoption generation and reject pages, ACKs, and
+retirement after account adoption, including a return to the original account.
+Reopened readers preserve each account's pending work, consumer progress and stream
+epoch. Runtime/session authority additionally fences
 individual host installations.
 
 Participant adoption also owns event commit intervals in the same encrypted

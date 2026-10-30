@@ -26,6 +26,10 @@ impl Fixture {
         )
         .unwrap();
         profile.complete_participant("pw", None).unwrap();
+        drop(
+            crate::eventlog::persist::PersistentEventLog::open_profile(profile.clone(), "pw")
+                .unwrap(),
+        );
         let received =
             ReceivedStore::from_profile(profile.clone(), &dir.path().join("received.log"), "pw")
                 .unwrap();
@@ -58,6 +62,10 @@ impl Fixture {
         )
         .unwrap();
         profile.complete_participant("pw", None).unwrap();
+        drop(
+            crate::eventlog::persist::PersistentEventLog::open_profile(profile.clone(), "pw")
+                .unwrap(),
+        );
         let received =
             ReceivedStore::from_profile(profile.clone(), &_dir.path().join("received.log"), "pw")
                 .unwrap();
@@ -169,6 +177,26 @@ fn account_adoption_fences_old_handles_and_keeps_each_accounts_pending_work() {
 
     prepare_adoption(database, &next_account.public(), &f.account.public()).unwrap();
     finish_adoption(database, &f.account.public()).unwrap();
+    assert!(matches!(f.effects.head(), Err(LogError::StaleCursor)));
+    assert!(matches!(f.effects.oldest(), Err(LogError::StaleCursor)));
+    assert!(matches!(
+        f.effects.registered(ReceptionConsumer::Desktop),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        f.effects.page(zero, original_head, limit(10, 1000), 100),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        f.effects.register(ReceptionConsumer::Desktop, zero),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        f.effects
+            .acknowledge(ReceptionConsumer::Desktop, zero, original_head),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(f.effects.retire(10), Err(LogError::StaleCursor)));
     let restored = ReceptionEffects::open(f.effects.profile.clone()).unwrap();
     assert_eq!(restored.head().unwrap(), original_head);
     let restored_page = restored

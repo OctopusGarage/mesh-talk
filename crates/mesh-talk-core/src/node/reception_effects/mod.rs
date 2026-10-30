@@ -7,7 +7,10 @@ use crate::eventlog::{
     event::{ConversationId, Event, EventId},
 };
 use crate::identity::device::PublicIdentity;
-use crate::storage::profile::context::ProfileStorage;
+use crate::storage::profile::{
+    context::ProfileStorage,
+    participant::event_ownership::{self, ParticipantEventOwner},
+};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -183,6 +186,7 @@ impl ReceptionConsumer {
 pub(crate) struct ReceptionEffects {
     profile: Arc<ProfileStorage>,
     account: [u8; 32],
+    owner: Option<ParticipantEventOwner>,
     #[cfg(test)]
     body_reads: std::sync::atomic::AtomicUsize,
 }

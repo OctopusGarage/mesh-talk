@@ -16,7 +16,7 @@ impl ReceptionEffects {
     ) -> Result<ReceptionPage, LogError> {
         limit.validate()?;
         self.profile.database().read(|c| {
-            let state=storage::state_on(c,&self.account)?;
+            let state=self.state_on(c)?;
             storage::validate_cursor(&state,after)?;
             storage::validate_cursor(&state,through)?;
             if after.sequence > through.sequence { return Err(LogError::StaleCursor); }
