@@ -162,6 +162,7 @@ async function identity() {
     sourceSha: sha, root, platform: process.platform, arch: process.arch,
     rustc: tool(process.env.RUSTC || "rustc", ["-Vv"]), cargo: tool("cargo", ["-V"]),
     nextest: nextest.trim(), llvmCov: llvmCov.trim(), buildArgs, cargoProfile: "test", features: "Cargo workspace defaults; no feature flags",
+    profileEnvironment: Object.fromEntries(Object.entries(process.env).filter(([name]) => /^CARGO_PROFILE_(?:DEV|TEST)_/u.test(name)).sort(([a], [b]) => a.localeCompare(b, "en"))),
     lockSha256: await fileHash("Cargo.lock"), cargoConfigSha256: await fileHash(".cargo/config.toml"), nextestConfigSha256: await fileHash(".config/nextest.toml"),
     runnerSha256: await fileHash(fileURLToPath(import.meta.url)),
     runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,

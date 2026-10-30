@@ -25,6 +25,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep stack file/line diagnostics without generating type/variable debug data.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
   MESH_TALK_TEST_TIMING: ${{ inputs.diagnostic_timing && '1' || '0' }}
 
 jobs:
@@ -89,7 +92,7 @@ jobs:
           tool: cargo-llvm-cov@0.8.7
 
       - name: Verify coverage accumulation with the actual tool
-        run: node --test scripts/ci/backend-coverage.test.mjs
+        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs
 
       # Tauri reads frontendDist, so build the frontend before any Cargo step.
       - name: Build frontend
@@ -157,11 +160,12 @@ jobs:
           node scripts/evals/backend-runner.mjs
           cargo llvm-cov --no-report -p mesh-talk-core --test bridge_cross_lan -- --ignored --test-threads=1
 
-      - name: Large-folder transfer regression (Linux)
+      - name: Large-folder enqueue regression (Linux)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          cargo llvm-cov test --no-report -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1 | tee "$RUNNER_TEMP/backend-eval-results/large-folder.log"
+          set -o pipefail
+          cargo llvm-cov test --no-report --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 2>&1 | tee "$RUNNER_TEMP/backend-eval-results/large-folder.log"
           node scripts/evals/backend-runner.mjs --validate-large-folder "$RUNNER_TEMP/backend-eval-results/large-folder.log"
           cargo llvm-cov report --lcov --output-path src-tauri/e2e-lcov.info
 

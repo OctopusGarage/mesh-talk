@@ -696,6 +696,15 @@ blob/trace evidence upload to succeed. Blob reports and failure
 traces are retained per OS/shard/attempt, and an HTML report is merged per OS even
 when browser execution fails.
 
+Successful shard uploads contain the raw Playwright blob (including its
+attachments) and structured JSON results, without a second copy of
+`test-results/`. Failed or interrupted UI execution additionally retains raw
+attachments under `ui-failure-attachments-*`, so incomplete blobs do not discard
+available diagnostics. Portable evidence extraction and its verified collector
+remain separate consumers. The actual Playwright round-trip in
+`scripts/diagnostics/playwright-artifacts.test.mjs` removes raw output before
+rebuilding JSON/HTML and verifies passed and failed case attachments byte for byte.
+
 The Rust build cache maps the workspace root to `target/`, matching
 `cargo metadata --no-deps --format-version 1`. The CI cache has its own build
 configuration key; native release, mutation and sanitizer caches stay separate.
@@ -807,6 +816,16 @@ latency and reliability.
 
 ### Windows workspace archives and slow fixtures
 
+Ordinary workspace and backend CI use Cargo's `line-tables-only` debug information
+for the built-in dev/test profiles. This retains application stack file/line
+locations while avoiding type/variable debug data. Local development defaults,
+optimization, assertions, overflow checks, production KDFs, and the independently
+owned sanitizer, mutation and release profiles remain unchanged. The actual-tool
+`scripts/ci/rust-profile.test.mjs` compares source-line coverage against full debug
+information and checks panic diagnostics, debug assertions and overflow handling;
+its no-debug negative control distinguishes stack locations from panic headers.
+See [Cargo debug profiles](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
+
 The Windows producer runs structural checks, frontend compilation, Clippy,
 an ordinary workspace build and separate doctests. It builds the instrumented
 workspace test binaries once with pinned cargo-nextest 0.9.148 and
@@ -822,7 +841,8 @@ plain diagnostic output. Pull requests restore caches; only main publishes them.
 
 The owning `scripts/ci/windows-coverage.mjs` helper validates every default Cargo test target, the full inventory,
 default ignored markers and the exact disjoint union of both runnable partitions.
-Producer and consumers must match source/run/attempt, compiler, Cargo, feature
+Producer and consumers must match source/run/attempt, compiler, Cargo, dev/test
+profile environment, feature
 resolution, lock/config/helper hashes, platform and the original absolute checkout
 root. The archive digest is verified before extraction. Fixed paths preserve
 compiled `CARGO_BIN_EXE` and manifest references. Source is checked out at the
@@ -849,13 +869,22 @@ coverage in the same execution, including the separate ignored bridge and
 large-folder acceptance. macOS and Windows keep their real backend executions.
 Accumulation uses `--no-report` between executions; combining it with `--no-clean`
 is invalid. The real CLI regression first writes a normal unit report, executes
-ignored scenarios and the workflow's exact filtered large-folder command, then
-verifies the final report retains all coverage. Positional test-name filtering
+ignored scenarios and the workflow's exact filtered large-folder integration command,
+then verifies the final report retains distinct coverage from all three executions.
+Its second prefix-matching integration case must remain unexecuted. Positional test-name filtering
 uses the explicit `cargo llvm-cov test` subcommand. Production builds,
 native desktop acceptance and sanitizer checks remain distinct.
 All three large-folder gates validate the exact successful scenario and Cargo
-summary from their saved log. A renamed filter that selects zero tests cannot
-silently pass; unrelated library tests may be filtered out.
+summary from saved stdout and stderr, preserving the Cargo failure through `tee`.
+A renamed filter that selects zero tests cannot silently pass. The dedicated
+`--test large_directory_enqueue` target uses `--locked` and exact ignored-case
+selection, avoiding compilation of the entire inline library test harness for
+this separate acceptance step. Its real 110 MiB fixture decrypts the exact returned
+event from the persisted log after dropping the Node writer and requires a V4
+manifest with matching file identity, directory metadata and more than 2,000
+chunks. It proves enqueue and staging; recipient transfer retains separate backend
+coverage. The small compact-manifest policy case remains in the ordinary unit suite,
+while the disk fixture stays an explicit escalation in the owning validation contract.
 
 Measure fixture preparation, protocol phases and teardown before changing a
 network deadline. HTTP expiry regressions establish real TCP admission and observe

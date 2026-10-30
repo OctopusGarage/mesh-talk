@@ -12,6 +12,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: never
+  # Both producer and consumers keep the same ordinary Cargo profile inputs.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
   RUST_TEST_THREADS: '1'
   MESH_TALK_TEST_TIMING: ${{ inputs.diagnostic_timing && '1' || '0' }}
 
@@ -58,7 +61,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.148,cargo-llvm-cov@0.8.7
       - name: Validate archive and coverage contracts
-        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
+        run: node --test scripts/ci/backend-coverage.test.mjs scripts/ci/rust-profile.test.mjs scripts/ci/windows-coverage-cli.test.mjs scripts/diagnostics/windows-coverage.test.mjs
       - name: Build frontend
         working-directory: frontend
         run: |

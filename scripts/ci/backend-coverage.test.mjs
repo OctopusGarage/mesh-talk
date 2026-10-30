@@ -13,15 +13,28 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
   const root = mkdtempSync(join(tmpdir(), "mesh-backend-coverage-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const name of ["src", "tests"]) mkdirSync(join(root, name));
-  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
-  const lines = workflow.split("\n").map(line => line.trim()).filter(line => line.startsWith("cargo llvm-cov ") && line.includes("--lib large_directory_enqueue_"));
-  assert.equal(lines.length, 1, "owning large-folder command must be unique");
-  const folderArgs = lines[0].split(" | tee ")[0].split(/\s+/u).slice(1);
-  const folderFilter = folderArgs[folderArgs.indexOf("--lib") + 1];
-  assert.match(folderFilter, /^large_directory_enqueue_[a-z_]+$/u);
+  const folderCommand = workflowName => {
+    const workflow = readFileSync(new URL(`../../.github/workflows/${workflowName}`, import.meta.url), "utf8");
+    const lines = workflow.split("\n").map(line => line.trim());
+    const commands = lines.filter(line => line.startsWith("cargo ") && line.includes("--test large_directory_enqueue "));
+    assert.equal(commands.length, 1, "owning large-folder command must be unique");
+    assert.equal(lines[lines.indexOf(commands[0]) - 1], "set -o pipefail", "failed Cargo execution must survive tee");
+    assert.match(commands[0], / 2>&1 \| tee "\$RUNNER_TEMP\/backend-eval-results\/large-folder\.log"$/u, "retain both stdout and stderr");
+    const args = commands[0].split(" 2>&1 | tee ")[0].split(/\s+/u).slice(1);
+    assert.ok(args.includes("--locked"));
+    assert.equal(args[args.indexOf("--test") + 2], LARGE_FOLDER_SCENARIO);
+    assert.deepEqual(args.slice(args.indexOf("--") + 1), ["--exact", "--ignored", "--test-threads=1"]);
+    return args;
+  };
+  const folderArgs = folderCommand("ci.yml");
+  const nativeFolderArgs = folderCommand("e2e-backend.yml");
+  assert.deepEqual(folderArgs.slice(0, 3), ["llvm-cov", "test", "--no-report"]);
+  assert.equal(nativeFolderArgs[0], "test");
+  assert.deepEqual(folderArgs.slice(3), nativeFolderArgs.slice(1));
   writeFileSync(join(root, "Cargo.toml"), '[package]\nname="mesh-talk-core"\nversion="0.1.0"\nedition="2024"\n');
-  assert.equal(LARGE_FOLDER_SCENARIO, `node::delivery_runtime_tests::${folderFilter}`);
-  writeFileSync(join(root, "src/lib.rs"), `pub fn normal_truth() -> u64 { 1 }\npub fn ignored_truth() -> u64 { 2 }\n#[test] fn normal() { assert_eq!(normal_truth(), 1); }\nmod node { mod delivery_runtime_tests { #[test] #[ignore] fn ${folderFilter}() { assert_eq!(crate::ignored_truth(), 2); } } }\n`);
+  writeFileSync(join(root, "src/lib.rs"), "pub fn normal_truth() -> u64 { 1 }\npub fn ignored_truth() -> u64 { 2 }\npub fn large_folder_truth() -> u64 { 3 }\n#[test] fn normal() { assert_eq!(normal_truth(), 1); }\n");
+  // A second prefix-matching case proves --exact is honored by the actual CLI.
+  writeFileSync(join(root, "tests/large_directory_enqueue.rs"), `#[test] #[ignore] fn ${LARGE_FOLDER_SCENARIO}() { assert_eq!(mesh_talk_core::large_folder_truth(), 3); }\n#[test] #[ignore] fn ${LARGE_FOLDER_SCENARIO}_unrelated() { panic!("exact selection must exclude this case"); }\n`);
   writeFileSync(join(root, "tests/two_node_cli.rs"), BACKEND_SUITES.two_node_cli.map(name => `#[test] #[ignore] fn ${name}() { assert_eq!(mesh_talk_core::ignored_truth(), 2); }`).join("\n"));
   const env = { ...process.env, CARGO_TARGET_DIR: join(root, "target"), CARGO_LLVM_COV_TARGET_DIR: join(root, "coverage-target"), CARGO_TERM_COLOR: "never" };
   delete env.LLVM_PROFILE_FILE;
@@ -37,6 +50,7 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
   const folderOutput = run(folderArgs);
   assert.ok(folderOutput.split(/\r?\n/u).includes(`test ${LARGE_FOLDER_SCENARIO} ... ok`), "filtered ignored scenario did not execute");
   assert.match(folderOutput, /1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out/u);
+  validateBackendOutput(run(nativeFolderArgs), [LARGE_FOLDER_SCENARIO], { allowFiltered: true });
   const logPath = join(root, "large-folder.log");
   writeFileSync(logPath, folderOutput);
   const validator = spawnSync(process.execPath, [fileURLToPath(new URL("../evals/backend-runner.mjs", import.meta.url)), "--validate-large-folder", logPath], { encoding: "utf8" });
@@ -45,4 +59,5 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
   const coverage = readFileSync(join(root, "result.lcov"), "utf8");
   assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*normal_truth/m, "earlier workspace coverage must survive the ignored pass");
   assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*ignored_truth/m, "ignored backend execution must contribute coverage");
+  assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*large_folder_truth/m, "the separate ignored integration target must contribute coverage");
 });

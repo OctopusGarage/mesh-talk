@@ -348,7 +348,9 @@
         "scripts/diagnostics/windows-coverage.test.mjs",
         "scripts/ci/windows-coverage-cli.test.mjs",
         ".github/workflows/ui-shards.yml",
-        "scripts/diagnostics/ui-shard-orchestration.test.mjs"
+        "scripts/diagnostics/ui-shard-orchestration.test.mjs",
+        "scripts/diagnostics/playwright-artifacts.test.mjs",
+        "scripts/ci/rust-profile.test.mjs"
       ],
       "node": [
         "scripts/ci/ubuntu-apt-source.test.mjs",
@@ -364,14 +366,17 @@
         "scripts/ci/backend-coverage.test.mjs",
         "scripts/diagnostics/windows-coverage.test.mjs",
         "scripts/ci/windows-coverage-cli.test.mjs",
-        "scripts/diagnostics/ui-shard-orchestration.test.mjs"
+        "scripts/diagnostics/ui-shard-orchestration.test.mjs",
+        "scripts/diagnostics/playwright-artifacts.test.mjs",
+        "scripts/ci/rust-profile.test.mjs"
       ],
       "escalation": [
         "Run actionlint and affected workflow regressions. Mutation runner changes also require scripts/release/run-mutants.test.mjs with the pinned cargo-mutants and cargo-nextest tools; verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the whole-suite budget from actual workspace inventory and runner variance while retaining per-test hang detection; size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration.",
         "Direct check migration requires successful current-source app-bound replacement evidence before editing branch protection; preserve strictness and unrelated checks. Windows archive changes require official pinned-tool archive/list/receipt/coverage proof, all default Cargo targets, exhaustive disjoint partitions, source/run/compiler/config/archive identity, hermetic offline consumers and actual hosted Windows execution. Producer lint, ordinary production builds and doctests remain directly required. Linux CI owns instrumented backend scenario evidence, while macOS/Windows retain their dedicated backend jobs.",
         "Coverage accumulation changes require scripts/ci/backend-coverage.test.mjs with real cargo-llvm-cov and matching LLVM tools. It must preserve the earlier default workspace report plus later ignored execution; --no-report and --no-clean are mutually exclusive. The owning native CI installs the tools before this regression.",
         "The Windows archive CLI fixture requires pinned cargo-nextest0.9.148/cargo-llvm-cov0.8.7 and LLVM tools matching rustc. It creates only an isolated local Git fixture and runs both exact partitions from the archive with empty consumers; no real product full suite is replaced by this contract test.",
-        "Reusable browser shards retain exactly four Linux and eight desktop runners with the same execution/artifact steps. Linux coverage may depend on Linux plus Health only, but portable collection and final UI acceptance must reject every missing/failed/cancelled/skipped Linux or desktop result."
+        "Reusable browser shards retain exactly four Linux and eight desktop runners with the same execution/artifact steps. Linux coverage may depend on Linux plus Health only, but portable collection and final UI acceptance must reject every missing/failed/cancelled/skipped Linux or desktop result.",
+        "Ordinary CI debug-info changes require scripts/ci/rust-profile.test.mjs with the actual compiler and matching LLVM tools: preserve application stack file/line locations, debug assertions, overflow checks and source-line coverage relative to full debug information. Keep producer/consumer profile inputs consistent and sanitizer, mutation and release settings independently owned. Browser artifact changes require the actual Playwright blob round-trip: passed and failed attachments must reconstruct after raw output removal, while unsuccessful shards retain raw attachments as a fallback."
       ]
     },
     {

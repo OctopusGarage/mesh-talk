@@ -3551,41 +3551,6 @@ fn large_manifest_uses_compact_wire_format_before_staging_chunks() {
     assert_eq!(a.log.lock().unwrap().conversations(), before);
 }
 
-#[tokio::test]
-#[ignore = "large disk transfer runs separately in backend E2E"]
-async fn large_directory_enqueue_uses_compact_manifest_instead_of_frame_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let bob = DeviceIdentity::generate();
-    let bp = Announce::new_with_account(&bob, &Account::generate(), "Bob", 9);
-    let (alice, _) = node(
-        dir.path(),
-        DeviceIdentity::generate(),
-        Account::generate(),
-        &bp,
-    );
-    let folder = dir.path().join("paintings");
-    std::fs::create_dir(&folder).unwrap();
-    // Write actual data: sparse files can be encoded differently by tar on CI.
-    let mut source = std::fs::File::create(folder.join("large.bin")).unwrap();
-    let block = vec![0xA5; 1024 * 1024];
-    for _ in 0..110 {
-        std::io::Write::write_all(&mut source, &block).unwrap();
-    }
-    drop(source);
-
-    let (_, file_conv) = alice
-        .enqueue_file_dm(&bob.user_id(), &folder, crate::file::FileKind::File)
-        .await
-        .unwrap();
-    let files = alice.files.lock().unwrap();
-    let Some(crate::file::AnyManifest::V4(manifest)) = files.manifest(&file_conv) else {
-        panic!("large folder must use the compact manifest");
-    };
-    assert_eq!(manifest.v3.v2.name, "paintings.tar");
-    assert_eq!(manifest.v3.v2.mime, crate::file::directory::MIME);
-    assert!(manifest.v3.v2.chunk_count > 2_000);
-}
-
 #[test]
 fn pending_accepted_intent_precedes_generic_own_sequence_allocation() {
     pending_accepted_intent_precedes_own_event(false);

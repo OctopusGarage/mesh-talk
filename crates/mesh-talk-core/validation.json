@@ -1475,12 +1475,45 @@
       ]
     },
     {
+      "id": "core-large-directory-enqueue",
+      "paths": [
+        "crates/mesh-talk-core/tests/large_directory_enqueue.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/file/manifest.rs",
+        "crates/mesh-talk-core/src/file/directory.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::delivery_runtime_tests::large_manifest_uses_compact_wire_format_before_staging_chunks"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Stage a real 110 MiB directory and persist its exact enqueued compact V4 manifest without exceeding the event frame limit.",
+        "guide": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding",
+        "invariants": [
+          {
+            "name": "The returned event ID resolves in the persisted event log after the writer stops; recipient decryption yields V4 with the matching file conversation, directory name/MIME and more than 2,000 chunks.",
+            "reference": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding"
+          }
+        ]
+      },
+      "escalation": [
+        "Run cargo test --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 separately, then validate the saved stdout/stderr with scripts/evals/backend-runner.mjs --validate-large-folder. The real 110 MiB fixture is explicit backend acceptance, not an ordinary affected-suite test; it proves enqueue/staging and persisted compact-manifest identity, not recipient transfer."
+      ]
+    },
+    {
       "id": "core-cli-harness",
       "paths": [
         "crates/mesh-talk-core/src/bin/",
         "crates/mesh-talk-core/tests/",
         "crates/mesh-talk-core/examples/",
         "specifications/deployment_guide.md"
+      ],
+      "excludePaths": [
+        "crates/mesh-talk-core/tests/large_directory_enqueue.rs"
       ],
       "rust": [
         {

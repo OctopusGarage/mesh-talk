@@ -40,14 +40,14 @@ pub fn branch(first: bool) -> u8 { if first { 7 } else { 9 } }
 }
 `);
   copyFileSync(fileURLToPath(new URL("./windows-coverage.mjs", import.meta.url)), path.join(root, "windows-coverage.mjs"));
-  const baseEnv = { ...process.env, CARGO_NET_OFFLINE: "true", RUST_TEST_THREADS: "1", CARGO_TERM_COLOR: "never" };
+  const baseEnv = { ...process.env, CARGO_NET_OFFLINE: "true", RUST_TEST_THREADS: "1", CARGO_TERM_COLOR: "never", CARGO_PROFILE_DEV_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_DEBUG: "line-tables-only" };
   // Fixture compilation must not inherit an outer workspace's instrumentation paths.
   for (const name of Object.keys(baseEnv)) if (name.startsWith("CARGO_LLVM_COV") || name.startsWith("__CARGO_LLVM_COV") || ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_TARGET_DIR", "LLVM_PROFILE_FILE", "CARGO_BUILD_TARGET"].includes(name)) delete baseEnv[name];
   let latestStderr = "";
-  const run = (binary, args, env = baseEnv) => {
+  const run = (binary, args, env = baseEnv, expectedStatus = 0) => {
     const result = spawnSync(binary, args, { cwd: root, encoding: "utf8", env, timeout: 60000, maxBuffer: 16 * 1024 * 1024 });
     latestStderr = result.stderr ?? "";
-    assert.equal(result.status, 0, `${binary} ${args.join(" ")}\n${result.stdout}\n${result.stderr}\n${result.error ?? ""}`);
+    assert.equal(result.status, expectedStatus, `${binary} ${args.join(" ")}\n${result.stdout}\n${result.stderr}\n${result.error ?? ""}`);
     return result.stdout.trim();
   };
   run("cargo", ["generate-lockfile", "--offline"]);
@@ -57,18 +57,23 @@ pub fn branch(first: bool) -> u8 { if first { 7 } else { 9 } }
   run("git", ["-c", "user.name=CI Fixture", "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=empty-hooks", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "test: isolated archive fixture"]);
   const env = { ...baseEnv, GITHUB_SHA: run("git", ["rev-parse", "HEAD"]), GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", MESH_TALK_TEST_TIMING: "1", MESH_ARCHIVE_NODE: process.execPath.replaceAll("\\", "/") };
   const artifact = path.join(temporary, "archive");
-  const phase = (args, environment) => {
+  const phase = (args, environment, expectedStatus = 0) => {
     // Script paths and argv stay in environment variables; no shell interpolation.
     const scoped = { ...environment };
     args.forEach((arg, index) => { scoped[`MESH_ARCHIVE_ARG_${index}`] = arg; });
     const script = 'eval "$(cargo llvm-cov show-env --sh)"\n"$MESH_ARCHIVE_NODE" windows-coverage.mjs ' + args.map((_, index) => `"$MESH_ARCHIVE_ARG_${index}"`).join(" ");
-    run("bash", ["-euc", script], scoped);
+    run("bash", ["-euc", script], scoped, expectedStatus);
+    if (expectedStatus !== 0) {
+      assert.match(latestStderr, /Consumer identity differs from producer/);
+      return;
+    }
     if (args[0] === "consume") assert.doesNotMatch(latestStderr, /^\s*(?:Compiling|Checking) /mu, "consumer compiled instead of reusing archive");
     assert.equal(run("git", ["status", "--porcelain", "--untracked-files=normal"]), "", "instrumented listing dirtied source");
     assert.ok(!readdirSync(root).some(name => /^default.*\.profraw$/u.test(name)));
   };
   phase(["produce", artifact], env);
   renameSync(path.join(root, "target"), path.join(temporary, "producer-target"));
+  phase(["consume", "1", artifact, path.join(temporary, "rejected-profile")], { ...env, CARGO_PROFILE_TEST_DEBUG: "full" }, 1);
   const freshCargoHome = path.join(temporary, "fresh-cargo-home");
   mkdirSync(freshCargoHome);
   const receipts = [], logs = [];

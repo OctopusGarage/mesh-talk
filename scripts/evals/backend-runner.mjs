@@ -12,7 +12,7 @@ export const BACKEND_SUITES = {
   channel_and_file_cli: ["two_cli_nodes_exchange_a_channel_message", "two_cli_nodes_transfer_a_file"],
 };
 
-export const LARGE_FOLDER_SCENARIO = "node::delivery_runtime_tests::large_directory_enqueue_uses_compact_manifest_instead_of_frame_error";
+export const LARGE_FOLDER_SCENARIO = "large_directory_enqueue_uses_compact_manifest_instead_of_frame_error";
 
 export function validateBackendOutput(output, expected, { allowFiltered = false } = {}) {
   const successful = [...output.matchAll(/^test (\S+) \.\.\. ok\s*$/gm)].map(match => match[1]);
