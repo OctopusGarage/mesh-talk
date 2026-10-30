@@ -331,6 +331,11 @@ impl Node {
     fn project_private_dm_control(&self, event: Event) -> Result<bool, NodeError> {
         let conv = event.conversation_id;
         let id = event.id;
+        self.log
+            .lock()
+            .expect("log mutex")
+            .repository()?
+            .check_receive_event(id)?;
         let Some(author) = self.historical_author(event.author.ed25519_pub()) else {
             return Ok(false);
         };
@@ -441,7 +446,7 @@ impl Node {
                 .lock()
                 .expect("log mutex")
                 .repository()?
-                .committed_headers_page((after >= 0).then_some(after), 128)?;
+                .bootstrap_control_headers(after, through)?;
             let mut progressed = after;
             let mut bytes = 0usize;
             for row in page {

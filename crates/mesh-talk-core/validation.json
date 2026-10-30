@@ -2490,7 +2490,8 @@
             "incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_and_delivers_ack",
             "sent_scope_repair_failure_installs_no_permission_and_retry_recovers",
             "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
-            "failed_media_"
+            "failed_media_",
+            "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work"
           ]
         }
       ],

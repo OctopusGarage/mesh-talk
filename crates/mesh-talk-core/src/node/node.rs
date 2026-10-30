@@ -1037,10 +1037,6 @@ impl Node {
             &dir.join("attachment-consent.log"),
             password,
         )?;
-        log.repository()?
-            .initialize_receiving(crate::eventlog::Author::from_ed25519(
-                identity.public().ed25519_pub,
-            ))?;
         log.repository()?.initialize_ancestry()?;
         let channel_checkpoints =
             super::channel::checkpoint::ChannelCheckpointStore::open(storage.clone())?;
@@ -1395,6 +1391,14 @@ impl Node {
                     })?;
             }
         }
+        node.log
+            .lock()
+            .expect("log mutex")
+            .repository()?
+            .initialize_receiving(
+                crate::eventlog::Author::from_ed25519(node.identity.public().ed25519_pub),
+                &node.account.public(),
+            )?;
         node.bootstrap_private_dm_controls().map_err(|error| {
             LogError::CorruptFile(format!("account control projection: {error}"))
         })?;

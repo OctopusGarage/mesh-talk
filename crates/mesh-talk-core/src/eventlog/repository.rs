@@ -75,6 +75,9 @@ pub(crate) struct EventRepository {
     before_mutation: std::sync::Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>,
     store_uuid: [u8; 16],
     selection_owner: [u8; 16],
+    receive_owner: std::sync::OnceLock<
+        crate::storage::profile::participant::event_ownership::ParticipantEventOwner,
+    >,
     #[cfg(test)]
     body_decodes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -165,6 +168,7 @@ impl EventRepository {
             before_mutation: std::sync::Mutex::new(None),
             store_uuid,
             selection_owner: *uuid::Uuid::new_v4().as_bytes(),
+            receive_owner: Default::default(),
             #[cfg(test)]
             body_decodes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]

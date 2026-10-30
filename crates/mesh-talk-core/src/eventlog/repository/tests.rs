@@ -1490,14 +1490,51 @@ fn validated_growth_gate_blocks_without_mutation_and_never_runs_for_duplicates_o
     ));
 }
 
+fn receive_profile(
+    dir: &tempfile::TempDir,
+) -> (
+    Arc<crate::storage::profile::context::ProfileStorage>,
+    EventRepository,
+    DeviceIdentity,
+    crate::identity::account::Account,
+) {
+    use crate::{
+        identity::account::Account,
+        storage::profile::{ProfileStorageLease, context::ProfileStorage},
+    };
+    let local = DeviceIdentity::generate();
+    let account = Account::generate();
+    let profile = ProfileStorage::open_participant(
+        ProfileStorageLease::acquire(dir.path()).unwrap(),
+        &local.public(),
+        &account.public(),
+        &dir.path().join("messages.log"),
+        &dir.path().join("sent.log"),
+        "password",
+    )
+    .unwrap();
+    profile.complete_participant("password", None).unwrap();
+    drop(crate::eventlog::PersistentEventLog::open_profile(profile.clone(), "password").unwrap());
+    drop(
+        crate::node::received_store::ReceivedStore::from_profile(
+            profile.clone(),
+            &dir.path().join("received.log"),
+            "password",
+        )
+        .unwrap(),
+    );
+    let repository =
+        EventRepository::from_profile(profile.clone(), EventDomainId(*b"MeshPartEventsV1"))
+            .unwrap();
+    (profile, repository, local, account)
+}
+
 #[test]
 fn runtime_metadata_received_work_retries_fairly_and_reopens_without_body_reads() {
     let dir = tempfile::tempdir().unwrap();
-    let database = database(&dir);
-    database.transaction(|c|{c.execute_batch("CREATE TABLE transcript_received_evidence(id BLOB PRIMARY KEY,conversation BLOB NOT NULL) WITHOUT ROWID;")?;Ok(())}).unwrap();
-    let domain = EventDomainId([9; 16]);
-    let repo = EventRepository::new(database.clone(), domain).unwrap();
-    let local = DeviceIdentity::generate();
+    let (profile, repo, local, account) = receive_profile(&dir);
+    let database = profile.database();
+    let domain = EventDomainId(*b"MeshPartEventsV1");
     let peer = DeviceIdentity::generate();
     let mut events = Vec::new();
     for n in 0..257 {
@@ -1506,8 +1543,11 @@ fn runtime_metadata_received_work_retries_fairly_and_reopens_without_body_reads(
         events.push(item);
     }
     let conv = events[0].conversation_id;
-    repo.initialize_receiving(Author::from_ed25519(local.public().ed25519_pub))
-        .unwrap();
+    repo.initialize_receiving(
+        Author::from_ed25519(local.public().ed25519_pub),
+        &account.public(),
+    )
+    .unwrap();
     let first = repo
         .pending_receive_ids(conv, 128, 8 * 1024 * 1024)
         .unwrap();
@@ -1538,9 +1578,12 @@ fn runtime_metadata_received_work_retries_fairly_and_reopens_without_body_reads(
         .unwrap();
     assert_eq!(repo.body_read_counts(), (0, 0));
     drop(repo);
-    let reopened = EventRepository::new(database.clone(), domain).unwrap();
+    let reopened = EventRepository::from_profile(profile.clone(), domain).unwrap();
     reopened
-        .initialize_receiving(Author::from_ed25519(local.public().ed25519_pub))
+        .initialize_receiving(
+            Author::from_ed25519(local.public().ed25519_pub),
+            &account.public(),
+        )
         .unwrap();
     for _ in 0..4 {
         assert!(
@@ -1561,14 +1604,13 @@ fn runtime_metadata_received_work_retries_fairly_and_reopens_without_body_reads(
 #[test]
 fn runtime_metadata_receive_bootstrap_resumes_and_keeps_control_work_separate() {
     let dir = tempfile::tempdir().unwrap();
-    let database = database(&dir);
-    database.transaction(|c|{c.execute_batch("CREATE TABLE transcript_received_evidence(id BLOB PRIMARY KEY,conversation BLOB NOT NULL) WITHOUT ROWID;")?;Ok(())}).unwrap();
-    let domain = EventDomainId([9; 16]);
-    let repo = EventRepository::new(database.clone(), domain).unwrap();
-    let local = DeviceIdentity::generate();
+    let (profile, repo, local, account) = receive_profile(&dir);
+    let database = profile.database();
+    let domain = EventDomainId(*b"MeshPartEventsV1");
     let peer = DeviceIdentity::generate();
     let author = Author::from_ed25519(local.public().ed25519_pub);
-    repo.initialize_receiving(author).unwrap();
+    repo.initialize_receiving(author, &account.public())
+        .unwrap();
     for n in 0..257 {
         repo.append(&event(&peer, n + 1, vec![], n, EventKind::Message))
             .unwrap();
@@ -1587,8 +1629,9 @@ fn runtime_metadata_receive_bootstrap_resumes_and_keeps_control_work_separate() 
         })
         .unwrap();
     drop(repo);
-    let repo = EventRepository::new(database.clone(), domain).unwrap();
-    repo.initialize_receiving(author).unwrap();
+    let repo = EventRepository::from_profile(profile.clone(), domain).unwrap();
+    repo.initialize_receiving(author, &account.public())
+        .unwrap();
     let (after, through) = repo.bootstrap_control_position().unwrap();
     assert_eq!(after, -1);
     assert!(through >= 257);
@@ -1608,8 +1651,9 @@ fn runtime_metadata_receive_bootstrap_resumes_and_keeps_control_work_separate() 
     let late = event(&peer, 259, vec![], 259, EventKind::Delete);
     repo.append(&late).unwrap();
     drop(repo);
-    let repo = EventRepository::new(database, domain).unwrap();
-    repo.initialize_receiving(author).unwrap();
+    let repo = EventRepository::from_profile(profile.clone(), domain).unwrap();
+    repo.initialize_receiving(author, &account.public())
+        .unwrap();
     assert_eq!(
         repo.bootstrap_control_position().unwrap(),
         (through, through)
@@ -1625,10 +1669,7 @@ fn runtime_metadata_receive_bootstrap_resumes_and_keeps_control_work_separate() 
 #[test]
 fn runtime_metadata_oversized_receive_cannot_starve_later_valid_event() {
     let dir = tempfile::tempdir().unwrap();
-    let database = database(&dir);
-    database.transaction(|c|{c.execute_batch("CREATE TABLE transcript_received_evidence(id BLOB PRIMARY KEY,conversation BLOB NOT NULL) WITHOUT ROWID;")?;Ok(())}).unwrap();
-    let repo = EventRepository::new(database, EventDomainId([9; 16])).unwrap();
-    let local = DeviceIdentity::generate();
+    let (_profile, repo, local, account) = receive_profile(&dir);
     let peer = DeviceIdentity::generate();
     let oversized = Event::new(
         &peer,
@@ -1651,8 +1692,11 @@ fn runtime_metadata_oversized_receive_cannot_starve_later_valid_event() {
     }
     let wide = event(&peer, 3, parents, 1027, EventKind::Message);
     repo.append(&wide).unwrap();
-    repo.initialize_receiving(Author::from_ed25519(local.public().ed25519_pub))
-        .unwrap();
+    repo.initialize_receiving(
+        Author::from_ed25519(local.public().ed25519_pub),
+        &account.public(),
+    )
+    .unwrap();
     assert_eq!(
         repo.pending_receive_ids(later.conversation_id, 3, 4096)
             .unwrap(),
@@ -1907,4 +1951,147 @@ fn indexed_custody_retry_cursor_wraps_once_without_reading_bodies() {
         vec![(first.lamport, first.id)],
         "a failed final custody attempt must not permanently starve retry"
     );
+}
+
+#[test]
+fn runtime_metadata_receive_account_migration_preserves_exact_evidence_and_warm_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let (profile, repository, local, account) = receive_profile(&dir);
+    let peer = DeviceIdentity::generate();
+    let author = Author::from_ed25519(local.public().ed25519_pub);
+    let message = event(&peer, 1, vec![], 1, EventKind::Message);
+    let control = event(&peer, 2, vec![], 2, EventKind::Delete);
+    repository.append(&message).unwrap();
+    repository.append(&control).unwrap();
+    profile
+        .database()
+        .transaction(|c| {
+            c.execute_batch(super::receiving::LEGACY_RECEIVE_SCHEMA)?;
+            c.execute(
+                "INSERT INTO participant_receive_scan VALUES(?1,?2,1,3,1,1,1)",
+                params![
+                    repository.domain.0.as_slice(),
+                    author.ed25519_pub().as_slice()
+                ],
+            )?;
+            c.execute(
+                "INSERT INTO participant_receive_pending VALUES(?1,?2,?3,1,0)",
+                params![
+                    repository.domain.0.as_slice(),
+                    message.id.as_bytes().as_slice(),
+                    message.conversation_id.as_bytes().as_slice()
+                ],
+            )?;
+            c.execute(
+                "INSERT INTO participant_control_processed VALUES(?1,?2)",
+                params![
+                    repository.domain.0.as_slice(),
+                    control.id.as_bytes().as_slice()
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    repository
+        .initialize_receiving(author, &account.public())
+        .unwrap();
+    assert_eq!(
+        repository
+            .pending_receive_ids(message.conversation_id, 1, 4096)
+            .unwrap(),
+        vec![message.id]
+    );
+    assert!(
+        repository
+            .pending_control_ids(control.conversation_id, 1, 4096)
+            .unwrap()
+            .is_empty()
+    );
+    let through = repository.bootstrap_control_position().unwrap().1;
+    repository.advance_control_bootstrap(through).unwrap();
+    drop(repository);
+    let repository =
+        EventRepository::from_profile(profile.clone(), EventDomainId(*b"MeshPartEventsV1"))
+            .unwrap();
+    // A warm constructor must not rediscover already scanned metadata, even if
+    // all INSERT attempts would have been harmless duplicates.
+    profile.database().transaction(|c| { c.execute_batch("CREATE TEMP TRIGGER no_warm_receive_scan BEFORE INSERT ON participant_receive_pending BEGIN SELECT RAISE(ABORT,'warm metadata replay'); END;")?;Ok(()) }).unwrap();
+    repository
+        .initialize_receiving(author, &account.public())
+        .unwrap();
+    assert_eq!(
+        repository.bootstrap_control_position().unwrap(),
+        (through, through)
+    );
+    assert_eq!(
+        repository
+            .pending_receive_ids(message.conversation_id, 1, 4096)
+            .unwrap(),
+        vec![message.id]
+    );
+    assert_eq!(repository.body_read_counts(), (0, 0));
+}
+
+#[test]
+fn runtime_metadata_receive_control_bootstrap_qualifies_account_before_page() {
+    use crate::storage::profile::participant::{finish_adoption, prepare_adoption};
+    let dir = tempfile::tempdir().unwrap();
+    let (profile, repository, local, account) = receive_profile(&dir);
+    let peer = DeviceIdentity::generate();
+    let author = Author::from_ed25519(local.public().ed25519_pub);
+    for sequence in 1..=129 {
+        repository
+            .append(&event(&peer, sequence, vec![], sequence, EventKind::React))
+            .unwrap();
+    }
+    repository
+        .initialize_receiving(author, &account.public())
+        .unwrap();
+    let original_position = repository.bootstrap_control_position().unwrap();
+    assert_eq!(
+        repository
+            .bootstrap_control_headers(original_position.0, original_position.1)
+            .unwrap()
+            .len(),
+        128
+    );
+    let next = crate::identity::account::Account::generate().public();
+    prepare_adoption(profile.database(), &account.public(), &next).unwrap();
+    finish_adoption(profile.database(), &next).unwrap();
+    let next_control = event(&peer, 130, vec![], 130, EventKind::Delete);
+    repository.append(&next_control).unwrap();
+    let current = EventRepository::from_profile(profile.clone(), repository.domain).unwrap();
+    current.initialize_receiving(author, &next).unwrap();
+    let (after, through) = current.bootstrap_control_position().unwrap();
+    let page = current.bootstrap_control_headers(after, through).unwrap();
+    assert_eq!(
+        page.len(),
+        1,
+        "other accounts' controls must not occupy the bounded bootstrap page"
+    );
+    assert_eq!(page[0].header.id, next_control.id);
+    assert!(matches!(
+        repository.bootstrap_control_position(),
+        Err(LogError::StaleCursor)
+    ));
+    prepare_adoption(profile.database(), &next, &account.public()).unwrap();
+    finish_adoption(profile.database(), &account.public()).unwrap();
+    let returned = EventRepository::from_profile(profile.clone(), repository.domain).unwrap();
+    returned
+        .initialize_receiving(author, &account.public())
+        .unwrap();
+    assert_eq!(
+        returned.bootstrap_control_position().unwrap(),
+        original_position
+    );
+    let first = returned
+        .bootstrap_control_headers(original_position.0, original_position.1)
+        .unwrap();
+    let last = returned
+        .bootstrap_control_headers(first.last().unwrap().ordinal, original_position.1)
+        .unwrap();
+    assert_eq!(first.len(), 128);
+    assert_eq!(last.len(), 1);
+    assert_ne!(last[0].header.id, next_control.id);
+    assert_eq!(returned.body_read_counts(), (0, 0));
 }

@@ -1582,6 +1582,14 @@ index the account before selecting a bounded attempt page, retaining earlier
 accounts' undiscovered and pending work. Event deletion does not erase these
 ownership boundaries.
 
+DM discovery captures that generation after adoption completes. Its pending index
+qualifies the original account namespace and authoritative ordinal range before
+applying row limits, preserving inactive accounts' work without making processing
+claims. Private-control migration has a separate cursor per account and selects
+only that account's control headers before body admission. Upgrading the older
+unscoped derived queue rebuilds metadata in bounded pages and preserves exact
+completed-control evidence; warm reopen keeps the existing discovery position.
+
 An authenticated legacy adoption preserves the previous owner's imported prefix;
 the event-source publication transaction fixes its end before new-account event
 appends. A compatible older indexed profile with one authenticated namespace can

@@ -1432,3 +1432,99 @@ fn participant_event_ranges_upgrade_only_unambiguous_existing_namespace() {
         }
     }
 }
+
+#[test]
+fn participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work() {
+    use crate::{
+        eventlog::{
+            Author,
+            repository::{EventDomainId, EventRepository},
+        },
+        storage::profile::participant::{finish_adoption, prepare_adoption},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let node = open_profile(dir.path(), DeviceIdentity::generate(), Account::generate()).unwrap();
+    let first = node.account.public();
+    let next = Account::generate().public();
+    let author = Author::from_ed25519(node.identity.public().ed25519_pub);
+    let peer = DeviceIdentity::generate();
+    let conversation = ConversationId::new([237; 32]);
+    let domain = EventDomainId(*b"MeshPartEventsV1");
+    let old = EventRepository::from_profile(node.storage.clone(), domain).unwrap();
+    old.initialize_receiving(author, &first).unwrap();
+    let append = |sequence, kind| {
+        let event = Event::new(
+            &peer,
+            conversation,
+            sequence,
+            vec![],
+            sequence,
+            sequence,
+            kind,
+            vec![9; 64],
+        );
+        node.log
+            .lock()
+            .unwrap()
+            .append_durable(event.clone())
+            .unwrap();
+        event.id
+    };
+    let pending_first = append(1, EventKind::Message);
+    assert_eq!(
+        old.pending_receive_ids(conversation, 1, 4096).unwrap(),
+        vec![pending_first]
+    );
+    let undiscovered_first = append(2, EventKind::Message);
+    prepare_adoption(node.storage.database(), &first, &next).unwrap();
+    finish_adoption(node.storage.database(), &next).unwrap();
+    let next_message = append(3, EventKind::Message);
+    let next_control = append(4, EventKind::Delete);
+    let current = EventRepository::from_profile(node.storage.clone(), domain).unwrap();
+    current.initialize_receiving(author, &next).unwrap();
+    assert_eq!(
+        current.pending_receive_ids(conversation, 1, 4096).unwrap(),
+        vec![next_message],
+        "earlier pending A rows must not consume B's one-row work budget"
+    );
+    assert_eq!(
+        current.pending_control_ids(conversation, 1, 4096).unwrap(),
+        vec![next_control]
+    );
+    assert!(matches!(
+        old.pending_receive_ids(conversation, 1, 4096),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        old.complete_control(next_control),
+        Err(LogError::StaleCursor)
+    ));
+    prepare_adoption(node.storage.database(), &next, &first).unwrap();
+    finish_adoption(node.storage.database(), &first).unwrap();
+    let returned = EventRepository::from_profile(node.storage.clone(), domain).unwrap();
+    returned.initialize_receiving(author, &first).unwrap();
+    let selected = returned
+        .pending_receive_ids(conversation, 128, 8 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(selected.len(), 2);
+    assert!(selected.contains(&pending_first));
+    assert!(selected.contains(&undiscovered_first));
+    assert!(!selected.contains(&next_message));
+    assert!(
+        returned
+            .pending_control_ids(conversation, 128, 8 * 1024 * 1024)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        matches!(old.discover_receives(), Err(LogError::StaleCursor)),
+        "an old A handle must remain fenced when A becomes current again"
+    );
+    assert!(matches!(
+        current.discover_receives(),
+        Err(LogError::StaleCursor)
+    ));
+    assert_eq!(old.body_read_counts(), (0, 0));
+    assert_eq!(current.body_read_counts(), (0, 0));
+    assert_eq!(returned.body_read_counts(), (0, 0));
+}
