@@ -1,0 +1,68 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M65QBW9HG23VNYWCR273STGD",
+  "strategy": "manual-commit",
+  "branch": "fix/deadlocks-ui-responsiveness",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "docs/ai-coding-reliability.md",
+    "docs/help/topics/channels.md",
+    "docs/module-boundaries.md",
+    "frontend/DESIGN.md",
+    "frontend/e2e/image-receiving.spec.ts",
+    "frontend/e2e/media-recovery.spec.ts",
+    "frontend/src/features/chat/MediaPreview.test.ts",
+    "frontend/src/features/chat/MediaPreview.tsx",
+    "frontend/src/features/chat/MediaSticker.test.ts",
+    "frontend/src/features/chat/ReceiveProgress.test.ts",
+    "frontend/src/features/chat/ReceiveProgress.tsx",
+    "frontend/src/features/chat/mediaFileRead.test.ts",
+    "frontend/src/locales/en.json",
+    "frontend/src/locales/es.json",
+    "frontend/src/locales/ja.json",
+    "frontend/src/locales/ko.json",
+    "frontend/src/locales/pt-BR.json",
+    "frontend/src/locales/yue.json",
+    "frontend/src/locales/zh-Hans.json",
+    "frontend/src/locales/zh-Hant.json",
+    "frontend/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 239916,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 13159040,
+    "output_tokens": 51015,
+    "api_call_count": 88,
+    "subagent_tokens": {
+      "input_tokens": 219729,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 2480512,
+      "output_tokens": 17337,
+      "api_call_count": 46
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 46291,
+    "layers": {
+      "betterleaks": 4,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 46289,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}

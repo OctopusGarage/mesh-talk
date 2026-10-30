@@ -1,0 +1,18 @@
+{
+  "tool_use_id": "01a18b52-5c2e-7f12-89e5-a105511a421f",
+  "agent_id": "01a18b52-5c2e-7f12-89e5-a105511a421f",
+  "subagent_type": "default",
+  "files": [
+    "frontend/src/features/chat/ReceiveProgress.test.ts",
+    "frontend/src/features/chat/ReceiveProgress.tsx"
+  ],
+  "token_usage": {
+    "input_tokens": 68519,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 892544,
+    "output_tokens": 7510,
+    "api_call_count": 16
+  },
+  "started_at": "2026-10-30T14:39:56.731608+09:00",
+  "completed_at": "2026-10-30T15:07:33.814148+09:00"
+}
