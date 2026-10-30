@@ -1455,8 +1455,8 @@ charges before loading bytes. Account adoption fences old handles and never
 imports the former account into the new namespace. This leaf does not by itself
 replace legacy FileBook retention or media startup work. Delivery-journal file
 projections now install FILES, validated eligibility and incoming reception facts
-in one transaction before retiring the intent. Incoming channel files use the
-same installer inside the receiver checkpoint transaction. Outgoing manifest
+in one transaction before retiring the intent. The same installer accepts the
+incoming channel owner's receiver checkpoint transaction. Outgoing manifest
 projections create no incoming effect. Signed same-account certification retains
 own-device attribution across recovery; retry preserves the first durable effect.
 
@@ -1469,7 +1469,8 @@ channel checkpoint. A separate terminal batch fact survives deletion of its
 former content template. Legacy historical-source migration creates no effects.
 Each receipt stream, exact installation identity, and fixed consumer cursor is
 scoped to the authenticated `participant_profile.account` key. Producers derive
-that key within their existing SQL transaction. Open readers capture the key and
+that key within their existing SQL transaction and verify the producer's captured
+participant account there before installing effects. Open readers capture the key and
 reject pages, ACKs, and retirement after account adoption; retained accounts keep
 their own pending work and epochs. Runtime/session authority additionally fences
 individual host installations.

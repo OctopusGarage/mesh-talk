@@ -924,4 +924,53 @@ mod tests {
             Some(AnyManifest::V1(renamed))
         );
     }
+
+    #[test]
+    fn retired_account_producers_cannot_install_effects_in_the_adopted_namespace() {
+        let mut f = Fixture::new();
+        let (entry, original, _) = f.fixture(10);
+        let effects =
+            crate::node::reception_effects::ReceptionEffects::open(f.book.profile.clone()).unwrap();
+        let mut messages = ReceivedStore::from_profile(
+            f.book.profile.clone(),
+            &f.root.path().join("received.log"),
+            "pw",
+        )
+        .unwrap();
+        let metadata = crate::node::reception_effects::ReceptionMetadata::for_incoming(
+            &original,
+            &entry,
+            &f.device.public(),
+            &f.account.account_id(),
+            1234,
+        );
+        let adopted = Account::generate();
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute(
+                    "UPDATE participant_profile SET account=?1 WHERE singleton=1",
+                    [adopted.public().ed25519_pub.as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let next =
+            crate::node::reception_effects::ReceptionEffects::open(f.book.profile.clone()).unwrap();
+        let next_head = next.head().unwrap();
+        assert!(matches!(
+            f.records
+                .record_file_with_reception(&entry, Some(&original), Some(&metadata)),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(
+            messages.record_durable_with_reception(&entry, &metadata),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(matches!(effects.head(), Err(LogError::StaleCursor)));
+        assert_eq!(next.head().unwrap(), next_head);
+        assert!(f.records.entry(entry.event_id).unwrap().is_none());
+        assert!(messages.entry(entry.event_id).unwrap().is_none());
+    }
 }
