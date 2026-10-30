@@ -19,6 +19,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+pub(in crate::node) type AccountChannelMaintenanceTestHook = dyn Fn(ConversationId) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + Sync;
+
 const MAX_MIGRATIONS: usize = 4096;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct MigrationAuthorization {
@@ -422,6 +427,17 @@ impl Node {
         channel: ConversationId,
         work: &mut ChannelAccountMaintenance,
     ) {
+        #[cfg(test)]
+        {
+            let hook = self
+                .account_channel_maintenance_test_hook
+                .lock()
+                .unwrap()
+                .clone();
+            if let Some(hook) = hook {
+                hook(channel).await;
+            }
+        }
         let policy = self.privacy.gate.read().await;
         let result = {
             let _membership = self

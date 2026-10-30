@@ -158,14 +158,14 @@ impl CriticalControlTrace {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ControlTestPage {
+pub(in crate::node) struct ControlTestPage {
     pub task: tokio::task::Id,
     pub dispatched_at: std::time::Instant,
     pub origin: String,
     pub request: crate::node::account_documents::wire::DocumentRequest,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct ControlTestDispatch {
+pub(in crate::node) struct ControlTestDispatch {
     pub paired: bool,
     pub protected: bool,
     pub resumed: bool,
@@ -304,12 +304,20 @@ struct ControlTestOrigin {
     lifetime: Option<std::sync::Weak<()>>,
 }
 #[derive(Default, Debug)]
-pub(super) struct ControlTestPages {
+pub(in crate::node) struct ControlTestPages {
     origins: std::collections::VecDeque<ControlTestOrigin>,
     pages: std::collections::VecDeque<ControlTestPage>,
     active: std::collections::HashSet<tokio::task::Id>,
 }
 impl ControlTestPages {
+    pub(in crate::node) fn lifetime(&self, task: tokio::task::Id) -> Option<std::sync::Weak<()>> {
+        self.origins
+            .iter()
+            .rev()
+            .find(|origin| origin.task == task)
+            .and_then(|origin| origin.lifetime.clone())
+    }
+
     pub fn observe(&mut self, event: &str) {
         if event.starts_with("control_task ") {
             if self.origins.len() == 64

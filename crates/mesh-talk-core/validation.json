@@ -26,6 +26,7 @@
         "crates/mesh-talk-core/src/node/channels/account_invitation.rs",
         "crates/mesh-talk-core/src/node/delivery_store/group_invitation.rs",
         "crates/mesh-talk-core/src/node/channel_account_controls.rs",
+        "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
         "crates/mesh-talk-core/src/node/outgoing_message.rs",
         "crates/mesh-talk-core/src/node/message_actions.rs",
         "crates/mesh-talk-core/src/node/reaction_store.rs",
@@ -158,6 +159,10 @@
           {
             "name": "Modern self controls bind the original account intent to its exact grant incarnation and saved causal view; valid departure retains only the original source retry route and projects Left over stale sibling membership observations.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Reference self-control evidence asserts the actual admitted remote executor while holding requester-side public membership recovery; real private readiness, original action deadlines and recovery cleanup remain required.",
+            "reference": "docs/testing-feedback-loop.md#maintaining-standards-across-requirements"
           },
           {
             "name": "Group access and source observations capture privacy and identity state before the event-log mutex; log-held projection never reacquires privacy, roster or host-session locks.",

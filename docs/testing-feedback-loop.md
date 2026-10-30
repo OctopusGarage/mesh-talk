@@ -223,6 +223,14 @@ admitted-action deadline at eight seconds. The archive-marker setup and dedicate
 held-traffic latency assertions also retain their existing eight-second bounds.
 Cold authentication and control exchanges keep their production network limits.
 
+Reference self-control fixtures hold requester-side public membership recovery
+for the selected group through the remote action proof. Disabling account History
+does not disable that recovery owner; it can otherwise create a ready local
+executor during setup. Use an instance-scoped test gate before privacy and
+membership locks, retain real private role/capability exchanges and release the
+gate on every exit. Assert the admitted executor's full identity and derive its
+diagnostic label from admission, rather than assuming the setup peer was chosen.
+
 Role-bootstrap helpers bind readiness to the requested group, the exact full source identity and a signed head floor captured when invoked. If none exists yet, pin the first non-tombstone source head observed within the same setup deadline. Accept that exact metadata or a strictly newer signed revision for the same key and full source; reject older, tombstoned or same-revision conflicting records. A later concurrent publication must not move an already satisfied snapshot barrier. Helpers may observe that durable role through the existing local document watch while an unrelated page tail remains in flight. A prior completed capability response for the exact full source identity is required before cancelling that redundant read. Preserve the setup deadline, current-binding validation and completed protocol-error checks; an incomplete first capability page cannot establish readiness.
 
 Pagination fixtures distinguish a completed comparison sweep from a settled full

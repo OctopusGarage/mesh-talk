@@ -19,6 +19,8 @@ mod message_actions;
 #[path = "tests/message_action_reference.rs"]
 mod message_action_reference;
 
+pub(in crate::node) use selected_same_source_control_latency::ControlTestPages;
+
 // Cold authenticated fixture arrival is established before operation admission.
 // Keep its existing 30-second owner budget separate from the held 8-second
 // operation/progress assertions; this helper does not drive additional traffic.
