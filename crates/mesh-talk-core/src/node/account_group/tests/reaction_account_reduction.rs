@@ -101,6 +101,45 @@ fn assert_originals(f: &Fixture, originals: &[(EventId, &DeviceIdentity)]) {
         assert_eq!(event.author.ed25519_pub(), &identity.public().ed25519_pub);
         assert!(event.verify_integrity() && event.verify_signature());
     }
+    drop(log);
+    assert_selected_summary(f);
+}
+
+fn assert_selected_summary(f: &Fixture) {
+    let expected = f
+        .observer
+        .reactions(f.group)
+        .unwrap()
+        .into_iter()
+        .map(|view| crate::node::ReactionSummary {
+            target: view.target,
+            emoji: view.emoji,
+            count: view.who.len() as u64,
+            from_me: view
+                .who
+                .iter()
+                .any(|id| id == &f.observer.account_id() || id == &f.observer.user_id()),
+        })
+        .collect::<Vec<_>>();
+    let mut cursor = None;
+    for _ in 0..512 {
+        let page = f
+            .observer
+            .reaction_summaries(f.group, &[f.target], cursor.as_deref())
+            .unwrap();
+        if !page.pending {
+            assert_eq!(
+                page.items, expected,
+                "selected summaries preserve the existing authenticated account reduction"
+            );
+            assert!(page.next.is_none());
+            return;
+        }
+        assert!(page.items.is_empty());
+        cursor = page.next;
+        assert!(cursor.is_some());
+    }
+    panic!("selected channel reaction projection did not settle");
 }
 
 #[test]

@@ -6,6 +6,10 @@ use crate::eventlog::event::{ConversationId, Event, EventId, EventKind};
 use crate::identity::device::PublicIdentity;
 use crate::node::conversation::{account_conversation_id, dm_conversation_id};
 
+mod selected;
+pub(in crate::node) use selected::ReactionQueryWork;
+pub use selected::{ReactionSummary, ReactionSummaryPage};
+
 #[cfg(test)]
 thread_local! {
     static REACTION_PROJECTION_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };

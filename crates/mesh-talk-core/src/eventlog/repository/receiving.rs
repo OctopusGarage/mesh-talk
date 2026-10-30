@@ -21,6 +21,9 @@ CREATE TABLE participant_receive_bootstrap(domain BLOB NOT NULL CHECK(length(dom
 ";
 const PROCESSED_SCHEMA: &str = "CREATE TABLE participant_control_processed(domain BLOB NOT NULL CHECK(length(domain)=16),id BLOB NOT NULL CHECK(length(id)=32),PRIMARY KEY(domain,id),FOREIGN KEY(domain,id) REFERENCES retained_events(domain,id) ON DELETE CASCADE) WITHOUT ROWID;";
 impl EventRepository {
+    pub(crate) fn receiving_owner(&self) -> Result<ParticipantEventOwner, LogError> {
+        self.database.read(|c| self.receive_owner_on(c).cloned())
+    }
     fn receive_owner_on(&self, c: &Connection) -> Result<&ParticipantEventOwner, LogError> {
         let owner = self.receive_owner.get().ok_or(LogError::StaleCursor)?;
         check_event_owner_on(c, owner)?;

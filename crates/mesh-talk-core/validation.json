@@ -2538,6 +2538,41 @@
         "Leaf repository tests do not certify participant runtime integration, native publication behavior or production-KDF startup budgets. Node integration must retain validate_participant_request before constructors and the existing delivery journal, use pure removal predicates under the SQL lock, and continue deadline pagination until an empty page rather than a short page.",
         "Actual consumer cutover requires affected history/search, delivery recovery, exact local deletion, snapshot export/restore and loopback/restart evidence; bounded repository APIs alone do not establish bounded startup memory."
       ]
+    },
+    {
+      "id": "core-selected-reaction-summaries",
+      "paths": [
+        "crates/mesh-talk-core/src/node/reactions/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::reactions::selected::tests::",
+            "reaction_account_reduction::"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node"
+      ],
+      "capability": {
+        "summary": "Project selected reaction targets into exact SQL counts and page summaries without author-list materialization.",
+        "guide": "docs/module-boundaries.md",
+        "invariants": [
+          {
+            "name": "Selected requests bind account generation, targets and authenticated source revisions; pending responses contain no partial rows and always carry a continuation.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Retained bodies and summary strings are selected by key and byte budgets before allocation; latest action is reduced per principal with unsigned clocks and remove-wins ties.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Modern-channel causal preparation still requires the shared resumable checkpoint boundary; native/frontend adoption and removal of legacy collecting views require their own consumer checks before an end-to-end bounded-reaction claim."
+      ]
     }
   ]
 }

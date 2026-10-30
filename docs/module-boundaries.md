@@ -248,6 +248,19 @@ transactions and evaluates external predicates outside the SQL mutex. Incoming
 reaction aggregation and the account-document startup owner retain separate
 consumer work; this source cut does not establish bounded reaction-view queries.
 
+`core/node/reactions/selected.rs` owns selected-target reaction preparation and
+summary pages. Its SQL projection reduces the latest authenticated action per
+principal into counts and a local-author flag; it does not materialize author
+lists. Requests bind the account generation, selected targets, proofs, channel
+control generation, deletion visibility and relevant source revisions. A pending
+response is empty and includes its continuation. Key/byte admission precedes
+retained-body reads and summary-string allocation; unchanged completed queries
+reuse the persisted result, and ordinary message tails preserve the reaction
+source token. Modern-channel causal preparation still depends on the shared
+checkpoint's resumable query integration. Legacy collecting view APIs remain for
+the pending native/frontend cutover, so this query prefix alone does not establish
+an end-to-end bounded reaction UI or change the account-document startup owner.
+
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary
 projections omit the content. The explicit exact-message content lookup is for

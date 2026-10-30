@@ -107,6 +107,73 @@ pub(super) fn valid_payload(meta: &AccountDocumentMeta, payload: &[u8]) -> bool 
     }
 }
 impl Node {
+    pub(in crate::node) fn selected_reaction_documents_revision(&self) -> [u8; 32] {
+        self.account_documents
+            .lock()
+            .expect("documents mutex")
+            .digest(AccountDocumentDomain::DmReaction)
+    }
+    pub(in crate::node) fn selected_reaction_documents(
+        &self,
+        peer: &str,
+        target: EventId,
+        after: Option<&AccountDocumentKey>,
+    ) -> Result<
+        (
+            Vec<(String, u64, ReactionPayload)>,
+            Option<AccountDocumentKey>,
+        ),
+        crate::eventlog::LogError,
+    > {
+        let conversation = account_conversation_id(&self.account_id(), peer);
+        if self
+            .account_suppression
+            .lock()
+            .expect("suppression mutex")
+            .contains(conversation, target)?
+        {
+            return Ok((Vec::new(), None));
+        }
+        let store = self.account_documents.lock().expect("documents mutex");
+        let page = store.reaction_metadata_page(peer, &target.to_hex(), after)?;
+        let next = page.last().map(|m| m.key.clone());
+        let mut out = Vec::new();
+        for meta in page {
+            if meta.tombstone {
+                continue;
+            }
+            let doc = store.get(&meta.key)?.ok_or_else(|| {
+                crate::eventlog::LogError::CorruptFile(
+                    "selected reaction document disappeared".into(),
+                )
+            })?;
+            if !valid_payload(&meta, doc.payload()) {
+                return Err(crate::eventlog::LogError::CorruptFile(
+                    "invalid selected reaction witness".into(),
+                ));
+            }
+            let value: Control = serde_json::from_slice(doc.payload()).map_err(|_| {
+                crate::eventlog::LogError::CorruptFile("invalid selected reaction document".into())
+            })?;
+            if let AccountDocumentKey::DmReaction {
+                actor_account,
+                emoji,
+                ..
+            } = meta.key
+            {
+                out.push((
+                    actor_account,
+                    value.wall,
+                    ReactionPayload {
+                        target,
+                        emoji,
+                        remove: value.remove,
+                    },
+                ));
+            }
+        }
+        Ok((out, next))
+    }
     fn install_private_control(
         &self,
         key: AccountDocumentKey,
