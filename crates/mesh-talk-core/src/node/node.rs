@@ -393,7 +393,8 @@ pub struct Node {
     pub(in crate::node) ui_changes: tokio::sync::watch::Sender<u64>,
     pub(in crate::node) file_changes: tokio::sync::watch::Sender<u64>,
     /// Encrypted, account-local attachment receive preferences and exact offer decisions.
-    pub(in crate::node) attachment_consent: Mutex<super::attachment_consent::AttachmentConsent>,
+    pub(in crate::node) attachment_consent:
+        Mutex<super::attachment_consent::IndexedAttachmentConsent>,
     /// Durable pairwise file-consent controls, separate from local receive policy.
     pub(in crate::node) file_consent: Mutex<super::file_consent_store::FileConsentStore>,
     /// Durable chat-media store under `<account_dir>/media`: the plaintext bytes of
@@ -756,7 +757,8 @@ impl Node {
             let h_recalls = s
                 .spawn(|| super::transcript_repository::publication::PublishedHistorySource::authenticate_legacy::<super::recall::RecallMark>(&storage,&dir.join("recalls.log"),password,super::transcript_repository::RECALL_MARKS,b"MTRECL"));
             let h_consent = s.spawn(|| {
-                super::attachment_consent::AttachmentConsent::open(
+                super::attachment_consent::IndexedAttachmentConsent::authenticate_legacy(
+                    &storage,
                     &dir.join("attachment-consent.log"),
                     password,
                 )
@@ -818,7 +820,7 @@ impl Node {
             password,
         )?;
         recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recovery_origins = origin_res
             .unwrap_or_else(|e| std::panic::resume_unwind(e))?
@@ -1030,6 +1032,11 @@ impl Node {
         // Derived file eligibility must exist before a manifest WAL intent can
         // install its body, exact evidence and reception effect atomically.
         let files = IndexedFileBook::open(storage.clone())?;
+        let attachment_consent = super::attachment_consent::IndexedAttachmentConsent::from_profile(
+            storage.clone(),
+            &dir.join("attachment-consent.log"),
+            password,
+        )?;
         log.repository()?
             .initialize_receiving(crate::eventlog::Author::from_ed25519(
                 identity.public().ed25519_pub,
@@ -1357,6 +1364,10 @@ impl Node {
             super::profile_receive_work::ProfileReceiveWork::open(node.storage.clone())?,
         );
         node.files = Mutex::new(IndexedFileBook::open(node.storage.clone())?);
+        node.attachment_consent
+            .lock()
+            .expect("consent lock")
+            .recapture()?;
         node.manifest_scopes.recapture()?;
         node.queue_approved_incomplete_files();
         // Receiver progress and plaintext projection share one SQL commit.

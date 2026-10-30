@@ -54,7 +54,7 @@ impl IndexedFileBook {
         })
     }
     pub(crate) fn download_work_pending(&self) -> Result<bool, LogError> {
-        self.profile.database().read(|c| {self.check(c)?;Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_download_pending WHERE account=?1) OR EXISTS(SELECT 1 FROM file_download_scan WHERE account=?1 AND done=0) OR EXISTS(SELECT 1 FROM file_receive_pending WHERE account=?1)",[self.account.as_slice()],|r|r.get(0))?)})
+        self.profile.database().read(|c| {self.check(c)?;Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_download_pending WHERE account=?1) OR EXISTS(SELECT 1 FROM file_download_scan WHERE account=?1 AND done=0) OR EXISTS(SELECT 1 FROM file_receive_pending WHERE account=?1) OR EXISTS(SELECT 1 FROM retained_events WHERE domain=?2 AND commit_ordinal>COALESCE((SELECT after_commit FROM file_receive_scan WHERE account=?1),-1))",params![self.account.as_slice(),b"MeshPartEventsV1".as_slice()],|r|r.get(0))?)})
     }
     pub(crate) fn claim_downloads(&self) -> Result<Vec<FileDownload>, LogError> {
         self.profile.database().transaction(|c| {

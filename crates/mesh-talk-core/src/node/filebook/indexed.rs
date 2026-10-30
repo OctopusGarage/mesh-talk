@@ -627,6 +627,10 @@ mod tests {
             )
             .unwrap();
             profile.complete_participant("pw", None).unwrap();
+            drop(
+                crate::eventlog::persist::PersistentEventLog::open_profile(profile.clone(), "pw")
+                    .unwrap(),
+            );
             let records = ReceivedStore::file_cards_from_profile(
                 profile.clone(),
                 &path.join("files.log"),
@@ -1367,6 +1371,54 @@ mod tests {
         assert_eq!(seen.len(), 40 - first.len());
         assert!(first.iter().all(|id| !seen.contains(id)));
         assert_eq!(f.records.body_reads(), 0);
+    }
+
+    #[test]
+    fn file_receive_undiscovered_headers_keep_bounded_worker_scheduled() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        f.book.discover_downloads(0).unwrap();
+        assert!(!f.book.download_work_pending().unwrap());
+        let sender = DeviceIdentity::generate();
+        let conversation = ConversationId::new([23; 32]);
+        for sequence in 1..=129 {
+            log.append_durable(Event::new(
+                &sender,
+                conversation,
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::Message,
+                vec![1],
+            ))
+            .unwrap();
+        }
+        assert!(
+            f.book.download_work_pending().unwrap(),
+            "an undiscovered header prefix must keep the worker at its work cadence"
+        );
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let first = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.discover_receives(None, &first, own).unwrap();
+        assert!(f.book.download_work_pending().unwrap());
+        let after = f.book.receive_after().unwrap();
+        let last = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(after, 128)
+            .unwrap();
+        f.book.discover_receives(after, &last, own).unwrap();
+        assert!(
+            !f.book.download_work_pending().unwrap(),
+            "a caught-up empty scheduler must return to the idle backoff"
+        );
+        assert_eq!(log.repository().unwrap().body_read_counts(), (0, 0));
     }
 
     #[test]

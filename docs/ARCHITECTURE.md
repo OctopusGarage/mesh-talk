@@ -1535,6 +1535,19 @@ incoming channel owner's receiver checkpoint transaction. Outgoing manifest
 projections create no incoming effect. Signed same-account certification retains
 own-device attribution across recovery; retry preserves the first durable effect.
 
+The attachment receive-policy owner uses source 17 of the shared publisher and
+account-qualified SQL facts. Global automatic receive defaults to false; exact
+latest decisions across validated aliases override contact/global preferences.
+The sequence and policy generation commit with each decision, so failed writes
+cannot advance scheduling or supersede a durable decline. Warm open reads no
+historical decision frames or maps. Adoption starts a fresh policy namespace and
+preserves the prior account for a later return; generation fences reject old
+handles even after that return. Initial legacy records belong to the authenticated
+original or bootstrap-previous account. An unpublished experimental legacy source
+with multiple account namespaces and no authoritative attribution fails explicitly
+and preserves its bytes. Existing signed remote file-consent revisions keep their
+independent ordering and admission contract.
+
 `node/reception_effects/` provides the derived reception-work owner for bounded
 host integration. An effect references its existing transcript row and stores
 first-installation provenance, own-device and batch metadata without copying its

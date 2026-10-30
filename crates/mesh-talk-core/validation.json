@@ -2469,7 +2469,9 @@
         "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
         "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
         "crates/mesh-talk-core/src/node/filebook/",
-        "crates/mesh-talk-core/src/node/account_suppression.rs"
+        "crates/mesh-talk-core/src/node/account_suppression.rs",
+        "crates/mesh-talk-core/src/node/attachment_consent.rs",
+        "crates/mesh-talk-core/src/node/attachment_consent/"
       ],
       "rust": [
         {
@@ -2485,7 +2487,10 @@
             "incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_and_delivers_ack",
             "sent_scope_repair_failure_installs_no_permission_and_retry_recovers",
             "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
-            "failed_media_"
+            "failed_media_",
+            "node::attachment_consent::",
+            "direct_file_approval_shares_signed_revision_with_relay_delivery",
+            "deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_last_key"
           ]
         }
       ],
@@ -2511,6 +2516,10 @@
           },
           {
             "name": "Manifest receive discovery qualifies account commit intervals before pending insertion; account-indexed bounded retries preserve oversized legal rows and returning-account work, while adoption generations reject stale reads and acknowledgements.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
