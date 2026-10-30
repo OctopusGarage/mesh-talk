@@ -1542,6 +1542,24 @@ reject pages, ACKs, and retirement after account adoption; retained accounts kee
 their own pending work and epochs. Runtime/session authority additionally fences
 individual host installations.
 
+Participant adoption also owns event commit intervals in the same encrypted
+database. Half-open ordinal ranges reference retained account namespaces; the
+full authenticated account key resolves that reference. Promotion commits the
+range boundary, account namespace and monotonic owner generation together. A
+generation fences a captured owner even after switching from A to B and back to
+A without appending an event. Exact ordinal lookups let derived receive queues
+index the account before selecting a bounded attempt page, retaining earlier
+accounts' undiscovered and pending work. Event deletion does not erase these
+ownership boundaries.
+
+An authenticated legacy adoption preserves the previous owner's imported prefix;
+the event-source publication transaction fixes its end before new-account event
+appends. A compatible older indexed profile with one authenticated namespace can
+initialize one range. Experimental indexed profiles with several historical
+namespaces and no authoritative commit cut are unsupported: open returns an
+explicit ownership-boundary error and preserves the data. Namespace membership
+alone cannot reconstruct those lost boundaries. Relay-role storage is separate.
+
 Receipt cursors bind a persisted random epoch and local installation sequence;
 sender timestamps never order host work. A finite through-cursor prevents
 continuous intake from extending one drain indefinitely. Each demand page scans

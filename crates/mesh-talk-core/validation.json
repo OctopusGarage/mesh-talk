@@ -322,6 +322,7 @@
         "crates/mesh-talk-core/src/storage/profile.rs",
         "crates/mesh-talk-core/src/storage/profile/context.rs",
         "crates/mesh-talk-core/src/storage/profile/participant.rs",
+        "crates/mesh-talk-core/src/storage/profile/participant/**",
         "crates/mesh-talk-core/src/storage/profile/participant_events.rs"
       ],
       "rust": [

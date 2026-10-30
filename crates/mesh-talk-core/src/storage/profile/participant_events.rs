@@ -274,6 +274,7 @@ pub(super) fn open(
         profile.database().transaction(|tx| {
             let unique=tx.query_row("SELECT unique_records FROM participant_event_publication WHERE singleton=1 AND phase=3",[],|r|r.get(0))?;
             import::publish_count(&repository,tx,unique)?;
+            super::participant::event_ownership::finish_import_on(tx)?;
             tx.execute("UPDATE participant_event_publication SET phase=4,cleanup_pending=CASE WHEN archive IS NULL THEN 0 ELSE 1 END WHERE singleton=1",[])?;
             publication::cut("participant-events-publication-transaction")?; Ok(())
         })?;

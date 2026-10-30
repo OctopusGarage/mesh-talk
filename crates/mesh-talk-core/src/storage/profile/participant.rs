@@ -11,6 +11,8 @@ use crate::{
     storage::database::EncryptedDatabase,
 };
 use rusqlite::params;
+
+pub(crate) mod event_ownership;
 use std::path::{Path, PathBuf};
 
 const SCHEMA: &str = "
@@ -317,6 +319,7 @@ pub(crate) fn open_existing(
         &locators(lease.canonical_root(), &owner.paths),
         &owner.account,
     )?;
+    database.transaction(|tx| event_ownership::initialize_existing_on(tx))?;
     Ok(Some(database))
 }
 
@@ -376,6 +379,10 @@ pub(crate) fn bootstrap(
                 [previous],
             )?;
         }
+        event_ownership::initialize_fresh_on(
+            tx,
+            legacy_previous.unwrap_or(&owner.account.account_id()),
+        )?;
         for (domain, locator) in locators.iter().enumerate() {
             tx.execute(
                 "INSERT INTO participant_sources VALUES(?1,?2)",
@@ -407,30 +414,68 @@ struct ParticipantControlRow {
 fn state(
     database: &EncryptedDatabase,
 ) -> Result<(AccountPublic, Option<AccountPublic>, Option<String>), LogError> {
-    database.read(|connection| {
-        manifest::validate_ddl(connection, SCHEMA)?;
-        let row = connection.query_row(
-            "SELECT version,role,account,next_account,phase,bootstrap_previous FROM participant_profile WHERE singleton=1", [],
-            |row| Ok(ParticipantControlRow {
-                version: row.get(0)?, role: row.get(1)?, active_key: row.get(2)?, next_key: row.get(3)?,
-                phase: row.get(4)?, legacy_previous_id: row.get(5)?,
-            }))?;
-        let ParticipantControlRow { version, role, active_key: account, next_key: next, phase, legacy_previous_id: bootstrap } = row;
-        if version != 1 || role != "participant-v1" || (phase == 0) != next.is_none() || !(0..=1).contains(&phase) {
-            return Err(invalid("incompatible participant profile authority"));
+    database.read(state_on)
+}
+
+fn state_on(
+    connection: &rusqlite::Connection,
+) -> Result<(AccountPublic, Option<AccountPublic>, Option<String>), LogError> {
+    manifest::validate_ddl(connection, SCHEMA)?;
+    let row = connection.query_row(
+        "SELECT version,role,account,next_account,phase,bootstrap_previous FROM participant_profile WHERE singleton=1", [],
+        |row| Ok(ParticipantControlRow {
+            version: row.get(0)?, role: row.get(1)?, active_key: row.get(2)?, next_key: row.get(3)?,
+            phase: row.get(4)?, legacy_previous_id: row.get(5)?,
+        }))?;
+    let ParticipantControlRow {
+        version,
+        role,
+        active_key: account,
+        next_key: next,
+        phase,
+        legacy_previous_id: bootstrap,
+    } = row;
+    if version != 1
+        || role != "participant-v1"
+        || (phase == 0) != next.is_none()
+        || !(0..=1).contains(&phase)
+    {
+        return Err(invalid("incompatible participant profile authority"));
+    }
+    let account = AccountPublic {
+        ed25519_pub: account
+            .try_into()
+            .map_err(|_| invalid("invalid active account"))?,
+    };
+    let next = next
+        .map(|key| {
+            key.try_into()
+                .map(|ed25519_pub| AccountPublic { ed25519_pub })
+                .map_err(|_| invalid("invalid next account"))
+        })
+        .transpose()?;
+    if next.as_ref() == Some(&account) {
+        return Err(invalid("invalid account adoption"));
+    }
+    if bootstrap.as_ref().is_some_and(|id| {
+        id.len() != 32
+            || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || *id == account.account_id()
+    }) || (bootstrap.is_some() && next.is_some())
+    {
+        return Err(invalid("invalid legacy participant adoption intent"));
+    }
+    if let Some(previous) = &bootstrap {
+        let retained: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM participant_account_namespaces WHERE account_id=?1)",
+            [previous],
+            |r| r.get(0),
+        )?;
+        if !retained {
+            return Err(invalid("legacy participant adoption namespace is missing"));
         }
-        let account = AccountPublic { ed25519_pub: account.try_into().map_err(|_| invalid("invalid active account"))? };
-        let next = next.map(|key| key.try_into().map(|ed25519_pub| AccountPublic { ed25519_pub }).map_err(|_| invalid("invalid next account"))).transpose()?;
-        if next.as_ref() == Some(&account) { return Err(invalid("invalid account adoption")); }
-        if bootstrap.as_ref().is_some_and(|id| id.len()!=32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) || *id == account.account_id()) || (bootstrap.is_some() && next.is_some()) {
-            return Err(invalid("invalid legacy participant adoption intent"));
-        }
-        if let Some(previous) = &bootstrap {
-            let retained: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM participant_account_namespaces WHERE account_id=?1)", [previous], |r| r.get(0))?;
-            if !retained { return Err(invalid("legacy participant adoption namespace is missing")); }
-        }
-        Ok((account,next,bootstrap))
-    })
+    }
+    Ok((account, next, bootstrap))
 }
 
 fn validate(
@@ -489,15 +534,15 @@ pub(crate) fn prepare_adoption(
     previous: &AccountPublic,
     next: &AccountPublic,
 ) -> Result<(), LogError> {
-    let (active, pending, bootstrap) = state(database)?;
-    if bootstrap.is_some()
-        || &active != previous
-        || previous == next
-        || pending.as_ref().is_some_and(|value| value != next)
-    {
-        return Err(invalid("incompatible participant account adoption"));
-    }
     database.transaction(|tx| {
+        let (active, pending, bootstrap) = state_on(tx)?;
+        if bootstrap.is_some()
+            || &active != previous
+            || previous == next
+            || pending.as_ref().is_some_and(|value| value != next)
+        {
+            return Err(invalid("incompatible participant account adoption"));
+        }
         tx.execute(
             "UPDATE participant_profile SET next_account=?1,phase=1 WHERE singleton=1",
             [next.ed25519_pub.as_slice()],
@@ -512,14 +557,14 @@ pub(crate) fn finish_adoption(
     database: &EncryptedDatabase,
     loaded: &AccountPublic,
 ) -> Result<(), LogError> {
-    let (active, next, bootstrap) = state(database)?;
-    if loaded != &active && next.as_ref() != Some(loaded) {
-        return Err(invalid("unprepared participant account change"));
-    }
-    if next.is_none() && bootstrap.is_none() {
-        return Ok(());
-    }
     database.transaction(|tx| {
+        let (active, next, bootstrap) = state_on(tx)?;
+        if loaded != &active && next.as_ref() != Some(loaded) {
+            return Err(invalid("unprepared participant account change"));
+        }
+        if next.is_none() && bootstrap.is_none() {
+            return Ok(());
+        }
         // A pre-SQL security rekey may retain only this account's hashed ID.
         // The authenticated loaded key can fill that exact unknown namespace,
         // but must never replace an already-known conflicting public key.
@@ -537,6 +582,8 @@ pub(crate) fn finish_adoption(
         if !matching {
             return Err(invalid("conflicting participant account namespace"));
         }
+        event_ownership::adopt_on(tx, &active, loaded)?;
+        event_ownership::check_active_range_on(tx, loaded)?;
         tx.execute("UPDATE participant_profile SET account=?1,next_account=NULL,phase=0,bootstrap_previous=NULL WHERE singleton=1", [loaded.ed25519_pub.as_slice()])?;
         Ok(())
     })
