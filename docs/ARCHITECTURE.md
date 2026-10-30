@@ -1706,8 +1706,11 @@ Raw account-group access observations remain separate from admitted channel
 authority: rejected signed controls still contribute to their original sorted-ID
 fingerprint. The access owner computes this metadata using bounded header and
 parent pages with disk ancestry marks, and caches the completed result against
-the exact retained source revision. The frontier is capped with an overflow
-sentinel; an incomplete local frontier cannot establish a complete observation.
+the raw control revision, destructive revision and canonical generation. Ordinary
+safe message appends reuse that observation; late parents or reordered sources
+invalidate it even when the signed control set is unchanged. A source whose kind
+index is still catching up uses the complete retained revision. The frontier is
+capped with an overflow sentinel; an incomplete local frontier cannot establish a complete observation.
 This bounds memory and makes unchanged observations reusable; a changed source
 can still require metadata work proportional to its retained graph.
 
