@@ -39,8 +39,7 @@ fn sticker(dir: &Path, color: u8) -> (std::path::PathBuf, Vec<u8>) {
 }
 
 #[tokio::test]
-async fn received_channel_sticker_recovery_retires_without_rewriting_media_or_inventing_dm_receipts()
- {
+async fn channel_sticker_recovery_keeps_local_bytes_and_verified_recipient_completion() {
     use crate::discovery::Announce;
     use tokio::net::TcpListener;
     let ad = tempfile::tempdir().unwrap();
@@ -91,11 +90,27 @@ async fn received_channel_sticker_recovery_retires_without_rewriting_media_or_in
     .await
     .expect("channel sticker bytes become durable");
     assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
-    assert!(!b.has_verified_file_completion(file));
-    assert!(b.delivery.lock().unwrap().cards_for_file(file).is_empty());
+    // Current group delivery reserves real recipient completion without a DM
+    // receipt. Only the source's own preview lacks an incoming completion row.
+    let final_chunk = a.log.lock().unwrap().events(&file).last().unwrap().id;
+    assert!(b.has_verified_file_completion(file));
+    assert!(b.historical_file_completion(file, final_chunk, &a.identity.public()));
+    assert!(!a.has_verified_file_completion(file));
+    assert!(a.delivery.lock().unwrap().cards_for_file(file).is_empty());
     let stored = b.media.path_for(file, &offer.name);
     let ciphertext = std::fs::read(&stored).unwrap();
+    let source_stored = a.media.path_for(file, &offer.name);
+    let source_ciphertext = std::fs::read(&source_stored).unwrap();
     for _ in 0..3 {
+        // An incoming file fingerprint reaches this callback before chunk-page
+        // requests. The source must retain its signed chunks for group members.
+        a.process_file_events(file);
+        assert_eq!(
+            std::fs::read(&source_stored).unwrap(),
+            source_ciphertext,
+            "an own preview must not be decoded and encrypted again on each recovery callback"
+        );
+        assert!(a.log.lock().unwrap().has(&final_chunk));
         b.pending_files.lock().unwrap().insert(file);
         b.pull_pending_files().await;
         assert_eq!(
@@ -105,10 +120,12 @@ async fn received_channel_sticker_recovery_retires_without_rewriting_media_or_in
         );
         assert!(
             !b.pending_files.lock().unwrap().contains(&file),
-            "local group media completion does not require a direct-recipient receipt"
+            "verified group media completion retires local recovery"
         );
     }
-    assert!(!b.has_verified_file_completion(file));
+    assert!(!a.has_verified_file_completion(file));
+    assert!(a.delivery.lock().unwrap().retry_receipts(1).is_empty());
+    assert!(b.historical_file_completion(file, final_chunk, &a.identity.public()));
     assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
     std::fs::remove_file(&stored).unwrap();
     b.pending_files.lock().unwrap().insert(file);
@@ -119,10 +136,18 @@ async fn received_channel_sticker_recovery_retires_without_rewriting_media_or_in
         "a missing local copy must still be recovered"
     );
     assert!(!b.pending_files.lock().unwrap().contains(&file));
+    assert!(b.historical_file_completion(file, final_chunk, &a.identity.public()));
+    a.runtime_work.close();
+    b.runtime_work.close();
     alice_server.abort();
     bob_server.abort();
     let _ = alice_server.await;
     let _ = bob_server.await;
+    for node in [&a, &b] {
+        tokio::time::timeout(std::time::Duration::from_secs(5), node.runtime_work.drain())
+            .await
+            .expect("sticker recovery fixture must drain admitted work");
+    }
 }
 
 #[tokio::test]

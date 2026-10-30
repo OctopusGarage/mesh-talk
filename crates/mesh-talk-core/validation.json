@@ -1688,6 +1688,7 @@
             "node::recall::",
             "node::file_completion::",
             "node::delivery_runtime_tests::failed_media_completion_metadata_keeps_durable_bytes_pending",
+            "node::delivery_runtime_tests::untracked_channel_media_local_export_verifies_retained_row_and_managed_bytes",
             "node::session::tests::"
           ]
         }

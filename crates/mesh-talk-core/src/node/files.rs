@@ -1409,10 +1409,10 @@ impl Node {
     /// Receive-complete persist for MEDIA: if `file_conv` is a media file (image/video by
     /// name) we hold ALL chunks of but haven't yet copied into the durable media store,
     /// reassemble + verify it (`read_file`) and write the bytes into the store. After this
-    /// the media is durable, so its transient chunks are safe to prune. A no-op for a
-    /// generic attachment (never stored), an incomplete file, or one already stored.
-    /// Returns true iff it newly persisted media. Best-effort — failures are swallowed and
-    /// retried on the next sync tick.
+    /// the media is durable, so its transient chunks follow the existing reclamation
+    /// policy. A no-op for a generic attachment (never stored) or an incomplete file.
+    /// Returns true when it persists media or the completion/reclamation owner reports
+    /// completion. Stored bytes are not rewritten; reclamation remains best-effort.
     pub(in crate::node) fn persist_media_if_complete(&self, file_conv: ConversationId) -> bool {
         // Decide media-vs-attachment by the sender's INTENT (manifest kind); for legacy
         // manifests with no kind, fall back to the filename heuristic. Only media is copied
@@ -1433,7 +1433,9 @@ impl Node {
         if self.local_media_recovery_complete(file_conv) {
             self.complete_sticker_aliases(file_conv);
             if !self.pending_sticker_aliases(file_conv) {
-                return false; // every retained offer is already complete
+                // Durable bytes still need the existing reclamation policy. An
+                // empty candidate set cannot manufacture recipient completion.
+                return self.commit_file_completion(file_conv, &[]);
             }
         }
         let candidates = self.completion_candidates(file_conv);

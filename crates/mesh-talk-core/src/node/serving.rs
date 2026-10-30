@@ -1051,6 +1051,9 @@ impl Node {
                     let progressed = self.complete_sticker_aliases(fc);
                     let pending = self.pending_sticker_aliases(fc);
                     if !pending {
+                        // Preserve local chunk retirement and the channel replica
+                        // budget without rewriting already durable media bytes.
+                        self.commit_file_completion(fc, &[]);
                         self.pending_files
                             .lock()
                             .expect("pending files mutex not poisoned")
