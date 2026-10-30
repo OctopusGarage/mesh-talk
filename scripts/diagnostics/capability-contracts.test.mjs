@@ -190,6 +190,11 @@ test("session capability retains executable generation and retirement obligation
       "runtime_bootstrap::tests::signed_account_nickname_persists_emits_and_rejects_retired_owner",
       "src-tauri/src/runtime_bootstrap.rs",
     ],
+    [
+      "Inbound callbacks queue main-thread publication before acquiring exact-session and runtime authority, preventing native-window rendezvous from inverting the session lock.",
+      "runtime_bootstrap::tests::inbound_dispatch_does_not_acquire_session_until_main_thread_execution",
+      "src-tauri/src/runtime_bootstrap.rs",
+    ],
   ];
   assert.deepEqual(
     owner("desktop-session").capability.invariants.map(({ name }) => name),

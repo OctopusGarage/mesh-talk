@@ -41,6 +41,88 @@ pub(super) fn sibling_nodes() -> (tempfile::TempDir, Arc<Node>, Arc<Node>) {
     (dir, source, receiver)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_delete_allows_sibling_channel_export_and_blocking_work_retirement() {
+    let (_dir, source, receiver) = sibling_nodes();
+    let channel = source
+        .create_channel("Concurrent archive", vec![receiver.identity.public()])
+        .await
+        .unwrap();
+    let deleted = source
+        .enqueue_channel_message_reply_expiring_if(
+            channel,
+            b"delete locally",
+            None,
+            None,
+            |commit| commit(),
+        )
+        .unwrap();
+    let retained = source
+        .enqueue_channel_message_reply_expiring_if(
+            channel,
+            b"retain locally",
+            None,
+            None,
+            |commit| commit(),
+        )
+        .unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    *source.before_sent_delete_hook.lock().unwrap() = Some(Box::new(move || {
+        entered_tx.send(()).unwrap();
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10))
+            .expect("release paused deletion");
+    }));
+    let deleting_node = source.clone();
+    let deletion = tokio::spawn(async move {
+        deleting_node
+            .account_blocking(move |node| node.delete_message(channel, deleted, false))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // An archive reader takes sentlog before recovered IDs. Detect the opposite
+    // ownership before starting it, so a regression fails without wedging a
+    // blocking worker (which an async timeout cannot cancel).
+    if source.recovered_sent_ids.try_lock().is_err() {
+        release_tx.send(()).unwrap();
+        deletion.await.unwrap().unwrap();
+        panic!("deletion retained recovered IDs before acquiring the sent log");
+    }
+    let peer = receiver.identity.public();
+    let exported = source
+        .account_blocking(move |node| {
+            node.prepare_account_export(&peer, None, true, false, AccountSyncVersion::V2)
+        })
+        .await
+        .unwrap();
+    assert_eq!(exported.0.len(), 1);
+    assert_eq!(exported.0[0].id(), *retained.as_bytes());
+
+    source.runtime_work.close();
+    let retired_early =
+        tokio::time::timeout(Duration::from_millis(50), source.runtime_work.drain())
+            .await
+            .is_ok();
+    release_tx.send(()).unwrap();
+    assert_eq!(deletion.await.unwrap().unwrap(), 1);
+    tokio::time::timeout(Duration::from_secs(2), source.runtime_work.drain())
+        .await
+        .expect("completed deletion must release retirement admission");
+    assert!(!retired_early, "retirement escaped the admitted deletion");
+    let history = source.channel_history(channel, 10);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, retained);
+    assert!(source.log.lock().unwrap().has(&deleted));
+}
+
 pub(super) fn sibling_peer(
     receiver: &Node,
     source: &Node,

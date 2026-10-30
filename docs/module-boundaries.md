@@ -185,7 +185,7 @@ internal transitions or import back into the chat composition module at runtime.
 DM file status refresh continues after the file offer's receipt, until the
 separate file-progress projection reaches completion. Receipt of the offer must
 not freeze an earlier approval or byte-progress snapshot on the sender.
-Active history and reaction reads use the shared native-read deadline so a stalled
+Active history, background coverage and reaction reads use the shared native-read deadline so a stalled
 IPC request releases the loading indicator into the existing retry state. Late
 results from a timed-out read cannot replace a newer snapshot. The chat identity
 boot window is thirty seconds of elapsed monotonic time, including native waits;
@@ -195,6 +195,16 @@ seconds, preserving the failure label until identity resolves. Successful recove
 clears failure and reloads favorites and roster without a restart. Logout or a
 superseding run invalidates delayed results and stops its ticker. These presentation
 deadlines do not cancel native work or establish whether the participant runtime is healthy.
+Verified identity completes the boot indicator independently of roster/archive
+hydration. Draft loading, settings observations (including readback after an
+acknowledged save), account profiles, lock status and diagnostics reuse the same
+ten-second read deadline and pending-native-read budget. Mutation completion is
+never inferred from a read timeout; settings writes retain their serial order.
+Receipt updates preserve unchanged conversation projections. Persistence coalesces
+the latest immutable snapshot in a fixed 100 ms window and flushes before
+restoration, explicit writes, owner/runtime retirement, page hiding and visibility
+changes. The identity, unread-priority and alias budgets are unchanged. Like other
+browser-local state, an abrupt process termination can lose the unflushed window.
 The history module defines its own state/context interface; `chat.ts` composes it
 and supplies runtime generations plus status refresh. Its patches cannot mutate
 that session context. `conversationModel.ts` owns shared Conversation/message data
@@ -538,6 +548,13 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   native session/lock authority; the settings controller owns acknowledged local
   bindings. Registration tokens prevent retired renderer cleanup from releasing
   newer keys. See [screenshot shortcuts](settings.md#screenshot-shortcuts).
+  Capture owns a single child task through window restoration even if the IPC
+  caller disappears. Pixel acquisition has a twenty-second deadline on macOS and
+  Windows, and two minutes on Linux for interactive portal approval; native
+  screenshot helper processes use fifteen seconds and
+  are killed and reaped on expiry. Restoration and returned pixels still require
+  the original unlocked session. Non-cancellable Windows capture workers retain
+  their own single-operation permit after UI timeout, preventing retry buildup.
 - `DiagnosticsDialog.tsx` delegates observations and native actions to
   `diagnostics/useDiagnosticsController.ts`. Each opening owns independent
   refresh generations, serial peer polling, bounded activity history and
@@ -603,6 +620,18 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   same-volume staging directory, then publishes it by directory rename. Existing
   partial directories are preserved for recovery. Subsequent encrypted metadata
   writes replace a synchronized sibling file instead of truncating the live file.
+- `recovery/setup.rs` owns the serialized encrypted credential-storage lane for
+  backup setup/status and remembered Drive grants. Its blocking worker retains
+  that lane even when its caller is cancelled. Password derivation, decryption,
+  serialization and temporary-file synchronization run outside the global
+  session and app-lock guards. Exact session generation and lock revision are
+  checked at capture, atomic publication/deletion and final plaintext release;
+  parent-directory synchronization follows publication outside those guards.
+- Local contact favorites use their own read/modify/write lane, including linked
+  imports. Every caller acquires it before session authority; JSON preparation
+  and file synchronization run on a blocking worker. Only final atomic replacement
+  retains the captured session/lock authority. An import additionally retains
+  its runtime lifecycle lease and verifies the expected cryptographic account.
 - Privacy commands reuse the same admission for checked observations and
   operation-enclosing IO commits. Core `*_guarded` methods await the privacy gate
   without host session authority, then enclose synchronous policy/proof/route

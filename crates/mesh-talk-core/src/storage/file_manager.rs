@@ -12,6 +12,43 @@ pub struct FileManager {
     base_path: PathBuf,
 }
 
+/// Encrypted, synchronized replacement that remains invisible until publication.
+/// Dropping it discards the temporary file and preserves the previous value.
+pub struct PreparedEncryptedWrite {
+    file: tempfile::NamedTempFile,
+    destination: PathBuf,
+}
+
+/// Publication has committed. Complete the best-effort directory sync after
+/// releasing any host authorization guards around the atomic replacement.
+#[must_use = "finish publication outside the host authorization guard"]
+pub struct PublishedEncryptedWrite {
+    parent: PathBuf,
+}
+
+impl PreparedEncryptedWrite {
+    pub fn publish(self) -> Result<PublishedEncryptedWrite, StorageError> {
+        self.file
+            .persist(&self.destination)
+            .map_err(|error| StorageError::Io(error.error))?;
+        Ok(PublishedEncryptedWrite {
+            parent: self
+                .destination
+                .parent()
+                .expect("user file has a parent")
+                .to_path_buf(),
+        })
+    }
+}
+
+impl PublishedEncryptedWrite {
+    pub fn finish(self) {
+        // Replacement is already visible; preserve the existing commit semantics
+        // instead of reporting a rollback after a failed directory sync.
+        let _ = sync_directory(&self.parent);
+    }
+}
+
 impl FileManager {
     pub fn base_path(&self) -> &PathBuf {
         &self.base_path
@@ -88,6 +125,21 @@ impl FileManager {
     where
         T: Serialize,
     {
+        self.prepare_encrypted_write(username, filepath, data, password)?
+            .publish()?
+            .finish();
+        Ok(())
+    }
+
+    /// Perform serialization, key derivation and file synchronization before a
+    /// caller acquires its short publication authority.
+    pub fn prepare_encrypted_write<T: Serialize>(
+        &self,
+        username: &str,
+        filepath: &str,
+        data: &T,
+        password: &str,
+    ) -> Result<PreparedEncryptedWrite, StorageError> {
         // Create user directory if it doesn't exist
         self.create_user_directory(username)?;
 
@@ -118,10 +170,10 @@ impl FileManager {
         file.write_all(&nonce)?;
         file.write_all(&ciphertext)?;
         file.as_file().sync_all()?;
-        file.persist(&full_path)
-            .map_err(|e| StorageError::Io(e.error))?;
-        let _ = sync_directory(parent);
-        Ok(())
+        Ok(PreparedEncryptedWrite {
+            file,
+            destination: full_path,
+        })
     }
 
     pub fn read_encrypted_file<T>(
@@ -207,6 +259,37 @@ fn sync_directory(path: &std::path::Path) -> Result<(), StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_encrypted_write_is_invisible_and_discardable_until_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = FileManager::new(dir.path().to_path_buf());
+        manager
+            .write_encrypted_file("alice", "meta/value.enc", &"before", "pw")
+            .unwrap();
+        let read = || {
+            manager
+                .read_encrypted_file::<String>("alice", "meta/value.enc", "pw")
+                .unwrap()
+        };
+        let discarded = manager
+            .prepare_encrypted_write("alice", "meta/value.enc", &"discard", "pw")
+            .unwrap();
+        assert_eq!(read(), "before");
+        drop(discarded);
+        assert_eq!(
+            fs::read_dir(manager.user_data_path("alice").join("meta"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let replacement = manager
+            .prepare_encrypted_write("alice", "meta/value.enc", &"after", "pw")
+            .unwrap();
+        assert_eq!(read(), "before");
+        replacement.publish().unwrap().finish();
+        assert_eq!(read(), "after");
+    }
 
     #[test]
     fn encrypted_replacement_retains_a_readers_previous_file() {

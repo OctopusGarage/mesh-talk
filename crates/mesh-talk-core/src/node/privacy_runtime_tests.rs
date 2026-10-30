@@ -3183,6 +3183,65 @@ async fn reachable_route_is_not_blocked_by_stalled_former_lan_handshake() {
 }
 
 #[tokio::test]
+async fn liveness_dial_deadline_includes_admission_and_releases_policy_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice");
+    let (alice, _) = node(&path);
+    let (bob, _) = node(&dir.path().join("bob"));
+    alice
+        .configure_privacy(
+            &path,
+            "pw",
+            &alice.signed_announce("Alice", 1),
+            Arc::new(DiscoveryVisibility::new(true)),
+        )
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let expected = bob.identity.public();
+    for _ in 0..10 {
+        alice.sessions.authentication_timed_out(&expected, address);
+    }
+    let authentication = alice
+        .sessions
+        .authentication_admission(alice.peer_endpoint_key(address, &expected))
+        .await
+        .unwrap();
+    tokio::time::pause();
+    let sender = alice.clone();
+    let dial = tokio::spawn(async move { sender.privacy_dial(address, &expected).await });
+    tokio::task::yield_now().await;
+    assert!(alice.privacy.gate.try_write().is_err());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    drop(authentication);
+    // Complete only the TCP accept using real I/O; the remote never speaks Noise.
+    tokio::time::resume();
+    let (_stalled, _) = listener.accept().await.unwrap();
+    tokio::time::pause();
+    let changing = alice.clone();
+    let writer = tokio::spawn(async move { changing.set_invisible(true).await });
+    tokio::task::yield_now().await;
+    assert!(!writer.is_finished());
+    tokio::time::advance(Duration::from_millis(19_100)).await;
+    let released = tokio::time::timeout(Duration::from_millis(100), writer).await;
+    assert!(
+        released.is_ok(),
+        "authentication extended the whole-dial deadline and retained the privacy gate"
+    );
+    released.unwrap().unwrap().unwrap();
+    assert!(dial.await.unwrap().is_err());
+    let permits: Vec<_> = (0..crate::node::session_pool::MAX_DIRECTION_CONNECTIONS)
+        .map(|_| {
+            alice
+                .sessions
+                .try_outbound()
+                .expect("timed-out dial retained socket capacity")
+        })
+        .collect();
+    drop(permits);
+}
+
+#[tokio::test]
 async fn existing_contact_local_acceptance_does_not_wait_for_stalled_network_handshake() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("alice");

@@ -21,6 +21,36 @@ import { useAuth } from "./auth";
 import { useTransfers } from "./transfers";
 import { useAvatars } from "./avatars";
 
+it("finishes identity boot while a background coverage read remains pending", async () => {
+  vi.useFakeTimers();
+  let finish!: (rows: unknown[]) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: 1,
+      });
+    if (command === "owner_account_history")
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(true);
+    expect(useChat.getState().historyScanBusy).toBe(true);
+    expect(useChat.getState().bootBusy).toBe(false);
+  } finally {
+    stop();
+    finish?.([]);
+    vi.useRealTimers();
+  }
+});
+
 it("coalesces roster invalidations and preserves readiness after an older failure", async () => {
   let reject!: (e: Error) => void;
   let count = 0;

@@ -20,16 +20,13 @@ import { contactPolicy, favorites as favoritesApi } from "@/lib/api/contacts";
 import { errorMessage } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import {
-  saveUnread,
-  savePendingUnread,
   loadPendingUnread,
   loadUnread,
+  queueReceptionPersistence,
+  flushReceptionPersistence,
   loadReceptionLedger,
-  saveReceptionLedger,
   loadUnreadOverflow,
-  saveUnreadOverflow,
   loadFullHistoryBaselines,
-  saveFullHistoryBaselines,
 } from "@/lib/unreadStorage";
 import {
   emptyReception,
@@ -269,7 +266,9 @@ async function pollUntilReady(
       const acct = identity.account_id;
       setPushStateSupport(identity.supports_push_state ? owner : null);
       syncChatAvatarIdentity(acct, () => !isCancelled());
-      await get().refreshRoster();
+      // Identity completes boot. Roster/history hydration owns its separate
+      // bounded lane and must not extend the startup deadline or hold bootBusy.
+      void get().refreshRoster();
       return true;
     } catch {
       if (superseded()) return false;
@@ -859,6 +858,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         notifyIncomingFileDismissed(file.fileConv);
     };
     const expiry = setInterval(expire, 1000);
+    const flushReceipts = () => flushReceptionPersistence();
+    if (typeof window !== "undefined")
+      window.addEventListener("pagehide", flushReceipts);
+    if (typeof document !== "undefined")
+      document.addEventListener?.("visibilitychange", flushReceipts);
     if (typeof window !== "undefined") window.addEventListener("focus", expire);
     if (typeof document !== "undefined")
       document.addEventListener?.("visibilitychange", expire);
@@ -994,6 +998,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
     return () => {
       cancelled = true;
+      flushReceptionPersistence();
+      if (typeof window !== "undefined")
+        window.removeEventListener("pagehide", flushReceipts);
+      if (typeof document !== "undefined")
+        document.removeEventListener?.("visibilitychange", flushReceipts);
       clearInterval(roster);
       clearInterval(expiry);
       if (typeof window !== "undefined")
@@ -1756,40 +1765,31 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
 }
 
 useChat.subscribe((state, previous) => {
-  if (state.unreadOwner && state.myAccountId) {
-    if (state.unread !== previous.unread)
-      saveUnread(state.unreadOwner, state.myAccountId, state.unread);
-    if (state.pendingUnknownUnread !== previous.pendingUnknownUnread)
-      savePendingUnread(
-        state.unreadOwner,
-        state.myAccountId,
-        state.pendingUnknownUnread,
-      );
-  }
   if (
-    state.ledger !== previous.ledger &&
-    state.unreadOwner &&
-    state.myAccountId
+    state.unreadOwner !== previous.unreadOwner ||
+    state.myAccountId !== previous.myAccountId ||
+    state.runEpoch !== previous.runEpoch
   )
-    saveReceptionLedger(state.unreadOwner, state.myAccountId, state.ledger);
+    flushReceptionPersistence();
+  if (!state.unreadOwner || !state.myAccountId) return;
+  queueReceptionPersistence(state.unreadOwner, state.myAccountId, {
+    ...(state.unread !== previous.unread ? { unread: state.unread } : {}),
+    ...(state.pendingUnknownUnread !== previous.pendingUnknownUnread
+      ? { pendingUnknownUnread: state.pendingUnknownUnread }
+      : {}),
+    ...(state.ledger !== previous.ledger ? { ledger: state.ledger } : {}),
+    ...(state.overflowUnread !== previous.overflowUnread
+      ? { overflowUnread: state.overflowUnread }
+      : {}),
+    ...(state.historyFullBaselines !== previous.historyFullBaselines
+      ? { historyFullBaselines: state.historyFullBaselines }
+      : {}),
+  });
+});
+useAuth.subscribe((state, previous) => {
   if (
-    state.overflowUnread !== previous.overflowUnread &&
-    state.unreadOwner &&
-    state.myAccountId
+    state.user?.id !== previous.user?.id ||
+    state.generation !== previous.generation
   )
-    saveUnreadOverflow(
-      state.unreadOwner,
-      state.myAccountId,
-      state.overflowUnread,
-    );
-  if (
-    state.historyFullBaselines !== previous.historyFullBaselines &&
-    state.unreadOwner &&
-    state.myAccountId
-  )
-    saveFullHistoryBaselines(
-      state.unreadOwner,
-      state.myAccountId,
-      state.historyFullBaselines,
-    );
+    flushReceptionPersistence();
 });

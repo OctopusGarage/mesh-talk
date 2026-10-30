@@ -134,9 +134,10 @@ impl PreparedParticipant {
                             if let Some(sender) = match endpoint {
                                 std::net::SocketAddr::V4(_) => Some(&socket),
                                 std::net::SocketAddr::V6(_) => socket_v6.as_ref(),
-                            } && let Some(_guard) = visibility.routed_send_guard().await
-                            {
-                                let _ = routed.probe(sender, endpoint).await;
+                            } {
+                                let _ = visibility
+                                    .with_routed_send(routed.probe(sender, endpoint))
+                                    .await;
                             }
                             tokio::time::sleep(Duration::from_millis(20)).await;
                         }
@@ -281,29 +282,23 @@ impl ParticipantRuntime {
         endpoint: std::net::SocketAddr,
         authorize: impl FnMut(&mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()> + Send,
     ) -> std::io::Result<()> {
-        if !self.visibility.routed_allowed().await {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "public discovery is disabled",
-            ));
-        }
         let socket = match endpoint {
             std::net::SocketAddr::V4(_) => &self.discovery_socket_v4,
             std::net::SocketAddr::V6(_) => self.discovery_socket_v6.as_ref().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "IPv6 unavailable")
             })?,
         };
-        let _guard = self.visibility.routed_send_guard().await.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "routed discovery is disabled",
-            )
-        })?;
-        if self
-            .routed_discovery
-            .probe_if(socket, endpoint, authorize)
+        let sent = self
+            .visibility
+            .with_routed_send(self.routed_discovery.probe_if(socket, endpoint, authorize))
             .await?
-        {
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "routed discovery is disabled",
+                )
+            })?;
+        if sent {
             Ok(())
         } else {
             Err(std::io::Error::new(

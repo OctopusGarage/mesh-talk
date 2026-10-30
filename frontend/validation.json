@@ -1436,7 +1436,8 @@
         "src/store/updates.test.ts",
         "src/store/updateRestart.test.ts",
         "src/features/chat/UpdatePanel.test.ts",
-        "src/lib/api/diagnostics.test.ts"
+        "src/lib/api/diagnostics.test.ts",
+        "src/features/chat/diagnostics/useDiagnosticsController.test.ts"
       ],
       "capability": {
         "summary": "Coordinate explicit signed updates, safe restart preparation and manual fallback while preserving native release, platform and channel authority.",
@@ -2013,6 +2014,10 @@
           {
             "name": "The badge writer coalesces current counts, retries with bounded backoff and native admission, and retires with its exact desktop/account/runtime lifetime.",
             "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
+          },
+          {
+            "name": "Receipt persistence coalesces within a fixed 100 ms window and flushes before restoration and owner retirement; unchanged conversations retain immutable projections and existing unread/alias bounds.",
+            "reference": "docs/module-boundaries.md"
           }
         ]
       },

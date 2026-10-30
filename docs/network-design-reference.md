@@ -1919,6 +1919,23 @@ The authoritative constants live in `transport/net.rs`, `node/session_pool.rs`, 
 
 ### Session reuse contract
 
+A fresh node dial has one twenty-second deadline across privacy admission,
+authentication admission, TCP capacity, and every candidate route. Per-route
+adaptive deadlines cannot extend that overall lifetime. The disclosure read gate
+still encloses the Noise handshake and verified-peer commit, so a completed
+privacy change cannot be followed by an old attempt's identity disclosure.
+Cancellation drops all racing sockets and their permits before releasing the gate.
+
+Discovery owns each visibility guard together with its UDP operation. One second
+bounds the complete announcement or routed probe, including guard acquisition;
+socket backpressure cannot retain the guard indefinitely. A timeout cancels the
+send, and the existing periodic producer owns retries. Disabling visibility still
+waits for any already-admitted send and prevents subsequent publication.
+
+The optional pinned relay gateway owns its proxy accept loop and every forwarding
+task. Gateway cancellation and upstream replacement close the owned listener and
+active streams; old forwarding tasks cannot retain a port or outlive their gateway.
+
 A retained session is exclusive to one borrower and reusable only after a complete successful sequential sync exchange has consumed its responses. The key/admission checks include full public identity, endpoint, current policy generation and authenticated account/role consistency. Canceled operations, malformed replies, pending unexpected bytes, EOF and stale policy/bindings cause eviction. Idle expiry releases capacity even without another checkout. When an authenticated
 route race wins a different endpoint from the caller's verified roster hint, the
 next sync exchange may reuse the winning session only while both exact endpoints

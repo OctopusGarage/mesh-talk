@@ -376,7 +376,8 @@
             "private_probe_refreshes_public_presence_before_its_lease_expires",
             "private_probe_rounds_do_not_starve_a_live_peer_after_eight_stalled_routes",
             "node::session_pool::",
-            "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel"
+            "historical_probe_rotation_visits_unlaunched_peers_and_rechecks_privacy_after_cancel",
+            "liveness_dial_deadline_includes_admission_and_releases_policy_writer"
           ]
         }
       ],
@@ -1498,7 +1499,8 @@
             "authenticated_preferred_route_keeps_last_slot_ahead_of_known_stalled_route",
             "fresh_one_off_routes_lead_and_signed_ports_supersede_cached_ports",
             "reachable_route_is_not_blocked_by_stalled_former_lan_handshake",
-            "alternate_route_reclaims_idle_sessions_before_waiting_on_stale_route"
+            "alternate_route_reclaims_idle_sessions_before_waiting_on_stale_route",
+            "liveness_dial_deadline_includes_admission_and_releases_policy_writer"
           ]
         }
       ],
@@ -1551,7 +1553,8 @@
             "optional_identity_request_rejection_preserves_reusable_account_capability",
             "identity_capability_cooldown_is_bounded_and_independent_of_account_sessions",
             "file_identity_repair_bounds_each_history_scan_and_advances_past_legacy_rows",
-            "federated_file_consent_and_complete_bytes_need_no_direct_client_route"
+            "federated_file_consent_and_complete_bytes_need_no_direct_client_route",
+            "node::account_sync::selection_tests::local_delete_allows_sibling_channel_export_and_blocking_work_retirement"
           ]
         }
       ],

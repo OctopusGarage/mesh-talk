@@ -90,50 +90,57 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
             },
             mesh_talk_core::node::RuntimeEvents {
                 on_dm: Box::new(move |dm| {
-                    let _ = dm_authority.current(|_| {
-                        crate::events::emit_dm_received(&app_handle_for_dm, dm);
+                    let app = app_handle_for_dm.clone();
+                    dm_authority.dispatch_current(&app_handle_for_dm, move || {
+                        crate::events::emit_dm_received(&app, dm);
                     });
                 }),
                 on_channel: Box::new(move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
-                    let _ = channel_authority.current(|_| {
+                    let app = app_handle_for_channel.clone();
+                    let runtime_id = format!(
+                        "{}:{}:{}",
+                        channel_authority.lease.owner(),
+                        channel_authority.lease.generation(),
+                        channel_authority.ticket
+                    );
+                    channel_authority.dispatch_current(&app_handle_for_channel, move || {
                         crate::events::emit_channel_message(
-                            &app_handle_for_channel,
-                            &format!(
-                                "{}:{}:{}",
-                                channel_authority.lease.owner(),
-                                channel_authority.lease.generation(),
-                                channel_authority.ticket
-                            ),
+                            &app,
+                            &runtime_id,
                             msg,
                         );
                     });
                 }),
                 on_file: Box::new(move |f: mesh_talk_core::node::ReceivedFile| {
-                    let _ = file_authority.current(|_| {
+                    let app = app_handle_for_file.clone();
+                    let runtime_id = format!(
+                        "{}:{}:{}",
+                        file_authority.lease.owner(),
+                        file_authority.lease.generation(),
+                        file_authority.ticket
+                    );
+                    file_authority.dispatch_current(&app_handle_for_file, move || {
                         crate::events::emit_file_received(
-                            &app_handle_for_file,
-                            &format!(
-                                "{}:{}:{}",
-                                file_authority.lease.owner(),
-                                file_authority.lease.generation(),
-                                file_authority.ticket
-                            ),
+                            &app,
+                            &runtime_id,
                             f,
                         );
                     });
                 }),
                 on_profile: Box::new(move |p: mesh_talk_core::node::ReceivedProfile| {
-                    let _ = profile_authority.current(|_| {
+                    let app = app_handle_for_profile.clone();
+                    profile_authority.dispatch_current(&app_handle_for_profile, move || {
                         crate::events::emit_profile_received(
-                            &app_handle_for_profile,
+                            &app,
                             p.account_id,
                             p.avatar,
                         );
                     });
                 }),
                 on_call_signal: Box::new(move |s: mesh_talk_core::node::ReceivedCallSignal| {
-                    let _ = call_authority.current(|_| {
-                        crate::events::emit_call_signal(&app_handle_for_call, s.from, s.payload);
+                    let app = app_handle_for_call.clone();
+                    call_authority.dispatch_current(&app_handle_for_call, move || {
+                        crate::events::emit_call_signal(&app, s.from, s.payload);
                     });
                 }),
             },
@@ -557,6 +564,52 @@ mod tests {
     use super::*;
     use mesh_talk_core::eventlog::event::ConversationId;
     use tauri::Listener;
+
+    #[test]
+    fn inbound_dispatch_does_not_acquire_session_until_main_thread_execution() {
+        let (session, _, authority) = authority();
+        let lease = authority.lease.clone();
+        let published = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = published.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = session
+            .matching(&lease, |_| {
+                let worker = std::thread::spawn(move || {
+                    send.send(authority.queued_current(move || {
+                        observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }))
+                    .unwrap();
+                });
+                let queued = receive.recv_timeout(std::time::Duration::from_secs(2));
+                (worker, queued)
+            })
+            .unwrap();
+        worker.0.join().unwrap();
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+        worker
+            .1
+            .expect("dispatch must not wait for the session lock")();
+        assert!(published.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn queued_inbound_event_rechecks_session_and_runtime_before_publication() {
+        for replace_runtime in [false, true] {
+            let (session, node, authority) = authority();
+            let published = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = published.clone();
+            let queued = authority.queued_current(move || {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            if replace_runtime {
+                node.next_lifecycle_ticket();
+            } else {
+                session.clear();
+            }
+            queued();
+            assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
 
     fn authority() -> (
         crate::state::SessionState,

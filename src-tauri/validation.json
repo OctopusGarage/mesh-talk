@@ -683,6 +683,10 @@
           {
             "name": "Signed account nicknames project into persisted desktop and frontend state only for the current installed session; old completed markers without a signed card repair the already-bound profile, while a pending adoption never publishes its unrelated previous local nickname across restart",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Inbound callbacks queue main-thread publication before acquiring exact-session and runtime authority, preventing native-window rendezvous from inverting the session lock.",
+            "reference": "docs/ARCHITECTURE.md"
           }
         ]
       }
@@ -855,6 +859,10 @@
           {
             "name": "Every archive retains a fresh salt and original key compatibility; verified restoration installs its supplied key with the new local credentials.",
             "reference": "docs/backup-recovery.md#restore-after-losing-a-device"
+          },
+          {
+            "name": "Encrypted credential work retains its own serialization through caller cancellation while session and app-lock authority cover only capture, atomic publication/deletion and final plaintext release.",
+            "reference": "docs/module-boundaries.md"
           }
         ]
       },
@@ -1233,6 +1241,10 @@
           {
             "name": "X11 helper output is a bounded PNG in a private temporary directory, with bounded execution and cleanup on every result",
             "reference": "specifications/platform_permissions.md#screenshots"
+          },
+          {
+            "name": "Capture owns restoration through IPC cancellation; bounded pixel acquisition attempts restoration on timeout while stale sessions cannot restore or obtain pixels.",
+            "reference": "docs/module-boundaries.md"
           }
         ]
       },
