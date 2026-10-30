@@ -86,6 +86,9 @@ struct OpaqueRoundStore<'a> {
 }
 
 impl SyncStore for OpaqueRoundStore<'_> {
+    fn requires_channel_v5(&self, _conversation: &ConversationId) -> bool {
+        false
+    }
     // Both legacy and federated mailboxes wrap every inner kind as Message.
     // Capability checks must not materialize and seal an upload page merely
     // to rediscover that invariant on every fingerprint probe and sync step.
@@ -848,6 +851,7 @@ mod permission_tests {
         assert!(!store.requires_channel_v2(&mailbox.id()));
         assert!(!store.requires_channel_v3(&mailbox.id()));
         assert!(!store.requires_channel_v4(&mailbox.id()));
+        assert!(!store.requires_channel_v5(&mailbox.id()));
         assert_eq!(
             wrappers.lock().unwrap().generated,
             0,

@@ -310,6 +310,9 @@ impl Node {
         {
             return false;
         }
+        if self.account_group_file_preparation_pinned(conversation) {
+            return false;
+        }
         if !committed && !self.untracked_file_reclaimable(conversation, &store) {
             return false;
         }
@@ -373,7 +376,9 @@ impl Node {
             .file_convs();
         let mut replicas = Vec::new();
         for file in file_convs {
-            if !self.is_channel_file_replica(file) {
+            if self.account_group_file_preparation_pinned(file)
+                || !self.is_channel_file_replica(file)
+            {
                 continue;
             }
             let rows = self.retained_file_rows(file);
@@ -584,9 +589,10 @@ impl Node {
             let Some(binding) = &card.completion_binding else {
                 return false;
             };
+            let group = self.group_file_offer(conversation, card.id, peer).is_some();
             if binding.source != *peer
                 || binding.owner_account != self.account_id()
-                || !self.known_account_allowed(peer)
+                || (!self.known_account_allowed(peer) && !group)
             {
                 return false;
             }
@@ -611,11 +617,12 @@ impl Node {
             let retained = match (original, row) {
                 (Some(event), Some(row)) => {
                     event.kind == EventKind::FileManifest
-                        && event.conversation_id
-                            == super::conversation::dm_conversation_id(
-                                &self.identity.public(),
-                                peer,
-                            )
+                        && (group
+                            || event.conversation_id
+                                == super::conversation::dm_conversation_id(
+                                    &self.identity.public(),
+                                    peer,
+                                ))
                         && event.author.ed25519_pub() == &peer.ed25519_pub
                         && event.verify_integrity()
                         && event.verify_signature()

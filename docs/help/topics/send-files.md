@@ -20,7 +20,7 @@ A channel member can supply retained attachments when both devices have accepted
 
 ## Control incoming transfers
 
-Open **More → Settings → Files & receiving** to choose the default receiving policy. Individual conversations can override it through their attachment receiving settings. Review the conversation's policy when its behavior differs from the default.
+Open **More → Settings → Files & downloads** to choose the default receiving policy. Individual conversations can override it through their attachment receiving settings. Review the conversation's policy when its behavior differs from the default.
 
 Receiving approval and the [download folder](download-location.md) are independent. Choosing a folder does not grant permission to receive a transfer.
 
@@ -36,6 +36,52 @@ Use **Received files** in the sidebar to browse locally known file entries. If a
 Completed downloads provide **Reveal**. If writing the download fails,
 check that the destination is writable, then use the file's retry action.
 
+## Copy text from an image
+
+In the macOS desktop app, click an ordinary image in the conversation to enlarge
+it. Move the pointer over the words, pause briefly, then drag to select the text.
+Press **Command-C**, or right-click the selection and choose **Copy text**. Recognition
+uses macOS Live Text and depends on the system's support for the image and language.
+When zoomed in, hold **Option** while dragging to select text rather than pan.
+
+## Image actions
+
+Right-click an enlarged ordinary image to open the app's image menu:
+
+- **Copy image** copies the whole decoded image as PNG, independent of zoom or pan.
+  This action appears when the platform provides image clipboard support. If the
+  clipboard refuses access, the app reports the failure; use **Save as…** instead.
+- **Save as…** uses the app's file-saving dialog. Cancelling creates no saved file.
+- **Reveal** appears after saving and opens the file's location.
+- **Share image…** appears only when the platform reports file-sharing support.
+
+The browser's new-window/download commands and automatic **Copy Subject** action
+are not exposed. Copying a subject would remove its background; it is different
+from copying the whole image and is not currently integrated.
+
+Copied images and text follow your copy-confirmation and clipboard-clearing settings in
+**Privacy & security**. Clipboard clearing is best-effort: if read access is denied
+or the system has changed the PNG representation, the app leaves the clipboard
+untouched rather than overwriting unknown content. Protected images do not allow text selection or copying.
+Press **Escape** or use the close button to return to the conversation.
+
 ## Further reference
 
 [File receiving settings](https://github.com/OctopusGarage/mesh-talk/blob/main/docs/settings.md#receiving-and-saving-files)
+
+## Take a photo
+
+Open the message tools beside the input and choose **Take photo**. Allow camera
+access when prompted. With multiple cameras, choose the camera below the preview.
+Take a photo, then choose **Retake** or **Use photo**. The confirmed photo joins
+pending attachments; add text if needed, then press **Send**.
+
+Taking a photo does not use the microphone. The camera stops after capture or
+when you close the dialog, leave the conversation, or lock/sign out of the app.
+The live self-camera preview may be mirrored; the saved photo preserves the
+camera's original orientation so text remains readable. Photos are captured as
+JPEG with a maximum long edge of 1920 pixels.
+
+If access is denied, allow camera access in your operating system's privacy
+settings and retry. If the camera is unavailable or busy, close other apps using
+it and retry, or choose an existing photo instead.

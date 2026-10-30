@@ -90,37 +90,37 @@ pub(crate) fn spawn_node_runtime<R: tauri::Runtime>(
             },
             mesh_talk_core::node::RuntimeEvents {
                 on_dm: Box::new(move |dm| {
-                    let _ = dm_authority.current(|_| {
-                        crate::events::emit_dm_received(&app_handle_for_dm, dm);
-                    });
+                    crate::events::dispatch_runtime_presentation(
+                        &app_handle_for_dm,
+                        &dm_authority,
+                        move |app| crate::events::emit_dm_received(app, dm),
+                    );
                 }),
                 on_channel: Box::new(move |msg: mesh_talk_core::node::ReceivedChannelMessage| {
-                    let _ = channel_authority.current(|_| {
-                        crate::events::emit_channel_message(
-                            &app_handle_for_channel,
-                            &format!(
-                                "{}:{}:{}",
-                                channel_authority.lease.owner(),
-                                channel_authority.lease.generation(),
-                                channel_authority.ticket
-                            ),
-                            msg,
-                        );
-                    });
+                    let owner = format!(
+                        "{}:{}:{}",
+                        channel_authority.lease.owner(),
+                        channel_authority.lease.generation(),
+                        channel_authority.ticket
+                    );
+                    crate::events::dispatch_runtime_presentation(
+                        &app_handle_for_channel,
+                        &channel_authority,
+                        move |app| crate::events::emit_channel_message(app, &owner, msg),
+                    );
                 }),
                 on_file: Box::new(move |f: mesh_talk_core::node::ReceivedFile| {
-                    let _ = file_authority.current(|_| {
-                        crate::events::emit_file_received(
-                            &app_handle_for_file,
-                            &format!(
-                                "{}:{}:{}",
-                                file_authority.lease.owner(),
-                                file_authority.lease.generation(),
-                                file_authority.ticket
-                            ),
-                            f,
-                        );
-                    });
+                    let owner = format!(
+                        "{}:{}:{}",
+                        file_authority.lease.owner(),
+                        file_authority.lease.generation(),
+                        file_authority.ticket
+                    );
+                    crate::events::dispatch_runtime_presentation(
+                        &app_handle_for_file,
+                        &file_authority,
+                        move |app| crate::events::emit_file_received(app, &owner, f),
+                    );
                 }),
                 on_profile: Box::new(move |p: mesh_talk_core::node::ReceivedProfile| {
                     let _ = profile_authority.current(|_| {

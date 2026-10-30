@@ -6,6 +6,7 @@ import type { CustomizationPack } from "./pack";
 const t = (key: string) =>
   ({
     "message.sticker": "[表情]",
+    "message.image": "图片",
     "message.recalledSummary": "[消息已撤回]",
     "protectedMessage.label": "Protected message",
     "messageFavorites.contentUnavailable": "Content unavailable",
@@ -82,5 +83,14 @@ it("preserves text and ordinary attachments without classifying malformed names 
       { file: { ...file(), name: "mt-sticker-v2-invalid.png" } },
       t,
     ),
-  ).toBe("mt-sticker-v2-invalid.png");
+  ).toBe("[图片]");
 });
+
+it.each(["screenshot.png", "PHOTO.JPG", "animation.gif", "IMG_0001.HEIC"])(
+  "summarizes image %s with a localized label instead of its filename",
+  (name) => {
+    expect(
+      messageSummary({ file: { name, mime: "", size: 42, media: false } }, t),
+    ).toBe("[图片]");
+  },
+);

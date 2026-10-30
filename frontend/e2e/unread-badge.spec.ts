@@ -685,3 +685,112 @@ test("channel mention indicator survives later traffic and clears when the menti
   ).toBeVisible();
   await expect(row).not.toContainText("[Mentioned you]");
 });
+
+test("unread review clears undiscovered senders and hidden channels without hiding later arrivals", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await observeBadge(page);
+  const row = page.getByTestId(`conversation-row-${CHANNEL.id}`);
+  await row.hover();
+  await page.getByTestId(`conversation-actions-${CHANNEL.id}`).click();
+  await page.getByRole("button", { name: "Hide channel", exact: true }).click();
+  await page.evaluate(
+    ({ channel, device }) => {
+      const w = window as unknown as {
+        __mockEmit: (event: string, data: unknown) => void;
+      };
+      w.__mockEmit("channel-message", {
+        channel_id: channel,
+        channel_name: "team",
+        from: device,
+        text: "hidden unread",
+        event_id: "hidden-unread",
+        reply_to: null,
+      });
+      w.__mockEmit("dm-received", {
+        from: "unknown-source",
+        from_name: "Unknown",
+        text: "no conversation yet",
+        reply_to: null,
+      });
+    },
+    { channel: CHANNEL.id, device: BOB.device },
+  );
+  await expect.poll(() => latestBadgeCount(page)).toBe(2);
+  await page.getByTestId("unread-review-trigger").click();
+  const panel = page.getByRole("dialog", {
+    name: "Unread messages",
+    exact: true,
+  });
+  await expect(
+    panel.getByText("Hidden conversation", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    panel.getByText("Waiting to identify sender", { exact: true }),
+  ).toBeVisible();
+  await panel.getByTestId("clear-unread-pending:unknown-source").click();
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await panel
+    .getByRole("button", { name: "Mark all as read", exact: true })
+    .click();
+  await expect(panel.getByText("You're all caught up.")).toBeVisible();
+  await expect.poll(() => latestBadgeCount(page)).toBe(0);
+  await page.evaluate(() => {
+    (
+      window as unknown as {
+        __mockEmit: (event: string, data: unknown) => void;
+      }
+    ).__mockEmit("dm-received", {
+      from: "another-unknown",
+      from_name: "Another",
+      text: "new arrival",
+      reply_to: null,
+    });
+  });
+  await expect.poll(() => latestBadgeCount(page)).toBe(1);
+  await expect(
+    panel.getByText("Waiting to identify sender", { exact: true }),
+  ).toBeVisible();
+  await panel
+    .getByRole("button", { name: "Mark all as read", exact: true })
+    .click();
+  await page.keyboard.press("Escape");
+  await enterChat(page);
+  await page.getByTestId("unread-review-trigger").click();
+  await expect(page.getByText("You're all caught up.")).toBeVisible();
+});
+
+test("unread review exposes failed badge updates and retries the current cleared count", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await observeBadge(page);
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __mockEmit: (event: string, data: unknown) => void;
+      __mockFailNext: (command: string, message: string) => void;
+    };
+    w.__mockFailNext("set_badge", "badge temporarily unavailable");
+    w.__mockEmit("dm-received", {
+      from: "unknown-badge",
+      from_name: "Unknown",
+      text: "retry badge",
+      reply_to: null,
+    });
+  });
+  await page.getByTestId("unread-review-trigger").click();
+  const panel = page.getByRole("dialog", {
+    name: "Unread messages",
+    exact: true,
+  });
+  await expect(panel.getByTestId("unread-badge-error")).toBeVisible();
+  await panel
+    .getByRole("button", { name: "Retry badge update", exact: true })
+    .click();
+  await expect(panel.getByTestId("unread-badge-error")).toHaveCount(0);
+  await panel
+    .getByRole("button", { name: "Mark all as read", exact: true })
+    .click();
+  await expect.poll(() => latestBadgeCount(page)).toBe(0);
+});

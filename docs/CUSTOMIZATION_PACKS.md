@@ -200,8 +200,11 @@ sessions, private sibling reconciliation and encrypted post-office controls.
 Existing MFM3 media and account-history card encodings remain unchanged; older
 peers ignore the optional metadata and retain ordinary file delivery. Retained
 source cards can supply bindings for earlier sends when the original signing
-device is still available. Bindings are persisted in the account's encrypted
-storage and included in recovery snapshots using existing signed-event records.
+device is still available. After account adoption, an existing historical binding
+remains immutable; lazy repair cannot sign an old account's outgoing card with
+the newly loaded account certificate. Bindings are persisted in the account's
+encrypted storage and included in recovery snapshots using existing signed-event
+records.
 
 Every repeated message still needs completion for its exact manifest event.
 After ciphertext reclamation, a cached sticker may complete a new compatible

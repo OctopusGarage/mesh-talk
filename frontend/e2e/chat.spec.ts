@@ -539,6 +539,11 @@ test.describe("Mesh-Talk UI flow", () => {
     await expect(
       page.getByTestId("message-parent-snippet").first(),
     ).toBeVisible();
+    const quote = page.getByTestId("message-parent-snippet").first();
+    await expect(quote).toHaveRole("button");
+    await quote.focus();
+    await page.keyboard.press("Enter");
+    await expect(firstBubble.locator("xpath=..")).toHaveClass(/bg-signal\/10/);
   });
 
   test("search opens, queries, shows results, and navigates", async ({
@@ -778,6 +783,7 @@ test.describe("Mesh-Talk UI flow", () => {
 
     await openSidebarMenuAction(page, "sidebar-nav-settings");
     await selectSettingsCategory(page, "appearance");
+    await selectSettingsCategory(page, "appearance");
     await expect(page.getByTestId("theme-picker")).toBeVisible();
 
     await page.getByTestId("theme-light").click();
@@ -809,6 +815,7 @@ test.describe("Mesh-Talk UI flow", () => {
     ).toBeVisible();
 
     await openSidebarMenuAction(page, "sidebar-nav-settings");
+    await selectSettingsCategory(page, "appearance");
     const lang = page.getByTestId("settings-language-select");
     await lang.selectOption("zh-Hans");
     // Sidebar section label re-renders in Simplified Chinese.

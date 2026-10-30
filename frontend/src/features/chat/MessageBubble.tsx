@@ -1,3 +1,6 @@
+import { canForward } from "./forwarding/selection";
+import { ForwardedRecordPreview } from "./forwarding/ForwardedRecordPreview";
+import { isForwardedRecord } from "@/lib/forwardedRecord";
 import { canCollect } from "./favorites/selection";
 import { ProtectedMessage } from "./ProtectedMessage";
 import {
@@ -49,15 +52,21 @@ import { EMOJIS, renderWithMentions } from "@/lib/mentions";
 import { stickerById } from "@/lib/stickerPacks";
 import { usePacks } from "@/store/packs";
 import type { ReactionInfo } from "@/lib/types";
-import { useChat, captureChatOwnership, type ChatMessage } from "@/store/chat";
+import {
+  useChat,
+  captureChatOwnership,
+  reactionFromMe,
+  type ChatMessage,
+} from "@/store/chat";
 import {
   useFileStatus,
   refreshFileAvailability,
   markUnavailableFileError,
 } from "@/store/fileAvailability";
 import { stickerSummary } from "@/lib/stickerMedia";
-import { messageSticker, messageSummary } from "@/lib/messagePresentation";
+import { messageSticker } from "@/lib/messagePresentation";
 import { MediaSticker } from "./MediaSticker";
+import { ReplyPreview } from "./ReplyPreview";
 import { MediaPreview } from "./MediaPreview";
 import { DeliveryFooter } from "./DeliveryFooter";
 import { fileGlyph, withinInlineCap } from "./mediaFile";
@@ -160,18 +169,19 @@ function FileBubble({
   // below, so it stays visible and savable instead of rendering an empty bubble.
   if (
     !metadataPending &&
-    available &&
+    !approvalNeeded &&
     file.fileConv &&
     file.media &&
     withinInlineCap(file.name, file.size)
   ) {
     return (
-      <div className="max-w-xs">
+      <div data-inline-media="" className="max-w-xs">
         <MediaPreview
           fileConv={file.fileConv}
           name={file.name}
           size={file.size}
           mime={file.mime}
+          readOnly={readOnly}
         />
         {uploadKey && (
           <TransferBar
@@ -186,6 +196,18 @@ function FileBubble({
   // Attachment (or over-cap media): the file card IS the content — name + size + download.
   return (
     <div className="min-w-[12rem] max-w-xs">
+      {!readOnly &&
+        !metadataPending &&
+        !approvalNeeded &&
+        available &&
+        isForwardedRecord(file.name, file.mime) && (
+          <ForwardedRecordPreview
+            fileConv={file.fileConv}
+            name={file.name}
+            size={file.size}
+            mime={file.mime}
+          />
+        )}
       <div className="flex items-center gap-2">
         {fileGlyph(file.name, file.mime)}
         <div className="min-w-0 flex-1">
@@ -310,6 +332,9 @@ function FileBubble({
 export function MessageBubble({
   m,
   parent,
+  onNavigateToParent,
+  parentAuthorName,
+  parentNavigationPending = false,
   showAuthor,
   grouped,
   showTime,
@@ -331,14 +356,19 @@ export function MessageBubble({
   onRecall,
   onReEdit,
   onCollect,
+  onForward,
   onSelectMessages,
   collected = false,
 }: {
   onCollect?: (m: ChatMessage) => void;
+  onForward?: (m: ChatMessage) => void;
   onSelectMessages?: (m: ChatMessage) => void;
   collected?: boolean;
   m: ChatMessage;
   parent: ChatMessage | null;
+  onNavigateToParent?: (id: string) => void;
+  parentAuthorName?: string;
+  parentNavigationPending?: boolean;
   showAuthor: boolean;
   /** Adjacent message from the same person within a short interval. */
   grouped?: boolean;
@@ -362,8 +392,8 @@ export function MessageBubble({
   /** True when this channel message mentions the current user. */
   mentioned?: boolean;
   reactions: ReactionInfo[];
-  // The id that represents "me" in a reaction's `who`: the ACCOUNT id for account
-  // conversations (who is account-keyed there), the device user-id for channels.
+  // Compatibility fallback when the native channel ownership projection is absent:
+  // account ID for account conversations; device ID for channels.
   selfReactionId: string;
   myName: string;
   onReply: (m: ChatMessage) => void;
@@ -599,11 +629,12 @@ export function MessageBubble({
                 data-context-menu=""
                 className={cn(
                   "min-w-0 text-[14px] leading-[1.55]",
-                  // Stickers float without a bubble; everything else gets the chat bubble.
+                  // Stickers float; actual inline media removes its text-bubble shell.
+                  // File cards and consent prompts retain the ordinary bubble.
                   isSticker
                     ? ""
                     : cn(
-                        "rounded-xl px-3.5 py-2.5",
+                        "rounded-xl px-3.5 py-2.5 [&:has([data-inline-media])]:border-0 [&:has([data-inline-media])]:bg-transparent [&:has([data-inline-media])]:p-0",
                         mine
                           ? "rounded-br-sm bg-bubble-own text-[hsl(var(--bubble-own-foreground))]"
                           : "rounded-bl-sm border border-border bg-muted text-foreground",
@@ -612,23 +643,6 @@ export function MessageBubble({
                   m.pending && "opacity-75",
                 )}
               >
-                {parent && (
-                  <div
-                    data-testid="message-parent-snippet"
-                    className={cn(
-                      "mb-1 flex items-center gap-1 rounded-md border px-2 py-1 text-xs",
-                      mine
-                        ? "border-primary-foreground/40 bg-primary-foreground/10"
-                        : "border-signal/50 bg-muted/50",
-                    )}
-                  >
-                    <CornerUpLeft className="h-3 w-3 shrink-0 opacity-70" />
-                    <span className="truncate opacity-80">
-                      {messageSummary(parent, t, installedPacks) ||
-                        t("composer.message")}
-                    </span>
-                  </div>
-                )}
                 {m.protection ? (
                   <ProtectedMessage
                     id={m.id}
@@ -687,6 +701,15 @@ export function MessageBubble({
               </div>
             </ContextMenuTrigger>
             <ContextMenuContent data-testid="message-context-menu">
+              {onForward && canForward(m) && (
+                <ContextMenuItem
+                  data-testid="msg-forward"
+                  onSelect={() => onForward(m)}
+                >
+                  <CornerUpLeft className="h-3.5 w-3.5 opacity-70" />
+                  {t("messageForwarding.forward")}
+                </ContextMenuItem>
+              )}
               {onCollect && canCollect(m) && (
                 <ContextMenuItem
                   data-testid="msg-collect"
@@ -706,7 +729,7 @@ export function MessageBubble({
                   onSelect={() => onSelectMessages(m)}
                 >
                   <ListChecks className="h-3.5 w-3.5 opacity-70" />
-                  {t("messageFavorites.selectMessages")}
+                  {t("messageForwarding.selectMessages")}
                 </ContextMenuItem>
               )}
               <ContextMenuItem
@@ -767,13 +790,34 @@ export function MessageBubble({
           )}
         </div>
 
+        {m.replyTo && (
+          <button
+            type="button"
+            data-testid="message-parent-snippet"
+            aria-label={t("messageFavorites.viewOriginal")}
+            title={t("messageFavorites.viewOriginal")}
+            aria-busy={parentNavigationPending}
+            disabled={!onNavigateToParent || parentNavigationPending}
+            onClick={() => m.replyTo && onNavigateToParent?.(m.replyTo)}
+            className="mt-1 flex min-h-9 max-w-full items-center gap-2 rounded-md bg-muted px-2.5 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default motion-reduce:transition-none"
+          >
+            {parentNavigationPending ? (
+              <span role="status">{t("common.loading")}</span>
+            ) : parent ? (
+              <ReplyPreview message={parent} authorName={parentAuthorName} />
+            ) : (
+              <span>{t("messageFavorites.viewOriginal")}</span>
+            )}
+          </button>
+        )}
+
         {/* reaction chips */}
         {reactions.length > 0 && (
           <div
             className={cn("mt-1 flex flex-wrap gap-1", mine && "justify-end")}
           >
             {reactions.map((r) => {
-              const me = r.who.includes(selfReactionId);
+              const me = reactionFromMe(r, selfReactionId);
               return (
                 <button
                   key={`${r.target}:${r.emoji}`}
@@ -807,7 +851,6 @@ export function MessageBubble({
           isChannel={isChannel}
           isPersonal={isPersonal}
           showTime={showTime}
-          compact={isSticker}
         />
 
         {m.failed && (

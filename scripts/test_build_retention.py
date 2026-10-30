@@ -733,6 +733,10 @@ class RetentionTests(unittest.TestCase):
         (crate / "src/main.rs").write_text("fn main() {}\n")
         (crate / "build.rs").write_text("""
 fn main() {
+    println!("cargo:rerun-if-env-changed=RETENTION_LOCK_PROBE");
+    if std::env::var("RETENTION_LOCK_PROBE").as_deref() != Ok("1") {
+        return;
+    }
     let ready = std::env::var("RETENTION_READY").unwrap();
     let release = std::env::var("RETENTION_RELEASE").unwrap();
     std::fs::write(ready, "ready").unwrap();
@@ -747,6 +751,7 @@ fn main() {
             CARGO_TARGET_DIR=str(self.root / "target"),
             RETENTION_READY=str(ready),
             RETENTION_RELEASE=str(release),
+            RETENTION_LOCK_PROBE="0",
         )
         command = [
             shutil.which("cargo"),
@@ -755,14 +760,25 @@ fn main() {
             "--manifest-path",
             str(crate / "Cargo.toml"),
         ]
+        # Compile/link the fixture before measuring lock acquisition. Changing
+        # the declared environment input reruns the compiled build script under
+        # Cargo's real profile lock without another cold compiler/linker wait.
+        preparation = subprocess.run(
+            command, env=env, capture_output=True, text=True, timeout=300
+        )
+        self.assertEqual(
+            preparation.returncode, 0, preparation.stdout + preparation.stderr
+        )
+        self.assertFalse(ready.exists(), "cold preparation must not arm the probe")
+        env["RETENTION_LOCK_PROBE"] = "1"
         process = subprocess.Popen(
             command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         profile = self.root / "target/debug"
         try:
-            # A cold Windows linker can take longer than 30 seconds on shared
-            # runners. This bounds fixture compilation, not lock acquisition.
-            deadline = time.monotonic() + 120
+            # Only the already-compiled probe and Cargo lock acquisition are
+            # timed here; keep the same bound as the reverse contention probe.
+            deadline = time.monotonic() + 15
             while (
                 not ready.exists()
                 and process.poll() is None

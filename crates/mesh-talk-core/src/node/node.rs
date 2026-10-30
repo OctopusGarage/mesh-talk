@@ -220,11 +220,17 @@ type BlockingTestHook = Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>;
 /// The node: identity + event log + shared roster + an outbound stream of
 /// received DMs. Construct with [`Node::open`]; share as `Arc<Node>`.
 pub struct Node {
+    pub(in crate::node) forwarding: Mutex<super::forwarding::ForwardStore>,
+    pub(in crate::node) forwarding_gate: tokio::sync::Mutex<()>,
     pub(in crate::node) outgoing_requests_gate: tokio::sync::Mutex<()>,
     pub(in crate::node) sessions: super::session_pool::SessionPool,
     pub(in crate::node) expiry_clock_start: (std::time::Instant, u64),
     pub(in crate::node) expiry_first_seen: Mutex<HashMap<EventId, std::time::Instant>>,
     pub(in crate::node) runtime_work: Arc<super::runtime_work::RuntimeWork>,
+    #[cfg(test)]
+    pub(in crate::node) control_fanout_start_test_hook: BlockingTestHook,
+    #[cfg(test)]
+    pub(in crate::node) group_file_asset_recv_test_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
     #[cfg(test)]
@@ -241,6 +247,12 @@ pub struct Node {
     pub(in crate::node) empty_file_cache_self_wakes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(in crate::node) accepted_hook: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    #[cfg(test)]
+    pub(in crate::node) account_session_test_hook:
+        Mutex<Option<Arc<super::account_session::AccountSessionTestHook>>>,
+    #[cfg(test)]
+    pub(in crate::node) account_client_test_hook:
+        Mutex<Option<Arc<super::account_session::AccountClientTestHook>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     /// Host preference. Relay selection and every relay dial consult this live flag.
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
@@ -265,7 +277,18 @@ pub struct Node {
         Mutex<super::account_transition_store::AccountTransitionStore>,
     pub(in crate::node) account_documents:
         Mutex<super::account_documents::store::AccountDocumentStore>,
+    pub(in crate::node) group_file_prepare_gate: Arc<tokio::sync::Mutex<()>>,
+    pub(in crate::node) group_operations:
+        Mutex<super::account_group::operations::journal::OperationJournal>,
     pub(in crate::node) account_document_updates: tokio::sync::watch::Sender<u64>,
+    pub(in crate::node) account_group_versions:
+        Mutex<HashMap<String, super::account_documents::sync::GroupProtocolSupport>>,
+    pub(in crate::node) operation_epoch: u64,
+    pub(in crate::node) operation_queries:
+        Mutex<HashMap<super::AccountGroupOperationId, (u64, std::time::Instant)>>,
+    pub(in crate::node) operation_seen: Mutex<HashMap<String, [u8; 32]>>,
+    pub(in crate::node) group_operation_versions:
+        Mutex<HashMap<String, super::account_documents::sync::GroupOperationSupport>>,
     pub(in crate::node) account_suppression: Mutex<super::account_suppression::AccountSuppression>,
     pub(in crate::node) favorites: Mutex<super::favorites::FavoriteStore>,
     pub(in crate::node) favorite_media: super::media_store::MediaStore,
@@ -303,6 +326,7 @@ pub struct Node {
     pub(in crate::node) pending_channel_plaintext: Mutex<super::serving::PendingChannelPlaintext>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
+    pub(in crate::node) group_metadata_cache: Mutex<super::group_metadata::MetadataCache>,
     #[cfg(test)]
     pub(in crate::node) channel_projection_replays: std::sync::atomic::AtomicUsize,
     /// Fixed read-only summaries recovered from previous devices at open time.
@@ -338,6 +362,7 @@ pub struct Node {
     pub(in crate::node) file_pull_notify: tokio::sync::Notify,
     pub(in crate::node) file_pull_cursor: std::sync::atomic::AtomicUsize,
     pub(in crate::node) file_pull_gate: tokio::sync::Mutex<()>,
+    pub(super) group_file_delivery: super::group_file_delivery::GroupFileDelivery,
     pub(in crate::node) relay_retry_after: Mutex<HashMap<String, std::time::Instant>>,
     pub(in crate::node) relay_drain_cursor: Mutex<HashMap<String, usize>>,
     pub(in crate::node) ui_changes: tokio::sync::watch::Sender<u64>,
@@ -592,7 +617,7 @@ impl Node {
             &dir.join("account-profiles.log"),
             password,
         )?);
-        let recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        let mut recalls = recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let attachment_consent = consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recovery_origins = origin_res
@@ -604,6 +629,13 @@ impl Node {
         let recovered_sent_ids =
             recovered_ids_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let mut dm_ratchet = DmRatchet::new(sessions);
+        let mut group_operations =
+            super::account_group::operations::journal::OperationJournal::open(
+                dir,
+                password,
+                account.public().ed25519_pub,
+                identity.public(),
+            )?;
         let mut delivery = super::delivery_store::DeliveryStore::open_for_log(log_path, password)?;
         delivery.bind_profile(
             log_path,
@@ -612,17 +644,42 @@ impl Node {
             &account.account_id(),
         )?;
         delivery.validate_owner(&identity.public(), &account.account_id())?;
-        while delivery
-            .recover_next_with_channels(
-                &mut dm_ratchet,
-                &mut log,
-                &mut sentlog,
-                &mut received,
-                Some(&mut received_files),
-                Some(&mut channel_senders),
-            )?
-            .is_some()
-        {}
+        loop {
+            if let Some(tx) = delivery.pending_transactions().first() {
+                delivery.validate_message_action_transaction(tx, &log, &identity)?;
+            }
+            let recall = delivery
+                .pending_transactions()
+                .first()
+                .and_then(|tx| match tx.body() {
+                    super::delivery_store::DeliveryTransaction::ChannelMessageAction {
+                        recall,
+                        ..
+                    } => recall.clone(),
+                    _ => None,
+                });
+            if delivery
+                .recover_next_with_group_operations(
+                    &mut dm_ratchet,
+                    &mut log,
+                    &mut sentlog,
+                    &mut received,
+                    Some(&mut received_files),
+                    Some(&mut channel_senders),
+                    Some(&mut |reference, events| {
+                        super::account_group::operations::persist_action_recall_completion(
+                            reference,
+                            recall.as_ref(),
+                            &mut recalls,
+                        )?;
+                        group_operations.complete(reference, events)
+                    }),
+                )?
+                .is_none()
+            {
+                break;
+            }
+        }
         received_files
             .remove_where(|entry| delivery.file_erased(entry.conversation, entry.event_id))?;
         let delivery_control_ids = delivery.control_ids();
@@ -766,6 +823,10 @@ impl Node {
         let (profile_tx, profile_rx) = mpsc::unbounded_channel::<ReceivedProfile>();
         let (call_signal_tx, call_signal_rx) =
             mpsc::unbounded_channel::<crate::node::call::ReceivedCallSignal>();
+        let forwarding = super::forwarding::ForwardStore::open(
+            &dir.join(format!("forwarding-{}.log", account.account_id())),
+            password,
+        )?;
         let favorites = super::favorites::FavoriteStore::open(
             &dir.join(format!("favorites-{}.log", account.account_id())),
             password,
@@ -823,6 +884,10 @@ impl Node {
             expiry_first_seen: Mutex::new(HashMap::new()),
             runtime_work: Arc::new(super::runtime_work::RuntimeWork::default()),
             #[cfg(test)]
+            control_fanout_start_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            group_file_asset_recv_test_hook: Mutex::new(None),
+            #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
             #[cfg(test)]
             profile_read_hook: Mutex::new(None),
@@ -838,13 +903,24 @@ impl Node {
             empty_file_cache_self_wakes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             accepted_hook: Mutex::new(None),
+            #[cfg(test)]
+            account_session_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            account_client_test_hook: Mutex::new(None),
             privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),
             identity,
             account,
             account_devices: Mutex::new(account_devices),
             account_transitions: Mutex::new(account_transitions),
             account_documents: Mutex::new(account_documents),
+            group_file_prepare_gate: Arc::new(tokio::sync::Mutex::new(())),
+            group_operations: Mutex::new(group_operations),
             account_document_updates,
+            account_group_versions: Mutex::new(HashMap::new()),
+            group_operation_versions: Mutex::new(HashMap::new()),
+            operation_epoch: rand_core::RngCore::next_u64(&mut rand_core::OsRng),
+            operation_queries: Mutex::new(HashMap::new()),
+            operation_seen: Mutex::new(HashMap::new()),
             account_suppression: Mutex::new(account_suppression),
             favorites: Mutex::new(favorites),
             favorite_media,
@@ -883,11 +959,14 @@ impl Node {
             recovery_origins,
             recovery_contacts,
             recovered_sent_ids: Mutex::new(recovered_sent_ids),
+            forwarding: Mutex::new(forwarding),
+            forwarding_gate: tokio::sync::Mutex::new(()),
             outgoing_requests_gate: tokio::sync::Mutex::new(()),
             channel_migration: Mutex::new(channel_migration),
             channel_senders: Mutex::new(channel_senders),
             channel_custody: Mutex::new(channel_custody),
             channel_projection_cache: Mutex::new(Default::default()),
+            group_metadata_cache: Mutex::new(Default::default()),
             #[cfg(test)]
             channel_projection_replays: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -900,6 +979,7 @@ impl Node {
             file_pull_notify: tokio::sync::Notify::new(),
             file_pull_cursor: std::sync::atomic::AtomicUsize::new(0),
             file_pull_gate: tokio::sync::Mutex::new(()),
+            group_file_delivery: Default::default(),
             relay_retry_after: Mutex::new(HashMap::new()),
             relay_drain_cursor: Mutex::new(HashMap::new()),
             ui_changes: tokio::sync::watch::channel(0).0,
@@ -947,8 +1027,17 @@ impl Node {
         node.reconcile_account_profiles_on_open().map_err(|error| {
             LogError::CorruptFile(format!("account profile projection: {error}"))
         })?;
+        if let Err(error) = node.project_public_profile_documents() {
+            log::debug!("contact profile projection deferred: {error}");
+        }
+        if let Err(error) = node.publish_public_profile_documents() {
+            log::debug!("contact profile publication deferred: {error}");
+        }
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
+        if node.retry_conversation_personal_cleanup().is_err() {
+            log::debug!("personal conversation cleanup remains pending");
+        }
         node.queue_approved_incomplete_files();
         Ok(node)
     }
@@ -1180,10 +1269,13 @@ impl Node {
     }
 
     pub fn channel_activity(&self, channel: ConversationId) -> Vec<super::ChannelActivity> {
-        self.channels
-            .lock()
-            .expect("channels mutex not poisoned")
-            .activity(&channel)
+        {
+            let book = self.channels.lock().expect("channels mutex not poisoned");
+            if book.state(&channel).is_some() {
+                return book.activity(&channel);
+            }
+        }
+        self.shared_group_activity(channel)
     }
 
     /// The current owner of `channel`, or empty if the channel is unknown.
@@ -1215,6 +1307,30 @@ impl Node {
         ciphertext: Vec<u8>,
         required_profile_parent: Option<EventId>,
     ) -> Result<(u64, EventId), NodeError> {
+        self.append_event_checked(channel, kind, ciphertext, required_profile_parent, |_| {
+            Ok(())
+        })
+    }
+
+    pub(in crate::node) fn append_event_if(
+        &self,
+        channel: ConversationId,
+        kind: EventKind,
+        ciphertext: Vec<u8>,
+        check: impl FnOnce(&super::delivery_store::DeliveryStore) -> Result<(), NodeError>,
+    ) -> Result<u64, NodeError> {
+        self.append_event_checked(channel, kind, ciphertext, None, check)
+            .map(|(seq, _)| seq)
+    }
+
+    fn append_event_checked(
+        &self,
+        channel: ConversationId,
+        kind: EventKind,
+        ciphertext: Vec<u8>,
+        required_profile_parent: Option<EventId>,
+        check: impl FnOnce(&super::delivery_store::DeliveryStore) -> Result<(), NodeError>,
+    ) -> Result<(u64, EventId), NodeError> {
         if self
             .channels
             .lock()
@@ -1234,6 +1350,7 @@ impl Node {
         let mut delivery = self.delivery.lock().expect("delivery lock not poisoned");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
+        check(&delivery)?;
         let self_author = Author::from_ed25519(self.identity.public().ed25519_pub);
         let mut log = self.log.lock().expect("log mutex not poisoned");
         let (mut parents, lamport) = log.prepare(&channel).map_err(NodeError::Log)?;

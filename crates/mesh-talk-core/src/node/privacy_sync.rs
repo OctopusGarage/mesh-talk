@@ -1218,6 +1218,9 @@ impl GuardedSyncStore<'_> {
                 visible.iter().map(|event| event.id).collect(),
             ),
             len: visible.len(),
+            requires_v5: visible
+                .iter()
+                .any(|event| event.kind == EventKind::ChannelMetadata),
             requires_v4: visible.iter().any(|event| {
                 matches!(
                     event.kind,
@@ -1470,6 +1473,23 @@ impl GuardedSyncStore<'_> {
     }
 }
 impl SyncStore for GuardedSyncStore<'_> {
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        if let Some(metadata) = self.public_projection_metadata(conversation) {
+            return metadata.requires_v5;
+        }
+        if !self
+            .node
+            .log
+            .lock()
+            .expect("log lock")
+            .requires_channel_v5(conversation)
+        {
+            return false;
+        }
+        self.visible(conversation)
+            .iter()
+            .any(|event| event.kind == EventKind::ChannelMetadata)
+    }
     fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
         if let Some(metadata) = self.public_projection_metadata(conversation) {
             return metadata.requires_v4;
@@ -1774,6 +1794,7 @@ impl SyncStore for GuardedSyncStore<'_> {
             EventKind::MembershipChange
                 | EventKind::ChannelAccountAuthority
                 | EventKind::ChannelDeviceInheritance
+                | EventKind::ChannelMetadata
                 | EventKind::ChannelAccept
                 | EventKind::ChannelLeave
                 | EventKind::ChannelOwnerTransfer

@@ -389,3 +389,94 @@ it("rejects obsolete composer snapshots and keeps policy edited during admission
   expect(store.getState().texts["account:a"]).toBe("saved");
   expect(store.getState().protections["account:a"]).toBe("authenticate");
 });
+
+it("discard prevents a queued draft from restoring a deleted chat and preserves other drafts", async () => {
+  const { api, store } = fixture();
+  await store.getState().start("alice", 1, "account-one");
+  let finish!: () => void;
+  api.save.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = () => resolve(undefined);
+      }),
+  );
+  store.getState().edit("alice", 1, "account:other", "keep");
+  const first = store.getState().flush();
+  await Promise.resolve();
+  store.getState().edit("alice", 1, "channel:deleted", "must not return");
+  const queued = store.getState().flush();
+  store.getState().discard("alice", 1, "channel:deleted");
+  finish();
+  await first;
+  await queued;
+  expect(
+    api.save.mock.calls.every((call) => !call[5]?.["channel:deleted"]),
+  ).toBe(true);
+  expect(store.getState().texts["channel:deleted"]).toBeUndefined();
+  expect(store.getState().texts["account:other"]).toBe("keep");
+});
+
+it("discard retires an initial load that was captured before imported deletion", async () => {
+  const { api, store } = fixture();
+  let finish!: (value: {
+    session: string;
+    drafts: Record<string, string>;
+  }) => void;
+  api.load.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const loading = store.getState().start("alice", 1, "account-one");
+  store.getState().discard("alice", 1, "channel:gone");
+  finish({
+    session: "1",
+    drafts: { "channel:gone": "old", "account:keep": "keep" },
+  });
+  await loading;
+  expect(store.getState().texts).toEqual({ "account:keep": "keep" });
+});
+
+it("discard retires a refresh captured before imported deletion", async () => {
+  const { api, store } = fixture();
+  await store.getState().start("alice", 1, "account-one");
+  let finish!: (value: {
+    session: string;
+    drafts: Record<string, string>;
+  }) => void;
+  api.load.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const refreshing = store.getState().refresh();
+  store.getState().discard("alice", 1, "account:a");
+  finish({ session: "1", drafts: { "account:a": "old" } });
+  await refreshing;
+  expect(store.getState().texts["account:a"]).toBeUndefined();
+});
+
+it("does not admit text or protection edits before initial draft loading completes", async () => {
+  const { api, store } = fixture();
+  let finish!: (value: {
+    session: string;
+    drafts: Record<string, string>;
+  }) => void;
+  api.load.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const loading = store.getState().start("alice", 1, "account-one");
+  store.getState().edit("alice", 1, "account:a", "unsupported early edit");
+  store.getState().setProtection("alice", 1, "account:a", "click");
+  expect(store.getState().texts).toEqual({});
+  expect(store.getState().protections).toEqual({});
+  finish({ session: "1", drafts: { "account:a": "saved" } });
+  await loading;
+  expect(store.getState().texts["account:a"]).toBe("saved");
+  expect(store.getState().protections).toEqual({});
+});

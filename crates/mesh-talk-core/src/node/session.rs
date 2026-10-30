@@ -136,10 +136,15 @@ enum SyncWire {
     FileMessageIdentitiesResponse {
         bundles: Vec<crate::eventlog::Event>,
     },
+    /// Encrypted owner group metadata requires kind 19.
+    FpRequestV5(FpRequest),
+    RequestV5(SyncRequest),
+    FollowupV5(SyncFollowup),
 }
 
-fn supports_event_kind(kind: EventKind, v2: bool, v3: bool, v4: bool) -> bool {
+fn supports_event_kind(kind: EventKind, v2: bool, v3: bool, v4: bool, v5: bool) -> bool {
     match kind {
+        EventKind::ChannelMetadata => v5,
         EventKind::ChannelAccountAuthority | EventKind::ChannelDeviceInheritance => v4,
         EventKind::ChannelHistoryPolicy | EventKind::ChannelJoinHistory => v3,
         EventKind::ChannelReplica => v2,
@@ -149,7 +154,8 @@ fn supports_event_kind(kind: EventKind, v2: bool, v3: bool, v4: bool) -> bool {
 
 #[cfg(test)]
 pub(in crate::node) fn is_followup(bytes: &[u8], conversation: ConversationId) -> bool {
-    matches!(decode(bytes), Ok(SyncWire::Followup(frame) | SyncWire::FollowupV2(frame) | SyncWire::FollowupV3(frame) | SyncWire::FollowupV4(frame)) if frame.conversation == conversation)
+    matches!(decode(bytes), Ok(SyncWire::Followup(frame) | SyncWire::FollowupV2(frame) | SyncWire::FollowupV3(frame) | SyncWire::FollowupV4(frame)
+            | SyncWire::FollowupV5(frame)) if frame.conversation == conversation)
 }
 
 #[cfg(test)]
@@ -159,7 +165,8 @@ pub(in crate::node) fn round_request_conversation(bytes: &[u8]) -> Option<Conver
             SyncWire::Request(request)
             | SyncWire::RequestV2(request)
             | SyncWire::RequestV3(request)
-            | SyncWire::RequestV4(request),
+            | SyncWire::RequestV4(request)
+            | SyncWire::RequestV5(request),
         ) => Some(request.conversation),
         _ => None,
     }
@@ -178,7 +185,8 @@ pub(super) fn sticker_test_frame(bytes: &[u8], file: ConversationId) -> (bool, u
             SyncWire::Followup(frame)
             | SyncWire::FollowupV2(frame)
             | SyncWire::FollowupV3(frame)
-            | SyncWire::FollowupV4(frame),
+            | SyncWire::FollowupV4(frame)
+            | SyncWire::FollowupV5(frame),
         ) => (false, frame.events),
         _ => return (false, 0),
     };
@@ -200,10 +208,12 @@ pub(in crate::node) fn requests_response(bytes: &[u8]) -> bool {
             | SyncWire::RequestV2(_)
             | SyncWire::RequestV3(_)
             | SyncWire::RequestV4(_)
+            | SyncWire::RequestV5(_)
             | SyncWire::FpRequest(_)
             | SyncWire::FpRequestV2(_)
             | SyncWire::FpRequestV3(_)
             | SyncWire::FpRequestV4(_)
+            | SyncWire::FpRequestV5(_)
             | SyncWire::DurableHaveRequest { .. }
             | SyncWire::FileConsentRequest { .. }
             | SyncWire::SignedFileConsentRequest { .. }
@@ -316,6 +326,19 @@ where
             stored,
         } if c == conversation && id == event_id => Ok(stored),
         _ => Err(SessionError::UnexpectedMessage),
+    }
+}
+
+#[cfg(test)]
+pub(in crate::node) fn durable_have_query_for_test(
+    bytes: &[u8],
+) -> Option<(ConversationId, EventId)> {
+    match decode(bytes).ok()? {
+        SyncWire::DurableHaveRequest {
+            conversation,
+            event_id,
+        } => Some((conversation, event_id)),
+        _ => None,
     }
 }
 
@@ -574,6 +597,7 @@ pub(in crate::node) struct SyncProgress {
     v2: bool,
     v3: bool,
     v4: bool,
+    v5: bool,
     rounds: usize,
     previous_push: std::collections::HashSet<EventId>,
     total: ApplyReport,
@@ -623,7 +647,7 @@ impl SyncProgress {
         // only skip a diff — never corrupt — so this is safe.)
         if !self.started {
             self.started = true;
-            let (fp, local_count, local_v2, local_v3, local_v4) = {
+            let (fp, local_count, local_v2, local_v3, local_v4, local_v5) = {
                 let store = store.lock().expect("store mutex not poisoned");
                 let (fp, count) = store.fingerprint_and_len(&conversation);
                 (
@@ -632,17 +656,21 @@ impl SyncProgress {
                     store.requires_channel_v2(&conversation),
                     store.requires_channel_v3(&conversation),
                     store.requires_channel_v4(&conversation),
+                    store.requires_channel_v5(&conversation),
                 )
             };
-            self.v2 |= local_v2 || local_v3 || local_v4;
-            self.v3 |= local_v3 || local_v4;
-            self.v4 |= local_v4;
+            self.v2 |= local_v2 || local_v3 || local_v4 || local_v5;
+            self.v3 |= local_v3 || local_v4 || local_v5;
+            self.v4 |= local_v4 || local_v5;
+            self.v5 |= local_v5;
             let request = FpRequest {
                 conversation,
                 fingerprint: fp,
             };
             channel
-                .send(&encode(&if self.v4 {
+                .send(&encode(&if self.v5 {
+                    SyncWire::FpRequestV5(request)
+                } else if self.v4 {
                     SyncWire::FpRequestV4(request)
                 } else if self.v3 {
                     SyncWire::FpRequestV3(request)
@@ -653,7 +681,8 @@ impl SyncProgress {
                 })?)
                 .await?;
             match decode(&channel.recv().await?)? {
-                SyncWire::UpgradeRequired { conversation: c } if c == conversation && !self.v4 => {
+                SyncWire::UpgradeRequired { conversation: c } if c == conversation && !self.v5 => {
+                    self.v5 = self.v4;
                     self.v4 = self.v3;
                     self.v3 = self.v2;
                     self.v2 = true;
@@ -697,7 +726,9 @@ impl SyncProgress {
             have: Vec::new(),
         };
         channel
-            .send(&encode(&if self.v4 {
+            .send(&encode(&if self.v5 {
+                SyncWire::RequestV5(request)
+            } else if self.v4 {
                 SyncWire::RequestV4(request)
             } else if self.v3 {
                 SyncWire::RequestV3(request)
@@ -712,7 +743,8 @@ impl SyncProgress {
         // Response carries the (bounded) events; the responder's have is streamed after.
         let mut response = match decode(&channel.recv().await?)? {
             SyncWire::Response(r) => r,
-            SyncWire::UpgradeRequired { conversation: c } if c == conversation && !self.v4 => {
+            SyncWire::UpgradeRequired { conversation: c } if c == conversation && !self.v5 => {
+                self.v5 = self.v4;
                 self.v4 = self.v3;
                 self.v3 = self.v2;
                 self.v2 = true;
@@ -724,7 +756,7 @@ impl SyncProgress {
         if response.conversation != conversation
             || response.events.iter().any(|event| {
                 event.conversation_id != conversation
-                    || !supports_event_kind(event.kind, self.v2, self.v3, self.v4)
+                    || !supports_event_kind(event.kind, self.v2, self.v3, self.v4, self.v5)
             })
         {
             return Err(SessionError::UnexpectedMessage);
@@ -755,21 +787,27 @@ impl SyncProgress {
         let needs_v3 = followups
             .iter()
             .flat_map(|frame| &frame.events)
-            .any(|event| !supports_event_kind(event.kind, true, false, false));
+            .any(|event| !supports_event_kind(event.kind, true, false, false, false));
         let needs_v4 = followups
             .iter()
             .flat_map(|frame| &frame.events)
-            .any(|event| !supports_event_kind(event.kind, true, true, false));
+            .any(|event| !supports_event_kind(event.kind, true, true, false, false));
+        let needs_v5 = followups
+            .iter()
+            .flat_map(|frame| &frame.events)
+            .any(|event| event.kind == EventKind::ChannelMetadata);
         let unsupported = followups
             .iter()
             .flat_map(|frame| &frame.events)
-            .any(|event| !supports_event_kind(event.kind, self.v2, self.v3, self.v4));
+            .any(|event| !supports_event_kind(event.kind, self.v2, self.v3, self.v4, self.v5));
         if unsupported {
             let empty = SyncFollowup {
                 conversation,
                 events: Vec::new(),
             };
-            let wire = if self.v4 {
+            let wire = if self.v5 {
+                SyncWire::FollowupV5(empty)
+            } else if self.v4 {
                 SyncWire::FollowupV4(empty)
             } else if self.v3 {
                 SyncWire::FollowupV3(empty)
@@ -784,6 +822,7 @@ impl SyncProgress {
             self.v2 = true;
             self.v3 |= needs_v3;
             self.v4 |= needs_v4;
+            self.v5 |= needs_v5;
             self.started = false;
             self.previous_push.clear();
             return Ok(false);
@@ -817,7 +856,9 @@ impl SyncProgress {
         }
         for followup in followups {
             channel
-                .send(&encode(&if self.v4 {
+                .send(&encode(&if self.v5 {
+                    SyncWire::FollowupV5(followup)
+                } else if self.v4 {
                     SyncWire::FollowupV4(followup)
                 } else if self.v3 {
                     SyncWire::FollowupV3(followup)
@@ -1003,9 +1044,11 @@ where
         SyncWire::Request(request)
         | SyncWire::RequestV2(request)
         | SyncWire::RequestV3(request)
-        | SyncWire::RequestV4(request) => {
+        | SyncWire::RequestV4(request)
+        | SyncWire::RequestV5(request) => {
             let conversation = request.conversation;
-            let v4 = matches!(decode(bytes)?, SyncWire::RequestV4(_));
+            let v5 = matches!(decode(bytes)?, SyncWire::RequestV5(_));
+            let v4 = v5 || matches!(decode(bytes)?, SyncWire::RequestV4(_));
             let v3 = v4 || matches!(decode(bytes)?, SyncWire::RequestV3(_));
             let v2 = v3 || matches!(decode(bytes)?, SyncWire::RequestV2(_));
             // The Request's inline have is empty on the networked path; read the
@@ -1017,6 +1060,7 @@ where
                 if (!v2 && store.requires_channel_v2(&conversation))
                     || (!v3 && store.requires_channel_v3(&conversation))
                     || (!v4 && store.requires_channel_v4(&conversation))
+                    || (!v5 && store.requires_channel_v5(&conversation))
                 {
                     None
                 } else {
@@ -1024,7 +1068,7 @@ where
                     response
                         .events
                         .iter()
-                        .all(|event| supports_event_kind(event.kind, v2, v3, v4))
+                        .all(|event| supports_event_kind(event.kind, v2, v3, v4, v5))
                         .then_some(response)
                 }
             };
@@ -1048,14 +1092,16 @@ where
         SyncWire::Followup(followup)
         | SyncWire::FollowupV2(followup)
         | SyncWire::FollowupV3(followup)
-        | SyncWire::FollowupV4(followup) => {
+        | SyncWire::FollowupV4(followup)
+        | SyncWire::FollowupV5(followup) => {
             let conversation = followup.conversation;
-            let v4 = matches!(decode(bytes)?, SyncWire::FollowupV4(_));
+            let v5 = matches!(decode(bytes)?, SyncWire::FollowupV5(_));
+            let v4 = v5 || matches!(decode(bytes)?, SyncWire::FollowupV4(_));
             let v3 = v4 || matches!(decode(bytes)?, SyncWire::FollowupV3(_));
             let v2 = v3 || matches!(decode(bytes)?, SyncWire::FollowupV2(_));
             if followup.events.iter().any(|event| {
                 event.conversation_id != conversation
-                    || !supports_event_kind(event.kind, v2, v3, v4)
+                    || !supports_event_kind(event.kind, v2, v3, v4, v5)
             }) {
                 return Err(SessionError::UnexpectedMessage);
             }
@@ -1071,11 +1117,13 @@ where
         SyncWire::FpRequest(req)
         | SyncWire::FpRequestV2(req)
         | SyncWire::FpRequestV3(req)
-        | SyncWire::FpRequestV4(req) => {
+        | SyncWire::FpRequestV4(req)
+        | SyncWire::FpRequestV5(req) => {
             // Compare the requester's whole-set digest to ours. On match the requester
             // skips the full exchange; on mismatch it follows up with a normal Request.
             let conversation = req.conversation;
-            let v4 = matches!(decode(bytes)?, SyncWire::FpRequestV4(_));
+            let v5 = matches!(decode(bytes)?, SyncWire::FpRequestV5(_));
+            let v4 = v5 || matches!(decode(bytes)?, SyncWire::FpRequestV4(_));
             let v3 = v4 || matches!(decode(bytes)?, SyncWire::FpRequestV3(_));
             let v2 = v3 || matches!(decode(bytes)?, SyncWire::FpRequestV2(_));
             let matched = {
@@ -1083,6 +1131,7 @@ where
                 if (!v2 && store.requires_channel_v2(&conversation))
                     || (!v3 && store.requires_channel_v3(&conversation))
                     || (!v4 && store.requires_channel_v4(&conversation))
+                    || (!v5 && store.requires_channel_v5(&conversation))
                 {
                     None
                 } else {
@@ -1588,11 +1637,77 @@ mod tests {
             (SyncWire::FpRequestV4(fp()), 20),
             (SyncWire::RequestV4(request()), 21),
             (SyncWire::FollowupV4(followup()), 22),
+            (SyncWire::FpRequestV5(fp()), 29),
+            (SyncWire::RequestV5(request()), 30),
+            (SyncWire::FollowupV5(followup()), 31),
         ] {
             let encoded = encode(&wire).unwrap();
             assert_eq!(&encoded[..4], &tag.to_le_bytes());
             assert!(decode(&encoded).is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn group_metadata_requires_v5_before_fingerprint_or_content_transfer() {
+        let alice = DeviceIdentity::generate();
+        let bob = DeviceIdentity::generate();
+        let event = Event::new(
+            &bob,
+            conv(),
+            1,
+            vec![],
+            1,
+            0,
+            EventKind::ChannelMetadata,
+            vec![1],
+        );
+        let (a, b) = tokio::io::duplex(65536);
+        let server = tokio::spawn(async move {
+            let mut channel = SecureChannel::accept(b, &bob).await.unwrap();
+            let mut log = EventLog::default();
+            log.append(event).unwrap();
+            let store = Mutex::new(log);
+            for _ in 0..8 {
+                serve_one(&mut channel, &store).await.unwrap();
+            }
+        });
+        let mut channel = SecureChannel::connect(a, &alice, None).await.unwrap();
+        for version in 1..=4 {
+            let probe = FpRequest {
+                conversation: conv(),
+                fingerprint: [0; 32],
+            };
+            let wire = match version {
+                1 => SyncWire::FpRequest(probe),
+                2 => SyncWire::FpRequestV2(probe),
+                3 => SyncWire::FpRequestV3(probe),
+                _ => SyncWire::FpRequestV4(probe),
+            };
+            channel.send(&encode(&wire).unwrap()).await.unwrap();
+            assert!(matches!(
+                decode(&channel.recv().await.unwrap()).unwrap(),
+                SyncWire::UpgradeRequired { .. }
+            ));
+            let request = SyncRequest {
+                conversation: conv(),
+                have: vec![],
+            };
+            let wire = match version {
+                1 => SyncWire::Request(request),
+                2 => SyncWire::RequestV2(request),
+                3 => SyncWire::RequestV3(request),
+                _ => SyncWire::RequestV4(request),
+            };
+            channel.send(&encode(&wire).unwrap()).await.unwrap();
+            send_have(&mut channel, conv(), &[], SyncWire::ReqHave)
+                .await
+                .unwrap();
+            assert!(matches!(
+                decode(&channel.recv().await.unwrap()).unwrap(),
+                SyncWire::UpgradeRequired { .. }
+            ));
+        }
+        server.await.unwrap();
     }
 
     #[tokio::test]

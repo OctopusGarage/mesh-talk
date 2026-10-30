@@ -1,8 +1,8 @@
 import { DeliveryDetails } from "./DeliveryDetails";
 import { useAuth } from "@/store/auth";
-import { Timer } from "lucide-react";
+import { Check, Copy, Inbox, Timer } from "lucide-react";
+import { MessageStatus } from "./MessageStatus";
 import { useChat } from "@/store/chat";
-import { useId } from "react";
 import { useTranslation } from "react-i18next";
 import { formatTime } from "@/lib/format";
 import type { ChatMessage } from "@/store/chat";
@@ -13,16 +13,13 @@ export function DeliveryFooter({
   isChannel,
   isPersonal = false,
   showTime = true,
-  compact = false,
 }: {
   message: ChatMessage;
   isChannel: boolean;
   isPersonal?: boolean;
   showTime?: boolean;
-  compact?: boolean;
 }) {
   const { t } = useTranslation();
-  const tooltip = useId();
   // A different message, conversation or session owns a fresh, closed disclosure.
   const authScope = useAuth((s) => `${s.user?.id ?? ""}:${s.generation}`);
   const chatScope = useChat(
@@ -111,7 +108,9 @@ export function DeliveryFooter({
   )
     return null;
   return (
-    <span className="mt-1 flex max-w-full flex-wrap items-center gap-x-1 gap-y-0.5 px-1 text-[11px] tabular-nums text-muted-foreground">
+    <div
+      className={`mt-1 flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-1 gap-y-0.5 px-1 text-[11px] tabular-nums text-muted-foreground ${message.fromMe ? "justify-end" : ""}`}
+    >
       {seconds !== null && (
         <span
           data-testid="message-expiry"
@@ -142,61 +141,53 @@ export function DeliveryFooter({
         </span>
       )}
       {delivery === "awaiting" && (
-        <DeliveryDetails key={detailsKey} message={message} compact={compact} />
+        <DeliveryDetails key={detailsKey} message={message} />
       )}
       {delivery === "delivered" && (
-        <span
-          className="group relative inline-flex items-center gap-1"
-          tabIndex={0}
-          role="img"
-          aria-label={label}
-          aria-describedby={tooltip}
-          data-delivery={delivery}
+        <MessageStatus
+          key={`${detailsKey}:delivered`}
+          label={label}
+          delivery={delivery}
+          icon={<Check className="h-3 w-3" aria-hidden="true" />}
         >
-          <span aria-hidden="true">{delivery === "delivered" ? "✓" : "◷"}</span>
-          {message.file && !compact && <span aria-hidden="true">{label}</span>}
-          <span
-            id={tooltip}
-            role="tooltip"
-            className="pointer-events-none absolute bottom-full right-0 z-10 mb-1 hidden w-56 rounded border bg-popover p-2 font-sans text-xs text-popover-foreground shadow group-hover:block group-focus:block"
-          >
-            {label} · {detail}
-          </span>
-        </span>
+          {() => <p>{detail}</p>}
+        </MessageStatus>
       )}
       {custody !== undefined && (
-        <span
-          className="group relative inline-flex items-center gap-1"
-          tabIndex={0}
-          role="img"
-          aria-label={custodyLabel}
-          aria-describedby={tooltip}
-          data-custody={custody}
+        <MessageStatus
+          key={`${detailsKey}:custody:${custody}:${postOfficeOnly}`}
+          label={custodyLabel}
+          custody={custody}
+          icon={
+            postOfficeOnly ? (
+              <Inbox className="h-3 w-3" aria-hidden="true" />
+            ) : (
+              <Copy className="h-3 w-3" aria-hidden="true" />
+            )
+          }
+          count={
+            custody === "unknown"
+              ? "?"
+              : !postOfficeOnly && custody > 0
+                ? custody === 1
+                  ? "1"
+                  : "2+"
+                : undefined
+          }
         >
-          {custody !== "unknown" && (
-            <span aria-hidden="true">
-              {custody === 0 ? "◷" : custody === 1 ? "✓" : "✓✓"}
-            </span>
+          {() => (
+            <p>
+              {t(
+                custody === "unknown"
+                  ? "message.custody.unknownHelp"
+                  : postOfficeOnly
+                    ? "message.custody.postOfficeHelp"
+                    : "message.custody.help",
+              )}
+            </p>
           )}
-          {(custody === "unknown" || custody === 0 || postOfficeOnly) && (
-            <span aria-hidden="true">{custodyLabel}</span>
-          )}
-          <span
-            id={tooltip}
-            role="tooltip"
-            className="pointer-events-none absolute bottom-full right-0 z-10 mb-1 hidden w-56 rounded border bg-popover p-2 font-sans text-xs text-popover-foreground shadow group-hover:block group-focus:block"
-          >
-            {custodyLabel} ·{" "}
-            {t(
-              custody === "unknown"
-                ? "message.custody.unknownHelp"
-                : postOfficeOnly
-                  ? "message.custody.postOfficeHelp"
-                  : "message.custody.help",
-            )}
-          </span>
-        </span>
+        </MessageStatus>
       )}
-    </span>
+    </div>
   );
 }

@@ -51,6 +51,21 @@ _Avoid_: running instance, account, physical computer.
 An account-signed binding of a device's public identity to that account.
 _Avoid_: discovery record, membership grant.
 
+**Account group role**:
+The account's accepted member or owner role in a channel. Certified devices
+present the same account role. The public membership state and verified account
+bindings establish that role; device reachability determines execution
+availability, not a different role. Legacy public controls retain their existing
+signer requirements.
+_Avoid_: online status, device approval, shared group reference.
+
+**Account group operation**:
+An account-authorized intent to change channel state or send channel content.
+Its pending identity is distinct from the public events that commit its effects.
+Execution may use an authorized device without changing the account's role or
+reattributing existing public events.
+_Avoid_: committed event before acceptance, device-specific permission.
+
 **Peer**:
 Another known network device, including an infrastructure device when the role
 permits it. A peer is not necessarily a person or a channel member.
@@ -77,6 +92,14 @@ for permitted destinations within its validity period.
 _Avoid_: channel membership, device certificate, session token.
 
 ## Conversations and history
+
+**Personal conversation removal**:
+An account-private decision to remove a chat, optionally erasing its history on
+certified linked devices. Durable deletion floors prevent stale private replay;
+each device confirms its own cleanup separately. It is distinct from leaving or
+dissolving a group, recalling a message and blocking a contact.
+_Avoid_: global deletion, completed cleanup based only on a committed group Leave.
+See [removal semantics](docs/network-design-reference.md#personal-conversation-removal).
 
 **Conversation**:
 A direct or channel conversation whose authorized content can be retained and
@@ -147,6 +170,14 @@ The current account's personal conversation. Its existence does not require a
 second device to be discoverable.
 UI label: **Message Yourself** (Simplified Chinese: **给自己发消息**).
 _Avoid_: second account, temporary local scratch chat.
+
+**Forwarded message**:
+A new message sent by the forwarding account using authorized retained source
+content. It has its own destination identity and delivery lifecycle. A merged
+chat record contains historical display snapshots attributed by the forwarder;
+those labels are not new signatures by the historical authors.
+_Avoid_: original message identity, authenticated original author, shared source file capability.
+See [Message forwarding](docs/message-forwarding.md).
 
 **Message favorite**:
 An account-owned saved item containing one or more ordered message snapshots and
@@ -310,6 +341,16 @@ are retained; the owner attests to the copied content. It does not grant old
 sender-chain keys, attachment access or complete conversation history.
 _Avoid_: full history sync, original-author signature on the copied plaintext.
 See [channel history settings](docs/help/topics/channels.md#history-for-new-members).
+
+**Shared group photo**: Owner-published image shared with authorized group
+members. A private group-photo override takes priority for its account; neither
+setting changes the owner's personal profile photo. See [group photos](docs/help/topics/channels.md#group-photo-and-personal-overrides).
+
+**Group announcement**: Versioned owner-published current group content,
+independent of ordinary message retention and optional pre-join chat history.
+Publication cards and device-private reminder dismissal are distinct from
+recipient delivery, public read receipts and explicit acknowledgement.
+See [group announcements](docs/help/topics/channels.md#group-announcements).
 
 ## Peer trust evidence
 

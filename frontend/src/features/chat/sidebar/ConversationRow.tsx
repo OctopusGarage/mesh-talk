@@ -24,6 +24,7 @@ import { useDrafts } from "@/store/drafts";
 import { useAuth } from "@/store/auth";
 import { usePacks } from "@/store/packs";
 import { messageSummary } from "@/lib/messagePresentation";
+import { useNewGroupAnnouncement } from "../useGroupAnnouncement";
 
 export function ConversationRow({
   conv,
@@ -35,6 +36,7 @@ export function ConversationRow({
   onTogglePin,
   onRename,
   onHide,
+  onDelete,
   navIndex,
   listPosition,
   listSize,
@@ -48,11 +50,13 @@ export function ConversationRow({
   onTogglePin: () => void;
   onRename: () => void;
   onHide?: () => void;
+  onDelete?: () => void;
   navIndex?: number;
   listPosition: number;
   listSize: number;
 }) {
   const { t } = useTranslation();
+  const newAnnouncement = useNewGroupAnnouncement(channel ? conv.id : "");
   const packs = usePacks((s) => s.packs);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -62,7 +66,7 @@ export function ConversationRow({
     (s) =>
       conv.kind === "channel" &&
       Object.values(s.ledger[convKey(conv)] ?? {}).some(
-        (entry) => !entry.seen && entry.mentioned,
+        (entry) => !entry.seen && !entry.suppressed && entry.mentioned,
       ),
   );
   const history = useChat((s) => s.messages[convKey(conv)]);
@@ -185,6 +189,11 @@ export function ConversationRow({
                 {t("sidebar.mentionedYou")}
               </span>
             )}
+            {newAnnouncement && (
+              <span className="shrink-0 font-medium text-signal">
+                {t("groupMetadata.newAnnouncement")}
+              </span>
+            )}
             <span className="truncate">
               {showDraft ? (
                 <>
@@ -262,6 +271,19 @@ export function ConversationRow({
                 className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {t("sidebar.hideChannel")}
+              </button>
+            )}
+            {onDelete && (
+              <button
+                type="button"
+                onClick={() => {
+                  setActionsOpen(false);
+                  onDelete();
+                }}
+                data-testid={`conversation-delete-${conv.id}`}
+                className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm text-destructive hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {t("conversationDeletion.delete")}
               </button>
             )}
           </PopoverContent>

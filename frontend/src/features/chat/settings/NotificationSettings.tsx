@@ -1,3 +1,4 @@
+import { MediaDeviceCheck } from "./MediaDeviceCheck";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { useNotificationPermission } from "@/lib/notify";
 import { NotificationPermissionHelp } from "../NotificationPermissionHelp";
@@ -141,6 +142,9 @@ export function NotificationSettings({
                 </div>
               }
             />
+          )}
+          {s.calls_enabled && (
+            <MediaDeviceCheck key={c.identity ?? "loading"} />
           )}
         </SettingsSection>
       </div>

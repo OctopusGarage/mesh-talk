@@ -52,6 +52,8 @@ pub struct PersistentEventLog {
     fingerprint_cache: Mutex<HashMap<ConversationId, ([u8; 32], usize)>>,
     #[cfg(test)]
     sync_event_exports: std::cell::Cell<usize>,
+    #[cfg(test)]
+    fail_sync: bool,
 }
 
 impl PersistentEventLog {
@@ -105,6 +107,8 @@ impl PersistentEventLog {
             fingerprint_cache: Mutex::new(HashMap::new()),
             #[cfg(test)]
             sync_event_exports: std::cell::Cell::new(0),
+            #[cfg(test)]
+            fail_sync: false,
         })
     }
 
@@ -138,7 +142,16 @@ impl PersistentEventLog {
 
     /// Transaction boundary for delivery: flush all causal parents before writing
     /// an intent, and synchronize even when recovery finds an existing event.
+    #[cfg(test)]
+    pub(crate) fn fail_sync_for_test(&mut self, enabled: bool) {
+        self.fail_sync = enabled;
+    }
+
     pub fn sync(&self) -> Result<(), LogError> {
+        #[cfg(test)]
+        if self.fail_sync {
+            return Err(std::io::Error::other("injected event-log sync failure").into());
+        }
         self.file.sync()
     }
 
@@ -194,6 +207,9 @@ impl PersistentEventLog {
     }
     pub fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
         self.log.requires_channel_v3(conversation)
+    }
+    pub fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v5(conversation)
     }
     pub fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
         self.log.requires_channel_v4(conversation)
@@ -567,6 +583,9 @@ const COMPACT_PROFILE_MIN: usize = 8;
 impl SyncStore for PersistentEventLog {
     fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
         PersistentEventLog::requires_channel_v3(self, conversation)
+    }
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        self.requires_channel_v5(conversation)
     }
     fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
         PersistentEventLog::requires_channel_v4(self, conversation)

@@ -73,6 +73,53 @@ region batches newly discovered unread identities in fixed windows; duplicates
 and read-count decreases do not deliberately replay announcements. Recovered
 history is not animated as a new live message.
 
+## Unread review and badge recovery
+
+The sidebar keeps **Unread** and **Files** side by side in one compact row.
+Their full names remain available to assistive technology and in tooltips; each
+opens its own existing dialog and retains its count.
+
+The sidebar's **Unread messages** review accounts for the same positive counters
+as the application badge: ordinary and hidden conversations, conversations no
+longer in the directory, aggregate overflow and sender devices whose account
+binding has not arrived. Hidden conversations can be opened without changing
+their visibility preference. Unresolved sources remain individually dismissible;
+refresh retries directory resolution without claiming complete history coverage.
+The review supports search and renders at most fifty sources initially, with an
+explicit show-more action. An empty review remains reachable.
+
+**Mark all as read** and each source's explicit mark-read action work independently
+of the active conversation's history loading or failure. They require a focused, visible authenticated desktop with verified local-user
+and account ownership, including while its node is temporarily unavailable and apply atomically to
+its current unread state. Later arrivals remain eligible for unread tracking.
+Unknown-sender dismissals remove only their local counters; they do not invent
+message identities or publish cross-device read evidence. Exact known identities
+follow the existing optional account read synchronization policy. Aggregate and
+legacy counters have no exact identities to synchronize. Clearing unread never
+deletes message content or disables later notifications. Unresolved counters do
+not expire merely because discovery or a history request fails.
+
+Successful local message deletion, conversation clearing, observed recall and
+known message expiry suppress their retained unread identities locally. Suppression
+is separate from viewing: automatic expiry/deletion does not publish a read
+receipt to linked devices. Its content-free evidence and known expiry deadlines
+persist with the bounded reception ledger. Expiry continues after message-cache
+eviction and on startup. A bounded history page's missing rows are not deletion
+evidence. Expiry deadlines unknown to this installation cannot be inferred;
+overflow without exact identities remains explicitly clearable. Ledger eviction
+still limits exact replay suppression; this is not an unlimited deletion journal.
+
+Unread counters and pending-sender counters persist at the chat-store boundary,
+including explicit clear actions. The native badge writer coalesces changes to
+the latest total and reasserts it on focus/visibility changes. Failed writes retry
+with exponential backoff from one second to thirty seconds. A five-second
+watchdog releases a stalled UI wait, with at most four unresolved native calls per
+installed writer. A stopped/replaced desktop, runtime or account cannot continue
+its retry loop or update the replacement's diagnostic state. Native owner and
+revision admission still rejects obsolete commands. The unread review exposes
+update failures and a manual retry; an IPC acknowledgement does not prove the
+operating system displayed the badge on every platform.
+
 ## Recovery and availability
 
 Active accepted groups with other members can expose local recovery observations:

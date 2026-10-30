@@ -3,6 +3,10 @@ use super::*;
 use std::collections::BTreeMap;
 use std::ops::Bound::{Excluded, Unbounded};
 
+#[cfg(test)]
+#[path = "read_entitlement_tests.rs"]
+mod read_entitlement_tests;
+
 pub(super) fn empty_history_digest() -> [u8; 32] {
     ArchiveIndex::default().finish().digest
 }
@@ -14,6 +18,17 @@ type AccountExportPage = (
     (u64, [u8; 32]),
 );
 type RecalledAccounts = HashMap<ConversationId, HashSet<EventId>>;
+
+/// The public lifetime behind an export, independent of a borrowed directory row.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct PrivateChannelScope {
+    channel: ConversationId,
+    genesis_owner: String,
+    membership: EventId,
+    acceptance: Option<EventId>,
+    authority: Option<EventId>,
+    epoch: u64,
+}
 
 fn recalled_in(recalled: &RecalledAccounts, conversation: ConversationId, target: EventId) -> bool {
     recalled
@@ -79,11 +94,13 @@ impl ArchiveIndex {
 }
 #[derive(PartialEq, Eq)]
 struct ArchiveKey {
+    requester_current: bool,
     history: bool,
     files: bool,
     version: AccountSyncVersion,
     revisions: [u64; 8],
     channels: Vec<ConversationId>,
+    channel_scopes: Vec<PrivateChannelScope>,
     accounts: Vec<String>,
     controls: (u64, [u8; 32]),
     recalls: [u8; 32],
@@ -92,10 +109,12 @@ impl ArchiveKey {
     // Appends leave captured selectors valid. Erasure, policy and authorization
     // transitions do not; fail closed on those without restarting for ordinary writes.
     fn accepts_append_only_change(&self, current: &Self) -> bool {
-        self.history == current.history
+        self.requester_current == current.requester_current
+            && self.history == current.history
             && self.files == current.files
             && self.version == current.version
             && self.channels == current.channels
+            && self.channel_scopes == current.channel_scopes
             && self.accounts == current.accounts
             && self.controls == current.controls
             && self.recalls == current.recalls
@@ -115,6 +134,216 @@ pub(in crate::node) struct ArchiveCache {
 }
 
 impl Node {
+    /// The paired full identity remains necessary even when this sibling has no
+    /// physical membership in the exported channel. A known binding replacement
+    /// wins over its retained pairing certificate.
+    fn retained_private_account_announcement(
+        &self,
+        device: &PublicIdentity,
+    ) -> Option<crate::discovery::Announce> {
+        // Do not use historical_author: its visibility filter can hide the very
+        // replacement proof which must invalidate an old pairing certificate.
+        let authenticated = {
+            self.privacy
+                .state
+                .read()
+                .expect("privacy lock not poisoned")
+                .as_ref()
+                .and_then(|state| state.proofs.by_author(&device.ed25519_pub))
+        };
+        authenticated.or_else(|| {
+            self.roster
+                .lock()
+                .expect("roster lock not poisoned")
+                .historical_by_author(&device.ed25519_pub)
+        })
+    }
+    pub(super) fn account_private_sibling_current(&self, requester: &PublicIdentity) -> bool {
+        self.certified_sibling(requester)
+            && self
+                .retained_private_account_announcement(requester)
+                .is_none_or(|proof| {
+                    proof.public() == *requester
+                        && proof.valid_presence()
+                        && !proof.post_office
+                        && self.account_group_binding_current(&proof)
+                })
+    }
+    /// Outbound and pooled channels need not repeat an inline announcement.
+    /// Its independently signed retained proof still has to match the exact
+    /// authenticated Noise peer and this account's current binding.
+    pub(super) fn account_private_source_announcement(
+        &self,
+        source: &PublicIdentity,
+    ) -> Option<crate::discovery::Announce> {
+        if !self.certified_sibling(source) {
+            return None;
+        }
+        self.retained_private_account_announcement(source)
+            .filter(|proof| {
+                proof.public() == *source
+                    && proof.valid_presence()
+                    && !proof.post_office
+                    && self.account_group_binding_current(proof)
+            })
+    }
+
+    fn private_channel_source_scope(
+        &self,
+        channel: ConversationId,
+        source: &crate::discovery::Announce,
+        require_sharing: bool,
+    ) -> Option<PrivateChannelScope> {
+        if source.post_office
+            || !source.valid_presence()
+            || !self.account_group_binding_current(source)
+        {
+            return None;
+        }
+        // Only the established genesis pin is read from the mutable book. Roles,
+        // acceptance, departures, epochs and sharing come from signed events.
+        let pin = self
+            .channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .state(&channel)
+            .map(|state| state.genesis_owner().to_owned());
+        let log = self.log.lock().expect("log mutex not poisoned");
+        let events = log.events(&channel);
+        let projection = super::super::channel::ChannelBook::project_membership(channel, &events);
+        let state = projection.state.as_ref()?;
+        let public = source.public();
+        if state.is_dissolved()
+            || pin.is_some_and(|pin| pin != state.genesis_owner())
+            || !state.members().contains(&public)
+            || !state.is_accepted_member(&public.user_id())
+        {
+            return None;
+        }
+        let (membership, acceptance) = if projection.authority.current_event().is_some() {
+            let grant = projection.authority.grant_for_device(&public, source)?;
+            (grant.membership_event, grant.acceptance_event)
+        } else {
+            let member = projection
+                .accepted
+                .iter()
+                .find(|member| member.public == public)?;
+            (member.membership_event, member.acceptance_event)
+        };
+        if require_sharing
+            && events
+                .iter()
+                .filter(|event| {
+                    event.kind == crate::eventlog::EventKind::ChannelReplica
+                        && event.author.user_id() == public.user_id()
+                        && projection.authorized.contains(&event.id)
+                        && matches!(event.ciphertext.as_slice(), [0..=1])
+                })
+                .max_by_key(|event| (event.lamport, event.id))
+                .is_some_and(|event| event.ciphertext == [0])
+        {
+            return None;
+        }
+        Some(PrivateChannelScope {
+            channel,
+            genesis_owner: state.genesis_owner().to_owned(),
+            membership,
+            acceptance,
+            authority: projection.authority.current_event(),
+            epoch: state.epoch(),
+        })
+    }
+
+    fn account_private_archive_scopes(
+        &self,
+        requester: &PublicIdentity,
+    ) -> Vec<PrivateChannelScope> {
+        if !self.account_private_sibling_current(requester) {
+            return Vec::new();
+        }
+        let ids = self
+            .channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .channel_ids();
+        let source = self.own_group_proof();
+        let mut scopes: Vec<_> = ids
+            .into_iter()
+            .filter_map(|channel| self.private_channel_source_scope(channel, &source, true))
+            .collect();
+        scopes.sort_by_key(|scope| *scope.channel.as_bytes());
+        scopes
+    }
+
+    pub(super) fn account_private_archive_channels(
+        &self,
+        requester: &PublicIdentity,
+    ) -> Vec<ConversationId> {
+        self.account_private_archive_scopes(requester)
+            .into_iter()
+            .map(|scope| scope.channel)
+            .collect()
+    }
+
+    pub(super) fn account_private_channel_export_scope(
+        &self,
+        channel: ConversationId,
+        requester: &PublicIdentity,
+    ) -> Option<PrivateChannelScope> {
+        self.account_private_sibling_current(requester)
+            .then(|| self.private_channel_source_scope(channel, &self.own_group_proof(), true))
+            .flatten()
+    }
+
+    pub(super) fn account_private_channel_export_allowed(
+        &self,
+        channel: ConversationId,
+        requester: &PublicIdentity,
+    ) -> bool {
+        self.account_private_sibling_current(requester)
+            && self
+                .private_channel_source_scope(channel, &self.own_group_proof(), true)
+                .is_some()
+    }
+
+    /// Private pages attest to the source's observations; they do not install
+    /// membership or keys. A current public negative always defeats a retained
+    /// positive source head. A reference without that DAG uses the existing
+    /// validated account-role source boundary, never inventory display facts.
+    pub(super) fn account_private_channel_import_allowed(
+        &self,
+        channel: ConversationId,
+        source: &crate::discovery::Announce,
+    ) -> bool {
+        let public = source.public();
+        if source.post_office
+            || !source.valid_presence()
+            || !self.certified_sibling(&public)
+            || !self.account_group_binding_current(source)
+        {
+            return false;
+        }
+        let has_public_state = self.account_group_projection(channel).state.is_some();
+        if has_public_state {
+            return self
+                .private_channel_source_scope(channel, source, false)
+                .is_some();
+        }
+        use super::super::account_group::AccountGroupRole;
+        self.account_group_access(channel).is_ok_and(|access| {
+            matches!(
+                access.role,
+                AccountGroupRole::Member | AccountGroupRole::Owner
+            ) && access.sources.iter().any(|candidate| {
+                candidate.device == public
+                    && matches!(
+                        candidate.role,
+                        AccountGroupRole::Member | AccountGroupRole::Owner
+                    )
+            })
+        })
+    }
+
     /// Resolve each conversation's recalls once, before taking any row-store
     /// locks. The same projection filters selectors and materialized payloads.
     pub(super) fn account_archive_recalls(&self) -> (RecalledAccounts, [u8; 32]) {
@@ -143,6 +372,30 @@ impl Node {
                 recalled.insert(conversation, targets);
             }
         }
+        // Channel plaintext and attachment manifests use the same recall
+        // projection as public channel history. Resolve it before row-store
+        // locks so a cached selector cannot retain a newly recalled target.
+        let channels = self
+            .channels
+            .lock()
+            .expect("channels mutex not poisoned")
+            .channel_ids();
+        for conversation in channels {
+            let targets = self.recalled_targets_channel(conversation);
+            for target in &targets {
+                let mut hash = Sha256::new();
+                hash.update(b"mesh-talk-channel-archive-recall-v1");
+                hash.update(conversation.as_bytes());
+                hash.update(target.as_bytes());
+                for (byte, part) in digest.iter_mut().zip(hash.finalize()) {
+                    *byte ^= part;
+                }
+                count = count.saturating_add(1);
+            }
+            if !targets.is_empty() {
+                recalled.entry(conversation).or_default().extend(targets);
+            }
+        }
         let mut hash = Sha256::new();
         hash.update(digest);
         hash.update(count.to_be_bytes());
@@ -160,21 +413,7 @@ impl Node {
     ) -> ArchiveIndex {
         let own = self.account_id();
         let mut page = previous.unwrap_or_default();
-        let requester_id = requester.user_id();
-        let me = self.user_id();
-        let channels = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.channel_ids()
-                .into_iter()
-                .filter(|id| {
-                    book.state(id).is_some_and(|state| {
-                        !state.is_dissolved()
-                            && state.is_accepted_member(&me)
-                            && state.is_accepted_member(&requester_id)
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
+        let channels = self.account_private_archive_channels(requester);
         if include_history {
             {
                 let sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
@@ -301,7 +540,9 @@ impl Node {
                                     .map(|event| event.id)
                             });
                         let Some(id) = id else { continue };
-                        if self.recipient_expired(&entry.plaintext, id, entry.wall_clock) {
+                        if recalled_in(recalled, channel, id)
+                            || self.recipient_expired(&entry.plaintext, id, entry.wall_clock)
+                        {
                             continue;
                         }
                         page.offer(
@@ -328,7 +569,13 @@ impl Node {
                     if entry.plaintext.is_empty() || entry.plaintext.len() > MAX_RECORD {
                         continue;
                     }
-                    if self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock) {
+                    if recalled_in(recalled, channel, entry.event_id)
+                        || self.recipient_expired(
+                            &entry.plaintext,
+                            entry.event_id,
+                            entry.wall_clock,
+                        )
+                    {
                         continue;
                     }
                     page.offer(
@@ -439,22 +686,8 @@ impl Node {
         version: AccountSyncVersion,
         recalls: [u8; 32],
     ) -> ArchiveKey {
-        let me = self.user_id();
-        let requester_id = requester.user_id();
-        let mut channels = {
-            let book = self.channels.lock().expect("channels mutex not poisoned");
-            book.channel_ids()
-                .into_iter()
-                .filter(|id| {
-                    book.state(id).is_some_and(|state| {
-                        !state.is_dissolved()
-                            && state.is_accepted_member(&me)
-                            && state.is_accepted_member(&requester_id)
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        channels.sort_by_key(|id| *id.as_bytes());
+        let channel_scopes = self.account_private_archive_scopes(requester);
+        let channels = channel_scopes.iter().map(|scope| scope.channel).collect();
         let (sent, sent_rewrite) = {
             let log = self.sentlog.lock().expect("sentlog mutex not poisoned");
             (log.revision(), log.rewrite_revision())
@@ -471,12 +704,14 @@ impl Node {
             (log.revision(), log.rewrite_revision())
         };
         ArchiveKey {
+            requester_current: self.account_private_sibling_current(requester),
             history,
             files,
             version,
             controls: self.private_dm_control_revision(),
             recalls,
             channels,
+            channel_scopes,
             accounts: if files {
                 let mut accounts = self.known_account_ids();
                 accounts.sort();
@@ -506,6 +741,11 @@ impl Node {
         files: bool,
         version: AccountSyncVersion,
     ) -> Result<AccountExportPage, NodeError> {
+        if !self.account_private_sibling_current(requester) {
+            return Err(NodeError::Authorization(
+                "account archive requester binding changed".into(),
+            ));
+        }
         let (recalled, recalls) = self.account_archive_recalls();
         // The lock prevents duplicate concurrent index builds. Producers never acquire it.
         let mut cache = self
@@ -516,9 +756,11 @@ impl Node {
         if cache.key.as_ref() != Some(&key) || cache.index.is_none() {
             let incremental = cache.key.as_ref().is_some_and(|old| {
                 old.history == key.history
+                    && old.requester_current == key.requester_current
                     && old.files == key.files
                     && old.version == key.version
                     && old.channels == key.channels
+                    && old.channel_scopes == key.channel_scopes
                     && old.accounts == key.accounts
                     && old.controls == key.controls
                     && old.recalls == key.recalls
@@ -615,7 +857,7 @@ impl Node {
         } else {
             EventId::new(key.id)
         };
-        if key.tag != 1 && recalled_in(recalled, conversation, target) {
+        if recalled_in(recalled, conversation, target) {
             return Ok(None);
         }
         if self

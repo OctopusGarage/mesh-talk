@@ -1,9 +1,23 @@
+import { DeleteChatDialog } from "./DeleteChatDialog";
+import {
+  canParticipateChannel,
+  isChannelInvitation,
+} from "./channelPermissions";
+import { PendingGroupControls } from "./GroupControlStatus";
+import {
+  ChannelAnnouncementStrip,
+  AnnouncementPublication,
+} from "./ChannelAnnouncement";
+import { withAnnouncementPublications } from "@/lib/groupAnnouncements";
 import { ConversationBio } from "./ConversationHeaders";
 import { useMessageCollection } from "./favorites/useMessageCollection";
 import {
   CollectionToolbar,
   FavoriteEditor,
 } from "./favorites/MessageCollection";
+import { ForwardDialog } from "./forwarding/ForwardDialog";
+import { canForward, forwardSource } from "./forwarding/selection";
+import type { ForwardSource } from "@/lib/api/messageForwarding";
 import { canCollect, MAX_FAVORITE_MESSAGES } from "./favorites/selection";
 import { useFavoriteMembership } from "./favorites/useFavoriteMembership";
 import { NotificationPermissionNotice } from "./NotificationPermissionNotice";
@@ -24,6 +38,7 @@ import { messageSummary } from "@/lib/messagePresentation";
 import { usePacks } from "@/store/packs";
 import { needsCustomWindowControls } from "@/lib/platform";
 import { ReceptionStatus } from "./ReceptionStatus";
+import { CameraCaptureDialog } from "./CameraCaptureDialog";
 import { Composer } from "./Composer";
 import { useDrafts } from "@/store/drafts";
 import {
@@ -37,6 +52,7 @@ import {
   messageRowKey,
   useConversationViewport,
 } from "./useConversationViewport";
+import { openReplySource } from "./replyNavigation";
 import { MessageBubble } from "./MessageBubble";
 import { MembersDialog } from "./MembersDialog";
 import { PendingChannelInvite } from "./PendingChannelInvite";
@@ -85,6 +101,10 @@ const NO_REACTIONS: ReactionInfo[] = [];
 
 export function ConversationView() {
   const { t } = useTranslation();
+  const [deletingChat, setDeletingChat] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const packs = usePacks((s) => s.packs);
   const motionOK = useMotionOK();
   const active = useChat((s) => s.active);
@@ -155,6 +175,17 @@ export function ConversationView() {
     return map;
   }, [members]);
   const key = active ? convKey(active) : "";
+  const forwardingScope = `${owner}:${authGeneration}:${receptionScope}:${key}`;
+  const [forwardingState, setForwardingState] = useState<{
+    scope: string;
+    source: ForwardSource | null;
+  }>({ scope: forwardingScope, source: null });
+  const forwarding =
+    forwardingState.scope === forwardingScope ? forwardingState.source : null;
+  const setForwarding = (source: ForwardSource | null) =>
+    setForwardingState({ scope: forwardingScope, source });
+  if (forwardingState.scope !== forwardingScope)
+    setForwardingState({ scope: forwardingScope, source: null });
   const collection = useMessageCollection(
     active,
     `${owner}:${authGeneration}:${receptionScope}:${key}`,
@@ -217,12 +248,28 @@ export function ConversationView() {
               (!message.id || !deletedContextIds.includes(message.id)) &&
               (message.expiresAtMs == null || message.expiresAtMs > expiryNow),
           )
-        : historyMessages,
-    [exactContext, historyMessages, deletedContextIds, expiryNow],
+        : active?.kind === "channel"
+          ? withAnnouncementPublications(
+              historyMessages,
+              channels.find((c) => c.channel_id === active.id)?.metadata
+                ?.announcement_history ?? [],
+              myAccountId,
+            )
+          : historyMessages,
+    [
+      exactContext,
+      historyMessages,
+      deletedContextIds,
+      expiryNow,
+      active?.kind,
+      active?.id,
+      channels,
+      myAccountId,
+    ],
   );
   const savedMessageIds = useFavoriteMembership(
     active,
-    messages,
+    messages.filter((message) => !message.announcement),
     `${owner}:${authGeneration}:${receptionScope}:${key}`,
   );
   const closeSearchContext = () => {
@@ -242,6 +289,32 @@ export function ConversationView() {
     searchTarget,
     exactContext ? undefined : markMessagesViewed,
   );
+
+  const replyNavigationRequest = useRef(0);
+  const [replyNavigation, setReplyNavigation] = useState<{
+    key: string;
+    id: string | null;
+    unavailable: boolean;
+  } | null>(null);
+  useEffect(() => {
+    replyNavigationRequest.current++;
+    setReplyNavigation(null);
+  }, [key, owner, authGeneration, receptionScope]);
+  const navigateReply = async (id: string) => {
+    const request = ++replyNavigationRequest.current;
+    setReplyNavigation({ key, id, unavailable: false });
+    const result = await openReplySource(
+      id,
+      viewport.jumpToMessage,
+      () => replyNavigationRequest.current === request,
+    );
+    if (replyNavigationRequest.current !== request) return;
+    setReplyNavigation({
+      key,
+      id: null,
+      unavailable: result === "unavailable",
+    });
+  };
 
   const unreadNavigationRequest = useRef(0);
   const [unreadNavigation, setUnreadNavigation] = useState<{
@@ -324,6 +397,26 @@ export function ConversationView() {
     m.arrivalKind !== "history_sync" &&
     !seenKeys.current.has(messageRowKey(m, i));
 
+  const replyAuthorName = (message: ChatMessage) =>
+    message.fromMe
+      ? myName
+      : displayIdentity({
+          accountId:
+            active?.kind === "channel"
+              ? roster.accountForMember(
+                  memberByDevice.get(message.who) ?? { user_id: message.who },
+                )
+              : active?.id,
+          deviceId: message.who,
+          fallbackName:
+            active?.kind === "channel"
+              ? memberByDevice.get(message.who)?.name
+              : active?.name,
+          accounts,
+          peers,
+          favorites,
+        }).name;
+
   const byId = useMemo(() => {
     const m = new Map<string, ChatMessage>();
     for (const msg of messages) if (msg.id) m.set(msg.id, msg);
@@ -381,29 +474,23 @@ export function ConversationView() {
   const activeChannel = isChannel
     ? channels.find((channel) => channel.channel_id === active.id)
     : undefined;
-  const sharedReference = activeChannel?.shared_reference === true;
-  const archived =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.archived,
-    );
-  const dissolved =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.dissolved,
-    );
-  const left =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.left,
-    );
-  const pendingInvite =
-    isChannel &&
-    channels.some(
-      (channel) => channel.channel_id === active.id && channel.pending_invite,
-    );
-  const readOnly =
-    sharedReference || archived || dissolved || left || pendingInvite;
+  const accountAccess = activeChannel?.account_access;
+  const accountRoleKnown = accountAccess !== undefined;
+  const sharedReference =
+    activeChannel?.shared_reference === true &&
+    (!accountAccess || accountAccess.role === "unknown");
+  const previousAccount = activeChannel?.previous_account;
+  const archived = !accountRoleKnown && activeChannel?.archived === true;
+  const dissolved = accountRoleKnown
+    ? accountAccess?.role === "dissolved"
+    : activeChannel?.dissolved === true;
+  const left = accountRoleKnown
+    ? accountAccess?.role === "left"
+    : activeChannel?.left === true;
+  const pendingInvite = isChannel && isChannelInvitation(activeChannel);
+  const accessPending =
+    accountRoleKnown && (!accountAccess || accountAccess.role === "unknown");
+  const readOnly = isChannel && !canParticipateChannel(activeChannel);
   // Reaction `who` is keyed by account id for account conversations, device user-id for channels.
   const selfReactionId = isChannel ? myId : myAccountId;
   // Alias (if set) overrides the conversation's announced name in the header + composer.
@@ -479,7 +566,9 @@ export function ConversationView() {
             id={active.id}
             name={headerName}
             memberCount={activeChannel?.member_count ?? members.length}
+            accountAccess={accountAccess}
             sharedReference={sharedReference}
+            previousAccount={!!previousAccount}
             archived={archived}
             dissolved={dissolved}
             left={left}
@@ -496,7 +585,9 @@ export function ConversationView() {
         <ConversationHistoryDialog
           conversation={{ ...active, name: headerName }}
         />
-        {isChannel && (sharedReference || (!archived && !pendingInvite)) ? (
+        {isChannel &&
+        !previousAccount &&
+        (sharedReference || (!archived && !pendingInvite)) ? (
           <MembersDialog key={key} dissolved={dissolved} />
         ) : (
           active.kind === "account" &&
@@ -509,6 +600,12 @@ export function ConversationView() {
           )
         )}
       </header>
+      {isChannel && !sharedReference && (
+        <ChannelAnnouncementStrip
+          key={`${owner}:${authGeneration}:${receptionScope}:${active.id}`}
+          channelId={active.id}
+        />
+      )}
       {notificationReminder.visible && (
         <NotificationPermissionNotice
           onDismiss={notificationReminder.dismiss}
@@ -535,6 +632,33 @@ export function ConversationView() {
           selected={collection.selected}
           onCancel={collection.cancel}
           onCollect={() => collection.collect(collection.selected)}
+          forwardDisabled={collection.selected.some(
+            (message) => !canForward(message),
+          )}
+          onForward={() => {
+            if (
+              active &&
+              collection.selected.every((message) => canForward(message))
+            )
+              setForwarding(forwardSource(active, collection.selected));
+          }}
+        />
+      )}
+      {forwarding && (
+        <ForwardDialog
+          key={forwardingScope}
+          source={forwarding}
+          onClose={() => setForwarding(null)}
+          onAccepted={(result) => {
+            const state = useChat.getState();
+            void state.reload();
+            void state.refreshRoster();
+            if (
+              result.items.length > 0 &&
+              result.items.every((item) => item.status === "accepted")
+            )
+              collection.cancel();
+          }}
         />
       )}
       {collection.draft && (
@@ -584,14 +708,17 @@ export function ConversationView() {
             </button>
           </div>
         )}
-        {!loading && !historyError && viewport.searchMiss && (
-          <div
-            role="status"
-            className="absolute inset-x-4 top-3 z-10 mx-auto max-w-[38rem] rounded-md border bg-card px-4 py-2 text-center text-[13px] shadow-elevation"
-          >
-            {t("search.contextUnavailable")}
-          </div>
-        )}
+        {!loading &&
+          !historyError &&
+          (viewport.searchMiss ||
+            (replyNavigation?.key === key && replyNavigation.unavailable)) && (
+            <div
+              role="status"
+              className="absolute inset-x-4 top-3 z-10 mx-auto max-w-[38rem] rounded-md border bg-card px-4 py-2 text-center text-[13px] shadow-elevation"
+            >
+              {t("search.contextUnavailable")}
+            </div>
+          )}
         {exactContext && (
           <div className="absolute right-4 top-3 z-10 rounded-md border bg-card px-3 py-2 text-sm shadow-elevation">
             <button
@@ -625,7 +752,13 @@ export function ConversationView() {
               aria-hidden="true"
               className="h-6 w-6 text-signal"
             />
-            <p>{t("redesign.emptyConversation")}</p>
+            <p>
+              {t(
+                previousAccount
+                  ? "conversation.previousAccountEmpty"
+                  : "redesign.emptyConversation",
+              )}
+            </p>
           </div>
         )}
         {messages.length > 0 && (
@@ -662,10 +795,18 @@ export function ConversationView() {
             atBottomThreshold={48}
             increaseViewportBy={400}
             itemContent={(i, m) => {
+              if (m.announcement)
+                return (
+                  <AnnouncementPublication
+                    channelId={active.id}
+                    value={m.announcement}
+                  />
+                );
               const prev = messages[i - 1];
               const next = messages[i + 1];
               const joins = (neighbor?: ChatMessage) =>
                 !!neighbor &&
+                !neighbor.announcement &&
                 neighbor.who === m.who &&
                 neighbor.fromMe === m.fromMe &&
                 formatDay(neighbor.wallClock) === formatDay(m.wallClock) &&
@@ -731,6 +872,12 @@ export function ConversationView() {
                     </label>
                   )}
                   <MessageBubble
+                    onForward={
+                      canForward(m)
+                        ? (message) =>
+                            setForwarding(forwardSource(active, [message]))
+                        : undefined
+                    }
                     onCollect={
                       canCollect(m)
                         ? (message) => collection.collect([message])
@@ -742,6 +889,14 @@ export function ConversationView() {
                     collected={!!m.id && savedMessageIds.has(m.id)}
                     m={m}
                     parent={parent}
+                    onNavigateToParent={(id) => void navigateReply(id)}
+                    parentNavigationPending={
+                      replyNavigation?.key === key &&
+                      replyNavigation.id === m.replyTo
+                    }
+                    parentAuthorName={
+                      parent ? replyAuthorName(parent) : undefined
+                    }
                     showAuthor={showAuthor}
                     grouped={grouped}
                     showTime={showTime}
@@ -816,6 +971,11 @@ export function ConversationView() {
         </AnimatePresence>
       </div>
 
+      {isChannel && (
+        <div className="mx-auto max-h-56 w-full max-w-[820px] overflow-y-auto px-5">
+          <PendingGroupControls group={active.id} />
+        </div>
+      )}
       <TransferBar transferKey={active.id} />
 
       <Dialog
@@ -858,23 +1018,52 @@ export function ConversationView() {
         </DialogContent>
       </Dialog>
 
-      {pendingInvite && !sharedReference ? (
+      {pendingInvite &&
+      !previousAccount &&
+      !sharedReference &&
+      !archived &&
+      !dissolved &&
+      !left ? (
         <PendingChannelInvite key={key} channelId={active.id} />
       ) : readOnly ? (
         <div
           className="border-t bg-card px-5 py-4 text-sm text-muted-foreground"
           role="status"
         >
+          {deletingChat && (
+            <DeleteChatDialog
+              key={`${owner}:${authGeneration}:${deletingChat.id}`}
+              channelId={deletingChat.id}
+              name={deletingChat.name}
+              onClose={() => setDeletingChat(null)}
+            />
+          )}
           {t(
-            sharedReference
-              ? activeChannel?.legacy_membership
-                ? "conversation.legacySharedReferenceHint"
-                : "conversation.sharedReferenceHint"
-              : dissolved
-                ? "conversation.dissolvedChannelHint"
-                : left
-                  ? "conversation.leftChannelHint"
-                  : "conversation.archivedChannelHint",
+            previousAccount
+              ? "conversation.previousAccountChannelHint"
+              : sharedReference
+                ? activeChannel?.legacy_membership
+                  ? "conversation.legacySharedReferenceHint"
+                  : "conversation.sharedReferenceHint"
+                : accessPending
+                  ? "conversation.groupAccessPending"
+                  : dissolved
+                    ? "conversation.dissolvedChannelHint"
+                    : left
+                      ? "conversation.leftChannelHint"
+                      : "conversation.archivedChannelHint",
+            accessPending ? { defaultValue: "Updating group access…" } : {},
+          )}
+          {!previousAccount && !sharedReference && (left || dissolved) && (
+            <Button
+              variant="ghost"
+              className="ml-3 text-destructive hover:text-destructive"
+              onClick={() =>
+                setDeletingChat({ id: active.id, name: active.name })
+              }
+            >
+              {t("conversationDeletion.delete")}
+            </Button>
           )}
         </div>
       ) : !draftsLoaded ? (
@@ -918,6 +1107,7 @@ export function ConversationView() {
           mentionNames={mentionNames}
           myName={myName}
           replyTo={replyTo}
+          replyAuthorName={replyTo ? replyAuthorName(replyTo) : undefined}
           prefill={prefill?.key === draftKey ? prefill : null}
           onSendSticker={(id, fallback) => {
             void sendSticker(id, fallback, expiresAtSend());
@@ -927,6 +1117,7 @@ export function ConversationView() {
           onAttach={attachments.attachFile}
           onAttachDirectory={attachments.attachDirectory}
           onImage={attachments.pickMedia}
+          onCamera={attachments.openCamera}
           onSend={(text, protection) => {
             const current = () => {
               const auth = useAuth.getState();
@@ -978,6 +1169,16 @@ export function ConversationView() {
           }}
           onPasteFiles={attachments.pasteFiles}
           onScreenshot={attachments.captureScreenshot}
+        />
+      )}
+      {attachments.cameraOpen && (
+        <CameraCaptureDialog
+          onCancel={attachments.cancelCamera}
+          onConfirm={attachments.confirmCamera}
+          onPickImage={() => {
+            attachments.cancelCamera();
+            void attachments.pickMedia();
+          }}
         />
       )}
       {attachments.screenshotBytes && (

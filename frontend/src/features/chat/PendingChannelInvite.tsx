@@ -1,3 +1,5 @@
+import { GroupControlStatus } from "./GroupControlStatus";
+import { useGroupControlOperation } from "./useGroupControlOperation";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -13,8 +15,9 @@ import { useChat } from "@/store/chat";
 export function PendingChannelInvite({ channelId }: { channelId: string }) {
   const { t } = useTranslation();
   const acceptChannelInvite = useChat((s) => s.acceptChannelInvite);
-  const leaveChannel = useChat((s) => s.leaveChannel);
-  const [busy, setBusy] = useState(false);
+  const declineChannelInvite = useChat((s) => s.declineChannelInvite);
+  const operation = useGroupControlOperation(channelId);
+  const busy = operation.busy;
   const [declineChannelId, setDeclineChannelId] = useState<string | null>(null);
   const isCurrent = () => {
     const active = useChat.getState().active;
@@ -31,8 +34,7 @@ export function PendingChannelInvite({ channelId }: { channelId: string }) {
           disabled={busy}
           onClick={() => {
             if (busy || !isCurrent()) return;
-            setBusy(true);
-            void acceptChannelInvite().finally(() => setBusy(false));
+            void operation.run(acceptChannelInvite);
           }}
         >
           {t("conversation.acceptInvite")}
@@ -48,11 +50,15 @@ export function PendingChannelInvite({ channelId }: { channelId: string }) {
           {t("conversation.declineInvite")}
         </Button>
       </div>
+      <GroupControlStatus
+        outcome={operation.outcome}
+        cancelRequested={operation.cancelRequested}
+      />
       <Dialog
         open={declineChannelId === channelId}
-        onOpenChange={(open) =>
-          setDeclineChannelId(open && isCurrent() ? channelId : null)
-        }
+        onOpenChange={(open) => {
+          setDeclineChannelId(open && isCurrent() ? channelId : null);
+        }}
       >
         <DialogContent>
           <DialogHeader>
@@ -61,6 +67,10 @@ export function PendingChannelInvite({ channelId }: { channelId: string }) {
               {t("conversation.declineInviteConfirm")}
             </DialogDescription>
           </DialogHeader>
+          <GroupControlStatus
+            outcome={operation.outcome}
+            cancelRequested={operation.cancelRequested}
+          />
           <div className="flex justify-end gap-2">
             <Button
               variant="ghost"
@@ -76,12 +86,9 @@ export function PendingChannelInvite({ channelId }: { channelId: string }) {
               onClick={() => {
                 if (busy || declineChannelId !== channelId || !isCurrent())
                   return;
-                setBusy(true);
-                void leaveChannel()
-                  .then((ok) => {
-                    if (ok) setDeclineChannelId(null);
-                  })
-                  .finally(() => setBusy(false));
+                void operation.run(declineChannelInvite, () =>
+                  setDeclineChannelId(null),
+                );
               }}
             >
               {t("conversation.declineInvite")}

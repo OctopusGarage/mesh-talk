@@ -16,7 +16,7 @@ Confirming an edit does not send it immediately. Cancel closes the editor withou
 
 ## Keyboard shortcuts
 
-Open **Settings → General** to change the two capture bindings, clear a binding
+Open **Settings → Shortcuts** to change the two capture bindings, clear a binding
 or restore defaults. Initially, **Capture screen** uses Ctrl+Shift+X and **Hide
 window & capture** uses Ctrl+Alt+Shift+X. On macOS use Command in place of Ctrl
 and Option in place of Alt. Shortcuts work inside Mesh-Talk by default. Enable

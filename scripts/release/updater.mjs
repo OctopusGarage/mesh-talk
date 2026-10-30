@@ -14,6 +14,24 @@ const targets = {
   "x86_64-unknown-linux-gnu": ["linux_x86_64", "appimage", "AppImage"],
 };
 
+export function updaterFailure(error, env = process.env) {
+  let details = [error?.message || String(error), error?.stderr?.toString()]
+    .filter(Boolean)
+    .join("\n");
+  for (const value of [
+    env.TAURI_SIGNING_PRIVATE_KEY,
+    env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
+  ]) {
+    if (!value) continue;
+    for (const secret of new Set(
+      [value, ...value.split(/\r?\n/)].filter(Boolean),
+    )) {
+      details = details.replaceAll(secret, "[REDACTED]");
+    }
+  }
+  return `Could not prepare signed updater artifacts: ${details.slice(0, 16384)}`;
+}
+
 export function updaterConfig(env) {
   const pubkey = env.MESH_TALK_UPDATER_PUBLIC_KEY?.trim() || "";
   const privateKey = env.TAURI_SIGNING_PRIVATE_KEY?.trim() || "";
@@ -174,10 +192,8 @@ if (
 ) {
   try {
     await main();
-  } catch {
-    console.error(
-      "Could not prepare signed updater artifacts; check trusted source, paired keys and build outputs",
-    );
+  } catch (error) {
+    console.error(updaterFailure(error));
     process.exitCode = 1;
   }
 }

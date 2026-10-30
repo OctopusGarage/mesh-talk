@@ -41,78 +41,58 @@ export function SecuritySettings({
   const icon = <ShieldCheck className="h-4 w-4" />;
   return (
     <>
-      <SettingsRow
-        id="setting-privacy-level"
-        icon={icon}
-        title={t("settings.privacyLevel")}
-        desc={t("settings.privacyLevelDesc")}
-        control={
-          <select
-            id="setting-privacy-level"
-            value={preset}
-            disabled={c.saving}
-            onChange={(e) =>
-              setPreset(e.target.value as AppSettings["privacy_level"])
-            }
-            className={SELECT_CLASS}
-          >
-            {s.privacy_level === "custom" && (
-              <option value="custom" disabled>
-                {t("settings.devicePresetCustom")}
-              </option>
-            )}
-            {(["balanced", "private", "strict"] as const).map((level) => (
-              <option key={level} value={level}>
-                {t(`settings.level_${level}`)}
-              </option>
-            ))}
-          </select>
-        }
-      />
-      <div className="space-y-2 pb-5 pt-2">
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          {t("settings.presetEffects")}
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {t("settings.presetPending")}
-        </p>
-        <Button
-          size="sm"
-          variant="secondary"
-          disabled={
-            c.saving || preset === "custom" || preset === s.privacy_level
-          }
-          onClick={() => void c.update({ privacy_level: preset }, "privacy")}
-        >
-          {t("settings.applyPreset")}
-        </Button>
-      </div>
-      <p className="text-xs leading-relaxed text-muted-foreground">
-        {t("settings.privacyEffectiveState")}
-      </p>
-      <SettingsSection>
+      <SettingsSection title={t("settings.sections.privacyPreset")}>
         <SettingsRow
-          title={t("settings.notificationPreview")}
-          desc={t("settings.notificationPreviewDesc")}
+          id="setting-privacy-level"
+          icon={icon}
+          title={t("settings.privacyLevel")}
+          desc={t("settings.privacyLevelDesc")}
           control={
-            <div className="flex flex-col items-start gap-1">
-              <span className="text-xs font-medium">
-                {t(
-                  s.notification_preview
-                    ? "settings.protectionOn"
-                    : "settings.protectionOff",
-                )}
-              </span>
-              <button
-                type="button"
-                onClick={onNotifications}
-                className="max-w-48 text-left text-xs text-signal underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {t("settings.previewSettingsLink")}
-              </button>
-            </div>
+            <select
+              id="setting-privacy-level"
+              value={preset}
+              disabled={c.saving}
+              onChange={(e) =>
+                setPreset(e.target.value as AppSettings["privacy_level"])
+              }
+              className={SELECT_CLASS}
+            >
+              {s.privacy_level === "custom" && (
+                <option value="custom" disabled>
+                  {t("settings.devicePresetCustom")}
+                </option>
+              )}
+              {(["balanced", "private", "strict"] as const).map((level) => (
+                <option key={level} value={level}>
+                  {t(`settings.level_${level}`)}
+                </option>
+              ))}
+            </select>
           }
         />
+        <div className="space-y-2 pb-5 pt-2">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t("settings.presetEffects")}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {t("settings.presetPending")}
+          </p>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={
+              c.saving || preset === "custom" || preset === s.privacy_level
+            }
+            onClick={() => void c.update({ privacy_level: preset }, "privacy")}
+          >
+            {t("settings.applyPreset")}
+          </Button>
+        </div>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {t("settings.privacyEffectiveState")}
+        </p>
+      </SettingsSection>
+      <SettingsSection title={t("settings.sections.lockAndLogin")}>
         <SettingsRow
           id="setting-auto-lock"
           icon={<KeyRound className="h-4 w-4" />}
@@ -160,6 +140,36 @@ export function SecuritySettings({
           }
         />
         <SettingsRow
+          id="setting-stay-signed-in"
+          icon={<KeyRound className="h-4 w-4" />}
+          title={t("settings.staySignedIn")}
+          desc={
+            <>
+              {t("settings.staySignedInDesc")}
+              <p className="mt-1">
+                {t(
+                  s.stay_signed_in
+                    ? "settings.savedLoginEnabled"
+                    : "settings.savedLoginDisabled",
+                )}
+              </p>
+              <p className="mt-1">{t("settings.scopeComputer")}</p>
+            </>
+          }
+          control={
+            <Switch
+              id="setting-stay-signed-in"
+              checked={s.stay_signed_in}
+              disabled={c.saving}
+              onCheckedChange={(on) =>
+                void c.update({ stay_signed_in: on }, "privacy")
+              }
+            />
+          }
+        />
+      </SettingsSection>
+      <SettingsSection title={t("settings.sections.clipboard")}>
+        <SettingsRow
           id="setting-confirm-copy"
           icon={icon}
           title={t("settings.confirmCopy")}
@@ -205,36 +215,7 @@ export function SecuritySettings({
             </select>
           }
         />
-        <SettingsRow
-          id="setting-stay-signed-in"
-          icon={<KeyRound className="h-4 w-4" />}
-          title={t("settings.staySignedIn")}
-          desc={
-            <>
-              {t("settings.staySignedInDesc")}
-              <p className="mt-1">
-                {t(
-                  s.stay_signed_in
-                    ? "settings.savedLoginEnabled"
-                    : "settings.savedLoginDisabled",
-                )}
-              </p>
-              <p className="mt-1">{t("settings.scopeComputer")}</p>
-            </>
-          }
-          control={
-            <Switch
-              id="setting-stay-signed-in"
-              checked={s.stay_signed_in}
-              disabled={c.saving}
-              onCheckedChange={(on) =>
-                void c.update({ stay_signed_in: on }, "privacy")
-              }
-            />
-          }
-        />
       </SettingsSection>
-      <AgentPrivacyStatus controller={c} onManage={onAgentSettings} />
       <div className="pt-5">
         <SettingsSection title={t("contactVisibility.section")}>
           <SettingsRow
@@ -245,6 +226,31 @@ export function SecuritySettings({
           />
         </SettingsSection>
       </div>
+      <SettingsSection title={t("settings.sections.relatedPermissions")}>
+        <SettingsRow
+          title={t("settings.notificationPreview")}
+          desc={t("settings.notificationPreviewDesc")}
+          control={
+            <div className="flex flex-col items-start gap-1">
+              <span className="text-xs font-medium">
+                {t(
+                  s.notification_preview
+                    ? "settings.protectionOn"
+                    : "settings.protectionOff",
+                )}
+              </span>
+              <button
+                type="button"
+                onClick={onNotifications}
+                className="max-w-48 text-left text-xs text-signal underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {t("settings.previewSettingsLink")}
+              </button>
+            </div>
+          }
+        />
+        <AgentPrivacyStatus controller={c} onManage={onAgentSettings} />
+      </SettingsSection>
       <div className="space-y-2 pt-4 text-xs leading-relaxed text-muted-foreground">
         <p>{t("settings.managedDeviceLimit")}</p>
         <p>{t("settings.exportLimit")}</p>

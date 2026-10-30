@@ -293,3 +293,29 @@ it("refreshes the privacy expiration read-only and cleans up on unmount", async 
     vi.useRealTimers();
   }
 });
+
+it("keeps lock and clipboard editors separate from related permission links", async () => {
+  await render();
+  const section = (key: string) =>
+    [...host.querySelectorAll("section")].find(
+      (node) =>
+        node.querySelector("h3")?.textContent ===
+        i18n.t(`settings.sections.${key}`),
+    )!;
+  expect(
+    section("lockAndLogin").querySelector("#setting-auto-lock"),
+  ).not.toBeNull();
+  expect(
+    section("lockAndLogin").querySelector("#setting-stay-signed-in"),
+  ).not.toBeNull();
+  expect(
+    section("clipboard").querySelector("#setting-confirm-copy"),
+  ).not.toBeNull();
+  expect(
+    section("clipboard").querySelector("#setting-clipboard-clear"),
+  ).not.toBeNull();
+  expect(
+    section("relatedPermissions").querySelector('select,[role="switch"]'),
+  ).toBeNull();
+  expect(host.querySelectorAll("#setting-stay-signed-in")).toHaveLength(1);
+});

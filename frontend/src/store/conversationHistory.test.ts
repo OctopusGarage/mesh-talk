@@ -516,3 +516,35 @@ it("reconciles late file identity bindings in both history display and unread re
     "second",
   ]);
 });
+
+it("removes confirmed expiry and recall from unread while retaining identities absent from a bounded history page", async () => {
+  const { emptyReception } = await import("./reception");
+  const store = session();
+  store.setState({
+    ...emptyReception({
+      [key]: {
+        expired: { seen: false, late: false },
+        recalled: { seen: false, late: false },
+        outside: { seen: false, late: true },
+      },
+    }),
+    active: conversation,
+    cacheOrder: [key],
+    unread: { [key]: 3 },
+  });
+  invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "owner_account_history"
+        ? [
+            { ...row("expired"), expires_at_ms: Date.now() - 1 },
+            { ...row("recalled"), recalled: true },
+          ]
+        : [],
+    ),
+  );
+  await reloadConversation(store.setState, store.getState);
+  expect(store.getState().unreadIds[key]).toEqual(["outside"]);
+  expect(store.getState().unread[key]).toBe(1);
+  expect(store.getState().ledger[key].expired.seen).toBe(false);
+  expect(store.getState().ledger[key].recalled.seen).toBe(false);
+});

@@ -33,6 +33,7 @@ pub struct EventLog {
     replica_v2: HashSet<ConversationId>,
     history_v3: HashSet<ConversationId>,
     account_v4: HashSet<ConversationId>,
+    metadata_v5: HashSet<ConversationId>,
     /// Per-conversation frontier: events not (yet) referenced as a parent.
     heads: HashMap<ConversationId, HashSet<EventId>>,
     /// Per-conversation version vector: author → highest seq seen.
@@ -163,6 +164,9 @@ impl EventLog {
         ) {
             self.account_v4.insert(conv);
         }
+        if event.kind == EventKind::ChannelMetadata {
+            self.metadata_v5.insert(conv);
+        }
         self.events.insert(id, event);
     }
 
@@ -189,6 +193,10 @@ impl EventLog {
 
     pub fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
         self.account_v4.contains(conversation)
+    }
+
+    pub fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        self.metadata_v5.contains(conversation)
     }
 
     /// All event ids currently held, in arbitrary order.

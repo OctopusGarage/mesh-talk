@@ -1,18 +1,7 @@
 //! Mutations of upgraded account-principal channel authority.
 
-use super::{
-    Node, NodeError,
-    channel::ChannelMembershipProjection,
-    channel_account_authority::{AccountAuthorityControl, AccountGrant, MAX_AUTHORITY_BYTES},
-};
-use crate::{
-    channel::ChannelMeta,
-    eventlog::{
-        EventKind,
-        event::{ConversationId, EventId},
-    },
-    identity::{account::AccountPublic, device::PublicIdentity},
-};
+use super::{Node, NodeError};
+use crate::{eventlog::event::ConversationId, identity::device::PublicIdentity};
 
 pub(super) enum AccountChannelMutation {
     Legacy,
@@ -20,112 +9,30 @@ pub(super) enum AccountChannelMutation {
     Changed(Vec<PublicIdentity>),
 }
 impl Node {
-    fn account_control(
-        &self,
-        channel: ConversationId,
-    ) -> Result<Option<(ChannelMembershipProjection, AccountAuthorityControl)>, NodeError> {
-        let projection = self.account_group_projection(channel);
-        let Some(previous) = projection.authority.current_event() else {
-            return Ok(None);
-        };
-        let state = projection
-            .state
-            .as_ref()
-            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-        if state.is_dissolved()
-            || !projection
-                .authority
-                .can_admin(&self.identity.public(), &self.own_group_proof())
-        {
-            return Err(NodeError::Channel(
-                "only the active channel owner account can change channel authority".into(),
-            ));
-        }
-        let control = AccountAuthorityControl {
-            version: 1,
-            previous: Some(previous),
-            issuer: self.own_group_proof(),
-            owner_account: self.account.public().ed25519_pub,
-            grants: projection.authority.grants(),
-            revoked: Vec::new(),
-            legacy_bindings: Vec::new(),
-            account_signature: Vec::new(),
-        };
-        Ok(Some((projection, control)))
-    }
-    fn append_account_control(
-        &self,
-        channel: ConversationId,
-        control: &AccountAuthorityControl,
-    ) -> Result<(), NodeError> {
-        let payload = control.signed_encode(channel, &self.account);
-        if AccountAuthorityControl::decode(&payload).is_none()
-            || payload.len() > MAX_AUTHORITY_BYTES
-        {
-            return Err(NodeError::Channel(
-                "channel account authority exceeds supported bounds".into(),
-            ));
-        }
-        self.append_event(channel, EventKind::ChannelAccountAuthority, payload)?;
-        self.process_channel(channel);
-        Ok(())
-    }
     pub(super) fn try_account_channel_remove(
         &self,
         channel: ConversationId,
         account_id: &str,
     ) -> Result<AccountChannelMutation, NodeError> {
-        let Some((projection, mut control)) = self.account_control(channel)? else {
-            return Ok(AccountChannelMutation::Legacy);
-        };
-        if projection.authority.owner_account_id().as_deref() == Some(account_id) {
-            return Err(NodeError::Channel(
-                "transfer channel ownership before the owner account leaves".into(),
-            ));
-        }
-        let Some(index) = control.grants.iter().position(|grant| {
-            grant.id().is_some_and(|id| {
-                AccountPublic {
-                    ed25519_pub: id.account_pub,
-                }
-                .account_id()
-                    == account_id
-            })
-        }) else {
-            return Ok(AccountChannelMutation::Unchanged);
-        };
-        let grant = control.grants.remove(index);
-        control.revoked.push(grant.id().expect("projected grant"));
-        // Closing proofs go to the prior participants; admission trims removed peers to the frozen prefix.
-        let recipients = projection
-            .state
-            .as_ref()
-            .expect("projected state")
-            .members()
-            .to_vec();
-        self.append_account_control(channel, &control)?;
-        if self
-            .account_group_projection(channel)
-            .authority
-            .account_grant(&grant.id().expect("projected grant").account_pub)
-            .is_some()
-        {
-            return Err(NodeError::Channel(
-                "channel account removal was not admitted".into(),
-            ));
-        }
-        Ok(AccountChannelMutation::Changed(recipients))
+        self.apply_owner_control(
+            channel,
+            &super::channels::owner_control::OwnerControlInput::RemoveAccount(account_id.into()),
+        )
     }
     pub(super) fn try_account_channel_transfer(
         &self,
         channel: ConversationId,
         device_id: &str,
     ) -> Result<AccountChannelMutation, NodeError> {
-        let Some((projection, mut control)) = self.account_control(channel)? else {
+        let projection = self.account_group_projection(channel);
+        if projection.authority.current_event().is_none() {
             return Ok(AccountChannelMutation::Legacy);
-        };
-        let state = projection.state.as_ref().expect("projected state");
-        let account_id = state
+        }
+        let state = projection
+            .state
+            .as_ref()
+            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+        let account = state
             .member_account_id(device_id)
             .filter(|_| state.is_accepted_member(device_id))
             .ok_or_else(|| {
@@ -133,38 +40,10 @@ impl Node {
                     "new owner account must have accepted the channel invitation".into(),
                 )
             })?;
-        if projection.authority.owner_account_id().as_deref() == Some(account_id) {
-            return Ok(AccountChannelMutation::Unchanged);
-        }
-        let account = control
-            .grants
-            .iter()
-            .filter_map(AccountGrant::id)
-            .find(|id| {
-                AccountPublic {
-                    ed25519_pub: id.account_pub,
-                }
-                .account_id()
-                    == account_id
-            })
-            .ok_or_else(|| {
-                NodeError::Channel("new owner has no active channel account grant".into())
-            })?;
-        control.owner_account = account.account_pub;
-        let recipients = state.members().to_vec();
-        self.append_account_control(channel, &control)?;
-        if self
-            .account_group_projection(channel)
-            .authority
-            .owner_account_id()
-            .as_deref()
-            != Some(account_id)
-        {
-            return Err(NodeError::Channel(
-                "channel account transfer was not admitted".into(),
-            ));
-        }
-        Ok(AccountChannelMutation::Changed(recipients))
+        self.apply_owner_control(
+            channel,
+            &super::channels::owner_control::OwnerControlInput::Transfer(account.into()),
+        )
     }
     pub(super) fn try_account_channel_invite(
         &self,
@@ -172,91 +51,85 @@ impl Node {
         new_member: &PublicIdentity,
         verified_proof: &crate::discovery::Announce,
     ) -> Result<AccountChannelMutation, NodeError> {
-        let Some((projection, mut control)) = self.account_control(channel)? else {
-            return Ok(AccountChannelMutation::Legacy);
+        use super::channels::account_invitation::{
+            InvitationInput, InvitationPreparation, InvitationWitness,
         };
-        let state = projection.state.as_ref().expect("projected state");
-        if state
-            .members()
-            .iter()
-            .any(|public| public.ed25519_pub == new_member.ed25519_pub && public != new_member)
-        {
-            return Err(NodeError::Channel("channel device identity changed".into()));
-        }
-        if verified_proof.public() != *new_member
-            || !verified_proof.valid_presence()
-            || verified_proof.post_office
-            || verified_proof.account_cert.is_none()
-        {
-            return Err(NodeError::Channel(
-                "verified account identity required before inviting a channel account".into(),
-            ));
-        }
-        let proof = verified_proof.clone();
-        let account_pub = proof
-            .account_cert
-            .as_ref()
-            .expect("verified certificate")
-            .account_ed25519_pub;
-        if projection.authority.account_grant(&account_pub).is_some() {
-            return Ok(AccountChannelMutation::Unchanged);
-        }
-        let mut members = state.members().to_vec();
-        members.push(new_member.clone());
-        members.sort_by_key(PublicIdentity::user_id);
-        members.dedup();
-        let meta = ChannelMeta {
-            name: state.name().into(),
-            members: members.clone(),
-            epoch: state
-                .epoch()
-                .checked_add(1)
-                .ok_or_else(|| NodeError::Channel("channel epoch exhausted".into()))?,
-            owner: state.owner().into(),
-        };
-        let mut incarnation = [0; 16];
-        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut incarnation);
-        control.grants.push(AccountGrant {
-            incarnation,
-            pending: true,
-            original: proof,
-            membership_event: EventId::new([0; 32]),
-            acceptance_event: None,
-        });
-        let policy = self.channel_history_policy(channel);
-        let selected = self.select_join_history(channel, policy, super::node::now_millis());
-        self.append_invitation_with_history_and_control(
-            channel,
-            &meta,
-            new_member,
-            (selected, policy),
-            |invitation| {
-                control
-                    .grants
-                    .last_mut()
-                    .expect("new grant")
-                    .membership_event = invitation;
-                let payload = control.signed_encode(channel, &self.account);
-                if AccountAuthorityControl::decode(&payload).is_none() {
-                    return Err(NodeError::Channel(
-                        "channel account authority exceeds supported bounds".into(),
-                    ));
-                }
-                Ok(Some((EventKind::ChannelAccountAuthority, payload)))
-            },
-        )?;
-        self.process_channel(channel);
         if self
             .account_group_projection(channel)
             .authority
-            .account_grant(&account_pub)
+            .current_event()
             .is_none()
         {
-            return Err(NodeError::Channel(
-                "channel account invitation was not admitted".into(),
+            return Ok(AccountChannelMutation::Legacy);
+        }
+        if verified_proof.public() != *new_member {
+            return Err(NodeError::Authorization(
+                "invitation target identity changed".into(),
             ));
         }
-        Ok(AccountChannelMutation::Changed(members))
+        let input = InvitationInput {
+            target_account_id: verified_proof.account_id().ok_or_else(|| {
+                NodeError::Authorization("verified invitation account required".into())
+            })?,
+        };
+        let policy = self.channel_history_policy(channel);
+        let selected = self.select_join_history(channel, policy, super::node::now_millis());
+        let history = self.prepare_invitation_history(channel, new_member, selected, policy)?;
+        let mut incarnation = [0; 16];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut incarnation);
+        let own = self.own_group_proof();
+        let mut delivery = self.delivery.lock().expect("delivery mutex");
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        let (transaction, recipients) = {
+            let book = self.channels.lock().expect("channels mutex");
+            let state = book
+                .state(&channel)
+                .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+            let log = self.log.lock().expect("log mutex");
+            let projection =
+                super::channel::ChannelBook::project_membership(channel, &log.events(&channel));
+            let witness = InvitationWitness {
+                own,
+                target: verified_proof.clone(),
+                incarnation,
+                parents: log.prepare(&channel).map_err(NodeError::Log)?.0,
+                recipients: projection
+                    .state
+                    .as_ref()
+                    .ok_or_else(|| NodeError::Channel("unknown channel".into()))?
+                    .members()
+                    .to_vec(),
+            };
+            let Some(prepared) = self.prepare_account_invitation_locked(InvitationPreparation {
+                group: channel,
+                log: &log,
+                state,
+                projection: &projection,
+                input: &input,
+                witness,
+                history,
+            })?
+            else {
+                return Ok(AccountChannelMutation::Unchanged);
+            };
+            let transaction = super::delivery_store::DeliveryTransaction::AccountInvitation {
+                input,
+                witness: prepared.witness,
+                transaction: Box::new(prepared.transaction),
+            };
+            delivery
+                .preflight_group_invitation_transaction(&transaction, &log)
+                .map_err(NodeError::Log)?;
+            log.sync().map_err(NodeError::Log)?;
+            (transaction, prepared.recipients)
+        };
+        delivery.begin(transaction).map_err(NodeError::Log)?;
+        self.recover_delivery(&mut delivery)
+            .map_err(NodeError::Log)?;
+        drop(delivery);
+        self.process_channel(channel);
+        Ok(AccountChannelMutation::Changed(recipients))
     }
 }
 

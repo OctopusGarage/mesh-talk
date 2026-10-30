@@ -475,7 +475,11 @@ impl Node {
             let routing = self.routing_peers();
             let mut bindings = Vec::new();
             let mut grants = BTreeMap::new();
-            for member in &projection.accepted {
+            for member in projection
+                .accepted
+                .iter()
+                .filter(|member| state.is_accepted_member(&member.public.user_id()))
+            {
                 let proof = if member.public == me {
                     Some(own.clone())
                 } else {
@@ -1072,6 +1076,311 @@ mod tests {
                 &receiver.own_group_proof()
             ),
             "removed membership cannot retain relay access"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_account_group_membership_and_ownership_inherit_over_certified_sibling_sync() {
+        use crate::node::AccountGroupRole;
+        let group = Group::new().await;
+        let owner = &group.nodes[0];
+        // The account resolver selects a stable available device, not the
+        // fixture's arbitrary array index. Accept on that real invitation route.
+        let (source, target) = if group.nodes[1].user_id() < group.nodes[2].user_id() {
+            (&group.nodes[1], &group.nodes[2])
+        } else {
+            (&group.nodes[2], &group.nodes[1])
+        };
+        let member_group = owner
+            .create_account_channel_invited_if(
+                "Account membership",
+                vec![source.account_id()],
+                |commit| commit(),
+            )
+            .await
+            .unwrap();
+        source.accept_channel_invite(member_group).await.unwrap();
+        let owned_group = source
+            .create_account_channel_invited_if(
+                "Account ownership",
+                vec![group.nodes[3].account_id()],
+                |commit| commit(),
+            )
+            .await
+            .unwrap();
+        // Only the accepted sibling is reachable; neither group owner approves
+        // another device. Discover and pull through the real certified protocol.
+        group.servers[0].abort();
+        for node in &group.nodes[1..] {
+            node.roster.lock().unwrap().forget(&owner.identity.public());
+        }
+        let mut target_work = ChannelAccountMaintenance::default();
+        let mut source_work = ChannelAccountMaintenance::default();
+        for _ in 0..16 {
+            target.maintain_account_channels(&mut target_work).await;
+            source.maintain_account_channels(&mut source_work).await;
+        }
+        assert_eq!(
+            target.account_group_access(member_group).unwrap().role,
+            AccountGroupRole::Member
+        );
+        assert_eq!(
+            target.account_group_access(owned_group).unwrap().role,
+            AccountGroupRole::Owner
+        );
+        assert!(target.channel_can_manage(owned_group));
+        assert_eq!(target.channel_member_account_sets(member_group).0.len(), 2);
+        assert!(
+            target
+                .account_group_projection(member_group)
+                .authority
+                .invitation_for_device(&target.identity.public(), &target.own_group_proof())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn late_initial_receive_keys_repair_an_already_present_message_through_history() {
+        use bincode::Options;
+        let group = Group::new().await;
+        let source = &group.nodes[1];
+        let target = &group.nodes[2];
+        let channel = source
+            .create_account_channel_invited_if(
+                "late receive keys",
+                vec![group.nodes[3].account_id()],
+                |commit| commit(),
+            )
+            .await
+            .unwrap();
+        source
+            .send_channel_message(channel, b"before inheritance")
+            .await
+            .unwrap();
+        let mut target_work = ChannelAccountMaintenance::default();
+        for _ in 0..16 {
+            target.maintain_account_channels(&mut target_work).await;
+            if target
+                .account_group_projection(channel)
+                .state
+                .is_some_and(|state| state.is_accepted_member(&target.user_id()))
+            {
+                break;
+            }
+        }
+        assert!(
+            target
+                .account_group_projection(channel)
+                .state
+                .unwrap()
+                .is_accepted_member(&target.user_id())
+        );
+        let absent = {
+            let book = target.channels.lock().unwrap();
+            let mut distributions = book
+                .state(&channel)
+                .unwrap()
+                .current_receive_distributions();
+            let absent = distributions
+                .iter()
+                .all(|(author, _, _)| author != &source.user_id());
+            for (_, _, value) in &mut distributions {
+                zeroize::Zeroize::zeroize(&mut value.chain_key);
+            }
+            absent
+        };
+        assert!(absent);
+        // This is the ordinary account history worker, without channel recovery:
+        // the source's first ReceiveKeys publication remains deliberately pending.
+        let history = tokio::spawn(Arc::clone(target).run_account_history_loop());
+        struct AbortHistory(tokio::task::AbortHandle);
+        impl Drop for AbortHistory {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _history_cleanup = AbortHistory(history.abort_handle());
+        let old_history = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if target
+                    .channel_history(channel, 20)
+                    .iter()
+                    .any(|row| row.text == b"before inheritance")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if old_history.is_err() {
+            history.abort();
+            let _ = history.await;
+            panic!("initial real history must arrive");
+        }
+        let old_message = source
+            .channel_history(channel, 20)
+            .into_iter()
+            .find(|row| row.text == b"before inheritance")
+            .unwrap()
+            .id;
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let held_hook = Arc::clone(&held);
+        let release_hook = Arc::clone(&release);
+        let recipient = target.identity.public();
+        *source.account_session_test_hook.lock().unwrap() = Some(Arc::new(move |peer, frame| {
+            let matching = peer == recipient
+                && matches!(frame,
+                super::super::account_sync_wire::AccountHistoryFrame::ChannelHeader {
+                    channel: current, event_id, ..
+                } if current == *channel.as_bytes() && event_id != *old_message.as_bytes());
+            if matching {
+                held_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let release = Arc::clone(&release_hook);
+            Box::pin(async move {
+                if matching {
+                    // Closing the gate releases every in-flight response,
+                    // including legitimate retries of the same header.
+                    let _ = release.acquire().await;
+                }
+            })
+        }));
+        struct ReleaseHistory(Arc<tokio::sync::Semaphore>);
+        impl Drop for ReleaseHistory {
+            fn drop(&mut self) {
+                self.0.close();
+            }
+        }
+        let _release_cleanup = ReleaseHistory(Arc::clone(&release));
+        source
+            .send_channel_message(channel, b"after inheritance before first keys")
+            .await
+            .unwrap();
+        let message = source
+            .channel_history(channel, 20)
+            .into_iter()
+            .find(|row| row.text == b"after inheritance before first keys")
+            .unwrap()
+            .id;
+        let (epoch, author, position): (u64, String, u32) = {
+            let log = target.log.lock().unwrap();
+            let event = log
+                .get(&message)
+                .expect("actual encrypted message arrived before initial keys");
+            let size = u16::from_be_bytes(event.ciphertext[..2].try_into().unwrap()) as usize;
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .reject_trailing_bytes()
+                .deserialize(&event.ciphertext[2..2 + size])
+                .unwrap()
+        };
+        assert!(
+            target
+                .account_group_projection(channel)
+                .authorized
+                .contains(&message)
+        );
+        assert_eq!(author, source.user_id());
+        let header_held = tokio::time::timeout(Duration::from_secs(8), async {
+            while !held.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            header_held.is_ok(),
+            "ordinary history request must reach the exact response gate"
+        );
+        assert!(
+            !target
+                .channel_history(channel, 20)
+                .iter()
+                .any(|row| row.id == message),
+            "plaintext must remain absent until the real history header is released"
+        );
+        let mut source_work = ChannelAccountMaintenance::default();
+        for _ in 0..4 {
+            source.maintain_account_channels(&mut source_work).await;
+        }
+        let snapshots: Vec<_> = source
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .into_iter()
+            .filter_map(|event| match DeviceControl::decode(&event.ciphertext) {
+                Some(DeviceControl::ReceiveKeys {
+                    recipient,
+                    epoch: snapshot_epoch,
+                    authors,
+                    positions,
+                    ..
+                }) if recipient == target.identity.public() && snapshot_epoch == epoch => authors
+                    .into_iter()
+                    .zip(positions)
+                    .find(|(identity, _)| identity.user_id() == author)
+                    .map(|(_, n)| n),
+                _ => None,
+            })
+            .collect();
+        assert!(!snapshots.is_empty());
+        assert!(
+            snapshots.iter().all(|n| *n > position),
+            "first real snapshot must be later than the existing ciphertext"
+        );
+        let keys_arrived = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let arrived = {
+                    let book = target.channels.lock().unwrap();
+                    let mut values = book
+                        .state(&channel)
+                        .unwrap()
+                        .current_receive_distributions();
+                    let found = values.iter().any(|(identity, key_epoch, distribution)| {
+                        identity == &author && *key_epoch == epoch && distribution.n > position
+                    });
+                    for (_, _, value) in &mut values {
+                        zeroize::Zeroize::zeroize(&mut value.chain_key);
+                    }
+                    found
+                };
+                if arrived {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            keys_arrived.is_ok(),
+            "actual signed late keys must arrive while history remains held"
+        );
+        assert!(
+            !target
+                .channel_history(channel, 20)
+                .iter()
+                .any(|row| row.id == message)
+        );
+        *source.account_session_test_hook.lock().unwrap() = None;
+        release.close();
+        let repaired = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if target.channel_history(channel, 20).iter().any(|row| {
+                    row.id == message && row.text == b"after inheritance before first keys"
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        history.abort();
+        let _ = history.await;
+        assert!(
+            repaired.is_ok(),
+            "history must repair an authorized ciphertext whose first receive snapshot is too new"
         );
     }
 

@@ -1,6 +1,6 @@
+import { windowsSnapshotProfile } from "./helpers/visual-snapshot";
 import { test, expect } from "./tauri-mock";
 import { enterChat, openBobDm, BOB } from "./helpers/session";
-import { windowsSnapshotProfile } from "./helpers/visual-snapshot";
 import type { Page } from "@playwright/test";
 import type { AccountBindingChange } from "../src/lib/api/privacy";
 
@@ -121,16 +121,19 @@ test("recipient reviews exact account changes and accepts one device without ver
         (element) => element.scrollWidth <= element.clientWidth,
       ),
     ).toBe(true);
-    // Native UI font metrics change wrapping; retain strict platform references.
+    const name = `account-binding-recovery-${size}.png`;
     const profile =
       process.platform === "win32"
-        ? await windowsSnapshotProfile(recovery.locator("h3"))
+        ? await windowsSnapshotProfile(recovery.locator("p").first())
         : process.platform;
-    const suffix = profile === "darwin" ? "" : `-${profile}`;
-    await expect(recovery).toHaveScreenshot(
-      `account-binding-recovery-${size}${suffix}.png`,
-      { animations: "disabled" },
-    );
+    const reference = ["linux", "win32"].includes(process.platform)
+      ? name.replace(".png", `-${profile}.png`)
+      : name;
+    console.info("Account binding snapshot profile:", profile);
+    // Collect both viewport failures while retaining a failed verdict for either.
+    await expect
+      .soft(recovery)
+      .toHaveScreenshot(reference, { animations: "disabled" });
   }
   await recovery.getByTestId("accept-account-change").first().click();
   await expect(recovery.getByTestId("accept-account-change")).toHaveCount(1);

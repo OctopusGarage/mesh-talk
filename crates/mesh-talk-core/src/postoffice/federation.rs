@@ -61,6 +61,12 @@ impl FederationStore {
 }
 
 impl SyncStore for FederationStore {
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .requires_channel_v5(conversation)
+    }
     fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
         self.store
             .lock()

@@ -76,6 +76,13 @@ for (const viewport of [
     await seedThemeBeforeLoad(page, viewport.theme);
     await enterChat(page);
     await openBobDm(page);
+    if (viewport.width < 760) {
+      // Native windows have a 760px minimum. Isolate the conversation to stress
+      // inline details at 320px without the desktop rail consuming its width.
+      await page.getByTestId("sidebar").evaluate((element) => {
+        element.style.display = "none";
+      });
+    }
     await observeLocalDelivery(page);
     await page
       .getByTestId("composer-input")
@@ -102,17 +109,47 @@ for (const viewport of [
     await expect(bubble.getByRole("button", { name: /resend/i })).toHaveCount(
       0,
     );
+    const timeBounds = await bubble.getByTestId("message-time").boundingBox();
+    const triggerBounds = await trigger.boundingBox();
+    expect(timeBounds!.x + timeBounds!.width).toBeLessThanOrEqual(
+      triggerBounds!.x,
+    );
     const bounds = await details.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
-    expect(bounds!.y).toBeGreaterThanOrEqual(0);
-    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
-    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
+    expect(
+      await details.evaluate((element) => getComputedStyle(element).position),
+    ).toBe("static");
     expect(
       await details.evaluate(
-        (element) => element.scrollWidth <= element.clientWidth,
+        (element) => element.closest('[data-testid="message-bubble"]') !== null,
       ),
     ).toBe(true);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+    const layout = await details.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      width: element.getBoundingClientRect().width,
+      overflowingChildren: Array.from(element.querySelectorAll("*"))
+        .filter((child) => child.scrollWidth > child.clientWidth)
+        .map((child) => ({
+          tag: child.tagName,
+          left:
+            child.getBoundingClientRect().left -
+            element.getBoundingClientRect().left,
+          right:
+            child.getBoundingClientRect().right -
+            element.getBoundingClientRect().left,
+          classes: child.getAttribute("class"),
+          scrollWidth: child.scrollWidth,
+          clientWidth: child.clientWidth,
+          width: child.getBoundingClientRect().width,
+        })),
+    }));
+    expect(layout.scrollWidth, JSON.stringify(layout)).toBeLessThanOrEqual(
+      layout.clientWidth,
+    );
+    expect(layout.overflowingChildren, JSON.stringify(layout)).toEqual([]);
     await page.screenshot({
       path: testInfo.outputPath("delivery-details-open.png"),
     });
@@ -353,12 +390,11 @@ test("text, sticker and file card stay Awaiting until explicit authoritative moc
     .filter({ hasText: "card.txt" })
     .locator('[data-delivery="delivered"]');
   await expect(cardReceipt).toHaveAccessibleName("File offer received");
-  await expect(
-    cardReceipt.getByText("File offer received", { exact: true }),
-  ).toBeVisible();
   await cardReceipt.focus();
-  await expect(cardReceipt.getByRole("tooltip")).toBeVisible();
-  await expect(cardReceipt.getByRole("tooltip")).toContainText(
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await expect(cardReceipt).toHaveAttribute("aria-expanded", "false");
+  await cardReceipt.press("Enter");
+  await expect(awaitingCard.getByTestId("message-status")).toContainText(
     "File card delivered",
   );
 });
@@ -681,7 +717,9 @@ test("channel acceptance reconciles repeated text once and confirmed post-office
   });
   await expect(bubbles.locator('[data-custody="1"]')).toHaveCount(2);
   await expect(
-    bubbles.getByRole("img", { name: "Post office confirmed a stored copy" }),
+    bubbles.getByRole("button", {
+      name: "Post office confirmed a stored copy",
+    }),
   ).toHaveCount(2);
   await expect(bubbles).toHaveCount(2);
 });
@@ -729,12 +767,16 @@ test("linked-device channel history waits for copy confirmation before showing a
     .getByTestId("message-bubble")
     .filter({ hasText: "Group message synced from my linked device" });
   await expect(bubble.locator('[data-custody="unknown"]')).toBeVisible();
-  await expect(bubble).toContainText("Copy status unavailable");
+  await expect(bubble.locator("[data-custody]")).toHaveAccessibleName(
+    "Copy status unavailable",
+  );
   await expect(bubble).not.toContainText("No member copy confirmed");
   await expect(bubble).not.toContainText("✓");
   await expect(bubble.locator("[data-delivery]")).toHaveCount(0);
   await bubble.locator("[data-custody]").focus();
-  await expect(bubble.getByRole("tooltip")).toContainText(
+  await expect(bubble.getByTestId("message-status")).toHaveCount(0);
+  await bubble.locator("[data-custody]").press("Enter");
+  await expect(bubble.getByTestId("message-status")).toContainText(
     "Another linked device may have newer information.",
   );
   await page.evaluate(() => {
@@ -744,8 +786,93 @@ test("linked-device channel history waits for copy confirmation before showing a
   });
   await expect(bubble.locator('[data-custody="1"]')).toBeVisible();
   await expect(
-    bubble.getByRole("img", { name: "Last confirmed: 1 member copy" }),
+    bubble.getByRole("button", { name: "Last confirmed: 1 member copy" }),
   ).toBeVisible();
-  await expect(bubble).toContainText("✓");
+  await expect(bubble.locator("[data-status-count]")).toHaveText("1");
+  await expect(bubble.getByTestId("message-status")).toHaveCount(0);
   await expect(bubble.locator("[data-delivery]")).toHaveCount(0);
+});
+
+test("typed channel File stays pending until canonical metadata commits and original-ID replay stays singular", async ({
+  page,
+}) => {
+  await enterChat(page);
+  await page.getByTestId("conversation-row-chan_team_dddd4444").click();
+  await page.evaluate(() => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __mockDeferNext(command: string): void;
+      __typedFileArgs?: Record<string, unknown>;
+    };
+    const original = host.__TAURI_INTERNALS__.invoke;
+    host.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "plugin:dialog|open")
+        return "/tmp/account-group-upload.bin";
+      if (command === "owner_submit_account_group_file")
+        host.__typedFileArgs = { ...args };
+      return original(command, args);
+    };
+    host.__mockDeferNext("owner_submit_account_group_file");
+  });
+  await revealComposerTools(page);
+  await page.getByTestId("composer-attach").click();
+  const bubble = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "account-group-upload.bin" });
+  await expect(bubble).toHaveCount(1);
+  await expect(
+    bubble.getByText("File details pending", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "The result is unconfirmed. Check this operation before retrying.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Check status", exact: true }),
+  ).toBeVisible();
+  await page.evaluate(() =>
+    (
+      window as unknown as { __mockReleaseDeferred(): void }
+    ).__mockReleaseDeferred(),
+  );
+  await expect(
+    bubble.getByText("File details pending", { exact: true }),
+  ).toHaveCount(0);
+  await expect(bubble.getByText("123 B", { exact: true })).toBeVisible();
+  const result = await page.evaluate(async () => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke(
+          command: string,
+          args: Record<string, unknown>,
+        ): Promise<unknown>;
+      };
+      __typedFileArgs: Record<string, unknown>;
+    };
+    const args = host.__typedFileArgs;
+    const replay = (await host.__TAURI_INTERNALS__.invoke(
+      "owner_submit_account_group_file",
+      args,
+    )) as { phase: { kind: string }; primary_event: string };
+    const rows = (await host.__TAURI_INTERNALS__.invoke("channel_history", {
+      channelId: args.channelId,
+    })) as Array<{ id: string; file?: { file_conv: string } }>;
+    return {
+      operationId: args.operationId,
+      phase: replay.phase.kind,
+      canonical: rows.filter((row) => row.id === replay.primary_event),
+    };
+  });
+  expect(result.operationId).toMatch(/^[a-f0-9]{64}$/);
+  expect(result.phase).toBe("committed");
+  expect(result.canonical).toHaveLength(1);
+  expect(result.canonical[0].file?.file_conv).toMatch(/^fc_/);
+  await expect(bubble).toHaveCount(1);
 });

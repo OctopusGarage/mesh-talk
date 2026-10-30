@@ -1,5 +1,15 @@
 //! Encrypted delivery transaction journal and immutable outbox metadata.
 
+mod group_file;
+mod group_invitation;
+mod group_legacy_leave;
+mod group_message;
+mod group_message_action;
+mod group_owner_control;
+mod group_self_control;
+pub(in crate::node) use group_file::GroupFileWitness;
+
+use super::account_group::operations::journal::OperationReference;
 use super::dm_envelope::DmEnvelope;
 use super::dm_ratchet::{DmRatchet, PreparedRatchet};
 use super::received_log::{ReceivedEntry, ReceivedLog};
@@ -13,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+pub(crate) type GroupOperationCompletion<'a> =
+    dyn FnMut(&OperationReference, &[Event]) -> Result<(), LogError> + 'a;
 
 const JOURNAL_MAGIC: &[u8; 6] = b"MTDTX1";
 const OUTBOX_MAGIC: &[u8; 6] = b"MTDOB1";
@@ -213,6 +226,45 @@ pub(crate) enum DeliveryTransaction {
         sent: SentEntry,
         senders: Vec<(u64, Vec<u8>)>,
     },
+    ChannelControl {
+        events: Vec<Event>,
+    },
+    GroupRequested {
+        operation: OperationReference,
+        transaction: Box<DeliveryTransaction>,
+    },
+    // Append-only: existing bincode enum discriminants and tuple shapes remain
+    // readable, including GroupRequested records from earlier desktop builds.
+    AccountOwnerControl {
+        input: super::channels::owner_control::OwnerControlInput,
+        witness: super::channels::owner_control::OwnerControlWitness,
+        events: Vec<Event>,
+    },
+    ChannelMessageAction {
+        input: super::message_actions::MessageActionInput,
+        witness: super::message_actions::MessageActionWitness,
+        events: Vec<Event>,
+        recall: Option<super::recall::RecallMark>,
+    },
+    AccountGroupFile {
+        witness: Box<GroupFileWitness>,
+        transaction: Box<DeliveryTransaction>,
+    },
+    AccountSelfControl {
+        input: super::channels::account_self_control::AccountSelfControlInput,
+        witness: super::channels::account_self_control::AccountSelfControlWitness,
+        events: Vec<Event>,
+    },
+    AccountInvitation {
+        input: super::channels::account_invitation::InvitationInput,
+        witness: super::channels::account_invitation::InvitationWitness,
+        transaction: Box<DeliveryTransaction>,
+    },
+    // Append-only: preserve every released WAL discriminant and witness layout.
+    LegacyMemberLeave {
+        witness: super::channels::account_self_control::LegacyMemberLeaveWitness,
+        events: Vec<Event>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,21 +279,82 @@ pub(crate) struct RequestRecord {
 impl DeliveryTransaction {
     pub(crate) fn body(&self) -> &Self {
         match self {
-            Self::Requested { transaction, .. } => transaction.body(),
+            Self::Requested { transaction, .. }
+            | Self::GroupRequested { transaction, .. }
+            | Self::AccountGroupFile { transaction, .. }
+            | Self::AccountInvitation { transaction, .. } => transaction.body(),
             _ => self,
         }
     }
     fn request(&self) -> Option<&RequestRecord> {
         match self {
             Self::Requested { request, .. } => Some(request),
+            Self::GroupRequested { transaction, .. }
+            | Self::AccountGroupFile { transaction, .. }
+            | Self::AccountInvitation { transaction, .. } => transaction.request(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn group_operation(&self) -> Option<&OperationReference> {
+        match self {
+            Self::GroupRequested { operation, .. } => Some(operation),
+            Self::Requested { transaction, .. }
+            | Self::AccountGroupFile { transaction, .. }
+            | Self::AccountInvitation { transaction, .. } => transaction.group_operation(),
+            _ => None,
+        }
+    }
+
+    fn file_binding(&self) -> Option<&GroupFileWitness> {
+        match self {
+            Self::AccountGroupFile { witness, .. } => Some(witness),
+            Self::Requested { transaction, .. } | Self::GroupRequested { transaction, .. } => {
+                transaction.file_binding()
+            }
+            _ => None,
+        }
+    }
+
+    fn invitation_binding(
+        &self,
+    ) -> Option<(
+        &super::channels::account_invitation::InvitationInput,
+        &super::channels::account_invitation::InvitationWitness,
+        &DeliveryTransaction,
+    )> {
+        match self {
+            Self::AccountInvitation {
+                input,
+                witness,
+                transaction,
+            } => Some((input, witness, transaction)),
+            Self::Requested { transaction, .. } | Self::GroupRequested { transaction, .. } => {
+                transaction.invitation_binding()
+            }
             _ => None,
         }
     }
 
     pub(crate) fn id(&self) -> EventId {
+        if let Some((_, _, Self::ChannelOutgoing { events, .. })) = self.invitation_binding()
+            && let Some(invitation) = events.first()
+        {
+            return invitation.id;
+        }
         match self.body() {
-            Self::Requested { .. } => unreachable!(),
-            Self::ChannelOutgoing { events, .. } => events.last().expect("channel message").id,
+            Self::Requested { .. }
+            | Self::GroupRequested { .. }
+            | Self::AccountGroupFile { .. }
+            | Self::AccountInvitation { .. } => unreachable!(),
+            Self::ChannelOutgoing { events, .. }
+            | Self::ChannelControl { events }
+            | Self::AccountSelfControl { events, .. }
+            | Self::LegacyMemberLeave { events, .. }
+            | Self::AccountOwnerControl { events, .. }
+            | Self::ChannelMessageAction { events, .. } => {
+                events.last().expect("channel effect").id
+            }
             Self::Outgoing { message, .. } | Self::OutgoingManifest { message, .. } => {
                 message.logical_id
             }
@@ -505,10 +618,48 @@ impl DeliveryStore {
         }
         for tx in &self.pending {
             let valid = match tx.body() {
-                DeliveryTransaction::Requested { .. } => unreachable!(),
-                DeliveryTransaction::ChannelOutgoing { events, .. } => events
+                DeliveryTransaction::Requested { .. }
+                | DeliveryTransaction::GroupRequested { .. }
+                | DeliveryTransaction::AccountGroupFile { .. }
+                | DeliveryTransaction::AccountInvitation { .. } => unreachable!(),
+                DeliveryTransaction::ChannelOutgoing { events, .. }
+                | DeliveryTransaction::ChannelControl { events } => events
                     .iter()
                     .all(|e| e.author.ed25519_pub() == &own.ed25519_pub),
+                DeliveryTransaction::AccountSelfControl {
+                    witness, events, ..
+                } => {
+                    witness.own.public() == *own
+                        && witness.own.account_id().as_deref() == Some(account)
+                        && events
+                            .iter()
+                            .all(|event| event.author.ed25519_pub() == &own.ed25519_pub)
+                }
+                DeliveryTransaction::LegacyMemberLeave { witness, events } => {
+                    witness.own.public() == *own
+                        && witness.own.account_id().as_deref() == Some(account)
+                        && events
+                            .iter()
+                            .all(|event| event.author.ed25519_pub() == &own.ed25519_pub)
+                }
+                DeliveryTransaction::AccountOwnerControl {
+                    witness, events, ..
+                } => {
+                    witness.own.public() == *own
+                        && witness.own.account_id().as_deref() == Some(account)
+                        && events
+                            .iter()
+                            .all(|event| event.author.ed25519_pub() == &own.ed25519_pub)
+                }
+                DeliveryTransaction::ChannelMessageAction {
+                    witness, events, ..
+                } => {
+                    witness.own.public() == *own
+                        && witness.own.account_id().as_deref() == Some(account)
+                        && events
+                            .iter()
+                            .all(|event| event.author.ed25519_pub() == &own.ed25519_pub)
+                }
                 DeliveryTransaction::Outgoing { message, .. } => message_ok(message),
                 DeliveryTransaction::OutgoingManifest {
                     message, received, ..
@@ -550,7 +701,21 @@ impl DeliveryStore {
                         && receipt.as_ref().is_none_or(|r| receipt_ok(r))
                 }
             };
-            if !valid {
+            let group_valid = tx.group_operation().is_none_or(|operation| {
+                operation.executor.device == *own
+                    && operation
+                        .origin
+                        .account_cert
+                        .as_ref()
+                        .is_some_and(|certificate| {
+                            crate::identity::account::AccountPublic {
+                                ed25519_pub: certificate.account_ed25519_pub,
+                            }
+                            .account_id()
+                                == account
+                        })
+            });
+            if !valid || !group_valid {
                 return Err(invalid("delivery transaction belongs to another profile"));
             }
         }
@@ -670,6 +835,204 @@ impl DeliveryStore {
             return Err(invalid("delivery capacity exhausted"));
         }
         Ok(())
+    }
+
+    /// Verify the exact prepared control against existing journal/count budgets
+    /// before its source reports acceptance. This reserves no sequence or I/O.
+    pub(in crate::node) fn preflight_group_control_transaction(
+        &self,
+        transaction: &DeliveryTransaction,
+        log: &PersistentEventLog,
+    ) -> Result<(), LogError> {
+        self.validate_transaction(transaction)?;
+        let DeliveryTransaction::AccountOwnerControl {
+            input,
+            witness,
+            events,
+        } = transaction.body()
+        else {
+            return Err(invalid("owner control preflight requires a bound effect"));
+        };
+        let [event] = events.as_slice() else {
+            return Err(invalid("invalid owner control effect count"));
+        };
+        if let Some(operation) = transaction.group_operation() {
+            group_owner_control::validate_parent_view(operation, input, witness, event, log)?;
+        } else {
+            group_owner_control::validate_direct_parent_view(input, witness, event, log)?;
+        }
+        self.check_counts(Some(transaction))?;
+        let bytes =
+            bincode::serialized_size(transaction).map_err(|_| invalid("delivery encoding"))?;
+        self.check_capacity(1, bytes)
+    }
+
+    pub(in crate::node) fn preflight_group_self_control_transaction(
+        &self,
+        tx: &DeliveryTransaction,
+        log: &PersistentEventLog,
+    ) -> Result<(), LogError> {
+        self.validate_transaction(tx)?;
+        let DeliveryTransaction::AccountSelfControl {
+            input,
+            witness,
+            events,
+        } = tx.body()
+        else {
+            return Err(invalid("self-control preflight requires a bound effect"));
+        };
+        let [event] = events.as_slice() else {
+            return Err(invalid("invalid self-control effect count"));
+        };
+        if let Some(operation) = tx.group_operation() {
+            group_self_control::validate_parent_view(operation, *input, witness, event, log)?;
+        } else {
+            group_self_control::validate_direct_parent_view(*input, witness, event, log)?;
+        }
+        self.check_counts(Some(tx))?;
+        let bytes = bincode::serialized_size(tx).map_err(|_| invalid("delivery encoding"))?;
+        self.check_capacity(1, bytes)
+    }
+
+    pub(in crate::node) fn preflight_legacy_member_leave_transaction(
+        &self,
+        tx: &DeliveryTransaction,
+        log: &PersistentEventLog,
+    ) -> Result<(), LogError> {
+        self.validate_transaction(tx)?;
+        let DeliveryTransaction::LegacyMemberLeave { witness, events } = tx.body() else {
+            return Err(invalid("legacy leave preflight requires a bound effect"));
+        };
+        let [event] = events.as_slice() else {
+            return Err(invalid("invalid legacy leave effect count"));
+        };
+        group_legacy_leave::validate_parent_view(tx.group_operation(), witness, event, log)?;
+        self.check_counts(Some(tx))?;
+        let bytes = bincode::serialized_size(tx).map_err(|_| invalid("delivery encoding"))?;
+        self.check_capacity(1, bytes)
+    }
+
+    /// Confirm private payload binding using the source identity before replay
+    /// publishes any action. The saved causal view owns the recipient set.
+    pub(in crate::node) fn validate_message_action_transaction(
+        &self,
+        tx: &DeliveryTransaction,
+        log: &PersistentEventLog,
+        identity: &crate::identity::device::DeviceIdentity,
+    ) -> Result<(), LogError> {
+        let DeliveryTransaction::ChannelMessageAction {
+            input,
+            witness,
+            events,
+            recall,
+        } = tx.body()
+        else {
+            return Ok(());
+        };
+        self.validate_transaction(tx)?;
+        let operation = tx
+            .group_operation()
+            .ok_or_else(|| invalid("message action operation binding required"))?;
+        let request = tx
+            .request()
+            .ok_or_else(|| invalid("message action request binding required"))?;
+        let [event] = events.as_slice() else {
+            return Err(invalid("invalid message action effect count"));
+        };
+        let recipients = group_message_action::validate_parent_view(
+            operation,
+            request,
+            input,
+            witness,
+            event,
+            recall.as_ref(),
+            log,
+        )?;
+        super::message_actions::validate_self_payload(identity, input, witness, event, &recipients)
+            .map_err(|_| invalid("message action private payload binding failed"))
+    }
+
+    pub(in crate::node) fn preflight_group_message_action(
+        &self,
+        tx: &DeliveryTransaction,
+        log: &PersistentEventLog,
+        identity: &crate::identity::device::DeviceIdentity,
+    ) -> Result<(), LogError> {
+        if !matches!(tx.body(), DeliveryTransaction::ChannelMessageAction { .. }) {
+            return Err(invalid("message action preflight requires a bound effect"));
+        }
+        self.validate_message_action_transaction(tx, log, identity)?;
+        self.check_counts(Some(tx))?;
+        let bytes = bincode::serialized_size(tx).map_err(|_| invalid("delivery encoding"))?;
+        self.check_capacity(1, bytes)
+    }
+
+    /// Validate the retained original preparation and ready local ciphertext
+    /// against the saved causal membership before any file effect is published.
+    pub(in crate::node) fn validate_group_file_transaction(
+        &self,
+        tx: &DeliveryTransaction,
+        log: &PersistentEventLog,
+    ) -> Result<(), LogError> {
+        let Some(witness) = tx.file_binding() else {
+            return Ok(());
+        };
+        self.validate_transaction(tx)?;
+        let operation = tx
+            .group_operation()
+            .ok_or_else(|| invalid("group file operation binding required"))?;
+        let request = tx
+            .request()
+            .ok_or_else(|| invalid("group file request binding required"))?;
+        group_file::validate_parent_view(operation, request, witness, tx.body(), log)
+    }
+
+    pub(in crate::node) fn preflight_group_file_transaction(
+        &self,
+        tx: &DeliveryTransaction,
+        log: &PersistentEventLog,
+    ) -> Result<(), LogError> {
+        if tx.file_binding().is_none() {
+            return Err(invalid("group file preflight requires a bound preparation"));
+        }
+        self.validate_group_file_transaction(tx, log)?;
+        self.check_counts(Some(tx))?;
+        let bytes = bincode::serialized_size(tx).map_err(|_| invalid("delivery encoding"))?;
+        self.check_capacity(1, bytes)
+    }
+
+    pub(in crate::node) fn validate_group_invitation_transaction(
+        &self,
+        tx: &DeliveryTransaction,
+        log: &PersistentEventLog,
+    ) -> Result<(), LogError> {
+        let Some((input, witness, body)) = tx.invitation_binding() else {
+            return Ok(());
+        };
+        self.validate_transaction(tx)?;
+        if let Some(operation) = tx.group_operation() {
+            let request = tx
+                .request()
+                .ok_or_else(|| invalid("invitation request binding required"))?;
+            group_invitation::validate_parent_view(operation, request, input, witness, body, log)?;
+        } else {
+            group_invitation::validate_direct_parent_view(input, witness, body, log)?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::node) fn preflight_group_invitation_transaction(
+        &self,
+        tx: &DeliveryTransaction,
+        log: &PersistentEventLog,
+    ) -> Result<(), LogError> {
+        if tx.invitation_binding().is_none() {
+            return Err(invalid("invitation preflight requires a bound preparation"));
+        }
+        self.validate_group_invitation_transaction(tx, log)?;
+        self.check_counts(Some(tx))?;
+        let bytes = bincode::serialized_size(tx).map_err(|_| invalid("delivery encoding"))?;
+        self.check_capacity(1, bytes)
     }
 
     /// Success is the durable acceptance point. Return the same id to callers
@@ -853,6 +1216,7 @@ impl DeliveryStore {
         self.recover_next_with_channels(ratchet, log, sent, received, files, None)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn recover_next_with_channels(
         &mut self,
@@ -863,16 +1227,143 @@ impl DeliveryStore {
         files: Option<&mut ReceivedLog>,
         channel_senders: Option<&mut super::channel_senders::ChannelSenderStore>,
     ) -> Result<Option<EventId>, LogError> {
+        self.recover_next_with_group_operations(
+            ratchet,
+            log,
+            sent,
+            received,
+            files,
+            channel_senders,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn recover_next_with_group_operations(
+        &mut self,
+        ratchet: &mut DmRatchet,
+        log: &mut PersistentEventLog,
+        sent: &mut SentLog,
+        received: &mut ReceivedLog,
+        files: Option<&mut ReceivedLog>,
+        channel_senders: Option<&mut super::channel_senders::ChannelSenderStore>,
+        mut completion: Option<&mut GroupOperationCompletion<'_>>,
+    ) -> Result<Option<EventId>, LogError> {
         self.sync_replacement()?;
         let Some(tx) = self.pending.first() else {
             return Ok(None);
         };
+        if tx.group_operation().is_some() && completion.is_none() {
+            return Err(invalid("group control recovery adapter required"));
+        }
         let id = tx.id();
         // The host syncs causal parents before begin. Re-sync before replay as
         // well, including the original incoming event and receipt's parents.
         log.sync()?;
+        self.validate_group_file_transaction(tx, log)?;
+        self.validate_group_invitation_transaction(tx, log)?;
         match tx.body() {
-            DeliveryTransaction::Requested { .. } => unreachable!(),
+            DeliveryTransaction::Requested { .. }
+            | DeliveryTransaction::GroupRequested { .. }
+            | DeliveryTransaction::AccountGroupFile { .. }
+            | DeliveryTransaction::AccountInvitation { .. } => {
+                unreachable!()
+            }
+            DeliveryTransaction::ChannelMessageAction {
+                input,
+                witness,
+                events,
+                recall,
+            } => {
+                let operation = tx
+                    .group_operation()
+                    .ok_or_else(|| invalid("message action operation binding required"))?;
+                let request = tx
+                    .request()
+                    .ok_or_else(|| invalid("message action request binding required"))?;
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid message action effect count"));
+                };
+                let (_, profile) = self
+                    .profile
+                    .as_ref()
+                    .ok_or_else(|| invalid("message action profile binding required"))?;
+                if profile.device != witness.own.public()
+                    || witness.own.account_id().as_deref() != Some(profile.account.as_str())
+                {
+                    return Err(invalid("message action belongs to another profile"));
+                }
+                group_message_action::validate_parent_view(
+                    operation,
+                    request,
+                    input,
+                    witness,
+                    event,
+                    recall.as_ref(),
+                    log,
+                )?;
+                log.append_durable(event.clone())?;
+            }
+            DeliveryTransaction::ChannelControl { events } => {
+                for event in events {
+                    log.append_durable(event.clone())?;
+                }
+            }
+            DeliveryTransaction::LegacyMemberLeave { witness, events } => {
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid legacy leave effect count"));
+                };
+                group_legacy_leave::validate_parent_view(
+                    tx.group_operation(),
+                    witness,
+                    event,
+                    log,
+                )?;
+                log.append_durable(event.clone())?;
+            }
+            DeliveryTransaction::AccountSelfControl {
+                input,
+                witness,
+                events,
+            } => {
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid self-control effect count"));
+                };
+                if let Some(operation) = tx.group_operation() {
+                    group_self_control::validate_parent_view(
+                        operation, *input, witness, event, log,
+                    )?;
+                } else {
+                    group_self_control::validate_direct_parent_view(*input, witness, event, log)?;
+                }
+                log.append_durable(event.clone())?;
+            }
+            DeliveryTransaction::AccountOwnerControl {
+                input,
+                witness,
+                events,
+            } => {
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid owner control effect count"));
+                };
+                let (_, profile) = self
+                    .profile
+                    .as_ref()
+                    .ok_or_else(|| invalid("owner control profile binding required"))?;
+                if profile.device != witness.own.public()
+                    || witness.own.account_id().as_deref() != Some(profile.account.as_str())
+                {
+                    return Err(invalid("owner control belongs to another profile"));
+                }
+                if let Some(operation) = tx.group_operation() {
+                    group_owner_control::validate_parent_view(
+                        operation, input, witness, event, log,
+                    )?;
+                } else {
+                    group_owner_control::validate_direct_parent_view(input, witness, event, log)?;
+                }
+                log.append_durable(event.clone())?;
+            }
             DeliveryTransaction::ChannelOutgoing {
                 events,
                 sent: entry,
@@ -971,6 +1462,23 @@ impl DeliveryStore {
         }
         if let Some(request) = self.pending[0].request().cloned() {
             self.install_record(OutboxRecord::Request(request))?;
+        }
+        if let Some(operation) = self.pending[0].group_operation() {
+            let events = match self.pending[0].body() {
+                DeliveryTransaction::ChannelControl { events }
+                | DeliveryTransaction::ChannelOutgoing { events, .. }
+                | DeliveryTransaction::AccountSelfControl { events, .. }
+                | DeliveryTransaction::LegacyMemberLeave { events, .. }
+                | DeliveryTransaction::AccountOwnerControl { events, .. }
+                | DeliveryTransaction::ChannelMessageAction { events, .. } => events,
+                _ => return Err(invalid("invalid group operation recovery effects")),
+            };
+            // The durable source result is a required sidecar. Keep the exact
+            // transaction pending until that owner confirms its own sync.
+            let complete = completion
+                .as_mut()
+                .ok_or_else(|| invalid("group control recovery adapter required"))?;
+            complete(operation, events)?;
         }
         // Rewrite commits before sync; update the live index even if the final
         // directory sync fails, and prohibit further mutations until it retries.
@@ -1131,6 +1639,14 @@ impl DeliveryStore {
 
     pub(crate) fn file_card(&self, id: EventId) -> Option<&FileCard> {
         self.files.get(&id)
+    }
+
+    pub(crate) fn retain_incoming_group_file(&mut self, file: FileCard) -> Result<(), LogError> {
+        if !file.destinations.is_empty() || file.completion_binding.is_none() {
+            return Err(invalid("invalid incoming group file reservation"));
+        }
+        self.check_file_slot(&file)?;
+        self.install_record(OutboxRecord::FileCard(file))
     }
 
     pub(crate) fn complete_file(
@@ -2567,8 +3083,258 @@ impl DeliveryStore {
     }
 
     fn validate_transaction(&self, tx: &DeliveryTransaction) -> Result<(), LogError> {
+        if let Some((input, witness, body)) = tx.invitation_binding() {
+            if self.profile.as_ref().is_some_and(|(_, profile)| {
+                profile.device != witness.own.public()
+                    || witness.own.account_id().as_deref() != Some(profile.account.as_str())
+            }) {
+                return Err(invalid("invitation belongs to another profile"));
+            }
+            group_invitation::validate_direct(input, witness, body)?;
+        }
+        // A file binding is executable only inside its original account/request
+        // wrappers. Never treat a bare file wrapper as an ordinary local send.
+        if tx.file_binding().is_some() && tx.group_operation().is_none() {
+            return Err(invalid("group file requires original operation binding"));
+        }
+        if let Some(operation) = tx.group_operation() {
+            let Some(certificate) = operation.origin.account_cert.as_ref() else {
+                return Err(invalid("group operation has no account binding"));
+            };
+            let DeliveryTransaction::GroupRequested { transaction, .. } = tx else {
+                return Err(invalid("invalid group operation wrapper"));
+            };
+            let DeliveryTransaction::Requested {
+                request,
+                transaction,
+            } = transaction.as_ref()
+            else {
+                return Err(invalid("invalid group operation request wrapper"));
+            };
+            let event = match transaction.as_ref() {
+                DeliveryTransaction::ChannelControl { events } => {
+                    if operation.executor.role != super::AccountGroupRole::Owner {
+                        return Err(invalid("invalid group control source role"));
+                    }
+                    match events.as_slice() {
+                        [event] => event,
+                        _ => return Err(invalid("invalid group control effect count")),
+                    }
+                }
+                DeliveryTransaction::ChannelOutgoing { events, sent, .. } => {
+                    group_message::validate(operation, request, transaction)?;
+                    if sent.plaintext.len() > self.limits.payload_bytes {
+                        return Err(invalid("group message payload exceeds limit"));
+                    }
+                    events
+                        .last()
+                        .ok_or_else(|| invalid("missing group message effect"))?
+                }
+                DeliveryTransaction::AccountGroupFile {
+                    witness,
+                    transaction,
+                } => {
+                    group_file::validate_bound(operation, request, witness, transaction)?;
+                    let DeliveryTransaction::ChannelOutgoing { events, sent, .. } =
+                        transaction.as_ref()
+                    else {
+                        return Err(invalid("invalid group file effect kind"));
+                    };
+                    if sent.plaintext.len() > self.limits.payload_bytes {
+                        return Err(invalid("group file payload exceeds limit"));
+                    }
+                    events
+                        .last()
+                        .ok_or_else(|| invalid("missing group file effect"))?
+                }
+                DeliveryTransaction::AccountInvitation {
+                    input,
+                    witness,
+                    transaction,
+                } => {
+                    group_invitation::validate_bound(
+                        operation,
+                        request,
+                        input,
+                        witness,
+                        transaction,
+                    )?;
+                    let DeliveryTransaction::ChannelOutgoing { events, .. } = transaction.as_ref()
+                    else {
+                        return Err(invalid("invalid invitation effect kind"));
+                    };
+                    events
+                        .first()
+                        .ok_or_else(|| invalid("missing invitation effect"))?
+                }
+                DeliveryTransaction::LegacyMemberLeave { witness, events } => {
+                    let [event] = events.as_slice() else {
+                        return Err(invalid("invalid legacy leave effect count"));
+                    };
+                    group_legacy_leave::validate_common(Some(operation), witness, event)?;
+                    event
+                }
+                DeliveryTransaction::AccountSelfControl {
+                    input,
+                    witness,
+                    events,
+                } => {
+                    let [event] = events.as_slice() else {
+                        return Err(invalid("invalid self-control effect count"));
+                    };
+                    group_self_control::validate_bound(operation, *input, witness, event)?;
+                    event
+                }
+                DeliveryTransaction::AccountOwnerControl {
+                    input,
+                    witness,
+                    events,
+                } => {
+                    let [event] = events.as_slice() else {
+                        return Err(invalid("invalid owner control effect count"));
+                    };
+                    group_owner_control::validate_bound(operation, input, witness, event)?;
+                    event
+                }
+                DeliveryTransaction::ChannelMessageAction {
+                    input,
+                    witness,
+                    events,
+                    recall,
+                } => {
+                    let [event] = events.as_slice() else {
+                        return Err(invalid("invalid message action effect count"));
+                    };
+                    group_message_action::validate_bound(
+                        operation,
+                        request,
+                        input,
+                        witness,
+                        event,
+                        recall.as_ref(),
+                    )?;
+                    event
+                }
+                _ => return Err(invalid("invalid group operation effect kind")),
+            };
+            if !operation.valid(&certificate.account_ed25519_pub)
+                || self.profile.as_ref().is_some_and(|(_, owner)| {
+                    owner.device != operation.executor.device
+                        || owner.account
+                            != crate::identity::account::AccountPublic {
+                                ed25519_pub: certificate.account_ed25519_pub,
+                            }
+                            .account_id()
+                })
+                || request.request_id != *operation.id.as_bytes()
+                || request.digest != operation.digest
+                || request.message_id != event.id
+                || request.destination
+                    != super::outgoing_message::MessageDestination::Channel(operation.group)
+            {
+                return Err(invalid("invalid group operation transaction binding"));
+            }
+        }
+
         match tx.body() {
-            DeliveryTransaction::Requested { .. } => unreachable!(),
+            DeliveryTransaction::Requested { .. }
+            | DeliveryTransaction::GroupRequested { .. }
+            | DeliveryTransaction::AccountGroupFile { .. }
+            | DeliveryTransaction::AccountInvitation { .. } => {
+                unreachable!()
+            }
+            DeliveryTransaction::ChannelMessageAction { .. } => {
+                if tx.group_operation().is_none() || tx.request().is_none() {
+                    Err(invalid(
+                        "message action requires original operation binding",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            DeliveryTransaction::LegacyMemberLeave { witness, events } => {
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid legacy leave effect count"));
+                };
+                if self.profile.as_ref().is_some_and(|(_, profile)| {
+                    profile.device != witness.own.public()
+                        || witness.own.account_id().as_deref() != Some(profile.account.as_str())
+                }) {
+                    return Err(invalid("legacy departure belongs to another profile"));
+                }
+                group_legacy_leave::validate_common(None, witness, event)
+            }
+            DeliveryTransaction::AccountSelfControl {
+                input,
+                witness,
+                events,
+            } => {
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid self-control effect count"));
+                };
+                if self.profile.as_ref().is_some_and(|(_, profile)| {
+                    profile.device != witness.own.public()
+                        || witness.own.account_id().as_deref() != Some(profile.account.as_str())
+                }) {
+                    return Err(invalid("self-control belongs to another profile"));
+                }
+                group_self_control::validate_direct(*input, witness, event)
+            }
+            DeliveryTransaction::AccountOwnerControl {
+                input,
+                witness,
+                events,
+            } => {
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid owner control effect count"));
+                };
+                if self.profile.as_ref().is_some_and(|(_, profile)| {
+                    profile.device != witness.own.public()
+                        || witness.own.account_id().as_deref() != Some(profile.account.as_str())
+                }) {
+                    return Err(invalid("owner control belongs to another profile"));
+                }
+                group_owner_control::validate_direct(input, witness, event)
+            }
+            DeliveryTransaction::ChannelControl { events } => {
+                let operation = tx
+                    .group_operation()
+                    .ok_or_else(|| invalid("group control requires operation binding"))?;
+                let [event] = events.as_slice() else {
+                    return Err(invalid("invalid group control effect count"));
+                };
+                let control = super::channels::SimpleControl::from_event(event)
+                    .ok_or_else(|| invalid("invalid group control payload"))?;
+                let effect = match control {
+                    super::channels::SimpleControl::Rename(name) => {
+                        super::AccountGroupOperation::Rename { name }
+                    }
+                    super::channels::SimpleControl::HistoryPolicy(policy) => {
+                        super::AccountGroupOperation::SetHistoryPolicy { policy }
+                    }
+                    super::channels::SimpleControl::Dissolve => {
+                        super::AccountGroupOperation::Dissolve
+                    }
+                };
+                if effect.kind() != operation.kind
+                    || event.conversation_id != operation.group
+                    || event.author.ed25519_pub() != &operation.executor.device.ed25519_pub
+                    || event.seq == 0
+                    || event.lamport == 0
+                    || event.parents.is_empty()
+                    || !event.is_canonical()
+                    || !event.verify_integrity()
+                    || !event.verify_signature()
+                    || !super::session::event_fits_frame(event)
+                    || super::account_group::operations::journal::operation_digest(
+                        event.conversation_id,
+                        &effect,
+                    ) != operation.digest
+                {
+                    return Err(invalid("invalid group control transaction"));
+                }
+                Ok(())
+            }
             DeliveryTransaction::ChannelOutgoing {
                 events,
                 sent,
@@ -2821,8 +3587,18 @@ impl DeliveryStore {
 
 fn metadata_for(tx: &DeliveryTransaction) -> Option<OutboxRecord> {
     match tx.body() {
-        DeliveryTransaction::Requested { .. } => unreachable!(),
-        DeliveryTransaction::ChannelOutgoing { .. } => None,
+        DeliveryTransaction::Requested { .. }
+        | DeliveryTransaction::GroupRequested { .. }
+        | DeliveryTransaction::AccountGroupFile { .. }
+        | DeliveryTransaction::AccountInvitation { .. } => {
+            unreachable!()
+        }
+        DeliveryTransaction::ChannelOutgoing { .. }
+        | DeliveryTransaction::ChannelControl { .. }
+        | DeliveryTransaction::AccountSelfControl { .. }
+        | DeliveryTransaction::LegacyMemberLeave { .. }
+        | DeliveryTransaction::AccountOwnerControl { .. }
+        | DeliveryTransaction::ChannelMessageAction { .. } => None,
         DeliveryTransaction::Outgoing { message, .. }
         | DeliveryTransaction::OutgoingManifest { message, .. } => {
             // A personal message with no known siblings has no transport work.

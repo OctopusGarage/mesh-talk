@@ -1246,13 +1246,31 @@ impl Node {
         addr: std::net::SocketAddr,
         expected: &PublicIdentity,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        self.privacy_dial_priority(
+            addr,
+            expected,
+            super::session_pool::AuthenticationPriority::Ordinary,
+        )
+        .await
+    }
+
+    pub(in crate::node) async fn privacy_dial_priority(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+        priority: super::session_pool::AuthenticationPriority,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
         let mut addr = addr;
         addr.set_ip(crate::transport::net::canonical_peer_ip(addr.ip()));
         #[cfg(test)]
         timing.phase("dial-privacy-gate");
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_privacy_gate_wait".into());
         let _operation = self.privacy.gate.read().await;
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_privacy_gate_acquired".into());
         let own = self.own_presence();
         let transitions = self.own_account_transitions();
         #[cfg(test)]
@@ -1269,6 +1287,8 @@ impl Node {
         {
             return Err(TransportError::AdmissionDenied);
         }
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_policy_admitted".into());
         let candidates = self.privacy_route_candidates(addr, expected, announce.as_ref());
         // A departed LAN endpoint may still accept TCP through a proxy/TUN but
         // never complete Noise. Give a second verified candidate a turn after
@@ -1280,19 +1300,54 @@ impl Node {
             let transitions = transitions.as_slice();
             async move {
                 let result = async {
-                    let _authentication = self
-                        .sessions
-                        .authentication_admission(self.peer_endpoint_key(candidate, expected))
-                        .await?;
+                    #[cfg(test)]
+                    self.trace_account_client(expected, || {
+                        "dial_authentication_admission_wait".into()
+                    });
+                    let authentication_key = self.peer_endpoint_key(candidate, expected);
+                    let _authentication = match priority {
+                        super::session_pool::AuthenticationPriority::Ordinary => {
+                            self.sessions
+                                .authentication_admission(authentication_key)
+                                .await?
+                        }
+                        super::session_pool::AuthenticationPriority::Control => {
+                            self.sessions
+                                .authentication_admission_priority(authentication_key, priority)
+                                .await?
+                        }
+                    };
+                    #[cfg(test)]
+                    self.trace_account_client(expected, || {
+                        "dial_authentication_admission_acquired_outbound_wait".into()
+                    });
                     let permits = self.sessions.outbound().await?;
+                    #[cfg(test)]
+                    self.trace_account_client(expected, || "dial_outbound_acquired".into());
                     let started = std::time::Instant::now();
                     let result = tokio::time::timeout(
                         self.sessions.authentication_timeout(expected, candidate),
                         async {
+                            #[cfg(test)]
+                            self.trace_account_client(expected, || "dial_tcp_connect_begin".into());
                             let stream = TcpStream::connect(candidate).await?;
+                            #[cfg(test)]
+                            self.trace_account_client(expected, || "dial_tcp_connect_end".into());
+                            #[cfg(test)]
+                            self.trace_account_client(expected, || {
+                                format!(
+                                    "dial_socket_ports={:?}",
+                                    (
+                                        stream.local_addr().ok().map(|addr| addr.port()),
+                                        stream.peer_addr().ok().map(|addr| addr.port())
+                                    )
+                                )
+                            });
                             stream.set_nodelay(true)?;
                             crate::transport::net::set_tcp_keepalive(&stream);
                             let publicly_visible = self.publicly_visible_at(stream.peer_addr()?);
+                            #[cfg(test)]
+                            self.trace_account_client(expected, || "dial_noise_begin".into());
                             SecureChannel::connect_with_transitions(
                                 stream,
                                 &self.identity,
@@ -1308,6 +1363,14 @@ impl Node {
                     .unwrap_or_else(|_| {
                         self.sessions.authentication_timed_out(expected, candidate);
                         Err(TransportError::Noise("dial timed out".into()))
+                    });
+                    #[cfg(test)]
+                    self.trace_account_client(expected, || {
+                        format!(
+                            "dial_noise_end ok={} outcome={:?}",
+                            result.is_ok(),
+                            super::account_session::client_transport_outcome(&result)
+                        )
                     });
                     if started.elapsed() >= Duration::from_secs(2) {
                         log::warn!(
@@ -1360,6 +1423,8 @@ impl Node {
         channel.retain_connection_permits(permits);
         #[cfg(test)]
         timing.phase("dial-proof-validation");
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_proof_validation_begin".into());
         self.apply_account_transition(channel.verified_peer())?;
         let generation = self.privacy.generation.load(Ordering::SeqCst);
         #[cfg(test)]
@@ -1380,6 +1445,8 @@ impl Node {
         self.note_dialed_route(requested_addr, &channel);
         #[cfg(test)]
         timing.finish();
+        #[cfg(test)]
+        self.trace_account_client(expected, || "dial_complete".into());
         Ok(channel)
     }
     #[cfg(test)]
@@ -1400,6 +1467,15 @@ impl Node {
         let mut timing = super::delivery_runtime::TestTiming::new("accept-tcp-ready");
         #[cfg(test)]
         timing.socket(&stream);
+        #[cfg(test)]
+        let observer_socket_ports = (
+            stream.local_addr().ok().map(|addr| addr.port()),
+            stream.peer_addr().ok().map(|addr| addr.port()),
+        );
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_tcp_ready socket_ports={observer_socket_ports:?}")
+        });
         let endpoint = stream.peer_addr()?;
         let ip = endpoint.ip();
         stream.set_nodelay(true)?;
@@ -1408,12 +1484,24 @@ impl Node {
         timing.phase("accept-own-presence");
         #[cfg(test)]
         timing.phase("accept-privacy-gate");
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_privacy_gate_wait socket_ports={observer_socket_ports:?}")
+        });
         let _operation = self.privacy.gate.read().await;
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_privacy_gate_acquired socket_ports={observer_socket_ports:?}")
+        });
         let own = self.own_presence();
         let transitions = self.own_account_transitions();
         let publicly_visible = self.publicly_visible_at(endpoint);
         #[cfg(test)]
         timing.phase("accept-noise-presence");
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_noise_begin socket_ports={observer_socket_ports:?}")
+        });
         let mut channel = tokio::time::timeout(
             super::route_timing::MAX_AUTHENTICATION_DEADLINE,
             SecureChannel::accept_with_transitions(
@@ -1432,6 +1520,10 @@ impl Node {
         .map_err(|_| TransportError::Noise("accept timed out".into()))??;
         #[cfg(test)]
         timing.phase("accept-remember-peer");
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("responder_noise_end socket_ports={observer_socket_ports:?}")
+        });
         channel.retain_connection_permits(permits);
         if self.pairing_retry_allowed(channel.peer_identity(), channel.peer_announcement()) {
             channel.restrict_to_pairing();

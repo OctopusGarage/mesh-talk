@@ -1,3 +1,4 @@
+import { selectSettingsCategory } from "./helpers/settings";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 import { test, expect } from "./tauri-mock";
 import { CHANNEL, enterChat, openBobDm } from "./helpers/session";
@@ -23,6 +24,7 @@ test("window and dialog close labels follow the selected language", async ({
 }) => {
   await enterChat(page);
   await openSidebarMenuAction(page, "sidebar-nav-settings");
+  await selectSettingsCategory(page, "appearance");
   const dialog = page.getByTestId("settings-dialog");
   await dialog.getByTestId("settings-language-select").selectOption("zh-Hans");
   await expect(dialog.getByRole("button", { name: "关闭" })).toBeVisible();

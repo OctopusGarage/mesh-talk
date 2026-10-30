@@ -25,6 +25,7 @@ pub(super) struct ProjectionMetadata {
     pub requires_v2: bool,
     pub requires_v3: bool,
     pub requires_v4: bool,
+    pub requires_v5: bool,
 }
 
 #[derive(Default)]

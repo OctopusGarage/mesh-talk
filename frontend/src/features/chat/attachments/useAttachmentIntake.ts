@@ -16,6 +16,7 @@ import {
 } from "@/lib/mediaTypes";
 import { captureChatOwnership, convKey, useChat } from "@/store/chat";
 
+import { canParticipateChannel } from "../channelPermissions";
 import { AttachmentBatchError } from "./attachmentBatch";
 import { useScreenshotShortcuts } from "../screenshot/useScreenshotShortcuts";
 
@@ -33,20 +34,10 @@ interface AttachmentSendOptions extends ProtectionPolicy {
 }
 
 function writable({ active, channels } = useChat.getState()) {
-  return (
-    !!active &&
-    !(
-      active.kind === "channel" &&
-      channels.some(
-        (channel) =>
-          channel.channel_id === active.id &&
-          (channel.shared_reference ||
-            channel.archived ||
-            channel.dissolved ||
-            channel.left ||
-            channel.pending_invite),
-      )
-    )
+  if (!active) return false;
+  if (active.kind !== "channel") return true;
+  return canParticipateChannel(
+    channels.find((channel) => channel.channel_id === active.id),
   );
 }
 
@@ -74,6 +65,11 @@ export function useAttachmentIntake(
   const [stagedScreenshot, setStagedScreenshot] = useState<{
     file: File;
     current: Current;
+  } | null>(null);
+
+  const [camera, setCamera] = useState<{
+    current: Current;
+    policy: AttachmentSendOptions;
   } | null>(null);
 
   const screenshotPolicies = useRef(new WeakMap<File, AttachmentSendOptions>());
@@ -279,7 +275,7 @@ export function useAttachmentIntake(
   }
   useScreenshotShortcuts({
     available: screenshotAvailable,
-    blocked: !!screenshot || capturing.current,
+    blocked: !!screenshot || !!camera || capturing.current,
     writable: writable(),
     capture: captureScreenshot,
   });
@@ -309,6 +305,7 @@ export function useAttachmentIntake(
       ) {
         conversationEpoch.current++;
         setScreenshot(null);
+        setCamera(null);
         setStagedScreenshot(null);
         setDragOver(false);
       }
@@ -320,6 +317,7 @@ export function useAttachmentIntake(
       ) {
         conversationEpoch.current++;
         setScreenshot(null);
+        setCamera(null);
         setStagedScreenshot(null);
       }
     });
@@ -400,6 +398,18 @@ export function useAttachmentIntake(
   }, [t]);
 
   return {
+    cameraOpen: !!camera?.current(),
+    openCamera: () => {
+      const current = capture();
+      if (current()) setCamera({ current, policy: snapshot() });
+    },
+    cancelCamera: () => setCamera(null),
+    confirmCamera: (file: File) => {
+      if (!camera?.current()) return;
+      screenshotPolicies.current.set(file, camera.policy);
+      setStagedScreenshot({ file, current: camera.current });
+      setCamera(null);
+    },
     dragOver,
     stagedScreenshot: stagedScreenshot?.current()
       ? stagedScreenshot.file

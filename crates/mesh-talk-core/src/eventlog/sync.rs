@@ -147,6 +147,11 @@ pub trait SyncStore {
                 )
             })
     }
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        self.events_excluding(conversation, &HashSet::new())
+            .iter()
+            .any(|event| event.kind == EventKind::ChannelMetadata)
+    }
     /// Digest and size of the currently visible event set. Implementations with
     /// unfiltered durable logs may cache this across idle recovery ticks.
     fn fingerprint_and_len(&self, conversation: &ConversationId) -> ([u8; 32], usize) {
@@ -244,6 +249,9 @@ pub enum FileConsentStatus {
 impl SyncStore for EventLog {
     fn requires_channel_v3(&self, conversation: &ConversationId) -> bool {
         EventLog::requires_channel_v3(self, conversation)
+    }
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        EventLog::requires_channel_v5(self, conversation)
     }
     fn requires_channel_v4(&self, conversation: &ConversationId) -> bool {
         EventLog::requires_channel_v4(self, conversation)

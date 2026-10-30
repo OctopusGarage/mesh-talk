@@ -541,6 +541,9 @@ impl PostOffice {
 }
 
 impl SyncStore for PostOffice {
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> bool {
+        self.log.requires_channel_v5(conversation)
+    }
     // Metadata probes must use the durable log's indexes/cache. Trait defaults
     // export every ciphertext body just to discover supported event kinds.
     fn requires_channel_v2(&self, conversation: &ConversationId) -> bool {
@@ -715,6 +718,7 @@ mod tests {
             assert!(!SyncStore::requires_channel_v2(&office, &conv()));
             assert!(!SyncStore::requires_channel_v3(&office, &conv()));
             assert!(!SyncStore::requires_channel_v4(&office, &conv()));
+            assert!(!SyncStore::requires_channel_v5(&office, &conv()));
             assert_eq!(SyncStore::fingerprint_and_len(&office, &conv()), expected);
         }
         assert_eq!(
@@ -739,6 +743,7 @@ mod tests {
             EventKind::ChannelReplica,
             EventKind::ChannelHistoryPolicy,
             EventKind::ChannelAccountAuthority,
+            EventKind::ChannelMetadata,
         ]
         .into_iter()
         .enumerate()
@@ -758,6 +763,7 @@ mod tests {
             assert!(SyncStore::requires_channel_v2(&office, &conv()));
             assert_eq!(SyncStore::requires_channel_v3(&office, &conv()), index >= 1);
             assert_eq!(SyncStore::requires_channel_v4(&office, &conv()), index >= 2);
+            assert_eq!(SyncStore::requires_channel_v5(&office, &conv()), index >= 3);
             let expected = office.log.fingerprint_and_len(&conv());
             assert_eq!(SyncStore::fingerprint_and_len(&office, &conv()), expected);
             assert_eq!(expected.1, index + 1);
@@ -779,6 +785,7 @@ mod tests {
         assert!(SyncStore::requires_channel_v2(&reopened, &conv()));
         assert!(SyncStore::requires_channel_v3(&reopened, &conv()));
         assert!(SyncStore::requires_channel_v4(&reopened, &conv()));
+        assert!(SyncStore::requires_channel_v5(&reopened, &conv()));
         assert_eq!(SyncStore::fingerprint_and_len(&reopened, &conv()), retained);
         reopened.prune_expired_at(start + MAX_RELAY_AGE).unwrap();
         assert!(reopened.log.sync_metadata_observations(&conv()).0.is_none());
@@ -786,6 +793,7 @@ mod tests {
         assert!(!SyncStore::requires_channel_v2(&reopened, &conv()));
         assert!(!SyncStore::requires_channel_v3(&reopened, &conv()));
         assert!(!SyncStore::requires_channel_v4(&reopened, &conv()));
+        assert!(!SyncStore::requires_channel_v5(&reopened, &conv()));
         drop(reopened);
         let expired = PostOffice::open_at(
             &path,
