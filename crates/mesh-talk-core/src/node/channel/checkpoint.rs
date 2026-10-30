@@ -127,8 +127,8 @@ impl ChannelCheckpointStore {
             sharing::initialize(c, !present)?;
             activity::initialize(c, !present)?;
             causal::initialize(c, !present)?;
-            file_preview::initialize(c)?;
             super::graph::preparing::initialize(c)?;
+            file_preview::initialize(c)?;
             crate::node::join_history::initialize_indexed(c, !present)
         })?;
         let (account, generation, owner) = profile.database().read(|c| {
