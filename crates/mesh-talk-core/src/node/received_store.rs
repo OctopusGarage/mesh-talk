@@ -234,6 +234,81 @@ impl ReceivedStore {
             false,
         )
     }
+    /// FILES plaintext, validated eligibility, exact processed evidence and host
+    /// reception facts share the existing profile transaction. The journal may
+    /// retire its intent only after this returns successfully.
+    pub(crate) fn record_file_with_reception(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&crate::eventlog::Event>,
+        metadata: Option<&super::reception_effects::ReceptionMetadata>,
+    ) -> Result<(), LogError> {
+        if self.repository.kind != FILES {
+            return Err(repository::invalid("file reception requires FILES owner"));
+        }
+        self.check_write()?;
+        let inserted = self.repository.profile.database().transaction(|c| {
+            let stored;
+            let original = match original {
+                Some(original) => original,
+                None => {
+                    stored = super::account_file_repository::IndexedAccountFileProofs::get_on(
+                        c,
+                        &entry.event_id,
+                    )?
+                    .ok_or_else(|| repository::invalid("file reception has no signed proof"))?;
+                    &stored
+                }
+            };
+            Self::install_file_on(c, entry, original, metadata)
+        })?;
+        self.note_channel_commit(usize::from(inserted));
+        Ok(())
+    }
+    /// The channel owner calls this after its receiver CAS and before batch
+    /// progress, all in one transaction. Return value counts newly retained rows.
+    pub(crate) fn install_file_on(
+        c: &rusqlite::Connection,
+        entry: &ReceivedEntry,
+        original: &crate::eventlog::Event,
+        metadata: Option<&super::reception_effects::ReceptionMetadata>,
+    ) -> Result<bool, LogError> {
+        if super::files::eligible_manifest_row(entry, Some(original), None).is_none() {
+            return Err(LogError::AdmissionRejected(
+                "invalid signed file reception".into(),
+            ));
+        }
+        if super::file_message_identity::IndexedFileMessageIdentities::row_suppressed_on(c, entry)?
+        {
+            super::filebook::indexed::mark_processed_on(c, entry.event_id)?;
+            return Ok(false);
+        }
+        let inserted = TranscriptRepository::put_on(
+            c,
+            FILES,
+            entry.conversation,
+            entry.event_id.as_bytes(),
+            entry.wall_clock,
+            0,
+            &entry.from,
+            &entry.plaintext,
+            true,
+            false,
+        )?;
+        super::filebook::indexed::install_on(c, entry, original)?;
+        if let Some(metadata) = metadata {
+            super::reception_effects::install_on(
+                c,
+                super::reception_effects::ReceptionSource {
+                    kind: super::reception_effects::ReceptionKind::File,
+                    conversation: entry.conversation,
+                    event_id: entry.event_id,
+                },
+                metadata,
+            )?;
+        }
+        Ok(inserted)
+    }
     pub(crate) fn record(
         &mut self,
         conversation: ConversationId,

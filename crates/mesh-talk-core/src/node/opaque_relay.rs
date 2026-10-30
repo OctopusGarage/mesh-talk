@@ -193,6 +193,7 @@ pub(in crate::node) struct OpaqueMailboxProgress {
     sync: super::session::SyncProgress,
     uploaded: Vec<(EventId, EventId)>,
     deferred_events: HashSet<EventId>,
+    processed_events: HashMap<EventId, Option<EventId>>,
     wrapper_ids: HashMap<EventId, EventId>,
     wrappers: Mutex<WrapperCache>,
 }
@@ -213,6 +214,7 @@ impl OpaqueMailboxProgress {
             sync: super::session::SyncProgress::default(),
             uploaded: Vec::new(),
             deferred_events: HashSet::new(),
+            processed_events: HashMap::new(),
             wrapper_ids: HashMap::new(),
             wrappers: Mutex::new(WrapperCache::default()),
         }
@@ -309,13 +311,28 @@ impl Node {
             return Err(super::session::SessionError::UnexpectedMessage);
         }
         let mut seen = self
-            .opaque_seen
+            .opaque_receive_cache
             .lock()
-            .expect("opaque seen lock not poisoned")
-            .get(&progress.mailbox.id())
-            .cloned()
-            .unwrap_or_default();
+            .expect("opaque cache lock not poisoned")
+            .seen(
+                progress.mailbox.id(),
+                &self.log.lock().expect("log lock not poisoned"),
+            )?;
         seen.extend(progress.deferred_events.iter().copied());
+        // Optional hint persistence may fail independently of admitted history.
+        // Keep only this active exchange's progress, under the existing HAVE
+        // identifier budget, so a disabled cache cannot pin the same page.
+        {
+            let log = self.log.lock().expect("log lock not poisoned");
+            for (outer, inner) in &progress.processed_events {
+                if match inner {
+                    Some(inner) => log.has(inner)?,
+                    None => true,
+                } {
+                    seen.insert(*outer);
+                }
+            }
+        }
         let mut controls = HashMap::new();
         let mut source_ids = Vec::new();
         if self.relay_send_allowed(&progress.relay) && authorize_upload() {
@@ -544,24 +561,31 @@ impl Node {
                 self.persist_media_if_complete(conv);
             }
         }
+        let retained_by_outer: HashMap<_, _> = retained.iter().copied().collect();
+        for outer in &processed {
+            if progress.processed_events.len() >= super::session::MAX_HAVE_IDS_TOTAL
+                && !progress.processed_events.contains_key(outer)
+            {
+                return Err(super::session::SessionError::NoProgress);
+            }
+            progress
+                .processed_events
+                .insert(*outer, retained_by_outer.get(outer).copied());
+        }
         if !retained.is_empty() {
             self.opaque_receive_cache
                 .lock()
                 .expect("opaque cache lock not poisoned")
                 .remember(progress.mailbox.id(), &retained);
         }
+        // Retained pairs stay dependent on exact main-log membership. Only
+        // wrappers without a retained inner event need session-only progress.
+        processed.retain(|outer| !retained_by_outer.contains_key(outer));
         if !processed.is_empty() {
-            let mut cache = self
-                .opaque_seen
+            self.opaque_receive_cache
                 .lock()
-                .expect("opaque seen lock not poisoned");
-            if cache.values().map(HashSet::len).sum::<usize>() > 250_000 {
-                cache.clear();
-            }
-            cache
-                .entry(progress.mailbox.id())
-                .or_default()
-                .extend(processed);
+                .expect("opaque cache lock not poisoned")
+                .remember_session(progress.mailbox.id(), &processed);
         }
         if !self.relay_send_allowed(channel.peer_identity()) {
             progress.uploaded.clear();
@@ -711,7 +735,7 @@ mod permission_tests {
                 EventKind::Message,
                 vec![8; 32000],
             );
-            for pass in 0..5 {
+            for pass in 0..6 {
                 if pass == 2 {
                     relay_log
                         .lock()
@@ -719,10 +743,6 @@ mod permission_tests {
                         .log
                         .append(mailbox.wrap(&newer).unwrap())
                         .unwrap();
-                }
-                if pass == 3 {
-                    // A surviving sidecar must never hide locally missing history.
-                    std::fs::remove_file(root.path().join("events.log")).unwrap();
                 }
                 if pass == 4 {
                     // Corruption disables the optional cache, without preventing login or receive.
@@ -736,6 +756,12 @@ mod permission_tests {
                     &proof,
                 );
                 node.cached_peer_snapshot_async().await.unwrap();
+                if pass == 3 {
+                    // Retained history may disappear independently of optional
+                    // hints. Preserve the published source barrier and use the
+                    // actual repository maintenance boundary.
+                    node.log.lock().unwrap().drop_conversation(&conv).unwrap();
+                }
                 let before = relay_log.lock().unwrap().exported.get();
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let address = listener.local_addr().unwrap();
@@ -766,9 +792,18 @@ mod permission_tests {
                     RelayMailbox::new(&node.identity, &remote.public(), &relay_public)
                 }
                 .unwrap();
-                node.opaque_mailbox_round(&mut channel, &remote.public(), None, receiving_mailbox)
-                    .await
-                    .unwrap();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    node.opaque_mailbox_round(
+                        &mut channel,
+                        &remote.public(),
+                        None,
+                        receiving_mailbox,
+                    ),
+                )
+                .await
+                .expect("optional hint failure cannot pin an active mailbox round")
+                .unwrap();
                 if pass >= 2 && !node.log.lock().unwrap().has(&newer.id).unwrap() {
                     // Outer IDs do not encode the inner DAG. If a child arrives
                     // on an earlier page, a fresh operation retries it after its
@@ -802,6 +837,17 @@ mod permission_tests {
                         (2..=3).contains(&transferred),
                         "missing-inner/corrupt-cache fallback transfers both wrappers, retrying a child-first page if necessary"
                     );
+                }
+                if pass == 4 {
+                    // Even unavailable optional SQL hints cannot pin receiving.
+                    // The next open must fall back to active-exchange progress.
+                    node.storage
+                        .database()
+                        .transaction(|c| {
+                            c.execute_batch("DROP INDEX opaque_session_epochs")?;
+                            Ok(())
+                        })
+                        .unwrap();
                 }
             }
         }
@@ -965,7 +1011,13 @@ mod permission_tests {
         assert!(node.log.lock().unwrap().has(&accepted.id).unwrap());
         assert!(!node.log.lock().unwrap().has(&rejected.id).unwrap());
         assert!(
-            !node.opaque_seen.lock().unwrap()[&progress.mailbox.id()].contains(&rejected_id),
+            !node
+                .opaque_receive_cache
+                .lock()
+                .unwrap()
+                .seen(progress.mailbox.id(), &node.log.lock().unwrap())
+                .unwrap()
+                .contains(&rejected_id),
             "rejected data must remain retryable after policy or storage recovery"
         );
         // A fresh operation really receives and retries the rejected wrapper;
@@ -1094,11 +1146,12 @@ mod permission_tests {
                     "receive permission gates durable inner-event admission"
                 );
                 assert_eq!(
-                    node.opaque_seen
+                    node.opaque_receive_cache
                         .lock()
                         .unwrap()
-                        .get(&mailbox.id())
-                        .is_some_and(|seen| seen.contains(&incoming_outer.id)),
+                        .seen(mailbox.id(), &node.log.lock().unwrap())
+                        .unwrap()
+                        .contains(&incoming_outer.id),
                     receive
                 );
                 drop(channel);

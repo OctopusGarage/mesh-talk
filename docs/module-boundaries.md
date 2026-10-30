@@ -156,6 +156,14 @@ journal. Account-route selectors retain the first envelope per conversation and
 advance transactionally when its row is erased.
 See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
 
+`core/node/opaque_receive_cache.rs` owns optional disk-backed mailbox hints on
+that same profile connection. Its independent source publication streams legacy
+mappings once; warm open reads metadata only. Active mailbox sync rechecks exact
+inner-event retention before using durable hints, while session-only progress is
+fenced by a fresh run identifier. ID sets exist only for the bounded active wire
+exchange. Corrupt or foreign hint sources remain preserved and unavailable; hints
+never establish admission, delivery, or deletion authority.
+
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary
 projections omit the content. The explicit exact-message content lookup is for

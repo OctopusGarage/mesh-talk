@@ -103,7 +103,7 @@ impl IndexedAccountFileProofs {
             .database()
             .read(|c| Self::get_on(c, id))
     }
-    fn get_on(c: &Connection, id: &EventId) -> Result<Option<Event>, LogError> {
+    pub(crate) fn get_on(c: &Connection, id: &EventId) -> Result<Option<Event>, LogError> {
         let mut statement=c.prepare_cached("SELECT conversation,author,sequence,lamport,clock,parent_bytes,ciphertext_bytes,signature_bytes,allocated_bytes FROM account_file_proof_headers WHERE id=?1")?;
         let mut rows = statement.query([id.as_bytes().as_slice()])?;
         let Some(row) = rows.next()? else {
