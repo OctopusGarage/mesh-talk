@@ -34,6 +34,14 @@ impl Default for ReceptionLimit {
     }
 }
 impl Node {
+    /// One current avatar projection, preserving an explicit clear tombstone.
+    /// An unknown account is absent; a known cleared avatar is `Some` with `None` bytes.
+    pub fn current_profile(
+        &self,
+        account: &str,
+    ) -> Result<Option<super::ReceivedProfile>, crate::eventlog::LogError> {
+        self.account_profiles.selected(account)
+    }
     pub fn current_profile_revision(&self) -> Result<u64, crate::eventlog::LogError> {
         self.account_profiles.revision()
     }

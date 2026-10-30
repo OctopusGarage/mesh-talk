@@ -599,3 +599,29 @@ fn indexed_profile_projection_ack_retry_notifies() {
 fn indexed_trust_card_projection_ack_retry_notifies() {
     projection_ack_retry_notifies(true);
 }
+
+#[test]
+fn indexed_current_profile_distinguishes_missing_clear_and_selected_avatar() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let peer = Account::generate();
+    let id = peer.account_id();
+    super::super::profile_store::reset_indexed_body_reads();
+    assert!(node.current_profile(&id).unwrap().is_none());
+    assert_eq!(super::super::profile_store::indexed_body_reads(), 0);
+    node.receive_legacy_profile(&ProfilePayload::new(&peer, None, 1))
+        .unwrap();
+    super::super::profile_store::reset_indexed_body_reads();
+    let clear = node.current_profile(&id).unwrap().unwrap();
+    assert_eq!(clear.account_id, id);
+    assert_eq!(clear.avatar, None);
+    assert_eq!(super::super::profile_store::indexed_body_reads(), 1);
+    node.receive_legacy_profile(&ProfilePayload::new(&peer, Some(vec![3; 8192]), 2))
+        .unwrap();
+    super::super::profile_store::reset_indexed_body_reads();
+    assert_eq!(
+        node.current_profile(&id).unwrap().unwrap().avatar,
+        Some(vec![3; 8192])
+    );
+    assert_eq!(super::super::profile_store::indexed_body_reads(), 1);
+}

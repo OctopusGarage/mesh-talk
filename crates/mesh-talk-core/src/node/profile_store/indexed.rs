@@ -167,13 +167,17 @@ impl IndexedProfileStore {
             )
         })
     }
-    pub(crate) fn avatar(&self, account: &str) -> Result<Option<Vec<u8>>, LogError> {
-        let value = self
-            .source
+    pub(in crate::node) fn selected(
+        &self,
+        account: &str,
+    ) -> Result<Option<ProfileEntry>, LogError> {
+        self.source
             .profile()
             .database()
-            .read(|c| Self::read_on(c, account))?;
-        Ok(value.and_then(|entry| entry.avatar))
+            .read(|c| Self::read_on(c, account))
+    }
+    pub(crate) fn avatar(&self, account: &str) -> Result<Option<Vec<u8>>, LogError> {
+        Ok(self.selected(account)?.and_then(|entry| entry.avatar))
     }
     pub(crate) fn updated_at(&self, account: &str) -> Result<Option<u64>, LogError> {
         self.source.profile().database().read(|c| {

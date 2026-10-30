@@ -28,11 +28,11 @@ const MAGIC: &[u8; 6] = b"MTPROF";
 
 /// One account's current avatar, as last received.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ProfileEntry {
-    account_id: String,
-    updated_at: u64,
+pub(in crate::node) struct ProfileEntry {
+    pub(in crate::node) account_id: String,
+    pub(in crate::node) updated_at: u64,
     /// The avatar data-URL bytes, or `None` if the peer CLEARED their avatar.
-    avatar: Option<Vec<u8>>,
+    pub(in crate::node) avatar: Option<Vec<u8>>,
 }
 
 fn avatar_order(revision: u64, avatar: &Option<Vec<u8>>) -> (u64, bool, Option<&[u8]>) {

@@ -53,6 +53,16 @@ impl AccountProfiles {
     pub fn avatar(&self, account: &str) -> Result<Option<Vec<u8>>, LogError> {
         self.state().avatars.avatar(account)
     }
+    pub fn selected(&self, account: &str) -> Result<Option<super::ReceivedProfile>, LogError> {
+        Ok(self
+            .state()
+            .avatars
+            .selected(account)?
+            .map(|entry| super::ReceivedProfile {
+                account_id: entry.account_id,
+                avatar: entry.avatar,
+            }))
+    }
     pub(super) fn page(
         &self,
         revision: Option<u64>,
