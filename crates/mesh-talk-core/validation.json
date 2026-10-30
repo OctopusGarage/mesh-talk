@@ -1179,7 +1179,7 @@
         "crates/mesh-talk-core/src/node/transcript_repository/",
         "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
         "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
-        "crates/mesh-talk-core/src/node/filebook/indexed.rs",
+        "crates/mesh-talk-core/src/node/filebook/",
         "crates/mesh-talk-core/src/node/account_suppression.rs"
       ],
       "rust": [
@@ -1191,7 +1191,12 @@
             "runtime_metadata_",
             "node::filebook::indexed::tests::",
             "node::recovered_sent_ids::tests::",
-            "node::account_suppression::tests::"
+            "node::account_suppression::tests::",
+            "indexed_file_runtime_warm_open_does_not_hydrate_retained_manifest_history",
+            "incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_and_delivers_ack",
+            "sent_scope_repair_failure_installs_no_permission_and_retry_recovers",
+            "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
+            "failed_media_"
           ]
         }
       ],

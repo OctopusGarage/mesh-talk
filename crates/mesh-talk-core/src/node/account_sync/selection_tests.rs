@@ -983,18 +983,26 @@ async fn account_sync_legacy_sibling_file_offer_cannot_bypass_bytes_off() {
         &event.ciphertext,
     )
     .unwrap();
-    let manifest = super::super::files::validated_manifest(&plain).unwrap();
+    super::super::files::validated_manifest(&plain).unwrap();
     receiver
         .log
         .lock()
         .unwrap()
         .append_durable(event.clone())
         .unwrap();
+    let row = super::super::received_log::ReceivedEntry {
+        event_id: event.id,
+        conversation: event.conversation_id,
+        from: event.author.user_id(),
+        wall_clock: event.wall_clock,
+        plaintext: plain,
+    };
     receiver
-        .files
+        .received_files
         .lock()
         .unwrap()
-        .record_event(event.id, event.author, manifest);
+        .record_file_with_reception(&row, Some(&event), None)
+        .unwrap();
     assert_eq!(
         receiver
             .attachment_consent_for_peer(file, id, &source.identity.public())
@@ -2356,6 +2364,7 @@ fn restore_attachment_bytes(source: &Node, file: ConversationId, path: &std::pat
         .lock()
         .unwrap()
         .manifest(&file)
+        .unwrap()
         .unwrap()
         .name()
         .to_string();

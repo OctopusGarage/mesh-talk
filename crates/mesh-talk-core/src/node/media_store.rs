@@ -250,6 +250,13 @@ impl MediaStore {
 
     /// Recover from a crash between local card erasure and managed-file removal.
     pub fn prune_unreferenced(&self, live: &HashSet<ConversationId>) -> std::io::Result<()> {
+        self.prune_unreferenced_where(|file| Ok(live.contains(&file)))
+    }
+
+    pub(in crate::node) fn prune_unreferenced_where(
+        &self,
+        mut live: impl FnMut(ConversationId) -> std::io::Result<bool>,
+    ) -> std::io::Result<()> {
         let mut removed_path = None;
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
@@ -267,7 +274,7 @@ impl MediaStore {
                 continue;
             };
             let conv = ConversationId::new(bytes);
-            if !live.contains(&conv) {
+            if !live(conv)? {
                 // The directory entry already identifies the exact managed file.
                 // Rescanning the whole directory for each orphan is quadratic.
                 std::fs::remove_file(&path)?;

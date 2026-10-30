@@ -1205,14 +1205,6 @@ fn sent_scope_repair_failure_installs_no_permission_and_retry_recovers() {
     let backup = dir.path().join("scopes-backup");
     std::fs::rename(&path, &backup).unwrap();
     std::fs::create_dir(&path).unwrap();
-    alice
-        .privacy
-        .state
-        .write()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .scope_repair_needed = true;
     let file = crate::eventlog::ConversationId::new([31; 32]);
     let parent = crate::eventlog::ConversationId::new([32; 32]);
     let author = crate::eventlog::Author::from_ed25519(alice.identity.public().ed25519_pub);
@@ -1222,17 +1214,7 @@ fn sent_scope_repair_failure_installs_no_permission_and_retry_recovers() {
             .remember_sent_manifest_scope(file, parent, author, event)
             .is_err()
     );
-    assert!(
-        !alice
-            .privacy
-            .state
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .file_scopes
-            .contains_key(&file)
-    );
+    assert!(!alice.has_file_scope(file).unwrap());
     std::fs::remove_dir(&path).unwrap();
     std::fs::rename(&backup, &path).unwrap();
     alice
@@ -1241,24 +1223,24 @@ fn sent_scope_repair_failure_installs_no_permission_and_retry_recovers() {
     alice
         .remember_sent_manifest_scope(file, parent, author, event)
         .unwrap();
-    let (_, scopes) = crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
-        &path, "pw", b"MTFSC1",
-    )
-    .unwrap();
+    let count: i64 = alice
+        .storage
+        .database()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM sent_file_scopes WHERE file=?1",
+                [file.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
     assert_eq!(
-        scopes.len(),
-        1,
-        "retries must repair the journal and remain idempotent"
+        count, 1,
+        "retry preserves exact idempotent sent scope metadata"
     );
     assert!(
-        !alice
-            .privacy
-            .state
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .scope_repair_needed
+        !alice.has_file_scope(file).unwrap(),
+        "orphan metadata cannot authorize a file without a validated binding"
     );
 }
 
@@ -1338,19 +1320,51 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
         .unwrap()
         .unwrap()
         .wall_clock;
+    let original = alice
+        .log
+        .lock()
+        .unwrap()
+        .get(&originals[0])
+        .unwrap()
+        .unwrap();
     alice
         .received_files
         .lock()
         .unwrap()
-        .record_durable(&super::received_log::ReceivedEntry {
-            event_id: originals[0],
-            conversation: crate::node::conversation::account_conversation_id(
-                &alice.account_id(),
-                &account.account_id(),
-            ),
-            from: alice.user_id(),
-            wall_clock: original_wall_clock,
-            plaintext: manifest.encode(),
+        .record_file_with_reception(
+            &super::received_log::ReceivedEntry {
+                event_id: original.id,
+                conversation: crate::node::conversation::account_conversation_id(
+                    &alice.account_id(),
+                    &account.account_id(),
+                ),
+                from: alice.user_id(),
+                wall_clock: original_wall_clock,
+                plaintext: manifest.encode(),
+            },
+            Some(&original),
+            None,
+        )
+        .unwrap();
+    let old_scopes = originals
+        .iter()
+        .map(|id| {
+            let event = alice.log.lock().unwrap().get(id).unwrap().unwrap();
+            StoredManifestScope {
+                file,
+                parent: event.conversation_id,
+                author: event.author,
+                event: *id,
+            }
+        })
+        .collect::<Vec<_>>();
+    alice
+        .storage
+        .database()
+        .transaction(|c| {
+            c.execute("DELETE FROM transcript_sources WHERE kind=9", [])?;
+            c.execute_batch("DROP TABLE sent_file_scopes;DROP TABLE sent_file_scope_revision")?;
+            Ok(())
         })
         .unwrap();
     let expected = alice.log.lock().unwrap().event_ids(&file).unwrap();
@@ -1358,6 +1372,19 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
     let own = crate::identity::account::Account::from_secret_bytes(alice.account.secret_bytes());
     drop(alice);
     let scope_path = dir.path().join("sent-manifest-scopes.log");
+    std::fs::remove_file(&scope_path).unwrap();
+    let (mut old_log, _) =
+        crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
+            &scope_path,
+            "pw",
+            b"MTFSC1",
+        )
+        .unwrap();
+    for scope in old_scopes {
+        old_log.append_durable(&scope).unwrap();
+    }
+    drop(old_log);
+
     std::fs::OpenOptions::new()
         .append(true)
         .open(&scope_path)
@@ -1420,13 +1447,18 @@ async fn legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_
     alice
         .remember_sent_manifest_scope(file, parent, author, event)
         .unwrap();
-    let (_, scopes) = crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
-        &scope_path,
-        "pw",
-        b"MTFSC1",
-    )
-    .unwrap();
-    assert_eq!(scopes.len(), 3);
+    let count: i64 = alice
+        .storage
+        .database()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM sent_file_scopes WHERE file=?1",
+                [file.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(count, 3);
     let server = tokio::spawn(alice.clone().run_accept_loop(listener));
     for device in &devices {
         let store = Mutex::new(crate::eventlog::EventLog::default());

@@ -142,12 +142,16 @@ reuse that publication owner for signed file proofs and exact logical-file
 bindings, with fixed headers, bounded owned payload reads and persisted revisions.
 `filebook/indexed.rs` owns validated file eligibility metadata and
 exact processed facts tied to existing FILES ordinals; its account namespace,
-resumable import and persisted revision use the same connection.
+resumable import and persisted revision use the same connection. Production Node
+uses this owner directly. `filebook/scopes.rs` owns source 9 sent fanout references;
+`filebook/work.rs` owns metadata-only download discovery, fair bounded admission and
+revision-qualified completion. Neither owns a second payload journal or permission
+rule; network disclosure reuses the existing exact parent authorization.
 `sent_store.rs`, `received_store.rs` and the indexed owner in
 `account_suppression.rs` expose owned lookups, bounded pages and exact local
 deletion markers. Their constructors require validated participant authority;
 production Node history, recovery, recall, and account-sync consumers use these
-indexed stores. FileBook and media lifetime cutovers remain separate. `eventlog/repository/order/combined.rs` extends the existing causal
+indexed stores. Media bytes retain their independent encryption/lifetime owner. `eventlog/repository/order/combined.rs` extends the existing causal
 order owner with disk ranks for signed events and isolated archive roots.
 `eventlog/repository/receiving.rs` owns resumable metadata discovery and bounded,
 fair retry selection; exact transcript evidence survives body erasure and commits

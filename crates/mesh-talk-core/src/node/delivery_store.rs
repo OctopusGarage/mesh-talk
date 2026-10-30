@@ -30,6 +30,15 @@ pub(crate) trait DeliveryReceivedProjection {
     ) -> Result<(), LogError> {
         self.record_durable(entry)
     }
+    fn record_manifest_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        scopes: &[&Event],
+    ) -> Result<(), LogError> {
+        let _ = scopes;
+        self.record_manifest(entry, original, None)
+    }
     fn record_incoming(
         &mut self,
         original: &Event,
@@ -71,6 +80,14 @@ impl DeliveryReceivedProjection for super::received_store::ReceivedStore {
         metadata: Option<&super::reception_effects::ReceptionMetadata>,
     ) -> Result<(), LogError> {
         self.record_file_with_reception(entry, original, metadata)
+    }
+    fn record_manifest_scopes(
+        &mut self,
+        entry: &ReceivedEntry,
+        original: Option<&Event>,
+        scopes: &[&Event],
+    ) -> Result<(), LogError> {
+        self.record_file_with_scopes(entry, original, None, scopes)
     }
     fn record_incoming(
         &mut self,
@@ -1112,14 +1129,18 @@ impl DeliveryStore {
                 }
                 files
                     .ok_or_else(|| invalid("file recovery adapter required"))?
-                    .record_manifest(
+                    .record_manifest_scopes(
                         received,
                         message
                             .destinations
                             .iter()
                             .find(|destination| destination.event.id == received.event_id)
                             .map(|destination| &destination.event),
-                        None,
+                        &message
+                            .destinations
+                            .iter()
+                            .map(|destination| &destination.event)
+                            .collect::<Vec<_>>(),
                     )?;
             }
             DeliveryTransaction::IncomingManifest {
@@ -1390,6 +1411,11 @@ impl DeliveryStore {
         }
     }
 
+    pub(crate) fn file_erasures(&self) -> impl Iterator<Item = (ConversationId, EventId)> + '_ {
+        self.erased_files
+            .iter()
+            .map(|(conversation, id)| (ConversationId::new(*conversation), *id))
+    }
     pub(crate) fn file_erased(&self, conversation: ConversationId, original: EventId) -> bool {
         self.erased_files
             .contains(&(*conversation.as_bytes(), original))

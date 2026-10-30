@@ -330,11 +330,22 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             vec![],
         );
         b.log.lock().unwrap().append(event.clone()).unwrap();
-        let manifest = b.files.lock().unwrap().manifest(&file).unwrap().clone();
-        b.files
+        let original_id = b.files.lock().unwrap().manifest_events(file)[0];
+        let mut row = b
+            .received_files
             .lock()
             .unwrap()
-            .record_event(event.id, event.author, manifest);
+            .entry(original_id)
+            .unwrap()
+            .unwrap();
+        row.event_id = event.id;
+        row.conversation = event.conversation_id;
+        row.wall_clock = event.wall_clock;
+        b.received_files
+            .lock()
+            .unwrap()
+            .record_file_with_reception(&row, Some(&event), None)
+            .unwrap();
         event.id
     };
     assert!(

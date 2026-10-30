@@ -1337,15 +1337,15 @@ async fn protected_images_require_exact_reveal_and_block_ordinary_bytes_and_expo
     assert!(!entry.file.as_ref().unwrap().name.contains("sensitive"));
     {
         let book = node.files.lock().unwrap();
-        let manifest = book.manifest(&file).unwrap();
-        assert!(!book.accepts(manifest.unprotected()));
+        let manifest = book.manifest(&file).unwrap().unwrap();
+        assert!(!book.accepts(manifest.unprotected()).unwrap());
         let downgraded = crate::file::AnyManifest::Protected {
             protection: MessageProtection::Click,
             inner: Box::new(manifest.unprotected().clone()),
         };
-        assert!(!book.accepts(&downgraded));
+        assert!(!book.accepts(&downgraded).unwrap());
         assert!(!crate::node::files::same_file_transfer(
-            manifest,
+            &manifest,
             manifest.unprotected()
         ));
     }
@@ -1493,7 +1493,16 @@ async fn protected_image_without_manifest_never_uses_ordinary_media_read() {
         .unwrap();
     // Lifecycle cleanup retires the manifest before deleting the encrypted blob.
     // Model that intermediate state without relying on scheduler timing.
-    *node.files.lock().unwrap() = crate::node::filebook::FileBook::new();
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute(
+                "DELETE FROM file_book_offers WHERE file=?1",
+                [file.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(node.media.read(file), Some(bytes.to_vec()));
     assert!(node.read_media(file).is_none());
 }

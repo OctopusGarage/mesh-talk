@@ -64,10 +64,10 @@ impl Node {
             };
             let manifest = {
                 let book = self.files.lock().expect("files lock not poisoned");
-                if !book.has_author(file.file_conv, own) {
+                if !book.has_author(file.file_conv, own)? {
                     continue;
                 }
-                book.manifest(&file.file_conv).cloned()
+                book.manifest(&file.file_conv)?
             };
             let Some(AnyManifest::V3(manifest)) = manifest else {
                 continue;
@@ -149,13 +149,7 @@ impl Node {
         &self,
         file: ConversationId,
     ) -> Result<Option<Vec<Event>>, crate::eventlog::LogError> {
-        let Some(manifest) = self
-            .files
-            .lock()
-            .expect("files lock")
-            .manifest(&file)
-            .cloned()
-        else {
+        let Some(manifest) = self.files.lock().expect("files lock").manifest(&file)? else {
             return Ok(None);
         };
         let AnyManifest::V3(manifest) = manifest else {
@@ -205,10 +199,10 @@ impl Node {
     ) -> Result<Option<EventId>, crate::eventlog::LogError> {
         let (manifest, ids) = {
             let files = self.files.lock().expect("files lock");
-            let Some(manifest) = files.manifest(&file).cloned() else {
+            let Some(manifest) = files.manifest(&file)? else {
                 return Ok(None);
             };
-            (manifest, files.manifest_events(file))
+            (manifest, files.offers(Some(file), None))
         };
         if !matches!(&manifest, AnyManifest::V3(media) if media.kind == FileKind::Media)
             || !sticker::is_sticker_name(manifest.name())
@@ -224,7 +218,8 @@ impl Node {
         {
             return Ok(None);
         }
-        for id in ids {
+        for offer in ids {
+            let id = offer?.event;
             if self.incoming_offer(file, Some(id), Some(peer))?.is_some() {
                 return Ok(Some(id));
             }
@@ -256,13 +251,7 @@ impl Node {
         {
             return Ok(None);
         }
-        let Some(manifest) = self
-            .files
-            .lock()
-            .expect("files lock")
-            .manifest(&file)
-            .cloned()
-        else {
+        let Some(manifest) = self.files.lock().expect("files lock").manifest(&file)? else {
             return Ok(None);
         };
         let AnyManifest::V3(ref media) = manifest else {

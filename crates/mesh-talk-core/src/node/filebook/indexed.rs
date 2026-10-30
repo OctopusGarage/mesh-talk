@@ -16,8 +16,10 @@ CREATE TABLE file_book_bindings(account BLOB NOT NULL CHECK(length(account)=32),
 CREATE INDEX file_book_live_files ON file_book_bindings(account,file) WHERE offers>0;
 CREATE TABLE file_book_offers(account BLOB NOT NULL CHECK(length(account)=32), ordinal INTEGER NOT NULL REFERENCES transcript_rows(ordinal) ON DELETE CASCADE, file BLOB NOT NULL CHECK(length(file)=32), event BLOB NOT NULL CHECK(length(event)=32), parent BLOB NOT NULL CHECK(length(parent)=32), author BLOB NOT NULL CHECK(length(author)=32), PRIMARY KEY(account,ordinal), FOREIGN KEY(account,file) REFERENCES file_book_bindings(account,file)) WITHOUT ROWID;
 CREATE INDEX file_book_file_offers ON file_book_offers(account,file,ordinal);
+CREATE INDEX file_book_file_authors ON file_book_offers(account,file,author,event);
 CREATE INDEX file_book_author_offers ON file_book_offers(account,author,ordinal);
 CREATE INDEX file_book_event_offers ON file_book_offers(account,event,ordinal);
+CREATE TABLE file_book_reconcile(account BLOB NOT NULL CHECK(length(account)=32),ordinal INTEGER NOT NULL,PRIMARY KEY(account,ordinal)) WITHOUT ROWID;
 CREATE TABLE file_book_processed(account BLOB NOT NULL CHECK(length(account)=32), event BLOB NOT NULL CHECK(length(event)=32), PRIMARY KEY(account,event)) WITHOUT ROWID;
 ";
 const TRIGGERS: &[(&str, &str)] = &[
@@ -27,7 +29,7 @@ const TRIGGERS: &[(&str, &str)] = &[
     ),
     (
         "file_book_offer_removed",
-        "CREATE TRIGGER file_book_offer_removed AFTER DELETE ON file_book_offers BEGIN UPDATE file_book_bindings SET offers=offers-1 WHERE account=OLD.account AND file=OLD.file; UPDATE file_book_owners SET revision=revision+1 WHERE account=OLD.account; END",
+        "CREATE TRIGGER file_book_offer_removed AFTER DELETE ON file_book_offers BEGIN UPDATE file_book_bindings SET offers=offers-1 WHERE account=OLD.account AND file=OLD.file; UPDATE file_book_owners SET revision=revision+1 WHERE account=OLD.account; DELETE FROM file_download_pending WHERE account=OLD.account AND file=OLD.file AND EXISTS(SELECT 1 FROM file_book_bindings WHERE account=OLD.account AND file=OLD.file AND offers=0); END",
     ),
     (
         "file_book_suppressed",
@@ -39,17 +41,20 @@ const TRIGGERS: &[(&str, &str)] = &[
     ),
 ];
 const MAX_BODY: usize = crate::node::transcript_repository::MAX_PAGE_BYTES;
-fn invalid(message: &str) -> LogError {
+pub(super) fn invalid(message: &str) -> LogError {
     LogError::CorruptFile(message.into())
 }
-fn blob<const N: usize>(row: &rusqlite::Row<'_>, index: usize) -> Result<[u8; N], LogError> {
+pub(super) fn blob<const N: usize>(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> Result<[u8; N], LogError> {
     row.get_ref(index)?
         .as_blob()
         .map_err(|_| invalid("invalid file-book metadata"))?
         .try_into()
         .map_err(|_| invalid("invalid file-book metadata width"))
 }
-fn active(c: &Connection) -> Result<[u8; 32], LogError> {
+pub(super) fn active(c: &Connection) -> Result<[u8; 32], LogError> {
     let mut statement =
         c.prepare_cached("SELECT account FROM participant_profile WHERE singleton=1")?;
     let mut rows = statement.query([])?;
@@ -76,9 +81,10 @@ fn page_limit(rows: usize, bytes: usize, charge: usize) -> Result<i64, LogError>
     Ok(rows.min(bytes / charge) as i64)
 }
 
+#[derive(Clone)]
 pub(crate) struct IndexedFileBook {
-    profile: Arc<ProfileStorage>,
-    account: [u8; 32],
+    pub(super) profile: Arc<ProfileStorage>,
+    pub(super) account: [u8; 32],
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FileOffer {
@@ -89,6 +95,164 @@ pub(crate) struct FileOffer {
     pub author: crate::eventlog::Author,
 }
 impl IndexedFileBook {
+    /// Metadata-only traversal. Each turn releases the profile connection before
+    /// the caller processes a row; no payload or history-sized ID list is kept.
+    pub(crate) fn offers(
+        &self,
+        file: Option<ConversationId>,
+        author: Option<crate::eventlog::Author>,
+    ) -> impl Iterator<Item = Result<FileOffer, LogError>> + use<> {
+        let book = self.clone();
+        let mut after = None;
+        let mut pending = std::collections::VecDeque::new();
+        let mut done = false;
+        std::iter::from_fn(move || {
+            if pending.is_empty() && !done {
+                match book.offers_page(file, author, after, 128, 128 * 144) {
+                    Ok(page) => {
+                        done = page.len() < 128;
+                        after = page.last().map(|offer| offer.ordinal).or(after);
+                        pending.extend(page);
+                    }
+                    Err(error) => {
+                        done = true;
+                        return Some(Err(error));
+                    }
+                }
+            }
+            pending.pop_front().map(Ok)
+        })
+    }
+    pub(crate) fn files(&self) -> impl Iterator<Item = Result<ConversationId, LogError>> + use<> {
+        let book = self.clone();
+        let mut after = None;
+        let mut pending = std::collections::VecDeque::new();
+        let mut done = false;
+        std::iter::from_fn(move || {
+            if pending.is_empty() && !done {
+                match book.files_page(after, 128, 4096) {
+                    Ok(page) => {
+                        done = page.len() < 128;
+                        after = page.last().copied().or(after);
+                        pending.extend(page);
+                    }
+                    Err(error) => {
+                        done = true;
+                        return Some(Err(error));
+                    }
+                }
+            }
+            pending.pop_front().map(Ok)
+        })
+    }
+    pub(crate) fn begin_reconcile(&self) -> Result<u64, LogError> {
+        self.profile.database().transaction(|c| {
+            self.check(c)?;
+            c.execute(
+                "DELETE FROM file_book_reconcile WHERE account=?1",
+                [self.account.as_slice()],
+            )?;
+            Ok(())
+        })?;
+        self.revision()
+    }
+    pub(crate) fn stage_revoke(&self, ordinal: i64) -> Result<(), LogError> {
+        self.profile.database().transaction(|c| {
+            self.check(c)?;
+            c.execute(
+                "INSERT OR IGNORE INTO file_book_reconcile VALUES(?1,?2)",
+                params![self.account.as_slice(), ordinal],
+            )?;
+            Ok(())
+        })
+    }
+    pub(crate) fn finish_reconcile(&self, revision: u64) -> Result<(), LogError> {
+        self.profile.database().transaction(|c| {
+            self.check(c)?;
+            let current:i64=c.query_row("SELECT revision FROM file_book_owners WHERE account=?1",[self.account.as_slice()],|r|r.get(0))?;
+            if u64::try_from(current).ok()!=Some(revision) {return Err(LogError::StaleCursor);}
+            c.execute("DELETE FROM file_book_offers WHERE account=?1 AND ordinal IN(SELECT ordinal FROM file_book_reconcile WHERE account=?1)",[self.account.as_slice()])?;
+            c.execute("DELETE FROM file_book_reconcile WHERE account=?1",[self.account.as_slice()])?;
+            Ok(())
+        })
+    }
+    pub(crate) fn contains_file(&self, file: ConversationId) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {self.check(c)?;Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_book_bindings WHERE account=?1 AND file=?2 AND offers>0)",params![self.account.as_slice(),file.as_bytes().as_slice()],|r|r.get(0))?)})
+    }
+    pub(crate) fn profile(&self) -> &Arc<ProfileStorage> {
+        &self.profile
+    }
+    pub(crate) fn accepts(&self, manifest: &AnyManifest) -> Result<bool, LogError> {
+        let binding = crate::node::files::file_transfer_fingerprint(manifest)
+            .ok_or_else(|| invalid("invalid file transfer binding"))?;
+        self.profile.database().read(|c| {
+            self.check(c)?;
+            let stored: Option<Vec<u8>> = c
+                .query_row(
+                    "SELECT digest FROM file_book_bindings WHERE account=?1 AND file=?2",
+                    params![
+                        self.account.as_slice(),
+                        manifest.file_conv().as_bytes().as_slice()
+                    ],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(stored.as_deref().is_none_or(|stored| stored == binding))
+        })
+    }
+    pub(crate) fn has_author(
+        &self,
+        file: ConversationId,
+        author: crate::eventlog::Author,
+    ) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {
+            self.check(c)?;
+            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_book_offers WHERE account=?1 AND file=?2 AND author=?3)",params![self.account.as_slice(),file.as_bytes().as_slice(),author.ed25519_pub().as_slice()],|r|r.get(0))?)
+        })
+    }
+    pub(crate) fn has_manifest_event(
+        &self,
+        file: ConversationId,
+        event: EventId,
+    ) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {
+            self.check(c)?;
+            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_book_offers WHERE account=?1 AND event=?2 AND file=?3)",params![self.account.as_slice(),event.as_bytes().as_slice(),file.as_bytes().as_slice()],|r|r.get(0))?)
+        })
+    }
+    pub(crate) fn authors_page(
+        &self,
+        file: ConversationId,
+        after: Option<crate::eventlog::Author>,
+        rows: usize,
+        bytes: usize,
+    ) -> Result<Vec<crate::eventlog::Author>, LogError> {
+        let limit = page_limit(rows, bytes, 32)?;
+        self.profile.database().read(|c| {
+            self.check(c)?;
+            let mut statement=c.prepare_cached("SELECT DISTINCT author FROM file_book_offers WHERE account=?1 AND file=?2 AND author>coalesce(?3,x'') ORDER BY author LIMIT ?4")?;
+            let mut rows=statement.query(params![self.account.as_slice(),file.as_bytes().as_slice(),after.as_ref().map(|author|author.ed25519_pub().as_slice()),limit])?;
+            let mut result=Vec::new();
+            while let Some(row)=rows.next()? { result.push(crate::eventlog::Author::from_ed25519(blob(row,0)?)); }
+            Ok(result)
+        })
+    }
+    pub(crate) fn revoke_ordinal(&self, ordinal: i64) -> Result<(), LogError> {
+        self.profile.database().transaction(|c| {
+            self.check(c)?;
+            c.execute(
+                "DELETE FROM file_book_offers WHERE account=?1 AND ordinal=?2",
+                params![self.account.as_slice(), ordinal],
+            )?;
+            Ok(())
+        })
+    }
+    pub(crate) fn mark_processed(&self, event: EventId) -> Result<(), LogError> {
+        self.profile.database().transaction(|c| {
+            self.check(c)?;
+            mark_processed_on(c, event)
+        })
+    }
     pub(crate) fn revision(&self) -> Result<u64, LogError> {
         self.profile.database().read(|c| {
             self.check(c)?;
@@ -108,6 +272,18 @@ impl IndexedFileBook {
                 params![self.account.as_slice(), ordinal],
                 |r| r.get(0),
             )?)
+        })
+    }
+    pub(crate) fn offer_for_entry(
+        &self,
+        entry: &ReceivedEntry,
+    ) -> Result<Option<FileOffer>, LogError> {
+        let digest: [u8; 32] = Sha256::digest(&entry.plaintext).into();
+        self.profile.database().read(|c| {
+            self.check(c)?;
+            let mut statement = c.prepare_cached("SELECT o.ordinal,o.event,o.file,o.parent,o.author FROM file_book_offers o JOIN transcript_rows r ON r.ordinal=o.ordinal WHERE o.account=?1 AND r.kind=3 AND r.conversation=?2 AND r.row_key=?3 AND r.plaintext_sha256=?4 LIMIT 1")?;
+            let mut rows=statement.query(params![self.account.as_slice(),entry.conversation.as_bytes().as_slice(),entry.event_id.as_bytes().as_slice(),digest.as_slice()])?;
+            rows.next()?.map(|row| Ok(FileOffer { ordinal:row.get(0)?,event:EventId::new(blob(row,1)?),file:ConversationId::new(blob(row,2)?),parent:ConversationId::new(blob(row,3)?),author:crate::eventlog::Author::from_ed25519(blob(row,4)?) })).transpose()
         })
     }
     pub(crate) fn files_page(
@@ -190,11 +366,13 @@ impl IndexedFileBook {
             )?;
             if !present {
                 c.execute_batch(SCHEMA)?;
+                c.execute_batch(super::work::SCHEMA)?;
                 for (_, sql) in TRIGGERS {
                     c.execute_batch(sql)?;
                 }
             }
             crate::storage::profile::manifest::validate_ddl(c, SCHEMA)?;
+            crate::storage::profile::manifest::validate_ddl(c, super::work::SCHEMA)?;
             for (name, sql) in TRIGGERS {
                 let actual: Option<String> = c
                     .query_row(
@@ -214,18 +392,26 @@ impl IndexedFileBook {
                 "INSERT OR IGNORE INTO file_book_owners VALUES(?1,NULL,?2,0)",
                 params![account.as_slice(), i64::from(present)],
             )?;
+            c.execute(
+                "INSERT OR IGNORE INTO file_download_scan VALUES(?1,NULL,NULL,0,1)",
+                [account.as_slice()],
+            )?;
             Ok(account)
         })?;
         Ok(Self { profile, account })
     }
-    fn check(&self, c: &Connection) -> Result<(), LogError> {
+    pub(super) fn check(&self, c: &Connection) -> Result<(), LogError> {
         if active(c)? == self.account {
             Ok(())
         } else {
             Err(LogError::StaleCursor)
         }
     }
-    pub(crate) fn manifest(&self, file: ConversationId) -> Result<Option<AnyManifest>, LogError> {
+    pub(crate) fn manifest(
+        &self,
+        file: impl std::borrow::Borrow<ConversationId>,
+    ) -> Result<Option<AnyManifest>, LogError> {
+        let file = *file.borrow();
         self.profile.database().read(|c| {
             self.check(c)?;
             manifest_on(c, &self.account, file)
@@ -356,6 +542,9 @@ pub(crate) fn install_on(
             original.author.ed25519_pub().as_slice()
         ],
     )? != 0;
+    if fresh {
+        super::work::enqueue_on(c, manifest.file_conv())?;
+    }
     mark_processed_on(c, entry.event_id)?;
     Ok(fresh)
 }
@@ -972,5 +1161,122 @@ mod tests {
         assert_eq!(next.head().unwrap(), next_head);
         assert!(f.records.entry(entry.event_id).unwrap().is_none());
         assert!(messages.entry(entry.event_id).unwrap().is_none());
+    }
+    #[test]
+    fn durable_download_work_is_bounded_fair_and_survives_reopen() {
+        let f = Fixture::new();
+        for n in 1..=130 {
+            let (row, event, _) = f.fixture(n);
+            f.book
+                .profile
+                .database()
+                .transaction(|c| Fixture::install(c, &row, &event))
+                .unwrap();
+        }
+        f.book.discover_downloads(7).unwrap();
+        f.book.discover_downloads(7).unwrap();
+        let first = f.book.claim_downloads().unwrap();
+        assert_eq!(first.len(), 8);
+        let Fixture {
+            root,
+            device,
+            account,
+            book,
+            records,
+        } = f;
+        drop(records);
+        drop(book);
+        let (book, records) = Fixture::open(root.path(), &device, &account);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..17 {
+            let page = book.claim_downloads().unwrap();
+            assert!(page.len() <= 8);
+            for work in page {
+                seen.insert(work.file);
+                book.finish_download(work).unwrap();
+            }
+        }
+        assert_eq!(seen.len(), 130);
+        assert!(!book.download_work_pending().unwrap());
+        assert_eq!(
+            records.body_reads(),
+            0,
+            "download discovery and retries are metadata only"
+        );
+        book.discover_downloads(8).unwrap();
+        assert_eq!(
+            book.claim_downloads().unwrap().len(),
+            8,
+            "changed consent rechecks retained offers"
+        );
+    }
+    #[test]
+    fn download_failure_rolls_back_body_and_stale_ack_preserves_new_offer() {
+        let f = Fixture::new();
+        let (first, original, manifest) = f.fixture(1);
+        f.book.profile.database().transaction(|c| {c.execute_batch("CREATE TRIGGER fail_download BEFORE INSERT ON file_download_pending BEGIN SELECT RAISE(ABORT,'injected download scheduling failure'); END")?;Ok(())}).unwrap();
+        assert!(
+            f.book
+                .profile
+                .database()
+                .transaction(|c| Fixture::install(c, &first, &original))
+                .is_err()
+        );
+        assert!(!f.book.processed(first.event_id).unwrap());
+        assert!(f.records.entry(first.event_id).unwrap().is_none());
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_download")?;
+                Fixture::install(c, &first, &original)
+            })
+            .unwrap();
+        let work = f.book.claim_downloads().unwrap()[0];
+        let alias = Event::new(
+            &f.device,
+            original.conversation_id,
+            2,
+            vec![],
+            2,
+            42,
+            EventKind::FileManifest,
+            vec![9],
+        );
+        let mut second = first.clone();
+        second.event_id = alias.id;
+        f.book
+            .profile
+            .database()
+            .transaction(|c| Fixture::install(c, &second, &alias))
+            .unwrap();
+        f.book.finish_download(work).unwrap();
+        assert!(
+            f.book.pending_for_test(manifest.file_conv()),
+            "new durable offer cannot lose its only scheduling fact to an old completion"
+        );
+        let current = f.book.claim_downloads().unwrap()[0];
+        assert!(current.revision > work.revision);
+        f.book.finish_download(current).unwrap();
+        assert!(!f.book.pending_for_test(manifest.file_conv()));
+    }
+}
+
+#[cfg(test)]
+impl IndexedFileBook {
+    pub(crate) fn file_convs(&self) -> Vec<ConversationId> {
+        self.files().collect::<Result<_, _>>().unwrap()
+    }
+    pub(crate) fn manifest_events(&self, file: ConversationId) -> Vec<EventId> {
+        self.offers(Some(file), None)
+            .map(|offer| offer.map(|offer| offer.event))
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+    pub(crate) fn is_emitted(&self, id: &EventId) -> bool {
+        self.processed(*id).unwrap()
+    }
+    pub(crate) fn pending_for_test(&self, file: ConversationId) -> bool {
+        self.profile.database().read(|c|Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_download_pending WHERE account=?1 AND file=?2)",params![self.account.as_slice(),file.as_bytes().as_slice()],|r|r.get(0))?)).unwrap()
     }
 }

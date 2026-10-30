@@ -8,6 +8,8 @@ use crate::file::AnyManifest;
 use std::collections::{HashMap, HashSet};
 
 pub(crate) mod indexed;
+pub(crate) mod scopes;
+mod work;
 
 /// A received file announcement, surfaced to the application.
 #[derive(Debug, Clone)]

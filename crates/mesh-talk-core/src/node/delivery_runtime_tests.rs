@@ -1386,14 +1386,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
     // Reproduce missing volatile scope: DM card/control remain authorized, while
     // chunk disclosure is blocked until durable scope import on reopen.
     for (_, file, _) in &originals {
-        a.privacy
-            .state
-            .write()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .file_scopes
-            .remove(file);
+        a.withheld_file_scopes.lock().unwrap().insert(*file);
     }
     case.phase("file-restart-card-ack-preparation");
     let confirmed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -1432,14 +1425,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
                 .iter()
                 .map(|e| e.id)
                 .collect();
-            a.privacy
-                .state
-                .write()
-                .unwrap()
-                .as_mut()
-                .unwrap()
-                .file_scopes
-                .remove(&file);
+            a.withheld_file_scopes.lock().unwrap().insert(file);
             // Each card still has its own deadline. Windows CI can briefly
             // stall a handshake while running the full workspace in parallel.
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -1468,14 +1454,7 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         assert!(b.read_file(*file).is_err(), "every card precedes download");
     }
     assert!(
-        !a.privacy
-            .state
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .file_scopes
-            .contains_key(&file),
+        !a.has_file_scope(file).unwrap(),
         "card ACK is installed before the missing chunk scope is restored"
     );
     assert!(
@@ -1991,6 +1970,7 @@ fn erased_static_manifest_reopen(adopt: bool) {
             .lock()
             .unwrap()
             .manifest(&manifest.file_conv)
+            .unwrap()
             .is_none()
     );
 }
@@ -2370,7 +2350,7 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
         assert_eq!(a.dm_history(&bob.public(), 10).unwrap()[0].id, id);
         assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
         assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
-        assert!(a.files.lock().unwrap().manifest(&file).is_some());
+        assert!(a.files.lock().unwrap().manifest(&file).unwrap().is_some());
     }
 }
 
@@ -2533,7 +2513,7 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         b.process_file_events(event.conversation_id);
         assert!(files.try_recv().is_err());
         assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
-        assert!(b.files.lock().unwrap().manifest(&file).is_none());
+        assert!(b.files.lock().unwrap().manifest(&file).unwrap().is_none());
         assert_eq!(b.reception_head().unwrap(), reception_start);
         b.received_files
             .lock()
@@ -2572,7 +2552,7 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         b.process_file_events(event.conversation_id);
         assert!(files.try_recv().is_err());
         assert_eq!(b.account_history(&a.account_id(), 10).unwrap().len(), 1);
-        assert!(b.files.lock().unwrap().manifest(&file).is_some());
+        assert!(b.files.lock().unwrap().manifest(&file).unwrap().is_some());
         let page = b
             .reception_page(reception_start, None, Default::default())
             .unwrap();
@@ -2793,6 +2773,7 @@ fn incoming_manifest_requires_dense_signed_chunk_prefix_before_card_acceptance()
                 .lock()
                 .unwrap()
                 .manifest(&manifest.file_conv)
+                .unwrap()
                 .is_some(),
             accepted
         );
@@ -2940,7 +2921,7 @@ fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() 
             let book = b.files.lock().unwrap();
             let expected = matches!(shape, "valid-account-host" | "conflicting-alias");
             assert_eq!(
-                book.manifest(&manifest.file_conv).is_some(),
+                book.manifest(&manifest.file_conv).unwrap().is_some(),
                 expected,
                 "{shape}, reopen={reopen}"
             );
@@ -2955,7 +2936,7 @@ fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() 
                     "conflicting alias must not suppress reprocessing"
                 );
                 assert!(super::files::same_file_transfer(
-                    book.manifest(&manifest.file_conv).unwrap(),
+                    &book.manifest(&manifest.file_conv).unwrap().unwrap(),
                     &crate::file::AnyManifest::V1(manifest.clone())
                 ));
             }
@@ -3010,17 +2991,8 @@ fn file_book_rebuild_does_not_restore_outgoing_card_scope_from_mismatched_row() 
         Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
     )
     .unwrap();
-    assert!(a.files.lock().unwrap().manifest(&file).is_none());
-    assert!(
-        !a.privacy
-            .state
-            .read()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .file_scopes
-            .contains_key(&file)
-    );
+    assert!(a.files.lock().unwrap().manifest(&file).unwrap().is_none());
+    assert!(!a.has_file_scope(file).unwrap());
 }
 
 #[test]
@@ -3057,8 +3029,6 @@ fn durable_file_erase_removes_live_key_even_when_sidecar_rewrite_fails() {
     );
     b.log.lock().unwrap().append_durable(event.clone()).unwrap();
     b.process_file_events(conv);
-    let host =
-        super::conversation::account_conversation_id(&b.account_id(), &ap.account_id().unwrap());
     b.received_files
         .lock()
         .unwrap()
@@ -3078,6 +3048,7 @@ fn durable_file_erase_removes_live_key_even_when_sidecar_rewrite_fails() {
             .lock()
             .unwrap()
             .manifest(&manifest.file_conv)
+            .unwrap()
             .is_none(),
         "durable erase must remove key despite later sidecar failure"
     );
@@ -3170,6 +3141,7 @@ fn legacy_file_erasure_capacity_refusal_preserves_durable_row_and_key() {
             .lock()
             .unwrap()
             .manifest(&manifest.file_conv)
+            .unwrap()
             .is_some()
     );
     assert_eq!(b.received_files.lock().unwrap().entries(&host).len(), 1);
@@ -3255,8 +3227,10 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
     b.delete_account_message(&aa.account_id(), originals[0].id)
         .unwrap();
     {
-        let state = b.privacy.state.read().unwrap();
-        let scopes = &state.as_ref().unwrap().file_scopes[&manifest.file_conv];
+        let scopes = b
+            .manifest_scopes(manifest.file_conv)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert!(
             scopes.iter().all(|scope| scope.event != originals[0].id),
             "erased alias scope must be removed"
@@ -3268,6 +3242,7 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
             .lock()
             .unwrap()
             .manifest(&manifest.file_conv)
+            .unwrap()
             .is_some()
     );
     assert_eq!(b.delivery.lock().unwrap().retry_receipts(10).len(), 1);
@@ -3300,6 +3275,7 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
             .lock()
             .unwrap()
             .manifest(&manifest.file_conv)
+            .unwrap()
             .is_some()
     );
     assert_eq!(b.prune_older_than(101).unwrap(), 1);
@@ -3308,6 +3284,7 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
             .lock()
             .unwrap()
             .manifest(&manifest.file_conv)
+            .unwrap()
             .is_none()
     );
     assert!(b.delivery.lock().unwrap().retry_receipts(10).is_empty());
@@ -3413,7 +3390,7 @@ async fn large_directory_enqueue_uses_compact_manifest_instead_of_frame_error() 
         .await
         .unwrap();
     let files = alice.files.lock().unwrap();
-    let Some(crate::file::AnyManifest::V4(manifest)) = files.manifest(&file_conv) else {
+    let Some(crate::file::AnyManifest::V4(manifest)) = files.manifest(&file_conv).unwrap() else {
         panic!("large folder must use the compact manifest");
     };
     assert_eq!(manifest.v3.v2.name, "paintings.tar");
@@ -7728,6 +7705,79 @@ async fn received_manifest_stays_saveable_after_reseed_and_restart() {
 }
 
 #[test]
+fn indexed_file_runtime_warm_open_does_not_hydrate_retained_manifest_history() {
+    use crate::eventlog::{Event, EventKind};
+    for count in [8u8, 80] {
+        let directory = tempfile::tempdir().unwrap();
+        let sender = DeviceIdentity::generate();
+        let sender_account = Account::generate();
+        let announce = Announce::new_with_account(&sender, &sender_account, "Sender", 9);
+        let identity = DeviceIdentity::generate();
+        let secret = identity.secret_bytes();
+        let account = Account::generate();
+        let account_secret = account.secret_bytes();
+        let (receiver, _, _files) = node_with_files(directory.path(), identity, account, &announce);
+        let conversation =
+            super::conversation::dm_conversation_id(&sender.public(), &receiver.identity.public());
+        let mut parent = None;
+        for n in 1..=count {
+            let manifest = crate::file::FileManifest {
+                name: format!("retained-{n}.txt"),
+                size: 0,
+                mime: "text/plain".into(),
+                checksum: crate::file::file_checksum(&[]),
+                file_key: [6; 32],
+                file_conv: ConversationId::new([n; 32]),
+                chunk_count: 1,
+            };
+            let event = Event::new(
+                &sender,
+                conversation,
+                u64::from(n),
+                parent.into_iter().collect(),
+                u64::from(n),
+                100,
+                EventKind::FileManifest,
+                crate::dm::seal(
+                    &sender,
+                    &receiver.identity.public().x25519_pub,
+                    &manifest.encode(),
+                )
+                .unwrap(),
+            );
+            parent = Some(event.id);
+            receiver.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        receiver.process_file_events(conversation);
+        let host = super::conversation::account_conversation_id(
+            &receiver.account_id(),
+            &sender_account.account_id(),
+        );
+        assert_eq!(
+            receiver
+                .received_files
+                .lock()
+                .unwrap()
+                .entries_ref(&host)
+                .len(),
+            usize::from(count)
+        );
+        drop(receiver);
+        let (reopened, _, _) = node_with_files(
+            directory.path(),
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            Account::from_secret_bytes(account_secret),
+            &announce,
+        );
+        assert_eq!(
+            reopened.received_files.lock().unwrap().body_reads(),
+            0,
+            "warm startup must use file eligibility and pending-work metadata for {count} retained cards"
+        );
+    }
+}
+
+#[test]
 fn expired_received_attachment_loses_readiness_after_cleanup() {
     use crate::eventlog::{Event, EventKind};
     let dir = tempfile::tempdir().unwrap();
@@ -8609,14 +8659,14 @@ async fn failed_media_persistence_remains_pending_until_storage_recovers() {
     std::fs::create_dir(&destination).unwrap();
     b.pull_pending_files().await;
     assert!(
-        b.pending_files.lock().unwrap().contains(&file),
+        b.files.lock().unwrap().pending_for_test(file),
         "completed chunks do not erase a failed durable media write from recovery"
     );
     assert!(!b.media.contains(file));
     std::fs::remove_dir(&destination).unwrap();
     b.pull_pending_files().await;
     assert!(b.media.contains(file));
-    assert!(!b.pending_files.lock().unwrap().contains(&file));
+    assert!(!b.files.lock().unwrap().pending_for_test(file));
     assert_eq!(b.read_media(file).unwrap(), bytes);
 }
 
@@ -8634,13 +8684,13 @@ async fn failed_media_completion_metadata_keeps_durable_bytes_pending() {
     assert!(b.media.contains(file));
     assert!(!b.has_verified_file_completion(file));
     assert!(
-        b.pending_files.lock().unwrap().contains(&file),
+        b.files.lock().unwrap().pending_for_test(file),
         "bytes alone cannot retire pending durable completion metadata"
     );
     std::fs::rename(&held, &outbox).unwrap();
     b.pull_pending_files().await;
     assert!(b.has_verified_file_completion(file));
-    assert!(!b.pending_files.lock().unwrap().contains(&file));
+    assert!(!b.files.lock().unwrap().pending_for_test(file));
     assert_eq!(b.read_media(file).unwrap(), bytes);
 }
 
@@ -9837,10 +9887,8 @@ async fn owned_scope_sender_fixture(
 #[tokio::test]
 async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
     let directory = tempfile::tempdir().unwrap();
-    let (sender, _, file, target) = owned_scope_sender_fixture(directory.path(), false).await;
+    let (sender, target, file, _) = owned_scope_sender_fixture(directory.path(), false).await;
     let sentinel = ConversationId::new([91; 32]);
-    let sentinel_event = EventId::new([92; 32]);
-    let author = crate::eventlog::Author::from_ed25519(sender.identity.public().ed25519_pub);
     let manifest = crate::file::FileManifest {
         name: "sentinel".into(),
         size: 0,
@@ -9850,19 +9898,29 @@ async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
         file_conv: sentinel,
         chunk_count: 1,
     };
-    sender.files.lock().unwrap().record_event(
-        sentinel_event,
-        author,
-        crate::file::AnyManifest::V1(manifest),
-    );
-    sender.files.lock().unwrap().mark_emitted(sentinel_event);
-    sender.pending_files.lock().unwrap().insert(sentinel);
-    sender.remember_manifest_scope(
-        sentinel,
+    let original = crate::eventlog::Event::new(
+        &sender.identity,
         ConversationId::new([93; 32]),
-        author,
-        sentinel_event,
+        1,
+        vec![],
+        1,
+        0,
+        crate::eventlog::EventKind::FileManifest,
+        vec![91],
     );
+    let row = super::received_log::ReceivedEntry {
+        event_id: original.id,
+        conversation: original.conversation_id,
+        from: sender.user_id(),
+        wall_clock: original.wall_clock,
+        plaintext: manifest.encode(),
+    };
+    sender
+        .received_files
+        .lock()
+        .unwrap()
+        .record_file_with_reception(&row, Some(&original), None)
+        .unwrap();
     let snapshot_book = || {
         let book = sender.files.lock().unwrap();
         let mut files = book.file_convs();
@@ -9874,7 +9932,7 @@ async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
                 ids.sort();
                 (
                     file,
-                    book.manifest(&file).cloned(),
+                    book.manifest(&file).unwrap(),
                     ids.iter()
                         .map(|id| (*id, book.is_emitted(id)))
                         .collect::<Vec<_>>(),
@@ -9883,16 +9941,11 @@ async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
             .collect::<Vec<_>>()
     };
     let book_before = snapshot_book();
-    let pending_before = sender.pending_files.lock().unwrap().clone();
+    let pending_before = sender.files.lock().unwrap().pending_for_test(sentinel);
     let scopes_before = sender
-        .privacy
-        .state
-        .read()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .file_scopes
-        .clone();
+        .manifest_scopes(file)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     sender.log.lock().unwrap().fail_read_for(Some(target));
     assert!(matches!(
         sender.reseed_live_file_book(&sender.delivery.lock().unwrap()),
@@ -9903,18 +9956,14 @@ async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
         "late scope failure must not replace the live FileBook"
     );
     assert!(
-        *sender.pending_files.lock().unwrap() == pending_before,
+        sender.files.lock().unwrap().pending_for_test(sentinel) == pending_before,
         "late scope failure must not trim pending files"
     );
     assert!(
         sender
-            .privacy
-            .state
-            .read()
+            .manifest_scopes(file)
+            .collect::<Result<Vec<_>, _>>()
             .unwrap()
-            .as_ref()
-            .unwrap()
-            .file_scopes
             == scopes_before,
         "late scope failure must not replace privacy scopes"
     );
@@ -9922,9 +9971,25 @@ async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
     sender
         .reseed_live_file_book(&sender.delivery.lock().unwrap())
         .unwrap();
-    assert!(sender.files.lock().unwrap().manifest(&file).is_some());
-    assert!(sender.files.lock().unwrap().manifest(&sentinel).is_none());
-    assert!(!sender.pending_files.lock().unwrap().contains(&sentinel));
+    assert!(
+        sender
+            .files
+            .lock()
+            .unwrap()
+            .manifest(&file)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        sender
+            .files
+            .lock()
+            .unwrap()
+            .manifest(&sentinel)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!sender.files.lock().unwrap().pending_for_test(sentinel));
 }
 
 #[tokio::test]
@@ -9958,13 +10023,9 @@ async fn owned_read_failure_manifest_recovery_uses_complete_wal_before_retiremen
     );
     assert!(
         sender
-            .privacy
-            .state
-            .read()
+            .manifest_scopes(file)
+            .collect::<Result<Vec<_>, _>>()
             .unwrap()
-            .as_ref()
-            .unwrap()
-            .file_scopes[&file]
             .iter()
             .any(|scope| scope.event == target),
         "the additional destination scope must not be stranded after journal retirement"

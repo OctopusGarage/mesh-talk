@@ -19,7 +19,13 @@ impl Node {
                         .lock()
                         .expect("files mutex")
                         .manifest(&conv)
-                        .is_some_and(|manifest| manifest.protection().is_some())
+                        .map(|manifest| {
+                            manifest.is_some_and(|manifest| manifest.protection().is_some())
+                        })
+                        .unwrap_or_else(|error| {
+                            log::warn!("favorite protection lookup failed: {error}");
+                            true
+                        })
                 })
             })
         {

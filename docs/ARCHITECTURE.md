@@ -1438,8 +1438,8 @@ barrier. Proof reads validate row and physical allocation charges before payload
 fetches; aliases remain bounded by the signed identity limit. Persisted revisions
 advance only for newly accepted proofs or bindings, so duplicate insertion and
 restart preserve ordered-view invalidation. Export visitors release the SQL guard
-between bounded pages. These indexed owners alone do not replace FileBook startup
-reconstruction or qualify the complete participant runtime memory bound.
+between bounded pages. Production Node uses the indexed FileBook described below;
+other independent runtime owners retain their own resource and startup contracts.
 The indexed FileBook projection references those existing file-card bodies by
 ordinal. It installs validated signed bindings and exact processing facts in the
 body transaction. Its transfer fingerprint shares the existing file equality
@@ -1452,8 +1452,17 @@ cleanup can fail. Signed logical aliases apply this rule in either arrival order
 the indexed author and exact plaintext digest must match the retained offer.
 Metadata pages check row and byte budgets; selected manifest reads verify physical allocation
 charges before loading bytes. Account adoption fences old handles and never
-imports the former account into the new namespace. This leaf does not by itself
-replace legacy FileBook retention or media startup work. Delivery-journal file
+imports the former account into the new namespace. Production Node imports old
+FILES bindings once through bounded turns; warm reopen reads checkpoints and exact
+retained erasure keys without hydrating file-card history. Download scheduling is
+account-scoped SQL work installed with each new validated offer. Metadata discovery
+pages contain at most 128 IDs and each worker turn admits eight files. A completion
+acknowledges the observed work revision, so a newer offer cannot lose its sole retry
+fact. Consent changes restart a persisted metadata scan, and failed media or
+completion writes leave pending work retryable across restart. Sent fanout scopes
+reuse source 9 publication and bounded metadata pages; the sync owner still checks
+each exact signed parent permission. Ordinary scope reads require a live validated
+binding, and historical scopes are never rebuilt in a resident map. Delivery-journal file
 projections now install FILES, validated eligibility and incoming reception facts
 in one transaction before retiring the intent. The same installer accepts the
 incoming channel owner's receiver checkpoint transaction. Outgoing manifest
