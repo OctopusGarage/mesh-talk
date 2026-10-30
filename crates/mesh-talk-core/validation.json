@@ -2,8 +2,49 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "core-indexed-current-profiles",
+      "paths": [
+        "crates/mesh-talk-core/src/node/profile_store/",
+        "crates/mesh-talk-core/src/node/account_profile_data/",
+        "crates/mesh-talk-core/src/node/trust_card/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "warm_open_reads_no_avatar_payloads",
+            "node::profile_store::indexed::tests::",
+            "node::account_profile_data::indexed::tests::",
+            "node::trust_card::indexed::tests::"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-account-profile"
+      ],
+      "capability": {
+        "summary": "Select current account profiles, compatibility avatars and frozen trust cards from independently published encrypted disk indexes.",
+        "guide": "docs/module-boundaries.md",
+        "invariants": [
+          {
+            "name": "Warm owner opens read metadata only; row and byte admission precedes selected payload fetch. Signed profile ties, trust-card first-revision wins, immutable creation dates and existing count/wire-byte quotas retain their distinct rules.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "A failed import preserves the legacy source; failed writes do not change current values or revision. Published missing authority is an error, not an empty store.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Repository owner tests do not certify Node startup, producer projection, warm reconciliation or host avatar cache integration; those boundaries require their own focused acceptance."
+      ]
+    },
+    {
       "id": "core-opaque-receive-hints",
-      "paths": ["crates/mesh-talk-core/src/node/opaque_receive_cache.rs"],
+      "paths": [
+        "crates/mesh-talk-core/src/node/opaque_receive_cache.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
@@ -14,7 +55,9 @@
           ]
         }
       ],
-      "consumers": ["core-node"],
+      "consumers": [
+        "core-node"
+      ],
       "capability": {
         "summary": "Keep optional opaque receive mappings on encrypted disk and load only the active mailbox's bounded protocol identifiers.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",

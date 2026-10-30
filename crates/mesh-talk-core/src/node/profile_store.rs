@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+mod indexed;
+pub(super) use indexed::IndexedProfileStore;
+
 const MAGIC: &[u8; 6] = b"MTPROF";
 
 /// One account's current avatar, as last received.
@@ -215,7 +218,57 @@ impl ProfileStore {
 
 #[cfg(test)]
 mod tests {
+    pub(super) fn profile(
+        root: &std::path::Path,
+        identity: &crate::identity::device::DeviceIdentity,
+        account: &Account,
+    ) -> std::sync::Arc<crate::storage::profile::context::ProfileStorage> {
+        let profile = crate::storage::profile::context::ProfileStorage::open_participant(
+            crate::storage::profile::ProfileStorageLease::acquire(root).unwrap(),
+            &identity.public(),
+            &account.public(),
+            &root.join("messages.log"),
+            &root.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        profile.complete_participant("pw", None).unwrap();
+        profile
+    }
+    #[test]
+    fn warm_open_reads_no_avatar_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("avatars");
+        let mut store = ProfileStore::open(&path, "pw").unwrap();
+        for n in 0..64 {
+            store
+                .record(&format!("{n:032x}"), 1, Some(vec![7; 8192]))
+                .unwrap();
+        }
+        drop(store);
+        let identity = crate::identity::device::DeviceIdentity::generate();
+        let account = Account::generate();
+        let owner = profile(root.path(), &identity, &account);
+        let imported = IndexedProfileStore::from_profile(owner.clone(), &path, "pw").unwrap();
+        drop(imported);
+        drop(owner);
+        indexed::reset_body_reads();
+        crate::storage::record_log::frame_observations::reset();
+        let owner = profile(root.path(), &identity, &account);
+        let store = IndexedProfileStore::from_profile(owner, &path, "pw").unwrap();
+        assert_eq!(indexed::body_reads(), 0);
+        let page = store.page(None).unwrap();
+        assert_eq!(page.rows.len(), 16);
+        assert_eq!(indexed::body_reads(), 16);
+        assert_eq!(
+            crate::storage::record_log::frame_observations::maximum_capacity(),
+            0,
+            "warm current-avatar open must not decrypt every account payload"
+        );
+    }
+
     use super::*;
+    use crate::identity::account::Account;
 
     #[test]
     fn current_pages_bound_rows_and_bytes_and_include_clear_tombstones() {

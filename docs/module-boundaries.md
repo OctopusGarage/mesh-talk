@@ -308,6 +308,16 @@ retired language metadata is never republished or restored as filtering state.
 The existing signed payload and encrypted record formats remain the same.
 `core/node/account_profile_data.rs` and `account_profile_io.rs` own the
 canonical account nickname, biography, avatar and immutable creation metadata.
+The `account_profile_data/indexed.rs`, `profile_store/indexed.rs` and
+`trust_card/indexed.rs` owners keep their distinct current-value admission rules
+and store payloads on the shared encrypted participant connection. Each source
+uses the independent history publisher and legacy-writer barrier. Warm owner
+construction reads metadata only; current pages admit at most 16 keys and 1 MiB
+before loading bodies, and selected lookups propagate storage errors. Signed
+account profiles preserve clear-avatar tie ordering and immutable creation dates;
+frozen trust cards keep the first accepted equal revision. Existing signed-owner
+account and wire-byte quotas remain unchanged. These owner APIs do not themselves
+certify Node producer/startup or warm projection integration.
 Nickname-only edits preserve other profile fields and use the same revision ordering. `src-tauri/src/runtime_bootstrap.rs` projects accepted own
 account nicknames into local credentials, live presence and frontend state under
 exact session/installation authority. Its runtime-owned producer retires with the

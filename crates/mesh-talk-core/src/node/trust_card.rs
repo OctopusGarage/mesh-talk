@@ -13,6 +13,9 @@ use std::{collections::HashMap, path::Path};
 const MAX_PROOFS: usize = 16;
 const MAX_TEXT: usize = 2048;
 const MAX_WIRE: usize = MAX_AVATAR_BYTES + 96 * 1024;
+mod indexed;
+pub(super) use indexed::IndexedTrustCardStore;
+
 const MAGIC: &[u8; 6] = b"MTTRST";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +304,62 @@ impl TrustCardStore {
 }
 #[cfg(test)]
 mod tests {
+    pub(super) fn profile(
+        root: &std::path::Path,
+        identity: &crate::identity::device::DeviceIdentity,
+        account: &Account,
+    ) -> std::sync::Arc<crate::storage::profile::context::ProfileStorage> {
+        let profile = crate::storage::profile::context::ProfileStorage::open_participant(
+            crate::storage::profile::ProfileStorageLease::acquire(root).unwrap(),
+            &identity.public(),
+            &account.public(),
+            &root.join("messages.log"),
+            &root.join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        profile.complete_participant("pw", None).unwrap();
+        profile
+    }
+    #[test]
+    fn warm_open_reads_no_avatar_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("cards");
+        let mut store = TrustCardStore::open(&path, "pw").unwrap();
+        for seed in 1..=32 {
+            let account = crate::identity::account::Account::from_secret_bytes([seed; 32]);
+            let card = TrustCard::new(
+                &account,
+                1,
+                "Person".into(),
+                String::new(),
+                None,
+                Some(vec![7; 8192]),
+            );
+            assert!(store.record(card).unwrap());
+        }
+        drop(store);
+        let identity = crate::identity::device::DeviceIdentity::generate();
+        let account = Account::generate();
+        let owner = profile(root.path(), &identity, &account);
+        let imported = IndexedTrustCardStore::from_profile(owner.clone(), &path, "pw").unwrap();
+        drop(imported);
+        drop(owner);
+        indexed::reset_body_reads();
+        crate::storage::record_log::frame_observations::reset();
+        let owner = profile(root.path(), &identity, &account);
+        let store = IndexedTrustCardStore::from_profile(owner, &path, "pw").unwrap();
+        assert_eq!(indexed::body_reads(), 0);
+        let page = store.page(None).unwrap();
+        assert_eq!(page.rows.len(), 16);
+        assert_eq!(indexed::body_reads(), 16);
+        assert_eq!(
+            crate::storage::record_log::frame_observations::maximum_capacity(),
+            0,
+            "warm trust-card open must not decrypt every account payload"
+        );
+    }
+
     use super::*;
     use crate::identity::account::Account;
     #[test]
