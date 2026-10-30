@@ -200,7 +200,13 @@ exact processed facts tied to existing FILES ordinals; its account namespace,
 resumable import and persisted revision use the same connection. Production Node
 uses this owner directly. `filebook/scopes.rs` owns source 9 sent fanout references;
 `filebook/work.rs` owns metadata-only download discovery, fair bounded admission and
-revision-qualified completion. Neither owns a second payload journal or permission
+revision-qualified completion. `filebook/receiving.rs` owns metadata-only manifest
+discovery and fair retry admission, retaining oversized rows until an adequate
+budget is supplied and using exact file processing evidence for completion.
+Discovery qualifies each commit through the participant-owned account intervals
+before inserting pending work; selection applies its account index before LIMIT.
+Captured adoption generations fence old handles even after returning to an account.
+These modules own neither a second payload journal nor a permission
 rule; network disclosure reuses the existing exact parent authorization.
 `sent_store.rs`, `received_store.rs` and the indexed owner in
 `account_suppression.rs` expose owned lookups, bounded pages and exact local

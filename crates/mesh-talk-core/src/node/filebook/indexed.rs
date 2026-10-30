@@ -4,7 +4,10 @@ use crate::{
     eventlog::{ConversationId, Event, EventId, LogError},
     file::AnyManifest,
     node::received_log::ReceivedEntry,
-    storage::profile::context::ProfileStorage,
+    storage::profile::{
+        context::ProfileStorage,
+        participant::event_ownership::{self, ParticipantEventOwner},
+    },
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -85,6 +88,9 @@ fn page_limit(rows: usize, bytes: usize, charge: usize) -> Result<i64, LogError>
 pub(crate) struct IndexedFileBook {
     pub(super) profile: Arc<ProfileStorage>,
     pub(super) account: [u8; 32],
+    // Early WAL/migration setup may precede adoption publication. Only the
+    // recaptured final owner may schedule newly received events.
+    pub(super) receive_owner: Option<ParticipantEventOwner>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FileOffer {
@@ -358,7 +364,7 @@ impl IndexedFileBook {
         Ok(())
     }
     pub(crate) fn open(profile: Arc<ProfileStorage>) -> Result<Self, LogError> {
-        let account = profile.database().transaction(|c| {
+        let (account, receive_owner) = profile.database().transaction(|c| {
             let present: bool = c.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_book_owners')",
                 [],
@@ -386,6 +392,7 @@ impl IndexedFileBook {
                 }
             }
             let account = active(c)?;
+            super::receiving::initialize_on(c, &account)?;
             // Only the initial account may import the old unnamespaced source.
             // A newly adopted account starts with no offers.
             c.execute(
@@ -396,12 +403,30 @@ impl IndexedFileBook {
                 "INSERT OR IGNORE INTO file_download_scan VALUES(?1,NULL,NULL,0,1)",
                 [account.as_slice()],
             )?;
-            Ok(account)
+            let loaded = crate::identity::account::AccountPublic {
+                ed25519_pub: account,
+            };
+            let receive_owner = match event_ownership::capture_event_owner_on(c, &loaded) {
+                Ok(owner) => Some(owner),
+                Err(LogError::StaleCursor) => None,
+                Err(error) => return Err(error),
+            };
+            Ok((account, receive_owner))
         })?;
-        Ok(Self { profile, account })
+        Ok(Self {
+            profile,
+            account,
+            receive_owner,
+        })
     }
     pub(super) fn check(&self, c: &Connection) -> Result<(), LogError> {
-        if active(c)? == self.account {
+        if let Some(owner) = &self.receive_owner {
+            return event_ownership::check_event_owner_on(c, owner);
+        }
+        // A temporary migration handle becomes stale once adoption publishes,
+        // even when the final account happens to have the same public key.
+        let migration: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM participant_profile WHERE singleton=1 AND account=?1 AND bootstrap_previous IS NOT NULL)", [self.account.as_slice()], |r|r.get(0))?;
+        if migration {
             Ok(())
         } else {
             Err(LogError::StaleCursor)
@@ -472,6 +497,10 @@ pub(crate) fn mark_processed_on(c: &Connection, event: EventId) -> Result<(), Lo
     let account = active(c)?;
     c.execute(
         "INSERT OR IGNORE INTO file_book_processed VALUES(?1,?2)",
+        params![account.as_slice(), event.as_bytes().as_slice()],
+    )?;
+    c.execute(
+        "DELETE FROM file_receive_pending WHERE account=?1 AND event=?2",
         params![account.as_slice(), event.as_bytes().as_slice()],
     )?;
     Ok(())
@@ -920,6 +949,12 @@ mod tests {
     fn account_adoption_fences_old_book_without_importing_former_account_offers() {
         let f = Fixture::new();
         let (entry, original, manifest) = f.fixture(3);
+        let mut log = crate::eventlog::persist::PersistentEventLog::open_profile(
+            f.book.profile.clone(),
+            "pw",
+        )
+        .unwrap();
+        log.append_durable(original.clone()).unwrap();
         f.book
             .profile
             .database()
@@ -927,17 +962,17 @@ mod tests {
             .unwrap();
         let ordinal = f.book.offers_page(None, None, None, 1, 144).unwrap()[0].ordinal;
         let adopted = Account::generate();
-        f.book
-            .profile
-            .database()
-            .transaction(|c| {
-                c.execute(
-                    "UPDATE participant_profile SET account=?1 WHERE singleton=1",
-                    [adopted.public().ed25519_pub.as_slice()],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        crate::storage::profile::participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &adopted.public(),
+        )
+        .unwrap();
+        crate::storage::profile::participant::finish_adoption(
+            f.book.profile.database(),
+            &adopted.public(),
+        )
+        .unwrap();
         assert!(matches!(
             f.book.eligible_ordinal(ordinal),
             Err(LogError::StaleCursor)
@@ -1259,6 +1294,177 @@ mod tests {
         assert!(current.revision > work.revision);
         f.book.finish_download(current).unwrap();
         assert!(!f.book.pending_for_test(manifest.file_conv()));
+    }
+
+    #[test]
+    fn file_receive_discovery_is_atomic_fair_and_does_not_discard_large_legal_rows() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let conversation = ConversationId::new([12; 32]);
+        for sequence in 1..=40 {
+            let event = Event::new(
+                &sender,
+                conversation,
+                sequence,
+                vec![],
+                sequence,
+                0,
+                EventKind::FileManifest,
+                vec![1; if sequence == 1 { 512 * 1024 } else { 100 }],
+            );
+            log.append_durable(event).unwrap();
+        }
+        let rows = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 128)
+            .unwrap();
+        f.book.profile.database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER fail_file_discovery BEFORE INSERT ON file_receive_pending WHEN NEW.ticket=20 BEGIN SELECT RAISE(ABORT,'injected'); END;")?;Ok(())
+        }).unwrap();
+        assert!(f.book.discover_receives(None, &rows, own).is_err());
+        assert_eq!(f.book.receive_after().unwrap(), None);
+        assert!(
+            f.book
+                .receive_candidates(conversation, 8, 4096)
+                .unwrap()
+                .is_empty()
+        );
+        f.book
+            .profile
+            .database()
+            .transaction(|c| {
+                c.execute_batch("DROP TRIGGER fail_file_discovery")?;
+                Ok(())
+            })
+            .unwrap();
+        f.book.discover_receives(None, &rows, own).unwrap();
+        let first = f.book.receive_candidates(conversation, 8, 4096).unwrap();
+        assert!(!first.contains(&rows[0].header.id));
+        for id in &first {
+            f.book.mark_processed(*id).unwrap();
+        }
+        let reopened = IndexedFileBook::open(f.book.profile.clone()).unwrap();
+        assert_eq!(
+            reopened.receive_after().unwrap(),
+            rows.last().map(|row| row.ordinal)
+        );
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..6 {
+            seen.extend(
+                reopened
+                    .receive_candidates(conversation, 8, 8 * 1024 * 1024)
+                    .unwrap(),
+            );
+        }
+        assert!(
+            seen.contains(&rows[0].header.id),
+            "small budgets must not retire a valid large row"
+        );
+        assert_eq!(seen.len(), 40 - first.len());
+        assert!(first.iter().all(|id| !seen.contains(id)));
+        assert_eq!(f.records.body_reads(), 0);
+    }
+
+    #[test]
+    fn file_receive_discovery_preserves_account_epochs_and_undiscovered_work() {
+        use crate::eventlog::{Author, persist::PersistentEventLog};
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        let mut log = PersistentEventLog::open_profile(f.book.profile.clone(), "pw").unwrap();
+        let sender = DeviceIdentity::generate();
+        let conversation = ConversationId::new([19; 32]);
+        let make = |seq| {
+            Event::new(
+                &sender,
+                conversation,
+                seq,
+                vec![],
+                seq,
+                1,
+                EventKind::FileManifest,
+                vec![1],
+            )
+        };
+        let events: Vec<_> = (1..=4).map(make).collect();
+        for event in &events[..2] {
+            log.append_durable(event.clone()).unwrap();
+        }
+        let own = Author::from_ed25519(f.device.public().ed25519_pub);
+        let first = log
+            .repository()
+            .unwrap()
+            .committed_headers_page(None, 1)
+            .unwrap();
+        f.book.discover_receives(None, &first, own).unwrap();
+        let next = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &next.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &next.public()).unwrap();
+        log.append_durable(events[2].clone()).unwrap();
+        let b = IndexedFileBook::open(f.book.profile.clone()).unwrap();
+        b.discover_receives(
+            None,
+            &log.repository()
+                .unwrap()
+                .committed_headers_page(None, 128)
+                .unwrap(),
+            own,
+        )
+        .unwrap();
+        assert_eq!(
+            b.receive_candidates(conversation, 128, 8 * 1024 * 1024)
+                .unwrap(),
+            vec![events[2].id],
+            "the adopted account must not receive old-account file notices"
+        );
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &next.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        log.append_durable(events[3].clone()).unwrap();
+        let a = IndexedFileBook::open(f.book.profile.clone()).unwrap();
+        let after = a.receive_after().unwrap();
+        a.discover_receives(
+            after,
+            &log.repository()
+                .unwrap()
+                .committed_headers_page(after, 128)
+                .unwrap(),
+            own,
+        )
+        .unwrap();
+        let selected: std::collections::HashSet<_> = a
+            .receive_candidates(conversation, 128, 8 * 1024 * 1024)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            selected,
+            std::collections::HashSet::from([events[0].id, events[1].id, events[3].id])
+        );
+        assert!(matches!(b.receive_after(), Err(LogError::StaleCursor)));
+        assert!(
+            matches!(f.book.receive_after(), Err(LogError::StaleCursor)),
+            "returning to A must not revive an old A scheduler"
+        );
+        assert!(
+            matches!(
+                f.book.forget_receive(events[0].id),
+                Err(LogError::StaleCursor)
+            ),
+            "an old A acknowledgement must not retire resumed A work"
+        );
     }
 }
 
