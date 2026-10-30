@@ -2515,7 +2515,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "Manifest receive discovery qualifies account commit intervals before pending insertion; account-indexed bounded retries preserve oversized legal rows and returning-account work, while adoption generations reject stale reads and acknowledgements.",
+            "name": "Manifest receive discovery qualifies account commit intervals before pending insertion; account-indexed bounded retries preserve oversized legal rows and returning-account work, while adoption generations reject stale reads, acknowledgements and message/file reception writes even after the account returns.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

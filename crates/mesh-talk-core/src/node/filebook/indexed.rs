@@ -1202,6 +1202,84 @@ mod tests {
         assert!(messages.entry(entry.event_id).unwrap().is_none());
     }
     #[test]
+    fn returned_account_producer_rejects_old_file_store_generation() {
+        returned_account_producer(true);
+    }
+
+    #[test]
+    fn returned_account_producer_rejects_old_message_store_generation() {
+        returned_account_producer(false);
+    }
+
+    fn returned_account_producer(files: bool) {
+        use crate::storage::profile::participant;
+        let f = Fixture::new();
+        let (mut entry, original, _) = f.fixture(27);
+        if !files {
+            entry.plaintext =
+                crate::node::message::MessageBody::new(b"retained message".to_vec(), None).encode();
+        }
+        let path = f
+            .root
+            .path()
+            .join(if files { "files.log" } else { "received.log" });
+        let open = || {
+            if files {
+                ReceivedStore::file_cards_from_profile(f.book.profile.clone(), &path, "pw")
+            } else {
+                ReceivedStore::from_profile(f.book.profile.clone(), &path, "pw")
+            }
+        };
+        let mut old = open().unwrap();
+        let effects =
+            crate::node::reception_effects::ReceptionEffects::open(f.book.profile.clone()).unwrap();
+        let before = effects.head().unwrap();
+        let metadata = crate::node::reception_effects::ReceptionMetadata::for_incoming(
+            &original,
+            &entry,
+            &f.device.public(),
+            &f.account.account_id(),
+            1234,
+        );
+        let other = Account::generate();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &f.account.public(),
+            &other.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &other.public()).unwrap();
+        participant::prepare_adoption(
+            f.book.profile.database(),
+            &other.public(),
+            &f.account.public(),
+        )
+        .unwrap();
+        participant::finish_adoption(f.book.profile.database(), &f.account.public()).unwrap();
+        let write = |store: &mut ReceivedStore| {
+            if files {
+                store.record_file_with_reception(&entry, Some(&original), Some(&metadata))
+            } else {
+                store.record_durable_with_reception(&entry, &metadata)
+            }
+        };
+        assert!(
+            matches!(write(&mut old), Err(LogError::StaleCursor)),
+            "an old producer must not revive after its account returns"
+        );
+        assert!(old.entry(entry.event_id).unwrap().is_none());
+        assert_eq!(
+            effects.head().unwrap(),
+            before,
+            "stale writes must install no reception work"
+        );
+        let mut fresh = open().unwrap();
+        write(&mut fresh).unwrap();
+        assert!(fresh.entry(entry.event_id).unwrap().is_some());
+        assert_ne!(effects.head().unwrap(), before);
+    }
+
+    #[test]
     fn durable_download_work_is_bounded_fair_and_survives_reopen() {
         let f = Fixture::new();
         for n in 1..=130 {

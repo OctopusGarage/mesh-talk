@@ -1360,6 +1360,14 @@ impl Node {
             super::reception_effects::ReceptionEffects::open(node.storage.clone())?;
         node.channel_checkpoints =
             super::channel::checkpoint::ChannelCheckpointStore::open(node.storage.clone())?;
+        node.received
+            .lock()
+            .expect("received lock")
+            .recapture_reception_owner(&node.account.public())?;
+        node.received_files
+            .lock()
+            .expect("received files lock")
+            .recapture_reception_owner(&node.account.public())?;
         node.profile_receive_work = Mutex::new(
             super::profile_receive_work::ProfileReceiveWork::open(node.storage.clone())?,
         );

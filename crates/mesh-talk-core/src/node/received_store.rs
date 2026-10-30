@@ -8,12 +8,20 @@ use crate::{
         LogError,
         event::{ConversationId, EventId},
     },
-    storage::{profile::context::ProfileStorage, record_log::EncryptedRecordLog},
+    identity::account::AccountPublic,
+    storage::{
+        profile::{
+            context::ProfileStorage,
+            participant::event_ownership::{self, ParticipantEventOwner},
+        },
+        record_log::EncryptedRecordLog,
+    },
 };
 use std::{path::Path, sync::Arc};
 
 pub(crate) struct ReceivedStore {
     repository: TranscriptRepository,
+    reception_owner: Option<ParticipantEventOwner>,
     #[cfg(test)]
     fail_once_after: std::cell::Cell<Option<usize>>,
 }
@@ -81,11 +89,46 @@ impl ReceivedStore {
                 )?;
                 writer.sync()
             })?;
+        let reception_owner = repository.profile.database().read(|c| {
+            let account: Vec<u8> = c.query_row(
+                "SELECT account FROM participant_profile WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            let loaded = AccountPublic {
+                ed25519_pub: account
+                    .try_into()
+                    .map_err(|_| repository::invalid("invalid received producer account"))?,
+            };
+            match event_ownership::capture_event_owner_on(c, &loaded) {
+                Ok(owner) => Ok(Some(owner)),
+                Err(LogError::StaleCursor) => Ok(None),
+                Err(error) => Err(error),
+            }
+        })?;
         Ok(Self {
             repository,
+            reception_owner,
             #[cfg(test)]
             fail_once_after: std::cell::Cell::new(None),
         })
+    }
+    /// Migration may initialize this source before account adoption publishes.
+    /// Only the authenticated final Node constructor may recapture its producer.
+    pub(crate) fn recapture_reception_owner(
+        &mut self,
+        loaded: &AccountPublic,
+    ) -> Result<(), LogError> {
+        self.reception_owner = Some(self.repository.profile.database().read(|c| {
+            self.repository.profile.check_participant_account_on(c)?;
+            event_ownership::capture_event_owner_on(c, loaded)
+        })?);
+        Ok(())
+    }
+    fn check_reception_owner_on(&self, c: &rusqlite::Connection) -> Result<(), LogError> {
+        self.repository.profile.check_participant_account_on(c)?;
+        let owner = self.reception_owner.as_ref().ok_or(LogError::StaleCursor)?;
+        event_ownership::check_event_owner_on(c, owner)
     }
     pub(crate) fn record_durable(&mut self, entry: &ReceivedEntry) -> Result<(), LogError> {
         if self.repository.kind == RECEIVED {
@@ -224,7 +267,7 @@ impl ReceivedStore {
         }
         self.check_write()?;
         let inserted = self.repository.profile.database().transaction(|c| {
-            self.repository.profile.check_participant_account_on(c)?;
+            self.check_reception_owner_on(c)?;
             Self::install_received_on(
                 c,
                 entry,
@@ -276,7 +319,7 @@ impl ReceivedStore {
         }
         self.check_write()?;
         let inserted = self.repository.profile.database().transaction(|c| {
-            self.repository.profile.check_participant_account_on(c)?;
+            self.check_reception_owner_on(c)?;
             let stored;
             let original = match original {
                 Some(original) => original,
