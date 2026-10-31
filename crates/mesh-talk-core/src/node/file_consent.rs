@@ -203,13 +203,14 @@ impl Node {
                     decision,
                     completion,
                 };
-                let previous = store.published_control(manifest);
+                let previous = store.published_control(manifest)?;
+                let previous_generation = store.published_generation(manifest)?;
                 if decision == ReceiveDecision::Pending && previous.is_none() && requested.is_none()
                 {
                     continue;
                 }
-                let event = if let Some(event) = previous.filter(|event| {
-                    store.published_generation(manifest) == Some(generation)
+                let event = if let Some(event) = previous.as_ref().filter(|event| {
+                    previous_generation == Some(generation)
                         && Decision::open(event).as_ref() == Some(&payload)
                 }) {
                     event.clone()
@@ -379,6 +380,7 @@ impl Node {
                 // Use the validated durable decision, never an unadmitted payload.
                 let answer = self
                     .outgoing_file_consent_status(card, manifest)
+                    .map_err(SessionError::Store)?
                     .unwrap_or(pending);
                 if answer != status(payload.decision) {
                     return Ok(pending);
@@ -435,35 +437,34 @@ impl Node {
         &self,
         card: EventId,
         manifest: EventId,
-    ) -> Option<crate::eventlog::sync::FileConsentStatus> {
+    ) -> Result<Option<crate::eventlog::sync::FileConsentStatus>, LogError> {
         let durable = self
             .file_consent
             .lock()
             .expect("consent lock not poisoned")
-            .remote_decision(manifest)
+            .remote_decision(manifest)?
             .map(status);
-        durable.or_else(|| {
+        Ok(durable.or_else(|| {
             self.outgoing_file_consents
                 .lock()
                 .expect("outgoing consent lock not poisoned")
                 .get(&(card, manifest))
                 .copied()
-        })
+        }))
     }
 
     pub(in crate::node) fn recipient_completed_file(
         &self,
         file: &super::delivery_store::FileCard,
         destination: &super::delivery_store::FileDestination,
-    ) -> bool {
+    ) -> Result<bool, LogError> {
         let binding = &destination.binding;
         let control = self
             .file_consent
             .lock()
             .expect("file consent lock not poisoned")
-            .received_control(binding.event_id)
-            .cloned();
-        control
+            .received_control(binding.event_id)?;
+        Ok(control
             .as_ref()
             .and_then(Decision::open)
             .is_some_and(|payload| {
@@ -481,7 +482,7 @@ impl Node {
                         .is_none_or(|id| id == &payload.recipient_account)
                     && payload.completion.is_some()
                     && payload.completion == file.final_chunk
-            })
+            }))
     }
 }
 
@@ -554,7 +555,11 @@ mod tests {
         let mut store = FileConsentStore::open(&path, "pw").unwrap();
         assert!(!store.receive_control(accepted).unwrap());
         assert_eq!(
-            store.received_control(payload.manifest).unwrap().id,
+            store
+                .received_control(payload.manifest)
+                .unwrap()
+                .unwrap()
+                .id,
             declined.id
         );
     }

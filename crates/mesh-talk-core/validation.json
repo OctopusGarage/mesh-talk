@@ -273,7 +273,8 @@
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/account_documents/custody.rs",
         "crates/mesh-talk-core/src/node/node_tests.rs",
-        "crates/mesh-talk-core/src/node/media_store.rs"
+        "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/node/media_store/**"
       ],
       "rust": [
         {
@@ -1869,6 +1870,7 @@
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/node/media_store/**",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
@@ -2214,6 +2216,7 @@
         "crates/mesh-talk-core/src/node/group_file_delivery_tests.rs",
         "crates/mesh-talk-core/src/node/file_consent.rs",
         "crates/mesh-talk-core/src/node/file_consent_store.rs",
+        "crates/mesh-talk-core/src/node/file_consent_store/**",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/delivery_store.rs",

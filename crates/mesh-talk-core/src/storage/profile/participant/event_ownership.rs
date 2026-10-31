@@ -12,6 +12,35 @@ CREATE UNIQUE INDEX participant_event_open_range ON participant_event_ranges((1)
 ";
 const MISSING_BOUNDARIES: &str = "participant event ownership boundaries are unavailable for this experimental multi-account profile; data was preserved";
 
+/// Resolve the authenticated owner of a device-local legacy projection.
+pub(crate) fn legacy_source_namespace_on(c: &Connection, source: &str) -> Result<String, LogError> {
+    let previous: Option<String> = c.query_row(
+        "SELECT bootstrap_previous FROM participant_profile WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if let Some(previous) = previous {
+        return Ok(previous);
+    }
+    let count: i64 = c.query_row(
+        "SELECT count(*) FROM (SELECT 1 FROM participant_account_namespaces LIMIT 2)",
+        [],
+        |r| r.get(0),
+    )?;
+    if count != 1 {
+        return Err(invalid(&format!(
+            "{source} ownership is unavailable for this experimental multi-account legacy source; data was preserved",
+        )));
+    }
+    let (account, _, _) = super::state_on(c)?;
+    let exact:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM participant_account_namespaces WHERE account_id=?1 AND account=?2)",params![account.account_id(),account.ed25519_pub.as_slice()],|r|r.get(0))?;
+    if !exact {
+        return Err(invalid(
+            "legacy source initial namespace is not authenticated",
+        ));
+    }
+    Ok(account.account_id())
+}
 /// Captured after adoption finishes. The generation also fences A -> B -> A.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ParticipantEventOwner {

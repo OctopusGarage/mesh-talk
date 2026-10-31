@@ -850,10 +850,17 @@ Relay custody remains pending. The receiver independently rejects unsolicited ch
 durable sync gate, including chunk-first delivery from older senders. A channel sender
 publishes the manifest and members pull chunks only after their own consent; automatic
 images retain eager distribution. Decisions bind the signed manifest event and survive
-restart. Local receive policy remains in `attachment-consent.log`; signed protocol
-controls and authenticated direct observations use the separate encrypted
-`file-consent-controls.log`. `file_consent` owns control validation and exchange,
-`file_consent_store` owns durable revision and replay state, and `FileBook` indexes
+restart. The prior `attachment-consent.log` and `file-consent-controls.log` sources
+publish once through the existing participant source owner (auxiliary kinds 17 and 18).
+Current receive policy, signed revisions and authenticated direct observations then live
+on that same encrypted database, qualified by the authenticated account namespace.
+Warm open does not decrypt historical consent frames. Selected controls enforce the
+existing signed-format byte limit before allocation; persisted counters retain the
+existing admission quotas. Account adoption preserves the previous account's decisions
+and fences old readers and writers, including A→B→A. The one-time legacy import uses
+its authenticated original namespace and refuses ambiguous experimental ownership
+without changing the source. `file_consent` owns validation and exchange,
+`file_consent_store` owns exact current revisions and direct overrides, and `FileBook` indexes
 offers by author. Exact manifest lookup avoids sorting all aliases for each offer;
 publication resolves alias policy once per file and excludes channel manifests. Saved
 completion controls require the current owner account, original sender and matching
@@ -878,6 +885,19 @@ and own-device media use retained signed manifest/local-row references only for
 local export, never for a historical network probe or a delivery receipt. Legacy
 v1 exports keep their prior in-memory path and retain chunks rather than creating
 new completion proofs.
+
+Actual chat, Favorites and account-document media use a derived filename inventory
+on the same profile database. Initial import streams regular directory entries once;
+warm open and selected paths use metadata seeks. Failed plaintext migrations retain
+their exact disk flags and original bytes without a resident set of historical IDs.
+A locator is reserved before filesystem publication; a failed metadata completion
+cannot cause encrypted bytes to be returned as plaintext. Backup enumerates fixed
+metadata pages and rejects duplicate IDs or a changing inventory. Startup schedules
+an orphan-cleanup cutoff; background turns examine at most 32 locators per store,
+hold the owning reference lock, and recheck locator revisions before unlinking.
+Writes after that cutoff wait for a subsequent startup cleanup, so publication cannot
+race a stale orphan decision. The existing standalone MediaStore constructor retains
+its legacy filesystem-only behavior.
 
 The durable per-account `media/` store uses a versioned `MTMEDIA1` header and
 64 KiB AES-256-GCM chunks. One password-derived key uses a private store salt;

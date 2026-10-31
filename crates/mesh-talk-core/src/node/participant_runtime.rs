@@ -169,10 +169,11 @@ impl PreparedParticipant {
                     if let Err(error) = tokio::task::spawn_blocking(move || {
                         let _permit = permit;
                         receiving.retry_file_receives();
+                        if let Err(error)=receiving.maintain_media(){log::warn!("media maintenance deferred: {error}");}
                     }).await {
                         log::warn!("file receive worker failed: {error}");
                     }
-                    let pending = node.files.lock().expect("files lock").download_work_pending().unwrap_or_else(|error| {log::warn!("download scheduling observation failed: {error}");true}) || node.group_file_work_pending() || node.pending_channel_file().is_some();
+                    let pending = node.files.lock().expect("files lock").download_work_pending().unwrap_or_else(|error| {log::warn!("download scheduling observation failed: {error}");true}) || node.group_file_work_pending() || node.pending_channel_file().is_some() || node.media_maintenance_pending().unwrap_or_else(|error|{log::warn!("media scheduling observation failed: {error}");true});
                     tokio::select! {
                         _ = node.pull_pending_files() => {},
                         _ = network.changed() => { delay = Duration::from_secs(FILE_PULL_INTERVAL_SECS); continue; },
