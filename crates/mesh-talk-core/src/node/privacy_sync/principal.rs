@@ -37,13 +37,13 @@ enum Principal {
         skip: usize,
     },
     Modern {
-        projection: super::super::channel::ChannelMembershipProjection,
+        projection: Box<super::super::channel::ChannelMembershipProjection>,
         closing: bool,
         accounts: [Option<[u8; 32]>; 2],
         account: usize,
         after: Option<Vec<u8>>,
     },
-    Legacy(LegacyChannel),
+    Legacy(Box<LegacyChannel>),
 }
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Phase {
@@ -705,12 +705,12 @@ impl GuardedSyncStore<'_> {
             .channel_checkpoints
             .published_projection(conversation)?;
         let Some(projection) = projection.filter(|p| p.authority.current_event().is_some()) else {
-            return Ok(Principal::Legacy(LegacyChannel::new(
+            return Ok(Principal::Legacy(Box::new(LegacyChannel::new(
                 self,
                 conversation,
                 relay,
                 own_peer,
-            )));
+            ))));
         };
         let authority = &projection.authority;
         let own = self.node.account.public().ed25519_pub;
@@ -771,7 +771,7 @@ impl GuardedSyncStore<'_> {
             }
         }
         Ok(Principal::Modern {
-            projection,
+            projection: Box::new(projection),
             closing,
             accounts,
             account: 0,

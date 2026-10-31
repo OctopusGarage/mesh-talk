@@ -13,7 +13,7 @@ pub(in crate::node) struct OwnerAuthorizationQuery {
     author: String,
     phase: OwnerPhase,
     publication_rank: i64,
-    before: Option<crate::channel::ChannelState>,
+    before: Option<Box<crate::channel::ChannelState>>,
 }
 enum OwnerPhase {
     Canonical,
@@ -49,7 +49,7 @@ pub(in crate::node) enum OwnerAuthorizationStep {
     Pending(PreparationStep),
     Ready {
         authorized: bool,
-        before: Option<crate::channel::ChannelState>,
+        before: Option<Box<crate::channel::ChannelState>>,
         work: PreparationStep,
     },
 }
@@ -135,7 +135,7 @@ impl IndexedView<'_> {
                         verdict = Some(false);
                         OwnerPhase::Done
                     } else {
-                        query.before = before;
+                        query.before = before.map(Box::new);
                         OwnerPhase::Rank
                     }
                 }

@@ -36,7 +36,7 @@ struct Observation {
 pub(in crate::node) struct ParticipantView {
     pub(super) conversation: ConversationId,
     pub(super) repository: NetworkView,
-    pub(super) preparation: Mutex<super::principal::Preparation>,
+    pub(super) preparation: Box<Mutex<super::principal::Preparation>>,
     pub(super) policy: Policy,
     observed: Mutex<Observation>,
     // Staged invitations already have an 8 MiB owner budget.
@@ -207,7 +207,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         Ok(ParticipantView {
             conversation: *conversation,
             repository,
-            preparation: Mutex::new(super::principal::Preparation::default()),
+            preparation: Box::new(Mutex::new(super::principal::Preparation::default())),
             policy,
             observed: Mutex::new(observed),
             pending,
@@ -599,6 +599,118 @@ mod tests {
             }
         }
         result
+    }
+
+    #[test]
+    fn participant_network_preparation_survives_unrelated_ordinary_appends() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let conversation = super::super::super::conversation::dm_conversation_id(
+            &node.identity.public(),
+            &peer.public(),
+        );
+        for seq in 1..=129 {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(Event::new(
+                    &node.identity,
+                    conversation,
+                    seq,
+                    vec![],
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![7; 32],
+                ))
+                .unwrap();
+        }
+        // Derived raw-kind readiness is complete before this exchange. Ordinary
+        // activity in another conversation changes no captured authority input.
+        while !node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .prepare_kind_metadata_step(PreparationBudget::default())
+            .unwrap()
+            .ready
+        {}
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+        let budget = PreparationBudget {
+            rows: 8,
+            edges: 16,
+            bytes: 64 * 1024,
+        };
+        assert!(
+            !NetworkSyncStore::prepare_view_step(&*store, &view, budget)
+                .unwrap()
+                .ready
+        );
+        let mut ready = false;
+        for seq in 1..=1000 {
+            node.log
+                .lock()
+                .unwrap()
+                .append_durable(Event::new(
+                    &node.identity,
+                    ConversationId::new([91; 32]),
+                    seq,
+                    vec![],
+                    seq,
+                    0,
+                    EventKind::Message,
+                    vec![3],
+                ))
+                .unwrap();
+            let work = NetworkSyncStore::prepare_view_step(&*store, &view, budget).expect(
+                "unrelated ordinary activity must not repeatedly discard finite preparation",
+            );
+            assert!(
+                work.rows <= budget.rows
+                    && work.edges <= budget.edges
+                    && work.bytes <= budget.bytes
+            );
+            if work.ready {
+                ready = true;
+                break;
+            }
+        }
+        assert!(
+            ready,
+            "continuous unrelated traffic starved the finite exchange"
+        );
+        assert_eq!(
+            NetworkSyncStore::metadata(&*store, &view).unwrap().count,
+            129
+        );
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        NetworkSyncStore::validate_view(&*store, &view).unwrap();
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .repository()
+                .unwrap()
+                .body_read_counts(),
+            before
+        );
     }
 
     #[tokio::test]

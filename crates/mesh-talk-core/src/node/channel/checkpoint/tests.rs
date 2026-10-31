@@ -2210,3 +2210,76 @@ fn channel_canonical_readiness_does_not_publish_history_before_recall_attempt() 
     assert!(fixture.store.history_read_ready(fixture.channel).unwrap());
     assert_eq!(fixture.log.repository().unwrap().body_read_counts(), before);
 }
+
+#[test]
+fn channel_logical_retirement_reclaims_orphan_facts_in_bounded_turns() {
+    let fixture = Fixture::new(257);
+    fixture.project();
+    let counts = || {
+        fixture
+            .store
+            .profile
+            .database()
+            .read(|c| {
+                let facts: i64 = c.query_row(
+                    "SELECT count(*) FROM channel_event_authority WHERE channel=?1",
+                    [fixture.channel.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )?;
+                let current: i64 = c.query_row(
+                    "SELECT count(*) FROM channel_current WHERE channel=?1",
+                    [fixture.channel.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )?;
+                let retained: i64 = c.query_row(
+                    "SELECT count(*) FROM retained_events WHERE domain=?1 AND conversation=?2",
+                    params![
+                        b"MeshPartEventsV1".as_slice(),
+                        fixture.channel.as_bytes().as_slice()
+                    ],
+                    |r| r.get(0),
+                )?;
+                let receivers: i64 = c.query_row(
+                    "SELECT count(*) FROM channel_receivers WHERE channel=?1",
+                    [fixture.channel.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )?;
+                Ok((facts, current, retained, receivers))
+            })
+            .unwrap()
+    };
+    let initial = counts();
+    assert!(initial.0 >= 257);
+    fixture
+        .log
+        .repository()
+        .unwrap()
+        .begin_retirement(&fixture.channel)
+        .unwrap();
+    let reads = fixture.log.repository().unwrap().body_read_counts();
+    let mut turns = 0;
+    loop {
+        let work = fixture.store.retire_orphan_step(7).unwrap();
+        assert!(work <= 7, "retirement exceeded caller row budget: {work}");
+        if work == 0 {
+            break;
+        }
+        turns += 1;
+        assert!(
+            turns < 2000,
+            "retirement did not finish without another channel read"
+        );
+    }
+    let final_counts = counts();
+    assert_eq!((final_counts.0, final_counts.1), (0, 0));
+    assert_eq!(
+        final_counts.2, initial.2,
+        "derived cleanup must not replace event retirement"
+    );
+    assert_eq!(
+        final_counts.3, initial.3,
+        "consumed receiver state is not disposable projection data"
+    );
+    assert_eq!(fixture.log.repository().unwrap().body_read_counts(), reads);
+    assert!(turns > 257 / 7);
+}

@@ -191,9 +191,9 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   persisted so a restarted node can resume sending. The static-recipient sealed
   distributions remain recoverable after member identity-key compromise, so
   deleting used chain keys does not protect recorded group history against that
-  attack. Receiver state currently rebuilds by reopening distributions from the
-  event log; replacing this with consuming pairwise ratchets requires a durable,
-  transactional receiver projection that preserves restart and replay behavior.
+  attack. Receiver checkpoints are indexed by channel, author and epoch in the
+  leased profile database. Exact receiver CAS, retained transcript/evidence and
+  reception facts commit together before an in-memory result is installed.
   Opening text or a file manifest first binds the authenticated author and epoch,
   then prepares an exact private receiver candidate. Only successful AEAD installs
   it; failed authentication and abandoned preparation preserve the live chain.
@@ -202,8 +202,10 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   secret buffers. It is neither a wire distribution nor a portable backup format.
   Sender and receiver advances reject exhausted `u32` positions before mutation;
   already-buffered skipped keys remain usable at the terminal position. These
-  primitives do not yet persist receiver checkpoints or atomically commit crypto
-  with transcript installation, and do not remove startup history replay.
+  primitives share the durable checkpoint owner. Startup restores only validated
+  current presentation and the active sending epoch; unfinished controls and
+  pending reception resume through the existing bounded recovery turns after
+  account adoption. Presentation never substitutes for fresh admission authority.
   An owner-authored `ChannelDissolve`
   event closes a channel for all members without erasing local history; closed channels
   remain visible as read-only history and reject new local events. Desktop-created

@@ -59,7 +59,10 @@ impl ChannelCheckpointStore {
             for row in &page {
                 if !row.active { continue; }
                 let known:bool=row.header.kind==EventKind::MembershipChange || c.query_row("SELECT EXISTS(SELECT 1 FROM channel_current WHERE channel=?1) OR EXISTS(SELECT 1 FROM channel_dirty WHERE channel=?1)",[row.header.conversation.as_bytes().as_slice()],|r|r.get(0))?;
-                if known { c.execute("INSERT OR IGNORE INTO channel_dirty VALUES(?1)",[row.header.conversation.as_bytes().as_slice()])?; }
+                if known {
+                    c.execute("INSERT OR IGNORE INTO channel_dirty VALUES(?1)",[row.header.conversation.as_bytes().as_slice()])?;
+                    work::queue_discovered_on(c,row.header.conversation,row.ordinal)?;
+                }
             }
             if c.execute("UPDATE channel_source_scan SET ordinal=?2 WHERE singleton=1 AND ordinal=?1",params![after,last])?!=1 { return Err(LogError::StaleCursor); }
             Ok(())

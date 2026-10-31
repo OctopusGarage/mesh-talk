@@ -223,7 +223,7 @@ impl SelectedControl {
                         if !authorized {
                             return Ok(Some(Verdict::Reject));
                         }
-                        self.phase = Phase::Canonical(before.map(Box::new));
+                        self.phase = Phase::Canonical(before);
                     }
                 }
             }

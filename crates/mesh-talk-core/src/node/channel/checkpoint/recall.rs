@@ -63,12 +63,13 @@ impl Node {
     pub(in crate::node) fn process_channel_recalls(
         &self,
         channel: ConversationId,
-    ) -> Result<(), NodeError> {
-        loop {
+    ) -> Result<(bool, bool), NodeError> {
+        {
             let Some(source) = self.channel_checkpoints.source_binding(channel)? else {
-                return Ok(());
+                return Ok((true, false));
             };
             let page = self.channel_checkpoints.recall_page(&source)?;
+            let worked = !page.ids.is_empty() || page.more_work;
             for id in page.ids {
                 let (event, author) = {
                     let log = self.log.lock().expect("log lock");
@@ -129,9 +130,10 @@ impl Node {
                     self.note_reception_change();
                 }
             }
-            if !page.more_work {
-                return Ok(());
-            }
+            Ok((
+                self.channel_checkpoints.history_read_ready(channel)?,
+                worked,
+            ))
         }
     }
 }

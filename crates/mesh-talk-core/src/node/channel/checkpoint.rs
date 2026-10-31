@@ -25,6 +25,7 @@ pub(in crate::node) use current::ChannelSource;
 pub(in crate::node) use file_preview::FileReceivePreview;
 mod pending;
 pub(in crate::node) use pending::ChannelReceiveBudget;
+mod presentation;
 mod recall;
 mod reception;
 pub(in crate::node) use reception::ChannelReceptionRole;
@@ -32,6 +33,7 @@ mod replay;
 mod sharing;
 #[cfg(test)]
 mod tests;
+mod work;
 
 const SCHEMA: &str = "
 CREATE TABLE channel_current(
@@ -73,6 +75,8 @@ pub(in crate::node) struct ChannelCheckpointStore {
     generation: i64,
     owner: Option<ParticipantEventOwner>,
     causal_query: std::sync::Mutex<()>,
+    presentation_query:
+        std::sync::Mutex<std::collections::HashMap<ConversationId, presentation::PolicyCandidate>>,
 }
 pub(in crate::node) struct PreparedChannelReceive {
     channel: ConversationId,
@@ -129,8 +133,11 @@ impl ChannelCheckpointStore {
             causal::initialize(c, !present)?;
             super::graph::preparing::initialize(c)?;
             file_preview::initialize(c)?;
+            presentation::initialize(c)?;
+            work::initialize(c)?;
             crate::node::join_history::initialize_indexed(c, !present)?;
-            crate::node::group_metadata::initialize_indexed(c)
+            crate::node::group_metadata::initialize_indexed(c)?;
+            cleanup::initialize(c)
         })?;
         let (account, generation, owner) = profile.database().read(|c| {
             let account = active_account_on(c)?;
@@ -160,6 +167,7 @@ impl ChannelCheckpointStore {
             generation,
             owner,
             causal_query: std::sync::Mutex::new(()),
+            presentation_query: std::sync::Mutex::new(Default::default()),
         })
     }
     fn check_account_on(&self, c: &Connection) -> Result<(), LogError> {
@@ -261,6 +269,9 @@ impl ChannelCheckpointStore {
             .map_err(|e| invalid(&e.to_string()))?;
         c.execute("INSERT INTO channel_current VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(channel) DO UPDATE SET state=excluded.state,source_job=excluded.source_job,source_revision=excluded.source_revision,next_rank=excluded.next_rank,owner_account=excluded.owner_account,known_local=excluded.known_local",
             params![state.id().as_bytes().as_slice(),bytes,job.as_slice(),revision,next_rank,account.as_slice(),known_local])?;
+        if known_local {
+            work::queue_on(c, state.id())?;
+        }
         Ok(())
     }
 

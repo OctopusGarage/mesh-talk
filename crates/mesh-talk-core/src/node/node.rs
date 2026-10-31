@@ -1104,45 +1104,11 @@ impl Node {
             received_files.remove_exact(conversation, id)?;
         }
         let delivery_control_ids = delivery.control_ids();
-        // Discovery and authority replay resume from durable metadata cursors.
-        // An ordinary warm open reads current channel state without decoding
-        // retained channel messages or restoring historical receiver epochs.
-        while channel_checkpoints.discover_step(log.repository()?)? {}
-        while let Some(channel) = channel_checkpoints.next_dirty()? {
-            while !channel_checkpoints.project_step(log.repository()?, &identity, channel)? {}
-        }
-        let mut channels = ChannelBook::new();
-        let mut channel_after = None;
-        loop {
-            let page = channel_checkpoints.current_page(channel_after)?;
-            if page.is_empty() {
-                break;
-            }
-            for state in page {
-                channel_after = Some(state.id());
-                channel_checkpoints.install_book_metadata(
-                    log.repository()?,
-                    &identity,
-                    &mut channels,
-                    state,
-                )?;
-            }
-        }
-        let archived_channels = archived_channel_summaries(&channel_checkpoints)?;
-        // Restore our persisted sending chains into each channel state. The event log
-        // only carries OTHER members' sender keys, so `my_sender` rebuilds empty above;
-        // without this, a post-restart send would mint a fresh chain that receivers
-        // (first-wins on the chain they already hold) cannot follow.
-        for channel in channels.channel_ids() {
-            if let Some(state) = channels.state_mut(&channel)
-                && let Some(bytes) = channel_senders.current(&channel, state.epoch())?
-            {
-                let key = SenderKey::deserialize(&bytes).ok_or_else(|| {
-                    LogError::CorruptFile("invalid channel sender checkpoint".into())
-                })?;
-                state.import_my_sender(state.epoch(), key);
-            }
-        }
+        // Startup restores only last validated current presentation after the
+        // account adoption commit below. Historical authority/receiver work is
+        // resumed by the existing bounded channel recovery loop.
+        let channels = ChannelBook::new();
+        let archived_channels = Vec::new();
         super::files::import_file_book(
             &files,
             &received_files,
@@ -1396,23 +1362,32 @@ impl Node {
             .recapture()?;
         node.manifest_scopes.recapture()?;
         node.queue_approved_incomplete_files();
-        // Receiver progress and plaintext projection share one SQL commit.
-        // Only pending ciphertext work is resumed; completed history has no
-        // startup body reads. Imported deadlines retain the conservative policy.
-        let mut after = None;
-        loop {
-            let page = node.channel_checkpoints.current_page(after)?;
-            if page.is_empty() {
-                break;
-            }
-            for state in page {
-                after = Some(state.id());
-                node.process_channel_reception_inner(state.id(), "catch_up", true)
-                    .map_err(|error| {
-                        LogError::CorruptFile(format!("channel reception recovery: {error}"))
+        node.channel_checkpoints.begin_runtime_reopen()?;
+        {
+            let mut book = node.channels.lock().expect("channels lock");
+            let mut after = None;
+            while let Some(channel) = node.channel_checkpoints.restore_presentation_page(
+                &mut book,
+                &node.user_id(),
+                after,
+            )? {
+                after = Some(channel);
+                if let Some(state) = book.state_mut(&channel)
+                    && let Some(bytes) = node
+                        .channel_senders
+                        .lock()
+                        .expect("sender store lock")
+                        .current(&channel, state.epoch())?
+                {
+                    let key = SenderKey::deserialize(&bytes).ok_or_else(|| {
+                        LogError::CorruptFile("invalid channel sender checkpoint".into())
                     })?;
+                    state.import_my_sender(state.epoch(), key);
+                }
             }
         }
+        node.archived_channels = archived_channel_summaries(&node.channel_checkpoints)?;
+        node.channel_recovery_notify.notify_one();
         node.log
             .lock()
             .expect("log mutex")

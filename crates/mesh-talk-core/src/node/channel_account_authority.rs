@@ -323,61 +323,7 @@ impl AccountAuthority {
             .find(|member| member.public == *public)?;
         self.legacy_seen.get(&lifetime_key(original)).copied()
     }
-    pub(crate) fn legacy_closing_events(
-        &self,
-        public: &PublicIdentity,
-        proof: &Announce,
-    ) -> Vec<EventId> {
-        let retired = self
-            .legacy_retired_source(public, proof)
-            .and_then(|(grant, _, _)| grant.id());
-        let omitted = self.omitted_legacy_departure(public, proof).is_some();
-        let account = proof
-            .account_cert
-            .as_ref()
-            .map(|cert| cert.account_ed25519_pub);
-        let mut events: Vec<_> = self
-            .initial_legacy
-            .iter()
-            .filter(|(id, _)| {
-                retired == Some(**id)
-                    || omitted && Some(id.account_pub) == account && self.cohort_closed(**id, false)
-            })
-            .flat_map(|(_, cohort)| {
-                cohort
-                    .originals
-                    .iter()
-                    .filter_map(|member| self.legacy_seen.get(&lifetime_key(member)).copied())
-            })
-            .collect();
-        events.sort_by_key(|event| *event.as_bytes());
-        events.dedup();
-        events
-    }
-    pub(crate) fn legacy_closing_basis(
-        &self,
-        public: &PublicIdentity,
-        proof: &Announce,
-    ) -> Vec<EventId> {
-        let mut events = self.legacy_closing_events(public, proof);
-        // An individually retired omitted device may still observe a live
-        // initial sibling; freeze a negative account cut only once that cohort
-        // is wholly closed (or the initial cut omitted the account entirely).
-        let account_has_initial_grant = proof.account_cert.as_ref().is_some_and(|cert| {
-            self.origins
-                .keys()
-                .any(|id| id.account_pub == cert.account_ed25519_pub)
-        });
-        if !events.is_empty() || !account_has_initial_grant {
-            events.extend(self.omitted_legacy_departure(public, proof));
-        }
-        if !events.is_empty() {
-            events.extend(self.genesis);
-        }
-        events.sort_by_key(|event| *event.as_bytes());
-        events.dedup();
-        events
-    }
+
     pub(crate) fn legacy_closed_device_proofs(&self) -> Vec<Announce> {
         self.originals
             .iter()

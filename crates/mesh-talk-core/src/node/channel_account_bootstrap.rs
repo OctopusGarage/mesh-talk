@@ -505,14 +505,21 @@ impl super::Node {
         channel: ConversationId,
     ) -> Result<super::channel::ChannelMembershipProjection, LogError> {
         let repository = log.repository()?;
-        while !self
-            .channel_checkpoints
-            .project_step(repository, &self.identity, channel)?
-        {}
-        Ok(self
-            .channel_checkpoints
-            .published_projection(channel)?
-            .unwrap_or_else(|| super::channel::ChannelMembershipProjection::empty(channel)))
+        let projection = self.channel_checkpoints.published_projection(channel);
+        let projection = match projection {
+            Ok(Some(projection)) => return Ok(projection),
+            Ok(None)
+                if !repository
+                    .has_kind(&channel, crate::eventlog::EventKind::MembershipChange)? =>
+            {
+                return Ok(super::channel::ChannelMembershipProjection::empty(channel));
+            }
+            Ok(None) | Err(LogError::StaleCursor) => LogError::StaleCursor,
+            Err(error) => return Err(error),
+        };
+        self.channel_checkpoints.queue_runtime(channel)?;
+        self.channel_recovery_notify.notify_one();
+        Err(projection)
     }
 
     pub(super) fn own_group_proof(&self) -> Announce {

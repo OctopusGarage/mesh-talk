@@ -395,6 +395,206 @@ async fn channel_checkpoint_warm_open_does_not_decode_signed_history() {
     }
 }
 
+#[tokio::test]
+async fn channel_checkpoint_reopen_defers_unprojected_control_backlog_to_runtime_turns() {
+    let directory = tempfile::tempdir().unwrap();
+    let secret = DeviceIdentity::generate().secret_bytes();
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, _) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        Node::open(
+            DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &directory.path().join("node.log"),
+            &directory.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let node = open();
+    let channel = node
+        .create_channel("Retained presentation", vec![])
+        .await
+        .unwrap();
+    {
+        let mut log = node.log.lock().unwrap();
+        let author = crate::eventlog::Author::from_ed25519(node.identity.public().ed25519_pub);
+        for _ in 0..129 {
+            let (parents, lamport) = log.prepare(&channel).unwrap();
+            let sequence = log.next_sequence(&channel, &author).unwrap();
+            let event = Event::new(
+                &node.identity,
+                channel,
+                sequence,
+                parents,
+                lamport,
+                1,
+                EventKind::ChannelRename,
+                vec![255],
+            );
+            log.append_durable(event).unwrap();
+        }
+    }
+    node.close_profile().unwrap();
+    let warm = open();
+    let reads = || {
+        warm.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts()
+    };
+    assert!(
+        reads().0 <= 4,
+        "Node::open replayed a retained control backlog before exposing bounded runtime work: {:?}",
+        reads()
+    );
+    assert_eq!(
+        warm.channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .name(),
+        "Retained presentation",
+        "deferred authority must retain the last validated presentation"
+    );
+    let mut completed = false;
+    for _ in 0..5000 {
+        let before = reads();
+        warm.retry_channel_plaintext();
+        let after = reads();
+        assert!(
+            after.0 - before.0 <= 4,
+            "one runtime work turn drained historical controls: {} bodies",
+            after.0 - before.0
+        );
+        if warm
+            .channel_checkpoints
+            .source_binding(channel)
+            .is_ok_and(|binding| binding.is_some())
+        {
+            completed = true;
+            break;
+        }
+    }
+    assert!(
+        completed,
+        "the durable backlog was never resumed without a new peer event"
+    );
+    assert_eq!(
+        warm.channels
+            .lock()
+            .unwrap()
+            .state(&channel)
+            .unwrap()
+            .name(),
+        "Retained presentation"
+    );
+    warm.close_profile().unwrap();
+}
+
+#[tokio::test]
+async fn channel_checkpoint_presentation_policy_backlog_yields_without_hidden_body_drain() {
+    let directory = tempfile::tempdir().unwrap();
+    let (dm, _) = mpsc::unbounded_channel();
+    let (channel, _) = mpsc::unbounded_channel();
+    let (file, _) = mpsc::unbounded_channel();
+    let node = Node::open(
+        DeviceIdentity::generate(),
+        Arc::new(Mutex::new(Roster::default())),
+        dm,
+        channel,
+        file,
+        &directory.path().join("events"),
+        &directory.path().join("sent"),
+        "pw",
+    )
+    .unwrap();
+    let channel = node.create_channel("policy", vec![]).await.unwrap();
+    let original = node.channel_history_policy(channel).unwrap();
+    {
+        let mut log = node.log.lock().unwrap();
+        let author = crate::eventlog::Author::from_ed25519(node.identity.public().ed25519_pub);
+        for _ in 0..129 {
+            let (parents, lamport) = log.prepare(&channel).unwrap();
+            let sequence = log.next_sequence(&channel, &author).unwrap();
+            let event = Event::new(
+                &node.identity,
+                channel,
+                sequence,
+                parents,
+                lamport,
+                1,
+                EventKind::ChannelHistoryPolicy,
+                vec![255],
+            );
+            log.append_durable(event).unwrap();
+        }
+        // Isolate presentation work from canonical preparation. An outer
+        // one-step reducer is insufficient if policy restoration still drains.
+        while !node
+            .channel_checkpoints
+            .project_step(log.repository().unwrap(), &node.identity, channel)
+            .unwrap()
+        {}
+    }
+    let reads = || {
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts()
+            .0
+    };
+    let before = reads();
+    node.process_channel_reception_inner(channel, "catch_up", false)
+        .unwrap();
+    assert!(
+        reads() - before <= 4,
+        "presentation drained {} historical policy bodies",
+        reads() - before
+    );
+    let mut complete = false;
+    for _ in 0..5000 {
+        let before = reads();
+        node.retry_channel_plaintext();
+        let policy = node.channel_history_policy(channel);
+        assert!(
+            reads() - before <= 4,
+            "policy retry reset its shared body budget"
+        );
+        match policy {
+            Ok(policy) => {
+                assert_eq!(policy, original);
+                complete = true;
+                break;
+            }
+            Err(NodeError::Log(LogError::StaleCursor)) => {}
+            Err(error) => panic!("unexpected policy preparation failure: {error}"),
+        }
+    }
+    assert!(
+        complete,
+        "policy preparation never resumed without a new event"
+    );
+    let before = reads();
+    node.process_channel_reception_inner(channel, "catch_up", false)
+        .unwrap();
+    assert_eq!(
+        reads(),
+        before,
+        "unchanged presentation decoded historical policy bodies"
+    );
+    node.close_profile().unwrap();
+}
+
 #[test]
 fn participant_event_source_publishes_before_runtime_and_reopens_from_database() {
     let directory = tempfile::tempdir().unwrap();

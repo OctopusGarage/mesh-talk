@@ -188,6 +188,13 @@ impl Node {
                     .is_member(&self.identity.public(), &self.own_group_proof())
         } else {
             state.owner_account_id().is_none()
+                && current.state.as_ref().is_some_and(|fresh| {
+                    fresh.epoch() == state.epoch()
+                        && fresh.members() == state.members()
+                        && fresh.owner() == state.owner()
+                        && fresh.is_accepted_member(&self.user_id())
+                        && !fresh.is_dissolved()
+                })
         }
     }
 
@@ -558,6 +565,15 @@ impl Node {
             self.maintain_account_channels(&mut account_maintenance)
                 .await;
             self.retry_channel_plaintext();
+            match self.retry_group_metadata() {
+                Ok(channels) => {
+                    for channel in channels {
+                        let members = self.channel_members(channel);
+                        self.distribute_channel(channel, &members).await;
+                    }
+                }
+                Err(error) => log::warn!("channel metadata recovery deferred: {error}"),
+            }
             if let Err(error) = self.auto_enroll_one_channel_sibling().await {
                 log::warn!("linked channel invitation failed; will retry: {error}");
             }
@@ -986,16 +1002,13 @@ impl Node {
                     self.append_event(channel, EventKind::ChannelHistoryPolicy, history_policy())?;
                 }
             }
-            // Build our own channel state (sets our identity for the sender-key path).
-            self.process_channel(channel);
-            self.record_channel_owner_origin(channel)?;
-            // Distribute our epoch-0 sender-key distribution to every member.
-            self.distribute_my_sender_key(channel, &members)?;
-
             distribution = Some((channel, members.clone()));
             Ok(())
         })?;
         let (channel, members) = distribution.expect("authorized channel commit executed");
+        self.await_channel_metadata(channel).await?;
+        self.record_channel_owner_origin(channel)?;
+        self.distribute_my_sender_key(channel, &members)?;
         self.distribute_channel(channel, &members).await;
         Ok(channel)
     }
@@ -1910,6 +1923,10 @@ impl Node {
         channel: ConversationId,
         members: &[PublicIdentity],
     ) {
+        if let Err(error) = self.await_channel_metadata(channel).await {
+            log::warn!("accepted channel control preparation deferred: {error}");
+            return;
+        }
         self.distribute_channel_targets(channel, members, None, true, None)
             .await;
     }
@@ -1922,6 +1939,10 @@ impl Node {
         members: &[PublicIdentity],
         event: Option<EventId>,
     ) -> bool {
+        if let Err(error) = self.await_channel_metadata(channel).await {
+            log::warn!("accepted channel control preparation deferred: {error}");
+            return false;
+        }
         self.distribute_channel_targets(channel, members, None, true, event)
             .await
     }

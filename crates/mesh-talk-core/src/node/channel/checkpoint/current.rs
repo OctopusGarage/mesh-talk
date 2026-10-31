@@ -1,6 +1,5 @@
 //! Current metadata access never materializes historical applied/authorized IDs.
 use super::*;
-use crate::eventlog::repository::EventHeader;
 impl ChannelCheckpointStore {
     /// Frozen history copies do not consume a sender chain. Their validated
     /// release identity still commits with transcript/effect installation.
@@ -43,55 +42,6 @@ impl ChannelCheckpointStore {
         })
     }
 
-    /// Install current presentation metadata only. Historical preference actors
-    /// and activities remain on disk; RAM follows current members and channels.
-    pub(in crate::node) fn install_book_metadata(
-        &self,
-        repository: &crate::eventlog::repository::EventRepository,
-        me: &crate::identity::device::DeviceIdentity,
-        book: &mut super::super::ChannelBook,
-        state: ChannelState,
-    ) -> Result<(), LogError> {
-        let channel = state.id();
-        let Some(source) = self.source_binding(channel)? else {
-            return Err(LogError::StaleCursor);
-        };
-        let policy = crate::node::join_history::indexed_policy(self, repository, me, channel)?;
-        let own = me.public().user_id();
-        let (preferences,_departed,transferred)=self.profile.database().read(|c| {
-            self.check_source_on(c,&source)?;
-            let mut preferences=Vec::new();
-            for member in state.members() {
-                let member=member.user_id();
-                let row:Option<(Vec<u8>,Vec<u8>,bool)>=c.query_row("SELECT lamport,event,enabled FROM channel_replica_preferences WHERE job=?1 AND channel=?2 AND member=?3",params![source.job.as_slice(),channel.as_bytes().as_slice(),&member],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-                if let Some((lamport,event,enabled))=row {
-                    preferences.push((member,u64::from_be_bytes(lamport.try_into().map_err(|_|invalid("invalid replica clock"))?),EventId::new(event.try_into().map_err(|_|invalid("invalid replica event"))?),enabled));
-                }
-            }
-            let flags:(bool,bool)=c.query_row("SELECT EXISTS(SELECT 1 FROM channel_activities WHERE job=?1 AND channel=?2 AND actor=?3 AND kind='left'),EXISTS(SELECT 1 FROM channel_activities WHERE job=?1 AND channel=?2 AND actor=?3 AND kind='transferred')",params![source.job.as_slice(),channel.as_bytes().as_slice(),&own],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            Ok((preferences,flags.0,flags.1))
-        })?;
-        let departed = self
-            .published_projection(channel)?
-            .ok_or(LogError::StaleCursor)?
-            .pending_departure(&own)?;
-        book.install_indexed_state(state);
-        book.history_policies.insert(channel, policy);
-        book.replica_preferences.retain(|(id, _), _| *id != channel);
-        for (member, lamport, event, enabled) in preferences {
-            book.replica_preferences
-                .insert((channel, member), (lamport, event, enabled));
-        }
-        book.departed.retain(|(id, _)| *id != channel);
-        book.transferred.retain(|(id, _)| *id != channel);
-        if departed {
-            book.departed.insert((channel, own.clone()));
-        }
-        if transferred {
-            book.transferred.insert((channel, own));
-        }
-        Ok(())
-    }
     /// Canonical prefix membership is distinct from causal ancestry. These
     /// selected snapshots preserve that distinction without replaying controls.
     pub(in crate::node) fn canonical_state(
@@ -258,21 +208,9 @@ impl ChannelCheckpointStore {
             |row| row.get(0),
         ).map_err(Into::into)
     }
-
-    /// Exact selected-header admission for file/recall consumers. The source
-    /// generation is checked inside the same read as its derived flag.
-    pub(in crate::node) fn content_admitted(&self, header: &EventHeader) -> Result<bool, LogError> {
-        self.profile.database().read(|c| {
-            self.check_account_on(c)?;
-            let row:Option<(Vec<u8>,i64,bool)>=c.query_row("SELECT s.source_job,s.source_revision,a.receive FROM channel_current s JOIN channel_event_authority a ON a.job=s.source_job AND a.channel=s.channel AND a.event=?2 WHERE s.channel=?1 AND s.owner_account=?3",params![header.conversation.as_bytes().as_slice(),header.id.as_bytes().as_slice(),self.account.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-            let Some((job,revision,admitted))=row else{return Ok(false);};
-            replay::require_source_on(c,header.conversation,job.try_into().map_err(|_|invalid("invalid channel job"))?,revision)?;
-            Ok(admitted)
-        })
-    }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::node) struct ChannelSource {
     pub(in crate::node) channel: ConversationId,
     pub(in crate::node) job: [u8; 16],
