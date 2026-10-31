@@ -908,6 +908,8 @@
             "channel_projection_control_does_not_drain_historical_ancestry_in_one_turn",
             "channel_receiver_and_source_handles_stay_stale_after_account_returns",
             "channel_decision_replacement_rejects_old_predicate_publication",
+            "participant_network_canonical_authority_respects_each_preparation_budget",
+            "channel_canonical_readiness_does_not_publish_history_before_recall_attempt",
             "ancestor_preparation_obeys_caller_work_budget_across_wide_parents",
             "ancestor_disposable_query_crash_retires_incrementally"
           ]
@@ -931,6 +933,10 @@
           },
           {
             "name": "Failed authentication waits for new key material, gaps wait for the existing skip bound, and legal oversized work remains pending without silent completion.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Canonical preparation shares caller row, edge and byte limits across all phases; plaintext read readiness also fences unattempted admitted recalls and exact dependency wakes without blocking dormant unknown-target retries.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -2173,7 +2179,8 @@
         "crates/mesh-talk-core/src/eventlog/persist.rs",
         "crates/mesh-talk-core/src/eventlog/sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
-        "crates/mesh-talk-core/src/node/node.rs"
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/group_metadata/**"
       ],
       "rust": [
         {

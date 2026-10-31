@@ -1484,8 +1484,16 @@ The channel checkpoint owner reuses the existing canonical logical-order job and
 its source revision. Safe tails extend the same job; a late control that changes
 canonical order rebuilds derived authority in bounded turns. Current metadata,
 selected causal membership, activity rows and exact applied identities live in
-indexed tables. Retired derived generations are reclaimed incrementally. A warm
-ordinary Node open loads current channel metadata without decoding completed
+indexed tables. Retired derived generations are reclaimed incrementally. A
+canonical preparation turn shares its explicit row, edge and byte budget across
+ordering, legacy parent cuts, generation cleanup and one reducer decision. A
+completed phase yields before the next one; network preparation forwards actual
+work counts. Canonical readiness alone does not authorize plaintext reads:
+admitted recalls must first be attempted, and exact dependency wakes close that
+read gate again. Dormant missing-target retries remain nonblocking. Constructor
+and remaining synchronous compatibility callers still require separate bounded
+caller integration; this preparation interface does not establish that bound.
+An ordinary warm Node open loads current channel metadata without decoding completed
 signed channel history. Source 8 independently publishes legacy channel sender
 snapshots; only each channel's active sending epoch is loaded into memory.
 
@@ -1737,6 +1745,24 @@ warm participant startup does not replay the custody journal. Migration seeks
 inventing an empty result. Auxiliary identities 16–18 have their own registry,
 so extending the publisher does not rewrite the installed transcript table.
 
+Shared group metadata uses a persistent selected-control index in the same leased
+profile database. Canonical job identity and authority changes fence its rows;
+ordinary message appends do not discard completed metadata selections. A cursor
+advances only after a publication or release has been examined. Source replacement
+retires at most 128 indexed keys per turn before rebuilding. The selected cover,
+latest announcement and last 20 valid announcement publications share a 64-body,
+128-row, 512-edge and 8 MiB turn budget with canonical and causal authority work.
+Publication ownership and release ancestry reuse the checkpoint owner's resumable
+queries. At most 64 selected controls retain an active continuation; capacity
+backpressure preserves existing work instead of evicting it. A source change
+restarts only the unfinished decision, and its durable cursor remains unchanged.
+Validated facts and cursor advancement commit together. Release key searches
+resume by exact recipient and rank.
+Missing keys remain distinct from an incomplete query, which returns no partial
+values and is retried by the owning editor. Plaintext caching remains limited to
+64 selected channel summaries. The existing control worker pages 32 current
+channels and appends releases under the captured source guard.
+
 Raw account-group access observations remain separate from admitted channel
 authority: rejected signed controls still contribute to their original sorted-ID
 fingerprint. The access owner computes this metadata using bounded header and
@@ -1759,7 +1785,12 @@ predicates run under the shared SQL lock and must remain pure; body deletion and
 physical row/byte counters commit together. Counts include retained aliases and
 per-device copies rather than canonical UI message counts. Suppression uses exact
 64-byte conversation/ID keys with bounded export pages and no expiry or Bloom
-filter. The existing delivery journal remains the cross-store transaction owner.
+filter. An exact suppression fact cannot expire solely by age while an offline
+peer or old backup can still reintroduce the row. Safe reclamation needs an
+acknowledged reintroduction horizon or a protocol rule rejecting the old lifetime;
+local absence alone is insufficient. This distinction is also explicit in
+[CouchDB's deletion and purge semantics](https://docs.couchdb.org/en/stable/api/database/misc.html#db-purge).
+The existing delivery journal remains the cross-store transaction owner.
 
 Metadata-only transcript pages charge 256 bytes per header and expose stable
 ordinals for exact owned body lookup. Source revisions persist across reopening;

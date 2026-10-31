@@ -338,41 +338,34 @@ impl ChannelCheckpointStore {
     pub(super) fn legacy_cut_step(
         &self,
         repository: &EventRepository,
-        event: &Event,
+        target: &crate::eventlog::repository::EventHeader,
         source_job: [u8; 16],
         revision: i64,
-    ) -> Result<LegacyCut, LogError> {
+        budget: crate::eventlog::sync::network::PreparationBudget,
+    ) -> Result<(LegacyCut, crate::eventlog::sync::network::PreparationStep), LogError> {
+        use crate::eventlog::sync::network::{PreparationBudget, PreparationStep};
+        use crate::node::channel::graph::{
+            AuthorityGraph,
+            preparing::{DecisionBinding, PreparingGraph},
+        };
+        budget.validate()?;
         let _serial = self.causal_query.lock().expect("channel causal query lock");
-        let channel = event.conversation_id;
+        let channel = target.conversation;
         let saved:Option<(Vec<u8>,Vec<u8>,i64)>=self.profile.database().read(|c| {
             self.check_account_on(c)?;replay::require_source_on(c,channel,source_job,revision)?;
-            c.query_row("SELECT selection,query,after_rank FROM channel_legacy_cuts WHERE source_job=?1 AND channel=?2 AND event=?3",params![source_job.as_slice(),channel.as_bytes().as_slice(),event.id.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(Into::into)
+            c.query_row("SELECT selection,query,after_rank FROM channel_legacy_cuts WHERE source_job=?1 AND channel=?2 AND event=?3",params![source_job.as_slice(),channel.as_bytes().as_slice(),target.id.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(Into::into)
         })?;
-        let (selection, query, after) = if let Some((selection, query, after)) = saved {
-            let id: [u8; 16] = selection
-                .try_into()
-                .map_err(|_| invalid("invalid legacy ancestry lease"))?;
-            let query: [u8; 16] = query
-                .try_into()
-                .map_err(|_| invalid("invalid legacy projection lease"))?;
-            match repository.resume_ancestor_selection(id) {
-                Ok(Some(selection)) => (selection, query, after),
-                Ok(None) | Err(LogError::StaleCursor) => {
-                    repository.retire_ancestor_selection(id)?;
-                    self.finish_legacy_cut(channel, source_job, event.id, query)?;
-                    return Ok(LegacyCut::Pending);
-                }
-                Err(error) => return Err(error),
+        let Some((selection, query, after)) = saved else {
+            if budget.bytes < 64 {
+                return Err(LogError::PageBudgetTooSmall { required: 64 });
             }
-        } else {
-            let Some(selection) = repository.start_ancestor_selection(channel, event.id)? else {
+            let Some(selection) = repository.start_ancestor_selection(channel, target.id)? else {
                 return Err(LogError::StaleCursor);
             };
             let query = *uuid::Uuid::new_v4().as_bytes();
             let installed = self.profile.database().transaction(|c| {
                 self.check_account_on(c)?;
                 replay::require_source_on(c, channel, source_job, revision)?;
-                cleanup_on(c)?;
                 c.execute(
                     "INSERT INTO channel_projection_queries VALUES(?1,?2,0)",
                     params![query.as_slice(), channel.as_bytes().as_slice()],
@@ -382,7 +375,7 @@ impl ChannelCheckpointStore {
                     params![
                         source_job.as_slice(),
                         channel.as_bytes().as_slice(),
-                        event.id.as_bytes().as_slice(),
+                        target.id.as_bytes().as_slice(),
                         selection.id().as_slice(),
                         query.as_slice()
                     ],
@@ -393,102 +386,165 @@ impl ChannelCheckpointStore {
                 repository.retire_ancestor_selection(selection.id())?;
                 return Err(error);
             }
-            (selection, query, -1)
-        };
-        if !repository
-            .ancestor_selection_step_with_budget(
-                &selection,
-                crate::eventlog::repository::order::OrderWorkBudget {
-                    vertices: 64,
-                    edges: 512,
-                    bytes: 8 * 1024 * 1024,
+            return Ok((
+                LegacyCut::Pending,
+                PreparationStep {
+                    rows: 1,
+                    bytes: 64,
+                    ..Default::default()
                 },
-            )?
-            .complete
+            ));
+        };
+        let id = selection
+            .try_into()
+            .map_err(|_| invalid("invalid legacy ancestry lease"))?;
+        let query = query
+            .try_into()
+            .map_err(|_| invalid("invalid legacy projection lease"))?;
+        let selection = match repository.resume_ancestor_selection(id) {
+            Ok(Some(selection)) => selection,
+            Ok(None) | Err(LogError::StaleCursor) => {
+                repository.retire_ancestor_selection(id)?;
+                self.finish_legacy_cut(channel, source_job, target.id, query)?;
+                return Ok((
+                    LegacyCut::Pending,
+                    PreparationStep {
+                        rows: 1,
+                        bytes: 64,
+                        ..Default::default()
+                    },
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let ancestry = repository.ancestor_selection_step_with_budget(
+            &selection,
+            crate::eventlog::repository::order::OrderWorkBudget {
+                vertices: budget.rows,
+                edges: budget.edges,
+                bytes: budget.bytes,
+            },
+        )?;
+        if !ancestry.complete || ancestry.vertices > 0 || ancestry.edges > 0 {
+            return Ok((
+                LegacyCut::Pending,
+                PreparationStep {
+                    rows: ancestry.vertices,
+                    edges: ancestry.edges,
+                    bytes: ancestry.charged_bytes,
+                    ..Default::default()
+                },
+            ));
+        }
+        let row_bytes = std::mem::size_of::<crate::eventlog::repository::EventHeader>();
+        if budget.rows < 2 {
+            return Err(LogError::InvalidPageBudget);
+        }
+        if budget.bytes < row_bytes + 256 {
+            return Err(LogError::PageBudgetTooSmall {
+                required: row_bytes + 256,
+            });
+        }
+        let page = repository.ancestor_headers_page(&selection, after, 1)?;
+        let mut work = PreparationStep {
+            rows: page.examined,
+            bytes: page.examined * row_bytes,
+            ..Default::default()
+        };
+        let replaying = page.items.first().copied();
+        if replaying.is_none()
+            && let Some(next) = page.next
         {
-            return Ok(LegacyCut::Pending);
+            self.profile.database().transaction(|c| {
+                self.check_account_on(c)?; replay::require_source_on(c,channel,source_job,revision)?;
+                c.execute("UPDATE channel_legacy_cuts SET after_rank=?4 WHERE source_job=?1 AND channel=?2 AND event=?3",params![source_job.as_slice(),channel.as_bytes().as_slice(),target.id.as_bytes().as_slice(),next])?;
+                Ok(())
+            })?;
+            return Ok((LegacyCut::Pending, work));
+        }
+        let decision = replaying
+            .as_ref()
+            .map_or(target.id, |(_, header)| header.id);
+        let binding = DecisionBinding {
+            job: query,
+            source_job,
+            revision,
+            channel,
+            event: decision,
+        };
+        let available = PreparationBudget {
+            rows: budget.rows - work.rows,
+            edges: budget.edges,
+            bytes: budget.bytes - work.bytes,
+        };
+        let graph = PreparingGraph::open(self.profile.clone(), repository, binding, available)?;
+        let prepared = graph.prepare()?;
+        let graph_work = graph.work();
+        if !prepared || graph_work.rows > 0 || graph_work.edges > 0 || graph_work.bytes > 0 {
+            work.rows += graph_work.rows;
+            work.edges += graph_work.edges;
+            work.bytes += graph_work.bytes;
+            return Ok((LegacyCut::Pending, work));
+        }
+        let snapshot = ProjectionFacts::snapshot_charge(&self.profile, query, channel)?;
+        let required = work
+            .bytes
+            .checked_add(snapshot)
+            .and_then(|n| n.checked_add(256))
+            .ok_or(LogError::RepositoryCounterExhausted)?;
+        if required > budget.bytes {
+            return Err(LogError::PageBudgetTooSmall { required });
         }
         let (mut reducer, _) =
             ProjectionFacts::load_bound(self.profile.clone(), query, source_job, channel)?;
         reducer.legacy_checks = false;
-        let page = repository.ancestor_headers_page(&selection, after, 1)?;
-        for (rank, header) in page.items {
-            use crate::node::channel::graph::{AuthorityGraph, preparing::PreparingGraph};
-            let graph = PreparingGraph::open(
-                self.profile.clone(),
-                repository,
-                crate::node::channel::graph::preparing::DecisionBinding {
-                    job: query,
-                    source_job,
-                    revision,
-                    channel,
-                    event: header.id,
-                },
-                crate::eventlog::sync::network::PreparationBudget {
-                    rows: 63,
-                    edges: 512,
-                    bytes: 8 * 1024 * 1024 - 256,
-                },
-            )?;
-            if !graph.prepare()? {
-                return Ok(LegacyCut::Pending);
-            }
+        work.bytes += snapshot;
+        let graph = PreparingGraph::open(
+            self.profile.clone(),
+            repository,
+            binding,
+            PreparationBudget {
+                rows: budget.rows - work.rows,
+                edges: budget.edges,
+                bytes: budget.bytes - work.bytes,
+            },
+        )?;
+        if let Some((rank, header)) = replaying {
             let allowed = if super::super::projection_facts::is_membership_control(header.kind) {
                 let event = graph.event(header.id)?;
                 if graph.pending() {
-                    return Ok(LegacyCut::Pending);
+                    false
+                } else {
+                    let event = event.ok_or_else(|| invalid("legacy cut control disappeared"))?;
+                    reducer.step(&event, &graph)?
                 }
-                let event = event.ok_or_else(|| invalid("legacy cut control disappeared"))?;
-                reducer.step(&event, &graph)?
             } else {
                 reducer.step_header(&header, &graph)?
             };
-            if graph.pending() {
-                return Ok(LegacyCut::Pending);
-            }
             let facts = reducer
                 .history
                 .as_ref()
                 .ok_or_else(|| invalid("legacy cut facts missing"))?
                 .clone();
-            let after_accept = facts.after_accept(&reducer, &header, &graph)?;
-            if graph.pending() {
-                return Ok(LegacyCut::Pending);
+            let after_accept = if graph.pending() {
+                false
+            } else {
+                facts.after_accept(&reducer, &header, &graph)?
+            };
+            if !graph.pending() {
+                self.profile.database().transaction(|c| {
+                    self.check_account_on(c)?;replay::require_source_on(c,channel,source_job,revision)?;
+                    facts.checkpoint_on(c,&mut reducer,&header,rank,(allowed,after_accept),"")?;
+                    graph.complete_on(c)?;
+                    c.execute("UPDATE channel_legacy_cuts SET after_rank=?4 WHERE source_job=?1 AND channel=?2 AND event=?3",params![source_job.as_slice(),channel.as_bytes().as_slice(),target.id.as_bytes().as_slice(),rank])?;
+                    Ok(())
+                })?;
             }
-            self.profile.database().transaction(|c| {
-                self.check_account_on(c)?;replay::require_source_on(c,channel,source_job,revision)?;
-                facts.checkpoint_on(c,&mut reducer,&header,rank,(allowed,after_accept),"")?;
-                graph.complete_on(c)?;
-                c.execute("UPDATE channel_legacy_cuts SET after_rank=?4 WHERE source_job=?1 AND channel=?2 AND event=?3",params![source_job.as_slice(),channel.as_bytes().as_slice(),event.id.as_bytes().as_slice(),rank])?;
-                Ok(())
-            })?;
-        }
-        if let Some(next) = page.next {
-            self.profile.database().transaction(|c| {
-                self.check_account_on(c)?;replay::require_source_on(c,channel,source_job,revision)?;
-                c.execute("UPDATE channel_legacy_cuts SET after_rank=?4 WHERE source_job=?1 AND channel=?2 AND event=?3",params![source_job.as_slice(),channel.as_bytes().as_slice(),event.id.as_bytes().as_slice(),next])?;Ok(())
-            })?;
-            return Ok(LegacyCut::Pending);
-        }
-        use crate::node::channel::graph::{AuthorityGraph, preparing::PreparingGraph};
-        let graph = PreparingGraph::open(
-            self.profile.clone(),
-            repository,
-            crate::node::channel::graph::preparing::DecisionBinding {
-                job: query,
-                source_job,
-                revision,
-                channel,
-                event: event.id,
-            },
-            crate::eventlog::sync::network::PreparationBudget {
-                rows: 63,
-                edges: 512,
-                bytes: 8 * 1024 * 1024 - 256,
-            },
-        )?;
-        if !graph.prepare()? {
-            return Ok(LegacyCut::Pending);
+            let charged = graph.work();
+            work.rows += charged.rows;
+            work.edges += charged.edges;
+            work.bytes += charged.bytes;
+            return Ok((LegacyCut::Pending, work));
         }
         let mut candidate = None;
         if reducer.authority.current_event().is_none()
@@ -496,10 +552,10 @@ impl ChannelCheckpointStore {
                 .history
                 .as_ref()
                 .ok_or_else(|| invalid("legacy cut facts missing"))?
-                .parents_authorized(event.id, &graph)?
+                .parents_authorized(target.id, &graph)?
             && let Some(state) = &reducer.prior
         {
-            let author = event.author.user_id();
+            let author = target.author.user_id();
             if state.owner() != author
                 && state.is_accepted_member(&author)
                 && let Some((public, membership_event, acceptance_event, true)) =
@@ -507,7 +563,7 @@ impl ChannelCheckpointStore {
                 && state.members().contains(public)
             {
                 candidate = Some(crate::node::channel_account_authority::LegacyDeparture {
-                    event: event.id,
+                    event: target.id,
                     member: crate::node::channel_account_authority::LegacyAccountMember {
                         public: public.clone(),
                         membership_event: *membership_event,
@@ -516,12 +572,16 @@ impl ChannelCheckpointStore {
                 });
             }
         }
+        let charged = graph.work();
+        work.rows += charged.rows;
+        work.edges += charged.edges;
+        work.bytes += charged.bytes;
         if graph.pending() {
-            return Ok(LegacyCut::Pending);
+            return Ok((LegacyCut::Pending, work));
         }
-        self.finish_legacy_cut(channel, source_job, event.id, query)?;
+        self.finish_legacy_cut(channel, source_job, target.id, query)?;
         repository.retire_ancestor_selection(selection.id())?;
-        Ok(LegacyCut::Ready(candidate))
+        Ok((LegacyCut::Ready(candidate), work))
     }
     fn finish_legacy_cut(
         &self,

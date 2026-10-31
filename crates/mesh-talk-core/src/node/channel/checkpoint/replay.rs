@@ -2,6 +2,7 @@
 //! authority facts; consumed receiver checkpoints never participate in replay.
 use super::*;
 use crate::{
+    eventlog::sync::network::{PreparationBudget, PreparationStep},
     eventlog::{
         event::EventKind,
         repository::{
@@ -17,7 +18,7 @@ use crate::{
     },
 };
 
-const ROWS: usize = 64;
+const HEADER_CHARGE: usize = std::mem::size_of::<crate::eventlog::repository::EventHeader>();
 const SCHEMA:&str="
 CREATE TABLE channel_source_scan(singleton INTEGER PRIMARY KEY CHECK(singleton=1),ordinal INTEGER NOT NULL CHECK(ordinal>=-1));
 CREATE TABLE channel_dirty(channel BLOB PRIMARY KEY CHECK(length(channel)=32)) WITHOUT ROWID;
@@ -66,23 +67,51 @@ impl ChannelCheckpointStore {
         Ok(true)
     }
 
-    /// One canonical header page and at most one decoded control at a time.
-    /// `false` asks the runtime to schedule another bounded work turn.
+    /// Compatibility wrapper for callers that use the standard finite turn.
     pub(in crate::node) fn project_step(
         &self,
         repository: &EventRepository,
         me: &DeviceIdentity,
         channel: ConversationId,
     ) -> Result<bool, LogError> {
-        if repository
-            .order_step(&channel, CausalOrder::Logical, OrderWorkBudget::default())?
-            .readiness
-            != OrderReadiness::Ready
-        {
-            return Ok(false);
+        Ok(self
+            .project_step_with_budget(repository, me, channel, PreparationBudget::default())?
+            .ready)
+    }
+
+    /// Ordering, old-generation retirement, legacy cuts and one reducer decision
+    /// share the caller's budget. Completing a phase yields before the next phase.
+    pub(in crate::node) fn project_step_with_budget(
+        &self,
+        repository: &EventRepository,
+        me: &DeviceIdentity,
+        channel: ConversationId,
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
+        budget.validate()?;
+        let order = repository.order_step(
+            &channel,
+            CausalOrder::Logical,
+            OrderWorkBudget {
+                vertices: budget.rows,
+                edges: budget.edges,
+                bytes: budget.bytes,
+            },
+        )?;
+        let mut work = PreparationStep {
+            rows: order.seeded + order.ranked + order.cleaned,
+            edges: order.edges,
+            bytes: order.charged_bytes,
+            ..Default::default()
+        };
+        if order.readiness != OrderReadiness::Ready || work.rows != 0 || work.edges != 0 {
+            return Ok(work);
         }
         let Some(generation) = repository.order_generation(&channel, CausalOrder::Logical)? else {
-            return Ok(true);
+            return Ok(PreparationStep {
+                ready: true,
+                ..work
+            });
         };
         let count =
             i64::try_from(generation.count).map_err(|_| LogError::RepositoryCounterExhausted)?;
@@ -104,21 +133,47 @@ impl ChannelCheckpointStore {
                 )?;
                 Ok(())
             })?;
-            return Ok(true);
+            return Ok(PreparationStep {
+                ready: true,
+                ..work
+            });
         }
-        if !self.prepare_legacy_departures(
+        let legacy = self.prepare_legacy_departures(
             repository,
             channel,
             generation.job,
             generation.source_revision,
             count,
-        )? {
-            return Ok(false);
+            budget,
+        )?;
+        if !legacy.ready {
+            return Ok(legacy);
         }
-        let (mut reducer, mut next) =
-            ProjectionFacts::load(self.profile.clone(), generation.job, channel)?;
-        if next == 0 && self.cleanup_generation_step(channel, generation.job)? {
-            return Ok(false);
+        let next: i64 = self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            require_source_on(c, channel, generation.job, generation.source_revision)?;
+            c.query_row("SELECT COALESCE((SELECT next_rank FROM channel_projection_work WHERE job=?1 AND channel=?2),0)",params![generation.job.as_slice(),channel.as_bytes().as_slice()],|r|r.get(0)).map_err(Into::into)
+        })?;
+        if next == 0 {
+            let cleaned = self.cleanup_generation_step_with_limit(
+                channel,
+                generation.job,
+                budget.rows_for(512)?,
+            )?;
+            if cleaned > 0 {
+                return Ok(PreparationStep {
+                    rows: cleaned,
+                    bytes: cleaned * 512,
+                    ..Default::default()
+                });
+            }
+        }
+        let snapshot = ProjectionFacts::snapshot_charge(&self.profile, generation.job, channel)?;
+        let minimum = snapshot
+            .checked_add(HEADER_CHARGE + 256)
+            .ok_or(LogError::RepositoryCounterExhausted)?;
+        if minimum > budget.bytes {
+            return Err(LogError::PageBudgetTooSmall { required: minimum });
         }
         if next > count {
             return Err(invalid("channel reducer cursor exceeds source"));
@@ -132,32 +187,60 @@ impl ChannelCheckpointStore {
                 next - 1,
                 PageBudget {
                     rows: 1,
-                    bytes: 64 * 1024,
+                    bytes: budget.bytes,
                 },
             )?
             else {
-                return Ok(false);
+                return Ok(work);
             };
-            for header in page.items {
+            if let Some(header) = page.items.into_iter().next() {
+                if budget.rows < 2 {
+                    return Err(LogError::InvalidPageBudget);
+                }
+                work.rows = 1;
+                work.bytes = HEADER_CHARGE;
+                let binding = crate::node::channel::graph::preparing::DecisionBinding {
+                    job: generation.job,
+                    source_job: generation.job,
+                    revision: generation.source_revision,
+                    channel,
+                    event: header.id,
+                };
                 let graph = PreparingGraph::open(
                     self.profile.clone(),
                     repository,
-                    crate::node::channel::graph::preparing::DecisionBinding {
-                        job: generation.job,
-                        source_job: generation.job,
-                        revision: generation.source_revision,
-                        channel,
-                        event: header.id,
-                    },
-                    crate::eventlog::sync::network::PreparationBudget {
-                        rows: 63,
-                        edges: 512,
-                        bytes: 8 * 1024 * 1024 - 256,
+                    binding,
+                    PreparationBudget {
+                        rows: budget.rows - 1,
+                        edges: budget.edges,
+                        bytes: budget.bytes - HEADER_CHARGE,
                     },
                 )?;
-                if !graph.prepare()? {
-                    return Ok(false);
+                let prepared = graph.prepare()?;
+                let graph_work = graph.work();
+                if !prepared
+                    || graph_work.rows != 0
+                    || graph_work.edges != 0
+                    || graph_work.bytes != 0
+                {
+                    return Ok(add_work(work, graph_work));
                 }
+                let (mut reducer, actual) =
+                    ProjectionFacts::load(self.profile.clone(), generation.job, channel)?;
+                if actual != next {
+                    return Err(LogError::StaleCursor);
+                }
+                work.bytes += snapshot;
+                let graph = PreparingGraph::open(
+                    self.profile.clone(),
+                    repository,
+                    binding,
+                    PreparationBudget {
+                        rows: budget.rows - 1,
+                        edges: budget.edges,
+                        bytes: budget.bytes - work.bytes,
+                    },
+                )?;
                 let processed = self
                     .profile
                     .database()
@@ -175,7 +258,7 @@ impl ChannelCheckpointStore {
                     ) {
                     let event = graph.event(header.id)?;
                     if graph.pending() {
-                        return Ok(false);
+                        return Ok(add_work(work, graph.work()));
                     }
                     Some(
                         event
@@ -197,7 +280,7 @@ impl ChannelCheckpointStore {
                     reducer.step_header(&header, &graph)?
                 };
                 if graph.pending() {
-                    return Ok(false);
+                    return Ok(add_work(work, graph.work()));
                 }
                 // Open authenticated control payloads outside the database mutex.
                 // Only immutable preparation occurs before the guarded commit.
@@ -240,7 +323,7 @@ impl ChannelCheckpointStore {
                     }
                 }
                 if graph.pending() {
-                    return Ok(false);
+                    return Ok(add_work(work, graph.work()));
                 }
                 let activity = activity_before.finish(&reducer, &header, event.as_ref(), &own);
                 let facts = reducer
@@ -250,7 +333,7 @@ impl ChannelCheckpointStore {
                     .clone();
                 let after_accept = facts.after_accept(&reducer, &header, &graph)?;
                 if graph.pending() {
-                    return Ok(false);
+                    return Ok(add_work(work, graph.work()));
                 }
                 self.profile.database().transaction(|c| {
                     self.check_account_on(c)?;
@@ -285,12 +368,16 @@ impl ChannelCheckpointStore {
                     }
                     Ok(())
                 })?;
-                next += 1;
+                return Ok(add_work(work, graph.work()));
             }
+            return Ok(work);
         }
-        if next < count {
-            return Ok(false);
+        let (reducer, actual) =
+            ProjectionFacts::load(self.profile.clone(), generation.job, channel)?;
+        if actual != next {
+            return Err(LogError::StaleCursor);
         }
+        work.bytes = snapshot;
         self.profile.database().transaction(|c| {
             self.check_account_on(c)?;
             require_source_on(c, channel, generation.job, generation.source_revision)?;
@@ -311,7 +398,10 @@ impl ChannelCheckpointStore {
             )?;
             Ok(())
         })?;
-        Ok(true)
+        Ok(PreparationStep {
+            ready: true,
+            ..work
+        })
     }
 
     fn refresh_distribution_on(
@@ -359,7 +449,8 @@ impl ChannelCheckpointStore {
         job: [u8; 16],
         revision: i64,
         count: i64,
-    ) -> Result<bool, LogError> {
+        budget: PreparationBudget,
+    ) -> Result<PreparationStep, LogError> {
         let retired=self.profile.database().transaction(|c| {
             self.check_account_on(c)?;require_source_on(c,channel,job,revision)?;
             let old:Option<(Vec<u8>,Vec<u8>,Vec<u8>)>=c.query_row("SELECT source_job,selection,query FROM channel_legacy_cuts WHERE channel=?1 AND source_job<>?2 LIMIT 1",params![channel.as_bytes().as_slice(),job.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
@@ -370,8 +461,21 @@ impl ChannelCheckpointStore {
             c.execute("DELETE FROM channel_legacy_cuts WHERE source_job=?1 AND channel=?2",params![source,channel.as_bytes().as_slice()])?;
             Ok(true)
         })?;
-        if retired || self.cleanup_generation_step(channel, job)? {
-            return Ok(false);
+        if retired {
+            return Ok(PreparationStep {
+                rows: 1,
+                bytes: 64,
+                ..Default::default()
+            });
+        }
+        let cleaned =
+            self.cleanup_generation_step_with_limit(channel, job, budget.rows_for(512)?)?;
+        if cleaned > 0 {
+            return Ok(PreparationStep {
+                rows: cleaned,
+                bytes: cleaned * 512,
+                ..Default::default()
+            });
         }
         let (next, rebuilding): (i64, bool) = self.profile.database().transaction(|c| {
             self.check_account_on(c)?;
@@ -388,7 +492,7 @@ impl ChannelCheckpointStore {
             .map_err(Into::into)
         })?;
         if rebuilding {
-            self.profile.database().transaction(|c| {
+            let removed=self.profile.database().transaction(|c| {
                 self.check_account_on(c)?;
                 require_source_on(c,channel,job,revision)?;
                 for (table,key) in [
@@ -402,16 +506,29 @@ impl ChannelCheckpointStore {
                     ("channel_authority_facts","kind,key"),("channel_authority_current","channel"),
                     ("channel_projection_work","channel")
                 ] {
-                    let sql=format!("DELETE FROM {table} WHERE job=?1 AND channel=?2 AND ({key}) IN (SELECT {key} FROM {table} WHERE job=?1 AND channel=?2 LIMIT 128)");
-                    if c.execute(&sql,params![job.as_slice(),channel.as_bytes().as_slice()])?!=0 { return Ok(()); }
+                    let sql=format!("DELETE FROM {table} WHERE job=?1 AND channel=?2 AND ({key}) IN (SELECT {key} FROM {table} WHERE job=?1 AND channel=?2 LIMIT ?3)");
+                    let removed=c.execute(&sql,params![job.as_slice(),channel.as_bytes().as_slice(),i64::try_from(budget.rows_for(512)?).map_err(|_|LogError::InvalidPageBudget)?])?;
+                    if removed!=0 {return Ok(removed);}
                 }
                 c.execute("UPDATE channel_legacy_scan SET rebuilding=0 WHERE job=?1 AND channel=?2",params![job.as_slice(),channel.as_bytes().as_slice()])?;
-                Ok(())
+                Ok(1)
             })?;
-            return Ok(false);
+            return Ok(PreparationStep {
+                rows: removed,
+                bytes: removed * 512,
+                ..Default::default()
+            });
         }
         if next == count {
-            return Ok(true);
+            return Ok(PreparationStep {
+                ready: true,
+                ..Default::default()
+            });
+        }
+        if budget.bytes < HEADER_CHARGE + 256 {
+            return Err(LogError::PageBudgetTooSmall {
+                required: HEADER_CHARGE + 256,
+            });
         }
         let OrderReadState::Ready(page) = repository.causal_headers_after_rank(
             &channel,
@@ -419,27 +536,41 @@ impl ChannelCheckpointStore {
             job,
             next - 1,
             PageBudget {
-                rows: 64,
-                bytes: 64 * 1024,
+                rows: 1,
+                bytes: budget.bytes,
             },
         )?
         else {
-            return Ok(false);
+            return Ok(PreparationStep::default());
         };
         let mut through = next;
         let mut candidate = None;
+        let mut work = PreparationStep::default();
         for header in page.items {
+            work.rows = 1;
+            work.bytes = HEADER_CHARGE;
             through += 1;
             if header.kind != EventKind::ChannelLeave || header.ciphertext_bytes != 0 {
                 continue;
             }
-            let event = repository
-                .get(&header.id)?
-                .ok_or_else(|| invalid("legacy departure disappeared"))?;
-            if !event.is_canonical() || !event.verify_integrity() || !event.verify_signature() {
-                continue;
+            if budget.rows < 3 {
+                return Err(LogError::InvalidPageBudget);
             }
-            match self.legacy_cut_step(repository, &event, job, revision)? {
+            // Retained headers were admitted only after integrity/signature
+            // validation. This empty legacy control needs no body or parent Vec.
+            let (cut, charged) = self.legacy_cut_step(
+                repository,
+                &header,
+                job,
+                revision,
+                PreparationBudget {
+                    rows: budget.rows - 1,
+                    edges: budget.edges,
+                    bytes: budget.bytes - HEADER_CHARGE,
+                },
+            )?;
+            work = add_work(work, charged);
+            match cut {
                 super::causal::LegacyCut::Pending => {
                     through -= 1;
                 }
@@ -447,7 +578,6 @@ impl ChannelCheckpointStore {
                     candidate = value.map(|value| (value.event, value.member));
                 }
             }
-            break;
         }
         self.profile.database().transaction(|c| {
             self.check_account_on(c)?;
@@ -466,6 +596,13 @@ impl ChannelCheckpointStore {
             if c.execute("UPDATE channel_legacy_scan SET next_rank=?3 WHERE job=?1 AND channel=?2 AND next_rank=?4",params![job.as_slice(),channel.as_bytes().as_slice(),through,next])?!=1 {return Err(LogError::StaleCursor);}
             Ok(())
         })?;
-        Ok(false)
+        Ok(work)
     }
+}
+
+fn add_work(mut left: PreparationStep, right: PreparationStep) -> PreparationStep {
+    left.rows += right.rows;
+    left.edges += right.edges;
+    left.bytes += right.bytes;
+    left
 }

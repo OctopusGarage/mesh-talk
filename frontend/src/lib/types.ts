@@ -284,6 +284,8 @@ export interface ChannelMetadataValue {
   authored_at: number;
 }
 export interface ChannelMetadata {
+  /** The bounded authority/history query is incomplete; values are not yet available. */
+  query_pending?: boolean;
   /** A publication is known, but its authorized content key is still catching up. */
   cover_pending?: boolean;
   announcement_pending?: boolean;

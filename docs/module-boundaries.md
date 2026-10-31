@@ -188,6 +188,12 @@ and reducer steps into a leased result, while `join_history/indexed/preparation.
 retains the existing canonical, strict-causal and future ownership-loss rules.
 These query owners share the repository ancestry implementation and its incremental
 retirement; callers must resume Pending work without synchronously draining it.
+Canonical preparation reports the caller's shared row, edge and byte budget
+across ordering, generation cleanup, legacy cuts and reducer decisions.
+The checkpoint's `history_read_ready` gate covers both current signed authority
+and the first attempt of admitted recalls; plaintext consumers must check it
+before hydration. Unknown-target retries become blocking again on their exact
+persisted wake, without requiring a history scan.
 `core/node/channel/checkpoint/` owns indexed current membership, canonical authority,
 receiver checkpoints, exact processing evidence, activity pages and pending retries.
 Ordinary warm channel opens load current metadata and the active sending epoch;
@@ -823,6 +829,18 @@ durable clear tombstones. It reuses channel authority and causal ownership
 validation; private account documents never grant authority over shared group
 content. Group sync capability gating and event-log retention preserve this
 contract across replay, offline recovery and accepted-member bootstrap.
+Its `group_metadata/indexed.rs` child owns selected publication/release facts and
+resumable cursors in the existing encrypted profile database. It reuses
+`join_history/indexed.rs` for canonical and causal owner checks. The last 20 valid
+announcement publications are selected before decryption; an unavailable key
+cannot pull an older publication into that window. Recipient release lookups
+match both device keys. Incomplete queries expose `query_pending`, separately
+from a validated current publication awaiting its content key. Its local
+`indexed/preparation.rs` retains bounded caller continuations for existing owner,
+ancestry and causal queries; it introduces no parallel authorization reducer.
+Unfinished active slots are retained under capacity backpressure, while completed
+plaintext summaries use the existing bounded cache. The channel cleanup owner
+can retire the index with a counted caller-supplied row allowance.
 
 `src-tauri/src/chat_commands/channel_metadata.rs` owns exact owner/account/runtime
 admission for reads and edits. Channel summaries project validated current content
