@@ -209,8 +209,19 @@ before hydration. Unknown-target retries become blocking again on their exact
 persisted wake, without requiring a history scan.
 `core/node/channel/checkpoint/` owns indexed current membership, canonical authority,
 receiver checkpoints, exact processing evidence, activity pages and pending retries.
-Ordinary warm channel opens load current metadata and the active sending epoch;
-completed signed history is not replayed. Other participant domains retain their
+`checkpoint/presentation.rs` and its preparation module own the last validated
+current display and resumable policy/departure selectors. `checkpoint/work.rs`
+queues current channel identities for the existing recovery loop, preserving
+pre-open expiry provenance with a scalar open epoch and committed-event cutoff.
+One failing channel retains its own retry deadline and does not block other
+channels. Startup restores validated current metadata and the active sending epoch;
+new signed controls resume after account adoption rather than draining in open.
+Fresh authority and recall-readiness checks remain separate from display state.
+The checkpoint cleanup owner retires disposable facts in bounded turns after
+logical channel retirement, even when no later read revisits the channel.
+Consumed receiver/evidence/receipt state is preserved. Selected join-history and
+directory consumers have separate preparation work; this caller boundary alone
+does not certify that every historical consumer is bounded. Other participant domains retain their
 legacy owners until their own cutovers. `core/node/runtime_startup.rs` composes
 startup inputs and completion through `runtime_work.rs`; blocking captures and
 undelivered results remain admitted until their resources are destroyed.

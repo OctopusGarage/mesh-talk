@@ -28,10 +28,16 @@ pub(super) const MAX_CONCURRENT_CONNS: usize = super::session_pool::MAX_DIRECTIO
 /// receiver keys. The durable pending row is the complete retry authority.
 #[derive(Default)]
 pub(in crate::node) struct PendingChannelPlaintext {
-    channel: Option<ConversationId>,
+    // Explicit pause used by the owning delivery retry boundary. Per-channel
+    // failures below never stop other current channels from progressing.
     pub(in crate::node) retry_at: Option<std::time::Instant>,
+    lanes: std::collections::HashMap<ConversationId, ChannelPlaintextRetry>,
+    cursor: Option<ConversationId>,
+}
+#[derive(Default)]
+struct ChannelPlaintextRetry {
+    retry_at: Option<std::time::Instant>,
     delay_ms: u64,
-    // A scheduling yield must not turn a single live arrival into catch-up.
     continuation: Option<(super::reception_effects::ArrivalKind, bool)>,
 }
 
@@ -1139,21 +1145,107 @@ impl Node {
         &self,
         conv: ConversationId,
     ) -> Result<(), crate::eventlog::LogError> {
-        let changed = {
-            // Match the book -> log order used by outgoing allocation.
-            let mut book = self.channels.lock().expect("channels mutex not poisoned");
-            let before = book.info_projection(conv);
-            let log = self.log.lock().expect("log mutex not poisoned");
-            if let Some(projected) =
-                super::channel::ChannelBook::projected_metadata(conv, &log.events(&conv)?)
-                && let Some(state) = book.state_mut(&conv)
-            {
-                state.install_membership_projection(projected);
+        self.prepare_channel_metadata_turn(conv).map(|_| ())
+    }
+
+    /// A single canonical or presentation turn. Only a fresh, completed
+    /// canonical state may replace membership; last presentation stays visible
+    /// until its independently budgeted selectors finish.
+    fn prepare_channel_metadata_turn(&self, conv: ConversationId) -> Result<bool, LogError> {
+        use crate::eventlog::sync::network::PreparationBudget;
+        self.channel_checkpoints.queue_runtime(conv)?;
+        let (step, state) = {
+            let log = self.log.lock().expect("log lock");
+            let step = self.channel_checkpoints.project_step_with_budget(
+                log.repository()?,
+                &self.identity,
+                conv,
+                PreparationBudget::default(),
+            )?;
+            if !step.ready {
+                self.channel_recovery_notify.notify_one();
+                return Ok(false);
             }
-            before != book.info_projection(conv)
+            (step, self.channel_checkpoints.current_state(conv)?)
         };
-        if changed {
-            let _ = self.channel_changes.send(conv);
+        let Some(state) = state else {
+            self.channel_checkpoints.finish_runtime(conv, None)?;
+            return Ok(true);
+        };
+        {
+            let mut book = self.channels.lock().expect("channel book lock");
+            let before = book.info_projection(conv);
+            // Recheck while holding the book guard, following outgoing's
+            // book -> log order; a concurrently appended control cannot install
+            // an old display as fresh membership for subsequent authoring.
+            let log = self.log.lock().expect("log lock");
+            let state = self
+                .channel_checkpoints
+                .current_state(state.id())?
+                .ok_or(LogError::StaleCursor)?;
+            book.install_indexed_state(state);
+            if let Some(state) = book.state_mut(&conv)
+                && !state.has_my_sender(state.epoch())
+                && let Some(bytes) = self
+                    .channel_senders
+                    .lock()
+                    .expect("sender store lock")
+                    .current(&conv, state.epoch())?
+            {
+                let key = crate::channel::sender_key::SenderKey::deserialize(&bytes).ok_or_else(
+                    || LogError::CorruptFile("invalid channel sender checkpoint".into()),
+                )?;
+                state.import_my_sender(state.epoch(), key);
+            }
+            drop(log);
+            if before != book.info_projection(conv) {
+                let _ = self.channel_changes.send(conv);
+            }
+        }
+        // The canonical step already consumed this turn's allowance. Do not
+        // reset the budget when it published the final control.
+        if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+            self.channel_recovery_notify.notify_one();
+            return Ok(false);
+        }
+        let step = {
+            let log = self.log.lock().expect("log lock");
+            self.channel_checkpoints.prepare_presentation_step(
+                log.repository()?,
+                &self.identity,
+                conv,
+                PreparationBudget::default(),
+            )?
+        };
+        if step.ready {
+            let mut book = self.channels.lock().expect("channel book lock");
+            let before = book.info_projection(conv);
+            self.channel_checkpoints.install_prepared_presentation(
+                &mut book,
+                &self.user_id(),
+                conv,
+            )?;
+            if before != book.info_projection(conv) {
+                let _ = self.channel_changes.send(conv);
+            }
+        } else {
+            self.channel_recovery_notify.notify_one();
+        }
+        let ready = step.ready && step.rows == 0 && step.edges == 0 && step.bytes == 0;
+        if !ready {
+            self.channel_recovery_notify.notify_one();
+        }
+        Ok(ready)
+    }
+
+    /// Local control APIs may await their accepted intent, yielding between
+    /// bounded turns. They never hold the log/book or delivery guard over await.
+    pub(in crate::node) async fn await_channel_metadata(
+        &self,
+        channel: ConversationId,
+    ) -> Result<(), NodeError> {
+        while !self.prepare_channel_metadata_turn(channel)? {
+            tokio::task::yield_now().await;
         }
         Ok(())
     }
@@ -1170,10 +1262,10 @@ impl Node {
                 .pending_channel_plaintext
                 .lock()
                 .expect("channel retry lock");
-            pending.channel = Some(conv);
-            let delay = pending.delay_ms.max(1000);
-            pending.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
-            pending.delay_ms = (delay * 2).min(30_000);
+            let lane = pending.lanes.entry(conv).or_default();
+            let delay = lane.delay_ms.max(1000);
+            lane.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
+            lane.delay_ms = (delay * 2).min(30_000);
             self.channel_recovery_notify.notify_one();
             log::warn!("channel reception deferred after storage failure: {error}");
         }
@@ -1193,47 +1285,49 @@ impl Node {
         if pending
             .retry_at
             .is_some_and(|deadline| std::time::Instant::now() < deadline)
-            || pending.channel.is_some_and(|channel| channel != conv)
+            || pending
+                .lanes
+                .get(&conv)
+                .and_then(|lane| lane.retry_at)
+                .is_some_and(|deadline| std::time::Instant::now() < deadline)
         {
             return Ok(());
         }
-        let name = {
-            let log = self.log.lock().expect("log lock");
-            let repository = log.repository()?;
-            while !self
-                .channel_checkpoints
-                .project_step(repository, &self.identity, conv)?
-            {}
-            let Some(state) = self.channel_checkpoints.current_state(conv)? else {
-                return Ok(());
-            };
-            let name = state.name().to_owned();
-            let mut book = self.channels.lock().expect("channel book lock");
-            let before = book.info_projection(conv);
-            self.channel_checkpoints.install_book_metadata(
-                repository,
-                &self.identity,
-                &mut book,
-                state,
-            )?;
-            if before != book.info_projection(conv) {
-                let _ = self.channel_changes.send(conv);
-            }
-            name
+        let lane = pending.lanes.entry(conv).or_default();
+        let (mut arrival, reopening) = *lane.continuation.get_or_insert_with(|| {
+            (
+                if context == "live" {
+                    ArrivalKind::Live
+                } else {
+                    ArrivalKind::CatchUp
+                },
+                reopening,
+            )
+        });
+        if !self.prepare_channel_metadata_turn(conv)? {
+            return Ok(());
+        }
+        let Some(state) = self.channel_checkpoints.current_state(conv)? else {
+            pending.lanes.remove(&conv);
+            return Ok(());
         };
+        let name = state.name().to_owned();
+        let source = self
+            .channel_checkpoints
+            .source_binding(conv)?
+            .ok_or(LogError::StaleCursor)?;
+        // A deferred startup may expose current display metadata, but no
+        // plaintext handoff precedes the admitted recall attempt boundary.
+        let (recalls_ready, recall_work) = self.process_channel_recalls(conv)?;
+        if !recalls_ready || recall_work {
+            self.channel_recovery_notify.notify_one();
+            return Ok(());
+        }
         let own_devices: std::collections::HashSet<_> = self
             .linked_devices()
             .into_iter()
             .map(|device| device.public.user_id())
             .collect();
-        let (mut arrival, reopening) = pending.continuation.unwrap_or_else(|| {
-            let arrival = if context == "live" && pending.channel.is_none() {
-                ArrivalKind::Live
-            } else {
-                ArrivalKind::CatchUp
-            };
-            (arrival, reopening)
-        });
         let mut budget = super::channel::checkpoint::ChannelReceiveBudget::default();
         loop {
             self.received
@@ -1330,14 +1424,18 @@ impl Node {
                 break;
             }
             if budget.exhausted() {
-                pending.channel = Some(conv);
-                pending.continuation = Some((arrival, reopening));
-                pending.retry_at = None;
+                let lane = pending.lanes.entry(conv).or_default();
+                lane.continuation = Some((arrival, reopening));
+                lane.retry_at = None;
                 self.channel_recovery_notify.notify_one();
                 return Ok(());
             }
         }
-        self.process_channel_recalls(conv)?;
+        if budget.spent() {
+            pending.lanes.entry(conv).or_default().continuation = Some((arrival, reopening));
+            self.channel_recovery_notify.notify_one();
+            return Ok(());
+        }
         self.process_join_history_reception(conv, reopening)?;
         if let Some((event, metadata)) = self.channel_checkpoints.finish_batch(conv)? {
             self.note_reception_change();
@@ -1364,31 +1462,62 @@ impl Node {
                     });
             }
         }
-        pending.channel = None;
-        pending.retry_at = None;
-        pending.delay_ms = 0;
-        pending.continuation = None;
+        self.channel_checkpoints
+            .finish_runtime(conv, Some(&source))?;
+        pending.lanes.remove(&conv);
         Ok(())
     }
 
     /// Retry the exact durable ciphertext work with no reachable peer or new event.
     pub(in crate::node) fn retry_channel_plaintext(&self) {
-        let channel = {
-            let pending = self
-                .pending_channel_plaintext
-                .lock()
-                .expect("channel retry lock");
-            if pending
-                .retry_at
-                .is_some_and(|deadline| std::time::Instant::now() < deadline)
-            {
-                return;
+        let turn = || -> Result<(), NodeError> {
+            if self.channel_checkpoints.retire_orphan_step(128)? != 0 {
+                self.channel_recovery_notify.notify_one();
+                return Ok(());
             }
-            pending.channel
+            let more = {
+                let log = self.log.lock().expect("log lock");
+                self.channel_checkpoints.discover_step(log.repository()?)?
+            };
+            let bootstrap = self.channel_checkpoints.resume_current_channels_step()?;
+            let channel = {
+                let mut pending = self
+                    .pending_channel_plaintext
+                    .lock()
+                    .expect("channel retry lock");
+                if pending
+                    .retry_at
+                    .is_some_and(|deadline| std::time::Instant::now() < deadline)
+                {
+                    return Ok(());
+                }
+                let channel = self.channel_checkpoints.next_runtime(pending.cursor)?;
+                pending.cursor = channel.map(|(channel, _)| channel);
+                channel
+            };
+            if more || bootstrap {
+                self.channel_recovery_notify.notify_one();
+            }
+            if let Some((channel, reopening)) = channel {
+                if let Err(error) =
+                    self.process_channel_reception_inner(channel, "catch_up", reopening)
+                {
+                    let mut pending = self
+                        .pending_channel_plaintext
+                        .lock()
+                        .expect("channel retry lock");
+                    let lane = pending.lanes.entry(channel).or_default();
+                    let delay = lane.delay_ms.max(1000);
+                    lane.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
+                    lane.delay_ms = (delay * 2).min(30_000);
+                    log::warn!("channel recovery deferred after storage failure: {error}");
+                }
+                self.process_file_events_reception(channel, "catch_up");
+            }
+            Ok(())
         };
-        if let Some(channel) = channel {
-            self.process_channel_reception(channel, "catch_up");
-            self.process_file_events_reception(channel, "catch_up");
+        if let Err(error) = turn() {
+            log::warn!("channel work discovery deferred: {error}");
         }
     }
 

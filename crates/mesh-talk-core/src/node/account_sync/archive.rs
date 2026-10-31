@@ -164,9 +164,8 @@ impl Node {
             .state(&channel)
             .map(|state| state.genesis_owner().to_owned());
         let log = self.log.lock().expect("log mutex not poisoned");
-        let owned = log.events(&channel)?;
-        let events: Vec<_> = owned.iter().collect();
-        let projection = super::super::channel::ChannelBook::project_membership(channel, &events);
+        let projection = self.account_group_projection_with_log(&log, channel)?;
+        let binding = self.channel_checkpoints.source_binding(channel)?;
         let Some(state) = projection.state.as_ref() else {
             return Ok(None);
         };
@@ -193,19 +192,19 @@ impl Node {
             };
             (member.membership_event, member.acceptance_event)
         };
-        if require_sharing
-            && events
-                .iter()
-                .filter(|event| {
-                    event.kind == crate::eventlog::EventKind::ChannelReplica
-                        && event.author.user_id() == public.user_id()
-                        && projection.authorized.contains(&event.id)
-                        && matches!(event.ciphertext.as_slice(), [0..=1])
-                })
-                .max_by_key(|event| (event.lamport, event.id))
-                .is_some_and(|event| event.ciphertext == [0])
-        {
-            return Ok(None);
+        if require_sharing {
+            let Some(binding) = binding.as_ref() else {
+                return Err(crate::eventlog::LogError::StaleCursor.into());
+            };
+            if !self
+                .channel_checkpoints
+                .replica_enabled_at(binding, &public.user_id())?
+            {
+                return Ok(None);
+            }
+        }
+        if let Some(binding) = binding {
+            self.channel_checkpoints.check_source(&binding)?;
         }
         Ok(Some(PrivateChannelScope {
             channel,

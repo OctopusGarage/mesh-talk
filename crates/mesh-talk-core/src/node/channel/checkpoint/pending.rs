@@ -55,6 +55,11 @@ impl ChannelReceiveBudget {
     pub(in crate::node) fn exhausted(&self) -> bool {
         self.bodies == 0 || self.pages == 0
     }
+    /// An empty indexed lookup leaves room to move to the next producer phase.
+    /// Any admitted (including rejected) body requires a scheduling yield first.
+    pub(in crate::node) fn spent(&self) -> bool {
+        self.bodies < 64
+    }
 }
 impl ChannelCheckpointStore {
     #[cfg(test)]
@@ -131,6 +136,7 @@ impl ChannelCheckpointStore {
             }
         }
     }
+    #[cfg(test)]
     pub(in crate::node) fn pending_page(
         &self,
         channel: ConversationId,

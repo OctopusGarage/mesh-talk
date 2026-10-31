@@ -638,18 +638,14 @@ impl Node {
         &self,
         channel: ConversationId,
     ) -> Result<HistoryPolicy, NodeError> {
-        let log = self.log.lock().expect("log lock");
-        while !self
-            .channel_checkpoints
-            .project_step(log.repository()?, &self.identity, channel)?
-        {}
-        Ok(indexed_policy(
-            &self.channel_checkpoints,
-            log.repository()?,
-            &self.identity,
-            channel,
-        )?)
+        let result = self.channel_checkpoints.prepared_history_policy(channel);
+        if matches!(result, Err(crate::eventlog::LogError::StaleCursor)) {
+            self.channel_checkpoints.queue_runtime(channel)?;
+            self.channel_recovery_notify.notify_one();
+        }
+        result.map_err(Into::into)
     }
+
     pub async fn set_channel_history_policy(
         &self,
         channel: ConversationId,

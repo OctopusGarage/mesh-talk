@@ -243,44 +243,54 @@ impl ProjectionFacts {
         )
     }
 
+    pub(super) fn pending_departure_after(
+        &self,
+        member: &str,
+        authority: &super::super::channel_account_authority::AccountAuthority,
+        after: Option<EventId>,
+    ) -> Result<Option<(EventId, bool)>, LogError> {
+        let row: Option<(Vec<u8>, Option<Vec<u8>>)> = self.profile.database().read(|c| {
+            self.guard_on(c)?;
+            c.query_row(
+                "SELECT event,account FROM channel_departure_facts WHERE job=?1 AND channel=?2 AND member=?3 AND event>COALESCE(?4,x'') ORDER BY event LIMIT 1",
+                params![self.job.as_slice(),self.channel.as_bytes().as_slice(),member,after.as_ref().map(|id|id.as_bytes().as_slice())],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional().map_err(Into::into)
+        })?;
+        let Some((event, account)) = row else {
+            return Ok(None);
+        };
+        let event = EventId::new(
+            event
+                .try_into()
+                .map_err(|_| invalid("invalid departure identity"))?,
+        );
+        let account = account
+            .map(|bytes| {
+                bytes
+                    .try_into()
+                    .map_err(|_| invalid("invalid departure account"))
+            })
+            .transpose()?
+            .or(authority.legacy_departure_account(event)?);
+        let pending = account.is_none_or(|account| authority.account_grant(&account).is_none())
+            || authority.legacy_departure_current(event)?;
+        Ok(Some((event, pending)))
+    }
+
     pub(super) fn pending_departure(
         &self,
         member: &str,
         authority: &super::super::channel_account_authority::AccountAuthority,
     ) -> Result<bool, LogError> {
-        let mut after: Option<Vec<u8>> = None;
-        loop {
-            let page:Vec<(Vec<u8>,Option<Vec<u8>>)>=self.profile.database().read(|c| {
-                self.guard_on(c)?;
-                let mut statement=c.prepare("SELECT event,account FROM channel_departure_facts WHERE job=?1 AND channel=?2 AND member=?3 AND (?4 IS NULL OR event>?4) ORDER BY event LIMIT 64")?;
-                statement.query_map(params![self.job.as_slice(),self.channel.as_bytes().as_slice(),member,after],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<_,_>>().map_err(Into::into)
-            })?;
-            if page.is_empty() {
-                return Ok(false);
+        let mut after = None;
+        while let Some((event, pending)) = self.pending_departure_after(member, authority, after)? {
+            if pending {
+                return Ok(true);
             }
-            for (bytes, account) in page {
-                let event = EventId::new(
-                    bytes
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| invalid("invalid departure identity"))?,
-                );
-                let account = account
-                    .map(|bytes| {
-                        bytes
-                            .try_into()
-                            .map_err(|_| invalid("invalid departure account"))
-                    })
-                    .transpose()?
-                    .or(authority.legacy_departure_account(event)?);
-                if account.is_none_or(|account| authority.account_grant(&account).is_none())
-                    || authority.legacy_departure_current(event)?
-                {
-                    return Ok(true);
-                }
-                after = Some(bytes);
-            }
+            after = Some(event);
         }
+        Ok(false)
     }
     pub(super) fn checkpoint_on(
         &self,

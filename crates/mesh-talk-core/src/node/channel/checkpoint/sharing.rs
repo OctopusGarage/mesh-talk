@@ -8,6 +8,18 @@ use crate::node::{
 use std::collections::BTreeMap;
 
 const SCHEMA: &str = "CREATE TABLE channel_receive_shipments(job BLOB NOT NULL,channel BLOB NOT NULL,recipient_ed BLOB NOT NULL,recipient_x BLOB NOT NULL,grant_account BLOB NOT NULL,grant_incarnation BLOB NOT NULL,epoch BLOB NOT NULL,author TEXT NOT NULL,position INTEGER NOT NULL CHECK(position>=0 AND position<=4294967295),PRIMARY KEY(job,channel,recipient_ed,recipient_x,grant_account,grant_incarnation,epoch,author)) WITHOUT ROWID;";
+impl ChannelCheckpointStore {
+    pub(in crate::node) fn replica_enabled_at(
+        &self,
+        source: &ChannelSource,
+        member: &str,
+    ) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {
+            self.check_source_on(c,source)?;
+            Ok(c.query_row("SELECT enabled FROM channel_replica_preferences WHERE job=?1 AND channel=?2 AND member=?3",params![source.job.as_slice(),source.channel.as_bytes().as_slice(),member],|r|r.get(0)).optional()?.unwrap_or(true))
+        })
+    }
+}
 pub(super) fn initialize(c: &Connection, fresh: bool) -> Result<(), LogError> {
     if fresh {
         c.execute_batch(SCHEMA)?;
