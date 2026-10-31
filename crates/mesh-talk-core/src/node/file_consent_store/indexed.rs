@@ -203,6 +203,36 @@ pub(crate) struct IndexedFileConsentStore {
     fail_writes: bool,
 }
 impl IndexedFileConsentStore {
+    pub(crate) fn offer_scan_position(&self, peer: &[u8; 32]) -> Result<i64, LogError> {
+        self.source.profile().database().read(|c| {
+            let owner = self.check_on(c)?;
+            Ok(c.query_row(
+                "SELECT after_ordinal FROM file_consent_offer_scan WHERE account=?1 AND peer=?2",
+                params![owner.namespace(), peer.as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+        })
+    }
+
+    pub(crate) fn advance_offer_scan(
+        &self,
+        peer: &[u8; 32],
+        before: i64,
+        after: i64,
+    ) -> Result<(), LogError> {
+        self.check_write()?;
+        self.source.profile().database().transaction(|c| {
+            let owner=self.check_on(c)?;
+            c.execute("INSERT OR IGNORE INTO file_consent_offer_scan VALUES(?1,?2,0)",params![owner.namespace(),peer.as_slice()])?;
+            if c.execute("UPDATE file_consent_offer_scan SET after_ordinal=?3 WHERE account=?1 AND peer=?2 AND after_ordinal=?4",params![owner.namespace(),peer.as_slice(),after,before])?!=1 {
+                return Err(LogError::StaleCursor);
+            }
+            Ok(())
+        })
+    }
+
     pub(crate) fn authenticate_legacy(
         profile: &ProfileStorage,
         path: &Path,
@@ -245,7 +275,11 @@ impl IndexedFileConsentStore {
             if !present && !published {
                 c.execute_batch(SCHEMA)?;
             }
-            manifest::validate_ddl(c, SCHEMA)
+            manifest::validate_ddl(c, SCHEMA)?;
+            const SCAN_SCHEMA: &str="CREATE TABLE file_consent_offer_scan(account TEXT NOT NULL REFERENCES file_consent_counts(account),peer BLOB NOT NULL CHECK(length(peer)=32),after_ordinal INTEGER NOT NULL CHECK(typeof(after_ordinal)='integer' AND after_ordinal>=0),PRIMARY KEY(account,peer)) WITHOUT ROWID;";
+            let scan:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_consent_offer_scan')",[],|r|r.get(0))?;
+            if !scan { c.execute_batch(SCAN_SCHEMA)?; }
+            manifest::validate_ddl(c,SCAN_SCHEMA)
         })?;
         let source = PublishedHistorySource::open(
             profile,
@@ -637,6 +671,16 @@ mod tests {
         let event = payload.event(&recipient, 1).unwrap();
         a.receive_control(event.clone()).unwrap();
         a.publish_control(event.clone(), 8).unwrap();
+        let peer = recipient.public().ed25519_pub;
+        a.advance_offer_scan(&peer, 0, 91).unwrap();
+        assert!(matches!(
+            a.advance_offer_scan(&peer, 0, 92),
+            Err(LogError::StaleCursor)
+        ));
+        a.fail_writes = true;
+        assert!(a.advance_offer_scan(&peer, 91, 92).is_err());
+        a.fail_writes = false;
+        assert_eq!(a.offer_scan_position(&peer).unwrap(), 91);
         let first = Account::from_secret_bytes([89; 32]);
         let second = Account::generate();
         participant::prepare_adoption(profile.database(), &first.public(), &second.public())
@@ -648,6 +692,12 @@ mod tests {
             Err(LogError::StaleCursor)
         ));
         assert_eq!(b.remote_decision(payload.manifest).unwrap(), None);
+        assert_eq!(b.offer_scan_position(&peer).unwrap(), 0);
+        b.advance_offer_scan(&peer, 0, 17).unwrap();
+        assert!(matches!(
+            a.offer_scan_position(&peer),
+            Err(LogError::StaleCursor)
+        ));
         assert_eq!(b.received_control(payload.manifest).unwrap(), None);
         b.observe_remote_decision(payload.manifest, ReceiveDecision::Declined)
             .unwrap();
@@ -655,6 +705,11 @@ mod tests {
             .unwrap();
         participant::finish_adoption(profile.database(), &first.public()).unwrap();
         let resumed = IndexedFileConsentStore::from_profile(profile, &path, "pw").unwrap();
+        assert_eq!(resumed.offer_scan_position(&peer).unwrap(), 91);
+        assert!(matches!(
+            a.advance_offer_scan(&peer, 91, 92),
+            Err(LogError::StaleCursor)
+        ));
         assert_eq!(
             resumed.remote_decision(payload.manifest).unwrap(),
             Some(ReceiveDecision::Accepted)

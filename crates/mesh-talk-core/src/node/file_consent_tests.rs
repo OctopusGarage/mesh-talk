@@ -6,6 +6,84 @@ use crate::identity::{account::Account, device::DeviceIdentity};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 
+#[test]
+fn opaque_file_consent_batches_bound_payloads_and_rotate_retained_offers() {
+    use crate::{
+        eventlog::{Event, EventKind},
+        file::FileManifest,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let sender = DeviceIdentity::generate();
+    let proof = Announce::new_with_account(&sender, &Account::generate(), "sender", 4000);
+    let (node, _, _) = node_with_files(
+        directory.path(),
+        DeviceIdentity::generate(),
+        Account::generate(),
+        &proof,
+    );
+    node.set_attachment_global_auto(true).unwrap();
+    let host = super::conversation::dm_conversation_id(&sender.public(), &node.identity.public());
+    for index in 1..=33u8 {
+        let manifest = FileManifest {
+            name: "empty.txt".into(),
+            size: 0,
+            mime: "text/plain".into(),
+            checksum: crate::file::file_checksum(&[]),
+            file_key: [3; 32],
+            file_conv: ConversationId::new([index; 32]),
+            chunk_count: 1,
+        };
+        let original = Event::new(
+            &sender,
+            host,
+            u64::from(index),
+            vec![],
+            u64::from(index),
+            1,
+            EventKind::FileManifest,
+            crate::dm::seal(
+                &sender,
+                &node.identity.public().x25519_pub,
+                &manifest.encode(),
+            )
+            .unwrap(),
+        );
+        node.accept_manifest_event(
+            &original,
+            &proof,
+            super::received_log::ReceivedEntry {
+                event_id: original.id,
+                conversation: host,
+                from: sender.user_id(),
+                wall_clock: 1,
+                plaintext: manifest.encode(),
+            },
+        )
+        .unwrap();
+    }
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..6 {
+        let controls = node.file_consent_events(&sender.public()).unwrap();
+        assert!(
+            controls.len() <= 8,
+            "one mailbox batch cannot retain every consent payload"
+        );
+        assert!(
+            controls
+                .iter()
+                .map(|event| bincode::serialized_size(event).unwrap())
+                .sum::<u64>()
+                <= 16 * 1024
+        );
+        seen.extend(controls.into_iter().map(|event| event.id));
+    }
+    assert_eq!(
+        seen.len(),
+        33,
+        "bounded batches must eventually revisit every retained offer"
+    );
+}
+
 struct RejectingDirectEndpoint {
     address: std::net::SocketAddr,
     task: Option<tokio::task::JoinHandle<()>>,

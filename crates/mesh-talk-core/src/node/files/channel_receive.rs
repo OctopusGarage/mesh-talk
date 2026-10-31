@@ -139,40 +139,40 @@ impl Node {
                     .expect("log lock")
                     .get(&id)?
                     .ok_or(LogError::StaleCursor)?;
-                if let Some((preview, _)) = turn.preview.as_mut() {
-                    if preview.same_chain(&event) {
-                        let Some(plaintext) = self
-                            .channel_checkpoints
-                            .preview_file_following(&event, preview)?
-                        else {
-                            continue;
-                        };
-                        let retain = self.channel_file_retain(
-                            &event,
-                            &plaintext,
-                            Some(preview.first().plaintext()),
-                        )?;
-                        if retain
-                            && !self
-                                .received_files
-                                .lock()
-                                .expect("file rows lock")
-                                .contains(id)?
-                        {
-                            turn.catch_up = true;
-                            let (preview, event) = turn.preview.take().expect("present preview");
-                            self.commit_channel_file(&preview.into_first(), &event, true, turn)?;
-                            turn.reset = true;
-                            break;
-                        }
-                        self.channel_checkpoints
-                            .defer_file_preview(&event, preview)?;
+                if let Some((preview, _)) = turn.preview.as_mut()
+                    && preview.same_chain(&event)
+                {
+                    let Some(plaintext) = self
+                        .channel_checkpoints
+                        .preview_file_following(&event, preview)?
+                    else {
                         continue;
+                    };
+                    let retain = self.channel_file_retain(
+                        &event,
+                        &plaintext,
+                        Some(preview.first().plaintext()),
+                    )?;
+                    if retain
+                        && !self
+                            .received_files
+                            .lock()
+                            .expect("file rows lock")
+                            .contains(id)?
+                    {
+                        turn.catch_up = true;
+                        let (preview, event) = turn.preview.take().expect("present preview");
+                        self.commit_channel_file(&preview.into_first(), &event, true, turn)?;
+                        turn.reset = true;
+                        break;
                     }
-                    // A different chain can be consumed independently, but a
-                    // second surfaced card establishes catch-up before either
-                    // visible card is published.
+                    self.channel_checkpoints
+                        .defer_file_preview(&event, preview)?;
+                    continue;
                 }
+                // A different chain can be consumed independently, but a
+                // second surfaced card establishes catch-up before either
+                // visible card is published.
                 let Some(candidate) = self.channel_checkpoints.prepare_receive(&event)? else {
                     continue;
                 };

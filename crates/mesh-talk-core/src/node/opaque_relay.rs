@@ -192,6 +192,7 @@ pub(in crate::node) struct OpaqueMailboxProgress {
     recipient: PublicIdentity,
     relay: PublicIdentity,
     identity_controls: Option<Vec<Event>>,
+    consent_offers: Option<Vec<(ConversationId, EventId)>>,
     conversation: Option<ConversationId>,
     sync: super::session::SyncProgress,
     uploaded: Vec<(EventId, EventId)>,
@@ -213,6 +214,7 @@ impl OpaqueMailboxProgress {
             recipient: recipient.clone(),
             relay: relay.clone(),
             identity_controls: None,
+            consent_offers: None,
             conversation,
             sync: super::session::SyncProgress::default(),
             uploaded: Vec::new(),
@@ -371,10 +373,17 @@ impl Node {
                     }
                 }
             }
+            if progress.consent_offers.is_none() {
+                progress.consent_offers = Some(self.file_consent_offers(&progress.recipient)?);
+            }
             controls.extend(
-                self.file_consent_events(&progress.recipient)?
-                    .into_iter()
-                    .map(|event| (event.id, event)),
+                self.file_consent_controls(
+                    &progress.recipient,
+                    progress.consent_offers.as_deref().unwrap_or(&[]),
+                    false,
+                )?
+                .into_iter()
+                .map(|event| (event.id, event)),
             );
         }
         let requested: HashSet<_> = source_ids.iter().copied().collect();

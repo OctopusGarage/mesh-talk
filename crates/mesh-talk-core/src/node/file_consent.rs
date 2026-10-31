@@ -85,11 +85,55 @@ impl Decision {
 }
 
 impl Node {
+    /// One fixed batch per mailbox exchange. The current decisions are refreshed
+    /// before each send; this cursor is discovery progress, never delivery truth.
+    pub(in crate::node) fn file_consent_offers(
+        &self,
+        sender: &PublicIdentity,
+    ) -> Result<Vec<(ConversationId, EventId)>, LogError> {
+        if self
+            .delivery_suspended
+            .load(std::sync::atomic::Ordering::Acquire)
+            || (!self.known_account_allowed(sender) && !self.group_member(sender)?)
+            || self
+                .historical_author(&sender.ed25519_pub)
+                .is_none_or(|proof| proof.public() != *sender)
+        {
+            return Ok(Vec::new());
+        }
+        let before = self
+            .file_consent
+            .lock()
+            .expect("file consent lock")
+            .offer_scan_position(&sender.ed25519_pub)?;
+        let author = crate::eventlog::Author::from_ed25519(sender.ed25519_pub);
+        let files = self.files.lock().expect("files lock").clone();
+        let mut offers = files.offers_page(None, Some(author), Some(before), 8, 8 * 144)?;
+        if offers.is_empty() && before != 0 {
+            offers = files.offers_page(None, Some(author), None, 8, 8 * 144)?;
+        }
+        let Some(after) = offers.last().map(|offer| offer.ordinal) else {
+            // No outbound work requires progress. In particular, a failed
+            // incoming-control writer must not block unrelated chat reception.
+            return Ok(Vec::new());
+        };
+        self.file_consent
+            .lock()
+            .expect("file consent lock")
+            .advance_offer_scan(&sender.ed25519_pub, before, after)?;
+        Ok(offers
+            .into_iter()
+            .map(|offer| (offer.file, offer.event))
+            .collect())
+    }
+
+    #[cfg(test)]
     pub(in crate::node) fn file_consent_events(
         &self,
         sender: &PublicIdentity,
     ) -> Result<Vec<Event>, LogError> {
-        self.file_consent_events_for(sender, None)
+        let offers = self.file_consent_offers(sender)?;
+        self.file_consent_controls(sender, &offers, false)
     }
 
     pub(in crate::node) fn direct_file_consent_control(
@@ -99,16 +143,20 @@ impl Node {
         manifest: EventId,
     ) -> Result<Option<Event>, LogError> {
         Ok(self
-            .file_consent_events_for(sender, Some((file, manifest)))?
+            .file_consent_controls(sender, &[(file, manifest)], true)?
             .into_iter()
             .next())
     }
 
-    fn file_consent_events_for(
+    pub(in crate::node) fn file_consent_controls(
         &self,
         sender: &PublicIdentity,
-        requested: Option<(ConversationId, EventId)>,
+        offers: &[(ConversationId, EventId)],
+        include_pending: bool,
     ) -> Result<Vec<Event>, LogError> {
+        if offers.len() > 8 {
+            return Err(LogError::InvalidPageBudget);
+        }
         if self
             .delivery_suspended
             .load(std::sync::atomic::Ordering::Acquire)
@@ -122,24 +170,9 @@ impl Node {
         else {
             return Ok(Vec::new());
         };
-        let offers: Box<dyn Iterator<Item = Result<(ConversationId, EventId), LogError>>> =
-            match requested {
-                Some(pair) => Box::new(std::iter::once(Ok(pair))),
-                None => Box::new(
-                    self.files
-                        .lock()
-                        .expect("files lock")
-                        .offers(
-                            None,
-                            Some(crate::eventlog::Author::from_ed25519(sender.ed25519_pub)),
-                        )
-                        .map(|offer| offer.map(|offer| (offer.file, offer.event))),
-                ),
-            };
         let mut controls = Vec::new();
         let scope = super::conversation::dm_conversation_id(&self.identity.public(), sender);
-        for offer in offers {
-            let (file, manifest) = offer?;
+        for &(file, manifest) in offers {
             let parent = self
                 .log
                 .lock()
@@ -205,8 +238,7 @@ impl Node {
                 };
                 let previous = store.published_control(manifest)?;
                 let previous_generation = store.published_generation(manifest)?;
-                if decision == ReceiveDecision::Pending && previous.is_none() && requested.is_none()
-                {
+                if decision == ReceiveDecision::Pending && previous.is_none() && !include_pending {
                     continue;
                 }
                 let event = if let Some(event) = previous.as_ref().filter(|event| {

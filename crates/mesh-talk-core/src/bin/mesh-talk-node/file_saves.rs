@@ -372,8 +372,32 @@ mod tests {
         let (a, _) = open(ad.path(), alice, aa, &bp);
         let (b, incoming) = open(bd.path(), bob, bob_account, &ap);
         let at = tokio::spawn(a.clone().run_accept_loop(al));
-        let bt = tokio::spawn(b.clone().run_accept_loop(bl));
+        let owner = mesh_talk_core::node::PreparedParticipant::prepare(
+            b.clone(),
+            bl,
+            Arc::new(mesh_talk_core::discovery::DiscoveryVisibility::new(false)),
+            mesh_talk_core::node::ParticipantConfig {
+                discovery_port: 0,
+                candidate_source: None,
+            },
+        )
+        .unwrap()
+        .launch("Bob");
         let channel = a.create_channel("media", vec![bpublic]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !b
+                .list_channels()
+                .unwrap()
+                .iter()
+                .any(|state| state.id == channel)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect(
+            "the participant worker must install the received channel before its policy changes",
+        );
         // This fixture exercises the non-sharing receiver's normal prune path.
         // Sharing members retain ciphertext under the channel replica budget.
         b.set_channel_replica_enabled(channel, false).await.unwrap();
@@ -407,7 +431,6 @@ mod tests {
         let destination = bd.path().join("downloads");
         std::fs::create_dir(&destination).unwrap();
         let (output, mut printed) = mpsc::unbounded_channel();
-        let owner = participant(b.clone()).await;
         let work = owner.blocking_work();
         let runner = tokio::spawn(run(
             b.clone(),
@@ -442,10 +465,8 @@ mod tests {
         );
         runner.abort();
         at.abort();
-        bt.abort();
         let _ = runner.await;
         let _ = at.await;
-        let _ = bt.await;
         owner.stop().await;
     }
 

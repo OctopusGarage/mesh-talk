@@ -28,6 +28,40 @@ pub(super) fn database(dir: &tempfile::TempDir) -> Arc<EncryptedDatabase> {
     )
 }
 #[test]
+fn bounded_selected_body_and_kind_count_admit_before_blob_fetch() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = EventRepository::new(database(&dir), EventDomainId([1; 16])).unwrap();
+    let identity = DeviceIdentity::generate();
+    let message = event(&identity, 1, vec![], 1, EventKind::Message);
+    let profile = event(&identity, 2, vec![message.id], 2, EventKind::Profile);
+    repository.append(&message).unwrap();
+    repository.append(&profile).unwrap();
+    let before = repository.body_read_counts();
+    assert_eq!(
+        repository
+            .count_kind(&message.conversation_id, EventKind::Message)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        repository
+            .count_kind(&message.conversation_id, EventKind::Delete)
+            .unwrap(),
+        0
+    );
+    let header = repository.header(&message.id).unwrap().unwrap();
+    let required = header.stored_bytes * 3 + std::mem::size_of::<Event>();
+    assert!(
+        matches!(repository.get_bounded(&message.id,required-1),Err(LogError::PageBudgetTooSmall{required:bytes}) if bytes==required)
+    );
+    assert_eq!(repository.body_read_counts(), before);
+    assert_eq!(
+        repository.get_bounded(&message.id, required).unwrap(),
+        Some(message)
+    );
+    assert_eq!(repository.body_read_counts().1, before.1 + 1);
+}
+#[test]
 fn retains_exact_event_across_reopen_without_cross_domain_leak() {
     let dir = tempfile::tempdir().unwrap();
     let db = database(&dir);

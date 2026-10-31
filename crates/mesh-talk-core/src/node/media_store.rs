@@ -29,6 +29,9 @@ use std::sync::Mutex;
 
 mod indexed;
 
+pub(in crate::node) type ManagedFiles =
+    Box<dyn Iterator<Item = std::io::Result<(ConversationId, PathBuf)>>>;
+
 const MAGIC: &[u8; 8] = b"MTMEDIA1";
 const CHUNK: usize = 64 * 1024;
 
@@ -421,17 +424,28 @@ impl MediaStore {
         conversation: ConversationId,
         name: &str,
         source: &Path,
+        check: impl FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<PreparedMediaWrite> {
+        let mut reader = std::io::BufReader::new(std::fs::File::open(source)?);
+        let total = std::fs::metadata(source)?.len();
+        self.prepare_from_reader_if(conversation, name, &mut reader, total, check)
+    }
+
+    pub(in crate::node) fn prepare_from_reader_if(
+        &self,
+        conversation: ConversationId,
+        name: &str,
+        reader: &mut impl Read,
+        total: u64,
         mut check: impl FnMut() -> std::io::Result<()>,
     ) -> std::io::Result<PreparedMediaWrite> {
         let directory = tempfile::Builder::new()
             .prefix(".pending-media-")
             .tempdir_in(&self.dir)?;
-        let mut reader = std::io::BufReader::new(std::fs::File::open(source)?);
-        let total = std::fs::metadata(source)?.len();
         self.encrypt_stream(
             conversation,
             &directory.path().join("ciphertext.part"),
-            &mut reader,
+            reader,
             total,
             &mut check,
         )?;
@@ -882,9 +896,7 @@ impl MediaStore {
             .ok_or_else(|| invalid("invalid media locator name"))
     }
     /// Visit a stable inventory with only one fixed metadata page retained.
-    pub(in crate::node) fn managed_files(
-        &self,
-    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<(ConversationId, PathBuf)>>>> {
+    pub(in crate::node) fn managed_files(&self) -> std::io::Result<ManagedFiles> {
         let Some(index) = &self.index else {
             return Ok(Box::new(self.legacy_managed_files()?.into_iter().map(Ok)));
         };
@@ -1155,7 +1167,7 @@ pub(in crate::node) fn sync_parent(path: &Path) -> std::io::Result<()> {
 /// Upper bound on a whole-file in-memory read for inline preview (OOM guard). Comfortably
 /// above the frontend's inline caps (16 MB image / 50 MB video); larger media uses the
 /// streaming save path instead.
-const MAX_INLINE_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
+pub(in crate::node) const MAX_INLINE_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `dest` + `.part`: the temp a store writes into before its atomic rename.
 fn part_path(dest: &Path) -> PathBuf {

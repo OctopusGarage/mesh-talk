@@ -356,6 +356,32 @@ impl EventRepository {
     pub(crate) fn get(&self, id: &EventId) -> Result<Option<Event>, LogError> {
         self.database.read(|c| self.get_on(c, id))
     }
+    /// Admit a selected body using the same conservative allocation charge as
+    /// body pages. A legal oversized event remains retained and returns its
+    /// required budget before SQLite copies the BLOB.
+    pub(crate) fn get_bounded(
+        &self,
+        id: &EventId,
+        bytes: usize,
+    ) -> Result<Option<Event>, LogError> {
+        if bytes == 0 {
+            return Err(LogError::InvalidPageBudget);
+        }
+        self.database.read(|c| {
+            let Some(header) = self.header_on(c, id)? else {
+                return Ok(None);
+            };
+            let required = header
+                .stored_bytes
+                .checked_mul(3)
+                .and_then(|n| n.checked_add(std::mem::size_of::<Event>()))
+                .ok_or(LogError::RepositoryCounterExhausted)?;
+            if required > bytes {
+                return Err(LogError::PageBudgetTooSmall { required });
+            }
+            self.get_on(c, id)
+        })
+    }
     pub(crate) fn get_on(&self, c: &Connection, id: &EventId) -> Result<Option<Event>, LogError> {
         self.require_visible_id_on(c, id)?;
         // End both SQL result lifetimes before deserializing. During the BLOB

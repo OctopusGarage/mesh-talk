@@ -10,6 +10,10 @@ use std::path::PathBuf;
 /// Count encoded chunk bytes rather than file plaintext, so disk growth stays bounded.
 const CHANNEL_FILE_REPLICA_BUDGET: usize = 64 * 1024 * 1024;
 
+#[cfg(test)]
+thread_local! {static REPLICA_BUFFER_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };}
+
+#[cfg(test)]
 fn channel_file_evictions(
     mut replicas: Vec<(crate::eventlog::ConversationId, u64, usize)>,
     budget: usize,
@@ -37,7 +41,7 @@ impl Node {
             .files
             .lock()
             .expect("files lock not poisoned")
-            .manifest(&conversation)?
+            .manifest(conversation)?
             .is_some_and(|manifest| {
                 crate::file::sticker::is_sticker_name(manifest.name())
                     && super::media_store::manifest_is_media(&manifest)
@@ -65,7 +69,7 @@ impl Node {
     ) -> Result<bool, super::NodeError> {
         let manifest = {
             let files = self.files.lock().expect("files lock not poisoned");
-            let Some(manifest) = files.manifest(&conversation)? else {
+            let Some(manifest) = files.manifest(conversation)? else {
                 return Ok(false);
             };
             if !crate::file::sticker::is_sticker_name(manifest.name())
@@ -243,34 +247,34 @@ impl Node {
             .lock()
             .expect("delivery lock not poisoned")
             .cards_for_file(conversation);
-        let log = self.log.lock().expect("log lock not poisoned");
-        let chunks = log.events(&conversation)?;
+        let headers = self.file_headers(conversation)?;
+        if !cards.iter().any(|card| {
+            card.completion_binding
+                .as_ref()
+                .is_some_and(|binding| binding.owner_account == self.account_id())
+        }) {
+            return Ok(Vec::new());
+        }
+        let mut chain = super::files::ChunkChain::default();
+        for header in headers {
+            let event = self.file_event(header?.id)?;
+            if !chain.accept(&event) {
+                return Ok(Vec::new());
+            }
+        }
         Ok(cards
             .into_iter()
             .filter_map(|card| {
                 let binding = card.completion_binding.as_ref()?;
                 if binding.owner_account != self.account_id()
-                    || chunks.len() != card.chunk_count as usize
+                    || chain.count != u64::from(card.chunk_count)
+                    || chain
+                        .source
+                        .is_none_or(|author| author.ed25519_pub() != &binding.source.ed25519_pub)
                 {
                     return None;
                 }
-                for (index, event) in chunks.iter().enumerate() {
-                    let parents = if index == 0 {
-                        vec![]
-                    } else {
-                        vec![chunks[index - 1].id]
-                    };
-                    if event.kind != EventKind::Message
-                        || event.seq != index as u64 + 1
-                        || event.parents != parents
-                        || event.author.ed25519_pub() != &binding.source.ed25519_pub
-                        || !event.verify_integrity()
-                        || !event.verify_signature()
-                    {
-                        return None;
-                    }
-                }
-                let final_chunk = chunks.last()?.id;
+                let final_chunk = chain.last?;
                 Some((card, final_chunk))
             })
             .collect())
@@ -355,14 +359,14 @@ impl Node {
             && (!eligible.is_empty() || untracked)
             && self.is_channel_file_replica(conversation)?
         {
-            let mut own_source = false;
-            for row in self.retained_file_rows(conversation) {
-                if row?.from == self.user_id() {
-                    own_source = true;
-                    break;
-                }
-            }
-            own_source || self.shares_replica(&conversation)?
+            self.files
+                .lock()
+                .expect("files lock not poisoned")
+                .has_author(
+                    conversation,
+                    crate::eventlog::Author::from_ed25519(self.identity.public().ed25519_pub),
+                )?
+                || self.shares_replica(&conversation)?
         } else {
             false
         };
@@ -396,95 +400,123 @@ impl Node {
         &self,
         conversation: ConversationId,
     ) -> Result<bool, super::NodeError> {
-        let media = {
-            let files = self.files.lock().expect("files lock not poisoned");
-            let Some(manifest) = files.manifest(&conversation)? else {
-                return Ok(false);
-            };
-            match manifest.kind() {
-                Some(crate::file::FileKind::File) => false,
-                _ if super::media_store::manifest_is_media(&manifest) => true,
-                _ => return Ok(false),
-            }
+        let book = self.files.lock().expect("files lock not poisoned").clone();
+        let Some(retention) = book.retention_for(conversation)? else {
+            return Ok(false);
         };
-        for row in self.retained_file_rows(conversation) {
-            let row = row?;
-            if self
-                .channels
-                .lock()
-                .expect("channels lock not poisoned")
-                .state(&row.conversation)
-                .is_some_and(|channel| {
-                    // A local media preview is not recipient delivery. Its
-                    // original signed chunks must survive incoming fingerprint
-                    // probes and remain available to other channel members.
-                    !media
-                        || channel
-                            .members()
-                            .iter()
-                            .any(|member| member.user_id() != self.user_id())
-                })
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        self.channel_replica_allowed(&book, retention.file, retention.mode)
     }
 
-    /// Keep complete channel files newest-first within a fixed local storage budget.
-    /// Chunk conversations are independent DAGs, so pruning a whole conversation
-    /// cannot orphan a message or another chunk. A peer may later download the file
-    /// again from another source if its local replica has been evicted.
-    fn prune_channel_file_replicas(&self) {
-        let result = (|| -> Result<(), NodeError> {
-            let file_convs = self.files.lock().expect("files lock not poisoned").files();
-            let mut replicas = Vec::new();
-            for file in file_convs {
-                let file = file?;
-                if self.account_group_file_preparation_pinned(file)
-                    || !self.is_channel_file_replica(file)?
-                {
-                    continue;
-                }
-                let mut newest = None;
-                for row in self.retained_file_rows(file) {
-                    let clock = row?.wall_clock;
-                    newest = Some(newest.unwrap_or(0).max(clock));
-                }
-                let Some(newest) = newest else {
-                    continue;
-                };
-                let Some(total) = self
-                    .files
+    fn channel_replica_allowed(
+        &self,
+        book: &super::filebook::indexed::IndexedFileBook,
+        file: ConversationId,
+        mode: u8,
+    ) -> Result<bool, NodeError> {
+        if mode == 0 {
+            return Ok(false);
+        }
+        let mut after = None;
+        loop {
+            let offers = book.offers_page(Some(file), None, after, 32, 32 * 144)?;
+            if offers.is_empty() {
+                return Ok(false);
+            }
+            after = offers.last().map(|offer| offer.ordinal);
+            for offer in offers {
+                let Some(header) = self
+                    .received_files
                     .lock()
-                    .expect("files lock not poisoned")
-                    .manifest(&file)?
-                    .map(|manifest| manifest.chunk_count() as usize)
+                    .expect("file rows lock")
+                    .header_by_ordinal(offer.ordinal)?
                 else {
                     continue;
                 };
-                let log = self.log.lock().expect("log lock not poisoned");
-                let chunks = log.events(&file)?;
-                if chunks.len() != total {
-                    continue;
+                if self
+                    .channels
+                    .lock()
+                    .expect("channels lock not poisoned")
+                    .state(&header.conversation)
+                    .is_some_and(|channel| {
+                        // A local media preview is not recipient delivery. Its
+                        // signed chunks remain available to other members.
+                        mode == 1
+                            || channel
+                                .members()
+                                .iter()
+                                .any(|member| member.user_id() != self.user_id())
+                    })
+                {
+                    return Ok(true);
                 }
-                let bytes = chunks
-                    .iter()
-                    .map(|event| event.ciphertext.len() + 256)
-                    .sum::<usize>();
-                replicas.push((file, newest, bytes));
             }
-            let drop = channel_file_evictions(replicas, CHANNEL_FILE_REPLICA_BUDGET);
-            let mut log = self.log.lock().expect("log lock not poisoned");
-            for file in drop {
-                let _ = log.drop_conversation(&file);
-            }
+        }
+    }
 
-            Ok(())
-        })();
-        if let Err(error) = result {
+    /// Keep complete channel files newest-first within a fixed local storage budget.
+    /// Fixed metadata pages carry current accepted offers; no payload or candidate
+    /// list grows with retained files. A changed source defers reclamation.
+    fn prune_channel_file_replicas(&self) {
+        if let Err(error) =
+            self.prune_channel_file_replicas_with_budget(CHANNEL_FILE_REPLICA_BUDGET)
+        {
             log::warn!("prune_channel_file_replicas deferred after storage failure: {error}");
         }
+    }
+
+    fn prune_channel_file_replicas_with_budget(&self, budget: usize) -> Result<(), NodeError> {
+        let book = self.files.lock().expect("files lock not poisoned").clone();
+        let revision = book.revision()?;
+        let mut after = None;
+        let mut used = 0usize;
+        loop {
+            let page = book.retention_page(after)?;
+            if page.is_empty() {
+                break;
+            }
+            #[cfg(test)]
+            REPLICA_BUFFER_PEAK.with(|peak| peak.set(peak.get().max(page.len())));
+            after = page.last().map(|row| (row.newest, row.file));
+            for row in page {
+                let file = row.file;
+                if self.account_group_file_preparation_pinned(file)
+                    || !self.channel_replica_allowed(&book, file, row.mode)?
+                {
+                    continue;
+                }
+                let source = self
+                    .log
+                    .lock()
+                    .expect("log lock not poisoned")
+                    .repository()?
+                    .metadata(&file)?;
+                let mut count = 0u64;
+                let mut bytes = 0usize;
+                for header in self.file_headers(file)? {
+                    let header = header?;
+                    count = count
+                        .checked_add(1)
+                        .ok_or(crate::eventlog::LogError::RepositoryCounterExhausted)?;
+                    bytes = bytes
+                        .checked_add(header.ciphertext_bytes)
+                        .and_then(|n| n.checked_add(256))
+                        .ok_or(crate::eventlog::LogError::RepositoryCounterExhausted)?;
+                }
+                if count != u64::from(row.chunks) {
+                    continue;
+                }
+                if used.saturating_add(bytes) <= budget {
+                    used += bytes;
+                    continue;
+                }
+                let mut log = self.log.lock().expect("log lock not poisoned");
+                if book.revision()? != revision || log.repository()?.metadata(&file)? != source {
+                    return Err(crate::eventlog::LogError::StaleCursor.into());
+                }
+                log.drop_conversation(&file)?;
+            }
+        }
+        Ok(())
     }
 
     /// Own completed fanout and untracked group files have no recipient probe debt.
@@ -494,9 +526,8 @@ impl Node {
         conversation: ConversationId,
         store: &super::delivery_store::DeliveryStore,
     ) -> Result<bool, super::NodeError> {
-        let log = self.log.lock().expect("log lock not poisoned");
-        let chunks = log.events(&conversation)?;
-        let Some(first) = chunks.first() else {
+        let mut headers = self.file_headers(conversation)?;
+        let Some(first) = headers.next().transpose()? else {
             return Ok(false);
         };
         let source = first.author;
@@ -516,36 +547,38 @@ impl Node {
                 }
                 let id = &row.event_id;
                 let parent = &row.conversation;
-                if log.get(id)?.is_some_and(|event| {
-                    event.conversation_id == *parent
-                        && event.kind == EventKind::FileManifest
-                        && event.author == source
-                        && event.verify_integrity()
-                        && event.verify_signature()
-                }) {
+                if self
+                    .log
+                    .lock()
+                    .expect("log lock not poisoned")
+                    .get_bounded(id, 4 * 1024 * 1024)?
+                    .is_some_and(|event| {
+                        event.conversation_id == *parent
+                            && event.kind == EventKind::FileManifest
+                            && event.author == source
+                            && event.verify_integrity()
+                            && event.verify_signature()
+                    })
+                {
                     allowed = true;
                     break;
                 }
             }
         }
-        Ok(allowed
-            && chunks.iter().enumerate().all(|(index, event)| {
-                event.kind == EventKind::Message
-                    && event.author == source
-                    && event.seq == index as u64 + 1
-                    && event.parents
-                        == if index == 0 {
-                            vec![]
-                        } else {
-                            vec![chunks[index - 1].id]
-                        }
-                    && {
-                        #[cfg(test)]
-                        self.untracked_chunk_validations
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        event.verify_integrity() && event.verify_signature()
-                    }
-            }))
+        if !allowed {
+            return Ok(false);
+        }
+        let mut chain = super::files::ChunkChain::default();
+        for header in std::iter::once(Ok(first)).chain(headers) {
+            let event = self.file_event(header?.id)?;
+            #[cfg(test)]
+            self.untracked_chunk_validations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if !chain.accept(&event) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn retained_file_rows(
@@ -792,6 +825,104 @@ impl Node {
 #[cfg(test)]
 mod replica_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn channel_replica_retention_never_collects_all_file_candidates() {
+        use crate::{
+            discovery::Announce,
+            eventlog::Event,
+            file::{AnyManifest, FileKind, FileManifestV2, FileManifestV3},
+            identity::{account::Account, device::DeviceIdentity},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let remote = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&remote, &Account::generate(), "peer", 4000);
+        let (node, _, _) = super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &proof,
+        );
+        let channel = node
+            .create_channel("replica retention", vec![])
+            .await
+            .unwrap();
+        for index in 1..=96u8 {
+            let file = ConversationId::new([index; 32]);
+            let manifest = AnyManifest::V3(FileManifestV3 {
+                kind: FileKind::File,
+                v2: FileManifestV2 {
+                    name: "retained.bin".into(),
+                    mime: "application/octet-stream".into(),
+                    size: 3,
+                    file_conv: file,
+                    file_key: [4; 32],
+                    file_nonce: [index; 8],
+                    chunk_size: crate::file::CHUNK_SIZE as u32,
+                    chunk_count: 1,
+                    chunk_hashes: vec![crate::file::chunk_hash(&[1, 2, 3])],
+                    checksum: crate::file::file_checksum(&[1, 2, 3]),
+                },
+            });
+            let AnyManifest::V3(manifest) = manifest else {
+                unreachable!()
+            };
+            let bytes = manifest.encode();
+            let original = Event::new(
+                &node.identity,
+                channel,
+                u64::from(index),
+                vec![],
+                u64::from(index),
+                u64::from(index),
+                EventKind::FileManifest,
+                vec![index],
+            );
+            let row = super::super::received_log::ReceivedEntry {
+                event_id: original.id,
+                conversation: channel,
+                from: node.user_id(),
+                wall_clock: u64::from(index),
+                plaintext: bytes,
+            };
+            node.received_files
+                .lock()
+                .unwrap()
+                .record_file_with_reception(&row, Some(&original), None)
+                .unwrap();
+            let chunk = Event::new(
+                &node.identity,
+                file,
+                1,
+                vec![],
+                1,
+                1,
+                EventKind::Message,
+                vec![index; 32],
+            );
+            node.log.lock().unwrap().append(chunk).unwrap();
+        }
+        REPLICA_BUFFER_PEAK.with(|peak| peak.set(0));
+        node.prune_channel_file_replicas_with_budget(64 * (32 + 256))
+            .unwrap();
+        assert_eq!(
+            REPLICA_BUFFER_PEAK.with(|peak| peak.get()),
+            32,
+            "replica retention traverses fixed pages, not every historical file"
+        );
+        for index in 1..=96u8 {
+            assert_eq!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .count_kind(&ConversationId::new([index; 32]), EventKind::Message)
+                    .unwrap(),
+                u64::from(index > 32),
+                "the unchanged greedy policy retains exactly the newest files"
+            );
+        }
+        assert_eq!(node.files.lock().unwrap().files().count(), 96);
+    }
 
     #[test]
     fn erased_ancestor_cannot_commit_a_prepared_alias_completion() {

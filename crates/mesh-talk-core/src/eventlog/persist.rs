@@ -157,6 +157,32 @@ impl PersistentEventLog {
             Backend::Indexed(repository) => repository.get(id),
         }
     }
+    pub(crate) fn get_bounded(
+        &self,
+        id: &EventId,
+        bytes: usize,
+    ) -> Result<Option<Event>, LogError> {
+        self.check_read(Some(id))?;
+        self.repository()?.get_bounded(id, bytes)
+    }
+    pub(crate) fn count_kind(
+        &self,
+        conversation: &ConversationId,
+        kind: super::EventKind,
+    ) -> Result<u64, LogError> {
+        self.check_read(None)?;
+        self.repository()?.count_kind(conversation, kind)
+    }
+    pub(crate) fn headers_page(
+        &self,
+        conversation: &ConversationId,
+        cursor: Option<&super::repository::pages::PageCursor>,
+        budget: PageBudget,
+    ) -> Result<super::repository::pages::Page<super::repository::EventHeader>, LogError> {
+        self.check_read(None)?;
+        self.repository()?
+            .headers_page(conversation, cursor, budget)
+    }
     pub fn authored_event(
         &self,
         conversation: ConversationId,

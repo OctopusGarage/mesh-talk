@@ -591,12 +591,11 @@ impl Node {
         if store.manifest_event_erased(event.id)
             || manifest.file_conv() == event.conversation_id
             || manifest.file_conv() == received.conversation
-            || self
+            || !self
                 .files
                 .lock()
                 .expect("files lock not poisoned")
                 .accepts(&manifest)?
-                == false
         {
             return Err(LogError::CorruptFile(
                 "conflicting immutable file manifest".into(),
@@ -605,38 +604,51 @@ impl Node {
         {
             let file_book = self.files.lock().expect("files lock").clone();
             let log = self.log.lock().expect("log lock not poisoned");
-            let mut chunks = log.events(&manifest.file_conv())?;
-            chunks.sort_by_key(|chunk| chunk.seq);
-            let mut previous = None;
-            let mut chunk_author = None;
-            for (index, chunk) in chunks.iter().enumerate() {
-                let mixed_authors = chunk_author.is_some_and(|author| author != chunk.author);
-                chunk_author = Some(chunk.author);
-                let malformed_chain = chunk.seq != index as u64 + 1
-                    || match previous {
-                        None => !chunk.parents.is_empty(),
-                        Some(id) => chunk.parents != [id],
-                    };
-                previous = Some(chunk.id);
-                if malformed_chain
-                    || mixed_authors
-                    || chunk.kind != crate::eventlog::EventKind::Message
-                    || (chunk.author != event.author
-                        && !file_book.has_author(manifest.file_conv(), chunk.author)?)
-                    || chunk.seq == 0
-                    || chunk.seq > u64::from(manifest.chunk_count())
-                    || !chunk.verify_integrity()
-                    || !chunk.verify_signature()
-                    || crate::file::open_chunk_for(
-                        &manifest,
-                        (chunk.seq - 1) as u32,
-                        &chunk.ciphertext,
-                    )
-                    .is_err()
+            let first = log
+                .headers_page(
+                    &manifest.file_conv(),
+                    None,
+                    crate::eventlog::repository::pages::PageBudget {
+                        rows: 1,
+                        bytes: std::mem::size_of::<crate::eventlog::repository::EventHeader>(),
+                    },
+                )?
+                .items
+                .into_iter()
+                .next();
+            if let Some(first) = first {
+                let count = log.repository()?.count(&manifest.file_conv())?;
+                if count > u64::from(manifest.chunk_count())
+                    || (first.author != event.author
+                        && !file_book.has_author(manifest.file_conv(), first.author)?)
                 {
                     return Err(LogError::CorruptFile(
                         "conflicting file chunk conversation".into(),
                     ));
+                }
+                let mut chain = super::files::ChunkChain::default();
+                // The former collector sorted by sequence. Exact author/sequence
+                // seeks retain that rule, and missing or mixed-author slots fail.
+                for index in 0..count {
+                    let header = log
+                        .repository()?
+                        .authored_header(&manifest.file_conv(), first.author, index + 1)?
+                        .ok_or_else(|| {
+                            LogError::CorruptFile("conflicting file chunk conversation".into())
+                        })?;
+                    let chunk = log
+                        .get_bounded(&header.id, 4 * 1024 * 1024)?
+                        .ok_or_else(|| {
+                            LogError::CorruptFile("selected file chunk disappeared".into())
+                        })?;
+                    if !chain.accept(&chunk)
+                        || crate::file::open_chunk_for(&manifest, index as u32, &chunk.ciphertext)
+                            .is_err()
+                    {
+                        return Err(LogError::CorruptFile(
+                            "conflicting file chunk conversation".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -2642,40 +2654,6 @@ impl Node {
             author: event.author,
             event: event.id,
         })
-    }
-
-    /// Stage every fallible record lookup before callers replace live projections.
-    pub(in crate::node) fn collect_file_card_scopes(
-        &self,
-        store: &DeliveryStore,
-    ) -> Result<Vec<(ConversationId, super::privacy_runtime::ManifestScope)>, LogError> {
-        let rows = self
-            .received_files
-            .lock()
-            .expect("file rows lock not poisoned");
-        let log = self.log.lock().expect("log lock not poisoned");
-        let mut scopes = Vec::new();
-        for file in store.file_cards() {
-            let Some(entry) = rows.entry(file.id)? else {
-                continue;
-            };
-            if entry.conversation != file.conversation || entry.from != self.user_id() {
-                continue;
-            }
-            let original = log.get(&entry.event_id)?;
-            if !self.file_card_manifest_matches(file, &entry, original.as_ref()) {
-                continue;
-            }
-            for destination in &file.destinations {
-                let Some(event) = log.get(&destination.binding.event_id)? else {
-                    continue;
-                };
-                if let Some(scope) = self.file_card_scope(file, destination, &event) {
-                    scopes.push((file.file_conversation, scope));
-                }
-            }
-        }
-        Ok(scopes)
     }
 
     /// The accepted WAL already owns complete signed destinations. Resolve and

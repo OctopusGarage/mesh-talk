@@ -10044,6 +10044,7 @@ async fn tracked_completion_and_active_fanout_skip_untracked_history_validation(
         "active fanout must not scan untracked chunk ancestry"
     );
     sender_result.expect("active fanout retains chunks without an untracked/share-policy lookup");
+    sender.log.lock().unwrap().fail_reads(false);
     assert_eq!(
         sender.log.lock().unwrap().events(&file).unwrap().len(),
         chunks
