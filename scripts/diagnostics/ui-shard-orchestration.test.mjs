@@ -21,7 +21,7 @@ test("Linux coverage requires Linux and Health without waiting for desktop shard
 });
 
 test("portable acceptance and final UI gate reject every unsuccessful Linux or desktop result", () => {
-  const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "skipped", EXTENDED: "false" };
+  const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
   for (const name of ["portable-evidence", "reports"]) assert.match(job(name), /needs: \[linux, desktop\]/);
   assert.match(job("ui-gate"), /needs: \[linux, desktop,/);
   for (const linux of ["success", "failure", "cancelled", "skipped", ""]) {
@@ -68,4 +68,47 @@ test("desktop browser burst waits for Health while Linux starts independently", 
   assert.match(job("desktop"), /needs: health/);
   assert.doesNotMatch(job("desktop"), /if: always\(\)/);
   assert.doesNotMatch(job("linux"), /needs:/);
+});
+
+
+// GitHub documents that reusable workflows inherit the caller's github context:
+// https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations
+function concurrency(file, github) {
+  const source = readFileSync(new URL(`../../.github/workflows/${file}.yml`, import.meta.url), "utf8");
+  const block = source.split("concurrency:\n")[1].split(/\n\S/)[0];
+  const evaluate = text => text.replace(/\$\{\{ (.*?) \}\}/g, (_, expression) => String(Function("github", `return (${expression})`)(github)));
+  return { group: evaluate(block.match(/^  group: (.+)$/m)[1]).toLowerCase(), cancel: evaluate(block.match(/^  cancel-in-progress: (.+)$/m)[1]) === "true" };
+}
+
+test("UI and reusable Health isolate caller/event streams while superseded candidates cancel", () => {
+  const context = { workflow: "UI E2E", event_name: "schedule", ref: "refs/heads/main", event: { pull_request: {} } };
+  const ui = concurrency("e2e-ui", context), called = concurrency("check-health", context);
+  const standalone = concurrency("check-health", { ...context, workflow: "Code Quality and Health Check" });
+  assert.notEqual(ui.group, called.group, "a called workflow must never cancel its caller");
+  assert.notEqual(called.group, standalone.group, "standalone Health cannot replace same-run UI evidence");
+  for (const owner of ["check-health", "e2e-ui"]) {
+    assert.notEqual(concurrency(owner, context).group, concurrency(owner, { ...context, event_name: "push" }).group);
+    assert.notEqual(concurrency(owner, context).group, concurrency(owner, { ...context, event_name: "workflow_dispatch" }).group);
+    assert.equal(concurrency(owner, context).cancel, false);
+    assert.equal(concurrency(owner, { ...context, event_name: "workflow_dispatch" }).cancel, false);
+    for (const event_name of ["pull_request", "merge_group", "push"]) {
+      const candidate = { ...context, event_name, ref: event_name === "push" ? "refs/heads/main" : "refs/merge-queue/main/candidate", event: event_name === "pull_request" ? { pull_request: { number: 42 } } : { pull_request: {} } };
+      assert.equal(concurrency(owner, candidate).cancel, true);
+      assert.equal(concurrency(owner, candidate).group, concurrency(owner, { ...candidate, sha: "replacement" }).group);
+      assert.notEqual(concurrency(owner, candidate).group, concurrency(owner, { ...candidate, ref: event_name === "push" ? "refs/heads/dev" : "refs/merge-queue/main/other", event: event_name === "pull_request" ? { pull_request: { number: 43 } } : { pull_request: {} } }).group);
+    }
+  }
+});
+
+test("Firefox core runs on ordinary candidates and the final gate requires its real success", () => {
+  const firefox = job("firefox-extended");
+  assert.doesNotMatch(firefox, /^    if:/m, "core Firefox must not be scheduled-only");
+  assert.match(firefox, /timeout-minutes: 20/);
+  assert.match(firefox, /EVAL_TIER:.*'extended' \|\| 'core'/);
+  assert.match(firefox, /browser-report\.mjs.*'extended' \|\| 'core'/);
+  const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
+  assert.equal(gate("Require complete selected UI matrices", env), 0);
+  for (const EXTENDED of ["false", "true"]) for (const FIREFOX of ["failure", "cancelled", "skipped", ""]) {
+    assert.notEqual(gate("Require complete selected UI matrices", { ...env, EXTENDED, FIREFOX, EXTENDED_CHROMIUM: EXTENDED === "true" ? "success" : "skipped" }), 0);
+  }
 });

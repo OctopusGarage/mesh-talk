@@ -51,14 +51,19 @@ merge candidate, and independently on its weekly/manual triggers. All three
 platform unit and diagnostic suites remain mandatory; source-only formatting,
 type/lint and dependency policy run once. The Linux unit coverage producer seals
 its line map for same-run UI consumers; source, workflow, run, attempt and digest
-must all match. Superseded candidate runs are cancelled automatically.
+must all match. Superseded PR, merge and push candidate runs are cancelled automatically.
+Health uses a distinct caller-workflow/event namespace, so independent manual or
+scheduled runs cannot cancel the UI caller or its same-run evidence producer.
 
 Branch protection requires direct execution checks instead of runner-backed
 copies of their aggregate result. `scripts/ci/required-checks.mjs` owns the direct
 release policy and replacement mapping. Source and all platform checks are
 individually required; Windows requires its build producer and both archive
 consumers. Release acceptance uses the same direct names plus its main-only
-checks. To inspect a migration, run
+checks, including ASan and mutation-runner acceptance. A newer failed, pending or
+missing check still rejects the exact source. Stable repeats this strict check
+immediately before public container upload and final release publication, after
+lengthy preparation; Nightly retains its final strict recheck. To inspect a migration, run
 `node scripts/ci/migrate-required-checks.mjs OWNER/REPO main PR_NUMBER --plan`.
 Use `--apply` only after the replacement checks pass on the current PR head. The
 command validates each bound GitHub App, rejects a changed candidate/policy,

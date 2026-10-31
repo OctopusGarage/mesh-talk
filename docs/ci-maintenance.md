@@ -160,7 +160,10 @@ required runtime assets; shard distribution does not guarantee equal durations.
 Both need compatible inputs and complete inventories, with isolation preserved.
 
 Cancel superseded verification for the same candidate when safe, with concurrency
-groups that do not accidentally couple unrelated workflows or branches. Preserve
+groups that separate caller workflows, event streams and branches. Reusable Health
+keeps a distinct prefix because GitHub exposes the caller workflow in its context;
+PR/merge/push candidates cancel their superseded source, while scheduled and manual
+evidence streams remain isolated. Preserve
 publication and release ordering. Inspect the configured queue mode and
 cancellation semantics; do not assume workflow dispatch order is execution order.
 Concurrency groups do not supply merge-candidate validation. Follow GitHub's
@@ -205,6 +208,29 @@ fails for the original mechanism and passes with the repair. Confirm that the
 intended case actually ran. Preserve existing coverage while investigating; any
 temporary quarantine needs an explicit owner, reason, tracking issue and removal
 condition under the existing gate policy.
+
+## Reject incomplete discovery and generated-policy drift
+
+Successful test execution requires successful, complete input discovery.
+`scripts/ci/fuzz-targets.py` compares the discovered cargo-fuzz list with the actual
+manifest-owned target inventory before running anything. Failed enumeration, an
+empty list, duplicates, omissions or unknown targets fail the job, as do individual
+target failures. Keep this assertion at the execution owner; shell loop command
+substitution alone does not propagate discovery failure under `set -e`.
+
+`scripts/ci/glib-migration.py` evaluates every resolved glib branch, rather than
+treating a newer parallel branch as proof that an older stack was removed. Its
+migration claim conservatively requires stable 0.20 or newer throughout; absent
+glib and mixed old/new trees do not establish migration. The
+[RustSec advisory](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) owns the
+security version ranges; the watcher retains native build/test and reviewed-PR
+requirements before changing dependencies.
+
+Generated native input probes share one accepted-key/extended-flag metadata owner
+between WebDriver mapping and emitted C# policy. Regressions must check that every
+emitted key is accepted with the correct flags and unsupported keys remain
+rejected, rather than only matching the generated call text. Ownership checks and
+real desktop acceptance remain separate from generator/compilation checks.
 
 ## Review the change and prevent renewed drift
 

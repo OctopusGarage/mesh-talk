@@ -75,3 +75,19 @@ test("release preflight prevents overwriting published versions before building"
   assert.match(workflow.split("  build-release:\n")[1], /^    needs: preflight/m);
   assert.match(workflow, /concurrency:/);
 });
+
+
+test("Stable rechecks changed source checks immediately before public container and release mutations", () => {
+  const publish = workflow.split("  publish-release:\n")[1];
+  const steps = publish.split(/^      - /m).slice(1);
+  const imageIndex = steps.findIndex(step => step.startsWith("name: Publish verified multi-platform post-office image\n"));
+  const releaseIndex = steps.findIndex(step => step.startsWith("name: Publish only the verified draft\n"));
+  assert.ok(imageIndex > 0 && releaseIndex > imageIndex);
+  const imageGuard = steps[imageIndex - 1];
+  const releaseGuard = steps[releaseIndex];
+  for (const guard of [imageGuard, releaseGuard]) {
+    assert.match(guard, /node scripts\/release\/check-source-checks\.mjs "\$SOURCE_REPO" "\$SOURCE_SHA"/);
+    assert.doesNotMatch(guard, /--wait|continue-on-error/);
+  }
+  assert.ok(releaseGuard.indexOf("check-source-checks.mjs") < releaseGuard.indexOf("release-state.mjs publish"));
+});

@@ -22,8 +22,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' }}
 
 jobs:
   health:
@@ -337,8 +337,7 @@ jobs:
           retention-days: 14
 
   firefox-extended:
-    name: Extended Firefox UI
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)
+    name: Firefox portable UI
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
@@ -360,13 +359,13 @@ jobs:
       - run: node ../scripts/evals/portable-runner.mjs
         env:
           EVAL_BROWSER: firefox
-          EVAL_TIER: extended
+          EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
           EVAL_SOURCE_SHA: ${{ github.sha }}
-      - name: Validate extended Firefox evidence
-        run: node ../scripts/evals/browser-report.mjs eval-results/portable/firefox/extended/results.json
+      - name: Validate complete Firefox evidence
+        run: node ../scripts/evals/browser-report.mjs eval-results/portable/firefox/${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}/results.json
         env:
           EVAL_BROWSER: firefox
-          EVAL_TIER: extended
+          EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
           EVAL_SOURCE_SHA: ${{ github.sha }}
       - if: always()
         uses: actions/upload-artifact@v7
@@ -400,10 +399,9 @@ jobs:
           test "$PACKS" = success
           test "$CHROMIUM" = success
           test "$PORTABLE" = success
+          test "$FIREFOX" = success
           if [ "$EXTENDED" = true ]; then
             test "$EXTENDED_CHROMIUM" = success
-            test "$FIREFOX" = success
           else
             test "$EXTENDED_CHROMIUM" = skipped
-            test "$FIREFOX" = skipped
           fi

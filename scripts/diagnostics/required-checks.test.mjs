@@ -71,3 +71,17 @@ test("Mac capacity allocation migrates Intel work while preserving ARM acceptanc
   for (const name of ["health / Portable checks (macos-26-intel)", "Backend core (macos-26-intel)", ...armNames]) assert.ok(releaseSourceChecks.includes(name));
   assert.deepEqual(migrateRequiredChecks(policy), policy);
 });
+
+
+test("release acceptance retains sanitizer and mutation checks required on main", async () => {
+  const { requireSourceChecks } = await import("../release/check-source-checks.mjs");
+  const names = ["ASan + LeakSanitizer (core)", "mutants"];
+  const complete = [...new Set([...releaseSourceChecks, ...names])].map((name, id) => ({ name, id: id + 1, app: { slug: "github-actions" }, status: "completed", conclusion: "success" }));
+  requireSourceChecks(complete, []);
+  for (const name of names) {
+    assert.throws(() => requireSourceChecks(complete.filter(check => check.name !== name), []), /check/, `${name}: absent`);
+    for (const change of [{ status: "queued", conclusion: null }, { status: "in_progress", conclusion: null }, { conclusion: "failure" }, { conclusion: "cancelled" }]) {
+      assert.throws(() => requireSourceChecks([...complete, { ...complete.find(check => check.name === name), id: 999, ...change }], []), /check/, `${name}: ${JSON.stringify(change)}`);
+    }
+  }
+});

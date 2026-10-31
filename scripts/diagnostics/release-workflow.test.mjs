@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -117,4 +117,41 @@ test("both release archive roles use the bounded signing owner before mandatory 
   const verifier = readFileSync(new URL("../release/verify-release.sh", import.meta.url), "utf8");
   assert.match(verifier, /cosign verify-blob --bundle/);
   assert.match(verifier, /--certificate-identity/);
+});
+
+
+test("Stable mutation commands cannot run after a newly unsuccessful source check", () => {
+  const steps = workflow.split("  publish-release:\n")[1].split(/^      - /m).slice(1);
+  const image = steps.find(step => step.startsWith("name: Recheck source immediately before container publication\n"));
+  const publication = steps.find(step => step.startsWith("name: Publish only the verified draft\n"));
+  assert.ok(image && publication);
+  const commands = step => {
+    const run = step.split("        run: ")[1];
+    return run.startsWith("|\n") ? run.slice(2).replace(/^          /gm, "") : run.trim();
+  };
+  const temporary = mkdtempSync(join(tmpdir(), "mesh-stable-source-"));
+  try {
+    const fixture = join(temporary, "source-check.mjs");
+    const source = new URL("../release/check-source-checks.mjs", import.meta.url).href;
+    const policy = new URL("../ci/required-checks.mjs", import.meta.url).href;
+    writeFileSync(fixture, `import {requireSourceChecks} from ${JSON.stringify(source)};\nimport {releaseSourceChecks} from ${JSON.stringify(policy)};\nconst checks=releaseSourceChecks.map((name,id)=>({name,id,app:{slug:"github-actions"},status:"completed",conclusion:"success"}));\nif(process.env.NEW_CHECK_STATE!=="success") checks.push({...checks[0],id:999,...JSON.parse(process.env.NEW_CHECK_STATE)});\nrequireSourceChecks(checks,[]);\n`);
+    const prelude = 'node() { if [ "$1" = scripts/release/check-source-checks.mjs ]; then "$REAL_NODE" "$CHECK_FIXTURE"; else printf "PUBLIC_MUTATION\\n"; fi; }\n';
+    for (const script of [commands(image) + '\nprintf "PUBLIC_MUTATION\\n"', commands(publication)]) {
+      const run = (script, state) => spawnSync("bash", ["-e", "-c", prelude + script], { encoding: "utf8", env: { ...process.env, REAL_NODE: process.execPath, CHECK_FIXTURE: fixture, NEW_CHECK_STATE: state, SOURCE_REPO: "fixture/repo", SOURCE_SHA: "a".repeat(40), RELEASE_TAG: "v1.2.3" } });
+      const healthy = run(script, "success");
+      assert.equal(healthy.status, 0, healthy.stderr);
+      assert.match(healthy.stdout, /PUBLIC_MUTATION/);
+      for (const state of [{ conclusion: "failure" }, { status: "queued", conclusion: null }, { status: "in_progress", conclusion: null }]) {
+        const blocked = run(script, JSON.stringify(state));
+        assert.notEqual(blocked.status, 0);
+        assert.doesNotMatch(blocked.stdout, /PUBLIC_MUTATION/);
+        // Negative control: removing the owning source check permits the mutation.
+        const old = run(script.replace(/^node scripts\/release\/check-source-checks\.mjs.*$/m, ""), JSON.stringify(state));
+        assert.equal(old.status, 0, old.stderr);
+        assert.match(old.stdout, /PUBLIC_MUTATION/);
+      }
+    }
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
 });
