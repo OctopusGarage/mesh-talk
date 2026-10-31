@@ -10,7 +10,7 @@ const native = ["ubuntu-24.04", "windows-2022", "macos-latest"].map(os => `nativ
 
 export const releaseSourceChecks = Object.freeze([
   ...workspace, ...health, ...backend, ...native,
-  "Playwright UI E2E", "scan", "Scorecard analysis",
+  "Playwright UI E2E", "ASan + LeakSanitizer (core)", "mutants", "scan", "Scorecard analysis",
   "Analyze (rust)", "Analyze (actions)", "Analyze (javascript-typescript)",
 ]);
 

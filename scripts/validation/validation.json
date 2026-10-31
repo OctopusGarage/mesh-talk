@@ -352,7 +352,13 @@
         ".github/workflows/ui-shards.yml",
         "scripts/diagnostics/ui-shard-orchestration.test.mjs",
         "scripts/diagnostics/playwright-artifacts.test.mjs",
-        "scripts/ci/rust-profile.test.mjs"
+        "scripts/ci/rust-profile.test.mjs",
+        ".github/workflows/fuzz.yml",
+        ".github/workflows/glib-0.20-watch.yml",
+        "scripts/ci/fuzz-targets.py",
+        "scripts/ci/glib-migration.py",
+        "scripts/ci/test_inventory_probes.py",
+        "scripts/diagnostics/ci-inventory.test.mjs"
       ],
       "node": [
         "scripts/ci/ubuntu-apt-source.test.mjs",
@@ -371,7 +377,8 @@
         "scripts/ci/windows-coverage-cli.test.mjs",
         "scripts/diagnostics/ui-shard-orchestration.test.mjs",
         "scripts/diagnostics/playwright-artifacts.test.mjs",
-        "scripts/ci/rust-profile.test.mjs"
+        "scripts/ci/rust-profile.test.mjs",
+        "scripts/diagnostics/ci-inventory.test.mjs"
       ],
       "escalation": [
         "Run actionlint and affected workflow regressions. Mutation runner changes also require scripts/release/run-mutants.test.mjs with the pinned cargo-mutants and cargo-nextest tools; verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the whole-suite budget from actual workspace inventory and runner variance while retaining per-test hang detection; size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration.",
@@ -379,7 +386,8 @@
         "Coverage accumulation changes require scripts/ci/backend-coverage.test.mjs with real cargo-llvm-cov and matching LLVM tools. It must preserve the earlier default workspace report plus later ignored execution; --no-report and --no-clean are mutually exclusive. The owning native CI installs the tools before this regression.",
         "The Windows archive CLI fixture requires pinned cargo-nextest0.9.148/cargo-llvm-cov0.8.7 and LLVM tools matching rustc. It creates only an isolated local Git fixture and runs both exact partitions from the archive with empty consumers; no real product full suite is replaced by this contract test.",
         "Reusable browser shards retain exactly four Linux and eight desktop runners with the same execution/artifact steps. Linux coverage may depend on Linux plus Health only, but portable collection and final UI acceptance must reject every missing/failed/cancelled/skipped Linux or desktop result.",
-        "Ordinary CI debug-info changes require scripts/ci/rust-profile.test.mjs with the actual compiler and matching LLVM tools: preserve application stack file/line locations, debug assertions, overflow checks and source-line coverage relative to full debug information. Keep producer/consumer profile inputs consistent and sanitizer, mutation and release settings independently owned. Browser artifact changes require the actual Playwright blob round-trip: passed and failed attachments must reconstruct after raw output removal, while unsuccessful shards retain raw attachments as a fallback."
+        "Ordinary CI debug-info changes require scripts/ci/rust-profile.test.mjs with the actual compiler and matching LLVM tools: preserve application stack file/line locations, debug assertions, overflow checks and source-line coverage relative to full debug information. Keep producer/consumer profile inputs consistent and sanitizer, mutation and release settings independently owned. Browser artifact changes require the actual Playwright blob round-trip: passed and failed attachments must reconstruct after raw output removal, while unsuccessful shards retain raw attachments as a fallback.",
+        "Fuzz discovery must succeed and exactly match every unique manifest-owned target before any execution; empty, incomplete and failed discovery reject. The glib migration watcher requires all resolved glib branches to reach stable 0.20 or newer before claiming migration. Validate both CLI failure controls and actual workflow wiring. Caller/event-scoped verification concurrency must preserve scheduled/manual evidence while cancelling superseded candidate sources. Release-source acceptance includes ASan and mutation-runner contracts, with immediate checks before each public Stable mutation; no publication is authorized by diagnostics."
       ]
     },
     {
@@ -451,7 +459,7 @@
         "scripts/diagnostics/trace-evidence.test.mjs"
       ],
       "escalation": [
-        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete authoritative core inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Dedicated WebKit and extended/Firefox acceptance remain separate. Standalone Windows portable-runner batches remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
+        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete authoritative core inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Dedicated WebKit and Firefox core acceptance are required on ordinary candidates; scheduled/manual extended Chromium and Firefox retain complete extended inventories. Fixture navigation must observe an actual boundary using browser-supported input rather than assume a wheel delta equals a scroll offset; retain genuine virtualized unmount, cache reuse and geometry assertions. Standalone Windows portable-runner batches remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
       ]
     },
     {

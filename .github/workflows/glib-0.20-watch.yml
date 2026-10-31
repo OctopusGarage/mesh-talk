@@ -1,13 +1,14 @@
 name: glib 0.20 bump watch
 
-# glib 0.18.5 is pinned transitively: tauri -> gtk "^0.18" -> glib 0.18. glib 0.20
-# (which fixes the unsoundness advisory GHSA-wrw7-89jp-8q8g) needs gtk 0.19+/gtk4,
-# which tauri 2.x does not yet use. This monthly job probes whether a newer tauri has
-# lifted that gate; if so it builds + tests with glib bumped and opens a PR. While the
+# glib 0.18.5 is pinned transitively: tauri -> gtk "^0.18" -> glib 0.18.
+# RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g is patched in glib >=0.20.0.
+# A parallel newer glib branch does not remove the old branch. This monthly job
+# probes whether every resolved glib branch migrated; if so it builds + tests
+# with glib bumped and opens a PR. While the
 # gate holds it is a cheap no-op (just dependency resolution — no system deps, no build).
 on:
   schedule:
-    - cron: '0 8 1 * *' # 1st of each month, 08:00 UTC
+    - cron: "0 8 1 * *" # 1st of each month, 08:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -23,28 +24,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Probe whether tauri's gtk stack now allows glib 0.20
         id: probe
         run: |
           set -euo pipefail
-          # Pull the latest compatible tauri; if its gtk stack moved to glib 0.20 the
-          # transitive glib version rises automatically. (Run from the workspace root,
-          # where Cargo.lock lives.)
+          # Resolve compatible tauri updates, then inspect every glib package using
+          # Cargo.lock's TOML structure, including parallel old/new branches.
           cargo update -p tauri
-          maxglib=$(awk '/^\[\[package\]\]/{n=""} /^name = /{gsub(/"/,"");n=$3} /^version = /{gsub(/"/,"");if(n=="glib")print $3}' Cargo.lock | sort -V | tail -1)
-          echo "Resolved glib: ${maxglib:-none}"
-          if [ -n "${maxglib:-}" ] \
-             && [ "$(printf '%s\n%s\n' 0.20.0 "$maxglib" | sort -V | head -1)" = "0.20.0" ] \
-             && [ "$maxglib" != "0.18.5" ]; then
-            echo "lifted=true" >> "$GITHUB_OUTPUT"
-            echo "glib_version=$maxglib" >> "$GITHUB_OUTPUT"
-          else
-            echo "lifted=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::glib 0.20 still gated by tauri's gtk stack (stays ${maxglib:-0.18.x}); no change."
-            git checkout -- Cargo.lock
-          fi
+          python3 -B scripts/ci/glib-migration.py
+
+      - name: Restore unresolved dependency probe
+        if: steps.probe.outputs.lifted == 'false'
+        run: git checkout -- Cargo.lock
 
       - name: Install Tauri system dependencies
         if: steps.probe.outputs.lifted == 'true'
@@ -88,7 +85,7 @@ jobs:
           commit-message: "chore(deps): bump glib to ${{ steps.probe.outputs.glib_version }} (gtk stack now supports it)"
           title: "chore(deps): bump glib to 0.20 (gtk stack now supports it)"
           body: |
-            tauri's gtk stack now resolves glib `${{ steps.probe.outputs.glib_version }}`, lifting the
+            All resolved glib branches are now `${{ steps.probe.outputs.glib_version }}`, lifting the
             `tauri -> gtk ^0.18 -> glib 0.18` pin that held glib at 0.18.5.
 
             This closes the glib unsoundness advisory **GHSA-wrw7-89jp-8q8g**.

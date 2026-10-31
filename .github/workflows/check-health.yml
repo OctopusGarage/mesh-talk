@@ -10,8 +10,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: health-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: health-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' }}
 
 permissions:
   contents: read

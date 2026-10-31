@@ -114,7 +114,7 @@ test("direct checks replace redundant runner-backed summary gates", () => {
 });
 
 test("the final UI gate rejects failed, cancelled or missing required jobs", () => {
-  const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "skipped", EXTENDED: "false" };
+  const env = { LINUX: "success", DESKTOP: "success", COVERAGE: "success", REPORTS: "success", PACKS: "success", CHROMIUM: "success", PORTABLE: "success", EXTENDED_CHROMIUM: "skipped", FIREFOX: "success", EXTENDED: "false" };
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", env).status, 0);
   assert.equal(runGate("e2e-ui.yml", "Require complete selected UI matrices", { ...env, REPORTS: "failure" }).status, 0, "HTML presentation is independent of test acceptance");
   for (const job of ["LINUX", "DESKTOP", "COVERAGE", "PACKS", "CHROMIUM", "PORTABLE"]) {

@@ -557,6 +557,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Recheck source immediately before container publication
+        run: node scripts/release/check-source-checks.mjs "$SOURCE_REPO" "$SOURCE_SHA"
       - name: Publish verified multi-platform post-office image
         uses: docker/build-push-action@v7
         with:
@@ -572,7 +574,9 @@ jobs:
           provenance: true
           sbom: true
       - name: Publish only the verified draft
-        run: node scripts/release/release-state.mjs publish "$RELEASE_TAG"
+        run: |
+          node scripts/release/check-source-checks.mjs "$SOURCE_REPO" "$SOURCE_SHA"
+          node scripts/release/release-state.mjs publish "$RELEASE_TAG"
       - name: Queue the reviewed next-development-target PR
         id: maintenance
         continue-on-error: true

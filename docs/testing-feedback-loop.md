@@ -83,8 +83,11 @@ must first supply equivalent bundled test seams, preserve negative controls and
 validate source-mapped coverage. Changing only the server command drops those
 contracts and is not a qualified optimization.
 
-Dedicated WebKit, nightly/manual extended Chromium and Firefox use
-`scripts/evals/portable-runner.mjs`.
+Dedicated WebKit and Firefox core run on ordinary PR, main and merge candidates
+through `scripts/evals/portable-runner.mjs`. Scheduled/manual extended runs add
+Chromium and Firefox extended inventories. Firefox uses the same complete evidence
+validator and existing job budget in both modes; browser-specific core regressions
+must be detected before source acceptance, rather than first by the next scheduled run.
 Windows uses four sequential Playwright shards with separate browser/dev-server
 lifetimes; other platforms use one. Each shard writes a unique nested evidence
 root and must exit successfully. The runner merges every outcome and validates
@@ -96,6 +99,32 @@ exact once-only union. Two 38-case processes exceeded the 20-minute hosted job
 deadline after 75 of 76 scenarios passed, with later page loads slowing down.
 Four processes reduce that accumulation without increasing the job deadline,
 retrying failed scenarios or establishing a product latency guarantee.
+
+A media-cache/virtualization fixture must establish both reader intent and the
+observed navigation boundary. Its trusted Home key reaches React's reader handler
+before a one-shot window bubble listener prevents default and sets the history
+start in the same event task. This fixture owns that cache-remount boundary;
+it does not assert browser paging semantics. Large wheel deltas are normalized,
+Home behavior differs across platforms, and requiring every PageUp to make
+monotonic progress adds an unrelated native-navigation assumption. A bare
+programmatic scroll can instead be treated as layout correction. The missing-reader
+negative control must fail. Retain explicit live-edge setup, exact history-start
+position, unmount, return-to-latest, row geometry and media URL reuse assertions.
+
+Presence expiry fixtures observe consumption of the distinctive lease source
+before failing subsequent reads. Deleted-contact fixtures await the post-change
+roster refresh before asserting absence. A sleep shorter or longer than a polling
+period proves neither of those operation boundaries; delayed-consumption and
+paused-polling controls must still exercise expiry, recovery and reappearance.
+
+Custody propagation fixtures first settle the newly created channel's signed
+inventory/control heads and the exact linked routes. Readiness observed before
+channel creation does not cover that new work. Hold a real authenticated inventory
+response to verify that setup remains pending until release; accept authenticated
+superseding heads so an obsolete captured version cannot strand the fixture.
+Keep the existing custody observation budget, real network exchange, offline-holder
+and restart assertions. This setup boundary does not establish a production latency
+guarantee or a dependency between independent mandatory/optional worker lanes.
 
 ## Validation stages and agent responsibilities
 
@@ -684,14 +713,15 @@ independent checks run concurrently and heavy suites are not repeated by health.
 | `check-health.yml` platform jobs      | Complete frontend units, help and diagnostic/Python regressions on Linux/macOS/Windows; unit coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                                                                 |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
-| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit and scheduled extended scenarios                                                                              |
+| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit/Firefox core and scheduled extended scenarios                                                                              |
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                                                                       |
 
 Health is called by the UI workflow for every PR base and merge candidate, with
 its own weekly/manual entry points. Direct source and platform checks are required
 individually; no new VM is allocated merely to copy their aggregate result. The
 replacement policy and source-release consumers share
-`scripts/ci/required-checks.mjs`; migrate administrator branch protection only
+`scripts/ci/required-checks.mjs`, including current-source ASan and mutation-runner
+acceptance for release; migrate administrator branch protection only
 after current-source replacement checks pass, as described in
 [quality gates](quality-gates.md). CI retains its weekly Rust run; UI runs full
 browser matrices daily. Dispatch CI and UI when complete hosted verification is
@@ -759,7 +789,8 @@ same attempt. Health's existing Linux job produces this artifact; no additional
 unit-test runner is allocated. Include artifact transfer and consumer validation
 costs when measuring the benefit of reuse.
 The final UI gate requires successful browser, coverage, optional-pack and
-portable jobs, plus Firefox when selected. HTML report rendering runs independently
+portable jobs and Firefox core (or the complete extended Firefox inventory when selected).
+HTML report rendering runs independently
 and is not a merge acceptance dependency; each test shard still requires its raw
 blob/trace evidence upload to succeed. Blob reports and failure
 traces are retained per OS/shard/attempt, and an HTML report is merged per OS even

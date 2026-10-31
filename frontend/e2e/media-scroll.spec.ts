@@ -134,7 +134,7 @@ test("scrolling away and returning to latest reuses media without changing row h
     .toBeCloseTo(8, 1);
   const log = page.getByRole("log");
   // The newest row can render before the virtualizer finishes its initial
-  // scroll. Establish the actual live-edge position before sending wheel input.
+  // scroll. Establish the actual live-edge position before navigating history.
   await expect
     .poll(() => log.evaluate((element) => element.scrollTop))
     .toBeGreaterThan(0);
@@ -154,15 +154,23 @@ test("scrolling away and returning to latest reuses media without changing row h
     () =>
       (window as unknown as ProbeWindow).__mediaScroll.reads["scroll-image-59"],
   );
-  const scrollTopBefore = await log.evaluate((element) => element.scrollTop);
-  const bounds = (await log.boundingBox())!;
-  await page.mouse.move(
-    bounds.x + bounds.width / 2,
-    bounds.y + bounds.height / 2,
-  );
-  // Reach the start of history: newly decoded panorama rows can shrink enough
-  // to consume a fixed wheel distance and leave the latest row mounted.
-  await page.mouse.wheel(0, -scrollTopBefore);
+  // This fixture owns a cache-remount boundary, not browser paging behavior.
+  // Let trusted input reach React's reader handler, then set that boundary in
+  // the same event task so queued layout corrections cannot consume the intent.
+  await log.focus();
+  await expect(log).toBeFocused();
+  await log.evaluate((scroller) => {
+    window.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.target !== scroller || event.key !== "Home") return;
+        event.preventDefault();
+        scroller.scrollTo({ top: 0, behavior: "instant" });
+      },
+      { once: true },
+    );
+  });
+  await log.press("Home");
   await expect.poll(() => log.evaluate((element) => element.scrollTop)).toBe(0);
   await expect(row).toHaveCount(0);
   await page.getByTestId("jump-to-latest").click();
