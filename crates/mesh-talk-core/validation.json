@@ -689,7 +689,7 @@
             "account_authority_negotiates_v4_and_transfers_in_both_directions",
             "account_authority_rejects_events_in_older_followup_envelopes",
             "account_authority_requires_v4_for_fingerprint_and_event_transfer",
-            "eventlog::persist::tests::account_channel_version_index_rejects_invalid_events_and_survives_restart",
+            "eventlog::persist::legacy::tests::account_channel_version_index_rejects_invalid_events_and_survives_restart",
             "node::node::tests::group_summary_and_presence_count_accounts_while_unknown_devices_remain_distinct",
             "node::channel_account_controls::tests::",
             "channel_content_controls_recheck_membership_at_durable_acceptance",
@@ -1823,7 +1823,7 @@
       ],
       "escalation": [
         "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
-        "CLI data-directory ownership changes additionally require the shared core storage profile-lock subprocess tests and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart.",
+        "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --lib storage::profile::tests::profile_lock -- --test-threads=1 and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart.",
         "Dedicated indexed relay lifecycle changes require the complete mesh-talk-node binary tests and, on Unix, the indexed_relay_cli integration target. Exercise all five branches and gateway proxy cancellation; successful Unix SIGTERM evidence does not establish native Windows forced-stop recovery or production-KDF startup performance."
       ],
       "capability": {
@@ -2256,7 +2256,7 @@
             "current_group_metadata_crosses_real_tcp_after_owner_goes_offline",
             "node::session::tests::",
             "eventlog::event::tests::",
-            "eventlog::persist::tests::",
+            "eventlog::persist::legacy::tests::",
             "node::join_history::tests::"
           ]
         }
@@ -2707,6 +2707,25 @@
       },
       "escalation": [
         "Run cargo test --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 separately, then validate the saved stdout/stderr with scripts/evals/backend-runner.mjs --validate-large-folder. The real 110 MiB fixture is explicit backend acceptance, not an ordinary affected-suite test; it proves enqueue/staging and persisted compact-manifest identity, not recipient transfer."
+      ]
+    }
+  ],
+  "prScenarios": [
+    {
+      "id": "discovery-native",
+      "paths": [
+        "crates/mesh-talk-core/src/discovery/",
+        "crates/mesh-talk-core/src/node/session.rs",
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/delivery_observation.rs",
+        "crates/mesh-talk-core/src/node/privacy_runtime.rs",
+        "crates/mesh-talk-core/src/node/session_pool.rs",
+        "crates/mesh-talk-core/src/node/route_timing.rs",
+        "crates/mesh-talk-core/src/node/delivery_retry.rs"
+      ],
+      "native": [
+        "host"
       ]
     }
   ]
