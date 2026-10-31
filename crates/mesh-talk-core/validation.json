@@ -43,6 +43,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
+            "node::serving::channel_metadata_wait_tests::",
             "control_task_lifetime_scope_restores_outer_witness_after_panic",
             "local_cancel_ack_during_remote_commit_rolls_forward_without_action_required",
             "owner_decision_rejects_stale_rejoined_lifetime_with_current_acceptance",

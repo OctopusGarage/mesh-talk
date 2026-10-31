@@ -255,6 +255,8 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) group_file_asset_recv_test_hook: BlockingTestHook,
     #[cfg(test)]
+    pub(in crate::node) channel_metadata_install_test_hook: BlockingTestHook,
+    #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) withheld_file_scopes: Mutex<HashSet<ConversationId>>,
@@ -1178,6 +1180,8 @@ impl Node {
             control_fanout_start_test_hook: Mutex::new(None),
             #[cfg(test)]
             group_file_asset_recv_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            channel_metadata_install_test_hook: Mutex::new(None),
             #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
             #[cfg(test)]

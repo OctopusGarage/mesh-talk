@@ -1189,6 +1189,17 @@ impl Node {
             self.channel_recovery_notify.notify_one();
             return Ok(false);
         }
+        #[cfg(test)]
+        {
+            let hook = self
+                .channel_metadata_install_test_hook
+                .lock()
+                .expect("channel metadata hook lock")
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         if !self.install_current_channel_metadata(conv)? {
             self.channel_checkpoints.finish_runtime(conv, None)?;
             return Ok(true);
@@ -1331,10 +1342,32 @@ impl Node {
         &self,
         channel: ConversationId,
     ) -> Result<(), NodeError> {
-        while !self.prepare_channel_metadata_turn(channel)? {
+        loop {
+            match self.prepare_channel_metadata_turn(channel) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(LogError::StaleCursor) => {
+                    // The source may change between bounded preparation and
+                    // installation. Retry only while this exact participant
+                    // owner is still valid; adoption also returns StaleCursor.
+                    self.channel_checkpoints.check_account()?;
+                    // Physical retirement may have finished before derived
+                    // checkpoint cleanup. That empty source cannot advance.
+                    let retained = self
+                        .log
+                        .lock()
+                        .expect("log lock")
+                        .repository()?
+                        .metadata(&channel)?
+                        .is_some_and(|metadata| metadata.count > 0);
+                    if !retained {
+                        return Err(LogError::StaleCursor.into());
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
             tokio::task::yield_now().await;
         }
-        Ok(())
     }
 
     /// Recovery provenance is supplied by the operation, never inferred from a
@@ -1928,6 +1961,212 @@ impl Node {
         if let Err(error) = result {
             log::warn!("emit_new_messages deferred after storage failure: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod channel_metadata_wait_tests {
+    use super::*;
+    use crate::identity::{account::Account, device::DeviceIdentity};
+
+    fn node(path: &std::path::Path) -> Arc<Node> {
+        let peer = crate::discovery::Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "Peer",
+            9,
+        );
+        super::super::test_support::node_with_files(
+            path,
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        )
+        .0
+    }
+
+    #[tokio::test]
+    async fn public_send_resumes_a_source_change_before_metadata_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let node = node(directory.path());
+        let channel = node.create_channel("before", vec![]).await.unwrap();
+        let source = node
+            .channel_checkpoints
+            .source_binding(channel)
+            .unwrap()
+            .unwrap();
+        let weak = Arc::downgrade(&node);
+        *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+            let node = weak.upgrade().unwrap();
+            assert!(node.log.try_lock().is_ok());
+            assert!(node.channels.try_lock().is_ok());
+            assert!(node.delivery.try_lock().is_ok());
+            node.append_event(
+                channel,
+                crate::eventlog::EventKind::ChannelRename,
+                b"after".to_vec(),
+            )
+            .unwrap();
+            assert!(matches!(
+                node.channel_checkpoints.check_source(&source),
+                Err(LogError::StaleCursor)
+            ));
+        }));
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            node.send_channel_message(channel, b"one accepted message"),
+        )
+        .await
+        .expect("selected metadata preparation must finish after a finite source change");
+        assert!(result.is_ok());
+        assert!(
+            node.channel_metadata_install_test_hook
+                .lock()
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            node.sentlog.lock().unwrap().count(Some(&channel)).unwrap(),
+            1
+        );
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        let state = node
+            .channel_checkpoints
+            .current_state(channel)
+            .unwrap()
+            .unwrap();
+        assert!(state.name() == "after");
+    }
+
+    #[tokio::test]
+    async fn metadata_wait_rejects_retired_participant_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let node = node(directory.path());
+        let channel = node.create_channel("owner fence", vec![]).await.unwrap();
+        let weak = Arc::downgrade(&node);
+        *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+            let node = weak.upgrade().unwrap();
+            node.storage.database().transaction(|connection| {
+                connection.execute(
+                    "UPDATE participant_event_ownership SET generation=generation+1 WHERE singleton=1",
+                    [],
+                )?;
+                Ok(())
+            }).unwrap();
+        }));
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), node.await_channel_metadata(channel))
+                .await
+                .expect("an invalid participant owner must fail without retrying");
+        assert!(matches!(result, Err(NodeError::Log(LogError::StaleCursor))));
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_wait_rejects_retired_source_before_checkpoint_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let node = node(directory.path());
+        let channel = node.create_channel("retired source", vec![]).await.unwrap();
+        let weak = Arc::downgrade(&node);
+        *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+            let node = weak.upgrade().unwrap();
+            assert!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .drop_conversation(&channel)
+                    .unwrap()
+                    > 0
+            );
+            assert!(
+                node.log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .metadata(&channel)
+                    .unwrap()
+                    .is_some_and(|metadata| metadata.count == 0)
+            );
+            let checkpoint_retained: bool = node
+                .storage
+                .database()
+                .read(|connection| {
+                    Ok(connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM channel_current WHERE channel=?1)",
+                        [channel.as_bytes().as_slice()],
+                        |row| row.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert!(
+                checkpoint_retained,
+                "source removal precedes independent checkpoint cleanup"
+            );
+        }));
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), node.await_channel_metadata(channel))
+                .await
+                .expect("a retired source must fail without waiting for background cleanup");
+        assert!(matches!(result, Err(NodeError::Log(LogError::StaleCursor))));
+        // Empty channels that have no obsolete checkpoint keep their existing
+        // successful preparation result; this guard only classifies a failure.
+        assert!(
+            node.await_channel_metadata(ConversationId::new([91; 32]))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_wait_propagates_corrupt_current_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let node = node(directory.path());
+        let channel = node
+            .create_channel("storage failure", vec![])
+            .await
+            .unwrap();
+        let weak = Arc::downgrade(&node);
+        *node.channel_metadata_install_test_hook.lock().unwrap() = Some(Box::new(move || {
+            let node = weak.upgrade().unwrap();
+            node.storage
+                .database()
+                .transaction(|connection| {
+                    connection.execute(
+                        "UPDATE channel_current SET state=X'00' WHERE channel=?1",
+                        [channel.as_bytes().as_slice()],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }));
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), node.await_channel_metadata(channel))
+                .await
+                .expect("storage corruption must not become a preparation retry");
+        assert!(matches!(
+            result,
+            Err(NodeError::Log(LogError::CorruptFile(_)))
+        ));
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
     }
 }
 

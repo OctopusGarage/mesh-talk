@@ -1552,6 +1552,13 @@ plaintext while local history keeps its tombstone. Dormant missing-target retrie
 remain nonblocking. Constructor
 and remaining synchronous compatibility callers still require separate bounded
 caller integration; this preparation interface does not establish that bound.
+Async local channel controls and sends await selected metadata in bounded turns.
+A concurrent source change resumes that preparation only while the checkpoint's
+captured account and generation remain valid and signed source rows remain.
+Retired participant handles, removed sources awaiting derived cleanup, and
+non-stale storage failures return immediately; preparation retries do not replay
+message acceptance or its durable journal transaction.
+
 An ordinary warm Node open loads current channel metadata without decoding completed
 signed channel history. Source 8 independently publishes legacy channel sender
 snapshots; only each channel's active sending epoch is loaded into memory.

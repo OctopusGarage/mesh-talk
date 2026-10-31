@@ -27,6 +27,17 @@ fn start(root: &Path, owner: &str, name: &str, port: u16) -> (NodeRuntime, Recei
     (runtime, rx)
 }
 
+fn stop_and_close(runtime: NodeRuntime) {
+    tauri::async_runtime::block_on(async {
+        let retired = tokio::time::timeout(Duration::from_secs(15), runtime.stop_for_storage())
+            .await
+            .expect("Timed out joining retired runtime producers");
+        retired
+            .close()
+            .expect("Retired profile must close before reopen");
+    });
+}
+
 fn until(description: &str, check: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while !check() {
@@ -451,14 +462,15 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     assert_eq!(group_row["local_cleanup_complete"], true);
     assert!(group_row["history_floor"].is_string());
 
-    // Drop every handle before opening stores again, exactly as logout/relaunch does.
+    // Join producers and close the exact profile before reopening, as the
+    // production retirement boundary does. A dead Weak<Node> alone can precede
+    // field destruction and does not prove the storage lease has been released.
     let before_restart = alice_handle.account_history(&bob_account, 20).unwrap();
     let old_node = Arc::downgrade(&alice_handle);
-    nodes.0.blocking_write().take();
+    let retiring = nodes.0.blocking_write().take().unwrap();
     drop(alice_handle);
-    until("old runtime tasks release their node and stores", || {
-        old_node.upgrade().is_none()
-    });
+    stop_and_close(retiring);
+    assert!(old_node.upgrade().is_none());
     drop((bob, bob_two, bob_handle));
     let (restarted, _) = start(root.path(), "alice", "Alice", a_port);
     assert_eq!(restarted.account_id(), alice_account);
@@ -558,11 +570,10 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             .is_some_and(|floor| floor.split(':').count() == 3)
     );
     assert_eq!(personal_row["local_cleanup_complete"], true);
-    nodes.0.blocking_write().take();
+    let retiring = nodes.0.blocking_write().take().unwrap();
     drop(deletion_handle);
-    until("deleted runtime releases stores", || {
-        deletion_weak.upgrade().is_none()
-    });
+    stop_and_close(retiring);
+    assert!(deletion_weak.upgrade().is_none());
     let (after_delete, _) = start(root.path(), "alice", "Alice", a_port);
     assert!(
         after_delete

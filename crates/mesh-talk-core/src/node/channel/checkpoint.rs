@@ -170,6 +170,12 @@ impl ChannelCheckpointStore {
             presentation_query: std::sync::Mutex::new(Default::default()),
         })
     }
+    /// Source preparation may resume after a concurrent append, but an old
+    /// participant handle must fail even when its account becomes active again.
+    pub(in crate::node) fn check_account(&self) -> Result<(), LogError> {
+        self.profile.database().read(|c| self.check_account_on(c))
+    }
+
     fn check_account_on(&self, c: &Connection) -> Result<(), LogError> {
         if let Some(owner) = &self.owner {
             return check_event_owner_on(c, owner);

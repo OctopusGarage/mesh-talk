@@ -1899,9 +1899,46 @@ async fn account_history_worker_drains_continuation_without_waiting_retry_interv
     }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     sibling_peer(&receiver, &source, listener.local_addr().unwrap());
+    #[derive(Default)]
+    struct ContinuationTiming {
+        completed_page: Option<std::time::Instant>,
+        longest_gap: Duration,
+        continued_requests: usize,
+    }
+    let continuation = Arc::new(std::sync::Mutex::new(ContinuationTiming::default()));
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let expected = source.identity.public();
+        let continuation = continuation.clone();
+        move |public, phase| {
+            if public != expected {
+                return;
+            }
+            let mut timing = continuation.lock().unwrap();
+            if phase == "history_end outcome=ok" {
+                // The complete page has passed authenticated transport and
+                // durable import. Cold startup and its writes precede this.
+                timing.completed_page = Some(std::time::Instant::now());
+            } else if phase.starts_with("history_begin ") {
+                // Include a reset cursor: periodic repair must not hide lost
+                // continuation state by beginning a new comparison instead.
+                if let Some(completed) = timing.completed_page.take() {
+                    timing.longest_gap = timing.longest_gap.max(completed.elapsed());
+                }
+                if phase == "history_begin after=true" {
+                    timing.continued_requests += 1;
+                }
+            }
+        }
+    }));
     let server = tokio::spawn(source.clone().run_accept_loop(listener));
-    let worker = tokio::spawn(receiver.clone().run_account_history_loop());
-    let outcome = tokio::time::timeout(Duration::from_secs(3), async {
+    // Replace only the original startup tick with one retained initial demand.
+    // Disable periodic repair so it cannot rescue a lost continuation even if
+    // the cold first page finishes just before the next ten-second tick.
+    receiver.account_sync_notify.notify_one();
+    let worker = tokio::spawn(receiver.clone().run_account_history_loop_with_tick(None));
+    // Bound the complete real transfer separately from every continuation gap.
+    // No subsequent synthetic wake or explicit preparation turn is injected.
+    let outcome = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if receiver
                 .account_history(&receiver.account_id(), 100)
@@ -1915,11 +1952,21 @@ async fn account_history_worker_drains_continuation_without_waiting_retry_interv
         }
     })
     .await;
+    *receiver.account_client_test_hook.lock().unwrap() = None;
     worker.abort();
     server.abort();
     let _ = worker.await;
     let _ = server.await;
-    outcome.expect("backlog drains promptly instead of waiting ten seconds per page");
+    outcome.expect("all forty real history messages must finish within the fixture bound");
+    let timing = continuation.lock().unwrap();
+    assert!(
+        timing.continued_requests > 0,
+        "a completed page must dispatch its retained continuation"
+    );
+    assert!(
+        timing.longest_gap < Duration::from_secs(3),
+        "every follow-up must resume within three seconds, without the ten-second periodic retry"
+    );
 }
 
 #[tokio::test]
