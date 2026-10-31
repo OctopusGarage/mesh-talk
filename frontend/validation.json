@@ -510,11 +510,18 @@
       "id": "frontend-history",
       "paths": [
         "frontend/src/store/conversationHistory.ts",
-        "frontend/src/store/conversationHistory.test.ts"
+        "frontend/src/store/conversationHistory.test.ts",
+        "frontend/src/store/conversationReactions.ts",
+        "frontend/src/store/conversationReactions.test.ts",
+        "frontend/src/features/chat/ReactionSummaryDialog.tsx",
+        "frontend/e2e/reaction-summaries.spec.ts"
       ],
       "frontend": [
         "src/store/conversationHistory.test.ts",
-        "src/lib/readDeadline.test.ts"
+        "src/lib/readDeadline.test.ts",
+        "src/store/conversationReactions.test.ts",
+        "src/store/chat.test.ts",
+        "src/features/chat/MessageBubble.test.ts"
       ],
       "consumers": ["frontend-chat"],
       "capability": {
@@ -523,6 +530,10 @@
         "invariants": [
           {
             "name": "One running automatic bundle and one pending invalidation wait for all original native reads; explicit archive expansion preserves its baseline policy",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Selected reaction queries share one physical native read, retain a bounded summary prefix, and preserve history/read progress while projections are pending.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
@@ -2917,6 +2928,19 @@
         "frontend/e2e/forwarding.spec.ts"
       ],
       "browser": ["e2e/forwarding.spec.ts"],
+      "native": ["host"]
+    },
+    {
+      "id": "frontend-selected-reactions-acceptance",
+      "paths": [
+        "frontend/src/store/conversationReactions.ts",
+        "frontend/src/features/chat/ReactionSummaryDialog.tsx",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/e2e/reaction-summaries.spec.ts",
+        "src-tauri/src/owner_commands/reactions.rs"
+      ],
+      "browser": ["e2e/reaction-summaries.spec.ts", "e2e/chat.spec.ts"],
       "native": ["host"]
     }
   ]

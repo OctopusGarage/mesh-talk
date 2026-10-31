@@ -10,8 +10,10 @@ use mesh_talk_core::eventlog::EventId;
 use serde::Serialize;
 
 mod group_operations;
+mod reactions;
 mod search;
 pub use group_operations::*;
+pub use reactions::*;
 pub use search::*;
 
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
@@ -732,6 +734,7 @@ mod tests {
                     super::owner_cancel_account_group_operation,
                     super::owner_search_recent,
                     super::owner_search_context,
+                    super::owner_reaction_summaries,
                     super::owner_reveal_message,
                     super::owner_reveal_image,
                     crate::message_favorites::owner_list_message_favorites,
@@ -2493,6 +2496,60 @@ mod tests {
     }
 
     #[test]
+    fn registered_reaction_summaries_are_selected_bounded_and_account_owned() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let id = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({"owner":"alice","account":account,"text":"selected reaction"}),
+            )
+            .unwrap();
+        fixture
+            .invoke(
+                "react_account",
+                serde_json::json!({"account":account,"target":id,"emoji":"👍","remove":false}),
+            )
+            .unwrap();
+        let mut request = serde_json::json!({"owner":"alice","kind":"account","target":account,"targets":[id],"cursor":null});
+        let mut completed = None;
+        for _ in 0..128 {
+            let response = fixture
+                .invoke("owner_reaction_summaries", request.clone())
+                .unwrap();
+            assert!(serde_json::to_vec(&response).unwrap().len() <= 1024 * 1024);
+            if response["pending"] == false {
+                completed = Some(response);
+                break;
+            }
+            assert_eq!(response["items"], serde_json::json!([]));
+            assert!(response["next"].is_string());
+            request["cursor"] = response["next"].clone();
+        }
+        let response = completed.expect("finite selected reaction projection completes");
+        assert_eq!(
+            response["items"],
+            serde_json::json!([{"target":id,"emoji":"👍","count":1,"from_me":true}])
+        );
+        assert_eq!(response["next"], serde_json::Value::Null);
+        request["owner"] = serde_json::json!("bob");
+        assert_eq!(
+            fixture
+                .invoke("owner_reaction_summaries", request.clone())
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+        request["owner"] = serde_json::json!("alice");
+        request["targets"] = serde_json::json!(vec![id; 65]);
+        assert_eq!(
+            fixture
+                .invoke("owner_reaction_summaries", request)
+                .unwrap_err()["kind"],
+            "invalid-input"
+        );
+    }
+
+    #[test]
     fn registered_search_validates_inputs_and_explicit_owner() {
         let fixture = Fixture::new();
         for kind in ["account", "channel", "legacy-device"] {
@@ -3090,6 +3147,10 @@ mod tests {
         let fixture = Fixture::new();
         for change in ["relogin", "logout", "lock"] {
             for (command, body) in [
+                (
+                    "owner_reaction_summaries",
+                    serde_json::json!({"owner":"alice","kind":"account","target":"01".repeat(16),"targets":["01".repeat(32)],"cursor":null}),
+                ),
                 (
                     "owner_search_recent",
                     serde_json::json!({"owner":"alice","query":"secret"}),

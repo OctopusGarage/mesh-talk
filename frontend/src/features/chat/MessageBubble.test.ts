@@ -13,9 +13,9 @@ vi.mock("@/store/packs", () => ({
 vi.mock("./DeliveryFooter", () => ({ DeliveryFooter: () => null }));
 
 it.each([
-  { from_me: true, who: ["offline-sibling"], mine: true },
-  { from_me: false, who: ["local-device"], mine: false },
-  { who: ["local-device"], mine: true },
+  { from_me: true, count: 1, mine: true },
+  { from_me: false, count: 1, mine: false },
+  { from_me: true, count: 100000, mine: true },
 ])(
   "uses certified ownership consistently for chip styling and accessible actions: %j",
   ({ mine, ...ownership }) => {

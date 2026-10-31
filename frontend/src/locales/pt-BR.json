@@ -382,7 +382,13 @@
     "reEdit": "Editar novamente",
     "mentionedYou": "Mencionou você",
     "reactionAdd": "Adicionar reação {{emoji}}",
-    "reactionRemove": "Remover sua reação {{emoji}}"
+    "reactionRemove": "Remover sua reação {{emoji}}",
+    "reactionsTitle": "Reações",
+    "reactionsDescription": "Contagens desta mensagem. Selecione uma reação para adicionar ou remover a sua.",
+    "reactionsEmpty": "Nenhuma reação",
+    "reactionsStart": "Voltar ao início",
+    "reactionsNext": "Próxima página",
+    "reactionsMore": "Mais reações"
   },
   "transfer": {
     "preparing": "Preparando arquivo…",

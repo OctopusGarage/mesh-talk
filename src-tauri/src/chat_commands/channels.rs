@@ -1,6 +1,5 @@
 use super::{
-    ChannelMemberInfo, ChannelMembersInfo, HistoryItem, NodeState, ReactionInfo, parse_channel_id,
-    parse_event_id, to_reaction_infos,
+    ChannelMemberInfo, ChannelMembersInfo, HistoryItem, NodeState, parse_channel_id, parse_event_id,
 };
 use crate::{commands::CommandError, runtime_admission::RuntimeAdmission, state::AppState};
 use serde::Serialize;
@@ -729,22 +728,6 @@ pub async fn react_channel(
             })
         })
         .await
-}
-
-#[tauri::command]
-pub async fn channel_reactions(
-    state: tauri::State<'_, NodeState>,
-    channel_id: String,
-) -> Result<Vec<ReactionInfo>, CommandError> {
-    let channel = parse_channel_id(&channel_id)?;
-    let guard = state.0.read().await;
-    let rt = guard.as_ref().ok_or_else(CommandError::not_started)?;
-    // Only the authenticated account principal proves account ownership.
-    // Unknown/adopted historical physical authors remain explicitly unowned.
-    Ok(to_reaction_infos(
-        rt.channel_reactions(channel)?,
-        Some(rt.account_id()),
-    ))
 }
 
 #[cfg(test)]

@@ -21,6 +21,11 @@ const conversation: Conversation = {
   name: "Friend",
 };
 const key = "account:friend";
+const historyBundleReads = () =>
+  invoke.mock.calls.filter(
+    ([command]) =>
+      command === "owner_account_history" || command === "owner_search_context",
+  );
 const row = (id: string) => ({
   id,
   from_me: false,
@@ -46,7 +51,7 @@ beforeEach(() => {
   });
 });
 
-it.each(["owner_account_history", "account_reactions"])(
+it.each(["owner_account_history"])(
   "releases the history spinner when %s stalls and retries without restarting",
   async (stalledCommand) => {
     vi.useFakeTimers();
@@ -500,7 +505,7 @@ it("coalesces a burst into one running automatic reload and one shared follow-up
     );
   }
   expect(finishes).toHaveLength(1);
-  expect(invoke.mock.calls).toHaveLength(2);
+  expect(historyBundleReads()).toHaveLength(1);
   finishes[0]([row("first")]);
   expect(await first).toBe(true);
   await vi.waitFor(() => expect(finishes).toHaveLength(2));
@@ -509,10 +514,10 @@ it("coalesces a burst into one running automatic reload and one shared follow-up
   expect(store.getState().messages[key].map((message) => message.id)).toEqual([
     "latest",
   ]);
-  expect(invoke.mock.calls).toHaveLength(4);
+  expect(historyBundleReads()).toHaveLength(2);
 });
 
-it.each(["owner_account_history", "account_reactions", "owner_search_context"])(
+it.each(["owner_account_history", "owner_search_context"])(
   "keeps automatic reload admission occupied until timed-out %s settles",
   async (stalledCommand) => {
     vi.useFakeTimers();
@@ -560,7 +565,7 @@ it.each(["owner_account_history", "account_reactions", "owner_search_context"])(
         expect(store.getState().historyError).toBe(key);
       for (let index = 0; index < 1000; index++)
         requestConversationReload(store.setState, store.getState);
-      expect(invoke.mock.calls).toHaveLength(3);
+      expect(historyBundleReads()).toHaveLength(2);
       expect(vi.getTimerCount()).toBe(0);
       invoke.mockImplementation((command: string) =>
         Promise.resolve(
@@ -570,7 +575,7 @@ it.each(["owner_account_history", "account_reactions", "owner_search_context"])(
       finishes[0]([]);
       await vi.advanceTimersByTimeAsync(0);
       expect(await queued).toBe(false);
-      expect(invoke.mock.calls).toHaveLength(6);
+      expect(historyBundleReads()).toHaveLength(4);
       expect(
         store.getState().messages[key].map((message) => message.id),
       ).toEqual(["fresh"]);
@@ -606,15 +611,15 @@ it("waits for every automatic bundle read after an early rejection", async () =>
     const queued = requestConversationReload(store.setState, store.getState);
     expect(await running).toBe(false);
     expect(store.getState().historyError).toBe(key);
-    expect(invoke.mock.calls).toHaveLength(3);
-    finishes[0]();
+    expect(historyBundleReads()).toHaveLength(2);
+    expect(finishes).toHaveLength(1);
     await Promise.resolve();
     await Promise.resolve();
-    expect(invoke.mock.calls).toHaveLength(3);
+    expect(historyBundleReads()).toHaveLength(2);
     invoke.mockResolvedValue([]);
-    finishes[1]();
+    finishes[0]();
     expect(await queued).toBe(true);
-    expect(invoke.mock.calls).toHaveLength(6);
+    expect(historyBundleReads()).toHaveLength(4);
   } finally {
     finishes.forEach((finish) => finish());
   }
@@ -651,7 +656,7 @@ it.each(["owner", "run", "identity", "caller"])(
     finishes.forEach((finish) => finish());
     expect(await running).toBe(false);
     expect(await queued).toBe(false);
-    expect(invoke.mock.calls).toHaveLength(2);
+    expect(historyBundleReads()).toHaveLength(1);
     expect(store.getState().messages[key]).toBeUndefined();
   },
 );
@@ -686,14 +691,14 @@ it("admits the replacement session only after old automatic native work settles"
       store.getState,
     );
     expect(await oldQueued).toBe(false);
-    expect(invoke.mock.calls).toHaveLength(2);
+    expect(historyBundleReads()).toHaveLength(1);
     finishes[0]();
     expect(await running).toBe(false);
     expect(await replacement).toBe(true);
     expect(store.getState().messages[key].map((message) => message.id)).toEqual(
       ["replacement"],
     );
-    expect(invoke.mock.calls).toHaveLength(4);
+    expect(historyBundleReads()).toHaveLength(2);
   } finally {
     finishes.forEach((finish) => finish());
   }
@@ -722,7 +727,7 @@ it("lets explicit reloads satisfy already queued automatic invalidations", async
   finish();
   expect(await running).toBe(false);
   expect(await queued).toBe(true);
-  expect(invoke.mock.calls).toHaveLength(4);
+  expect(historyBundleReads()).toHaveLength(2);
   expect(store.getState().messages[key][0].id).toBe("explicit");
 });
 
@@ -786,7 +791,7 @@ it("keeps a queued live invalidation when a coalesced roster request retires", a
   finish();
   await running;
   expect(await live).toBe(true);
-  expect(invoke.mock.calls).toHaveLength(4);
+  expect(historyBundleReads()).toHaveLength(2);
 });
 
 it("preserves archive expansion baselines while satisfying a live reload burst", async () => {

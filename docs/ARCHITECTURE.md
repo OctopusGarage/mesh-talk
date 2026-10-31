@@ -2111,7 +2111,7 @@ limit; authenticated checkpoint compaction remains a separate protocol decision.
 
 Automatic desktop history refreshes share one running native-read bundle and one
 coalesced pending invalidation. The running slot remains occupied until every
-original history, reaction and context read settles, even after a presentation
+original history and context read settles, even after a presentation
 deadline or an early rejection. Explicit navigation, search and retry retain their
 own admission path and preserve their history-baseline policy. The existing global
 64-read admission limit and owner/run fences still apply. A native read that never
@@ -2121,6 +2121,17 @@ A queued presentation waiter has one shared ten-second deadline, so a stalled
 history operation cannot hold the roster-refresh coordinator indefinitely. This
 deadline reports incomplete history without clearing the pending invalidation,
 advancing its revision, or releasing native admission.
+
+Selected reaction summaries have an independent owner-fenced native read lane.
+The desktop requests at most 64 visible message IDs per turn; the core returns
+at most 128 summary rows within its 1 MiB serialized budget, with explicit pending
+projection continuations. Replies contain counts and authenticated own-account
+membership, without retaining author lists. One physical summary request remains
+admitted until native settlement; inline refreshes retain only the latest pending
+demand, and a single-message inspector shares that admission. The active renderer
+cache keeps at most 512 summaries and 2 MiB of charged strings. Incomplete targets
+open a page-replacing inspector; subsequent pages never append an unbounded list.
+Reaction projection does not delay the existing history or read-ledger commit.
 
 The standalone legacy SDK's profile maintenance preserves referenced ancestors
 and the latest two safe profile leaves per author. Pending conversations share one atomic rewrite rather

@@ -12,6 +12,8 @@ export interface ConversationCacheState {
   cacheOrder: string[];
   messages: Record<string, ChatMessage[]>;
   reactions: Record<string, ReactionInfo[]>;
+  /** Targets with additional summary pages or a retryable projection. Only the active owner is retained. */
+  reactionRemainder: Record<string, string[]>;
   historyRequests: Record<string, number>;
   historyLimits: Record<string, number>;
   deleted: Record<string, string[]>;
@@ -23,6 +25,7 @@ export function emptyConversationCache(): ConversationCacheState {
     cacheOrder: [],
     messages: {},
     reactions: {},
+    reactionRemainder: {},
     historyRequests: {},
     historyLimits: {},
     deleted: {},
