@@ -1540,8 +1540,22 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
     let external_runtime =
         external_runtime.expect("the external owner-rename peer owns its runtime");
     owner.publish_account_group_access(&mut None);
-    pull_group_control(&reference, &owner, addresses[0], genesis.conversation_id).await;
-    pull_group_control(&member, &owner, addresses[0], genesis.conversation_id).await;
+    cold_account_control_setup(
+        observe_account_fixture_condition(|| {
+            [
+                (&reference, &owner),
+                (&member, &owner),
+                (&owner, &reference),
+            ]
+            .into_iter()
+            .all(|(node, peer)| has_account_group_operation_support(node, peer, None))
+        }),
+        async {
+            pull_group_control(&reference, &owner, addresses[0], genesis.conversation_id).await;
+            pull_group_control(&member, &owner, addresses[0], genesis.conversation_id).await;
+        },
+    )
+    .await;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner
@@ -1552,16 +1566,6 @@ async fn reference_owner_rename_commits_one_original_owner_effect_over_noise() {
     );
     assert!(reference.channel_members(group).is_empty());
     assert!(!reference.channel_can_manage(group));
-    cold_account_setup(async {
-        loop {
-            let requester_ready = reference.group_operation_versions.lock().unwrap()
-                .get(&owner.user_id()).is_some_and(|support| support.public == owner.identity.public());
-            let source_ready = owner.group_operation_versions.lock().unwrap()
-                .get(&reference.user_id()).is_some_and(|support| support.public == reference.identity.public());
-            if requester_ready && source_ready { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }).await.expect("cold authenticated capability exchanges must progress in both directions without submitting work or manual polling");
     // Observe only the selected route. Task IDs correlate concurrent lanes
     // without changing the authenticated exchange or adding any traffic.
     let private_trace =

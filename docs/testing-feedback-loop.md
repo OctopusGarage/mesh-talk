@@ -533,6 +533,15 @@ producers. The inbound-only incoming-Wake fixture drives its existing two setup
 directions inside that budget before observing readiness; a passive wait there
 would have no producer to satisfy it. No extra warmup exchange is added.
 
+Reference Text/Sticker, owner rename and private policy/dissolve scenarios use the
+same ordering. Keep role-bootstrap protocol tests and deliberate capability-refusal
+cases focused on their original acceptance boundary rather than warming them.
+First public-fanout fault arrival also belongs to the cold owner: canonical
+publication-order tests still inspect the exact committed result and signed
+metadata at the first connection while fanout is pending. Consecutive-control
+tests retain both original eight-second commit/progress assertions, establishing
+the real live held response between them before admitting the second operation.
+
 `selected_source_cold_capability_setup_precedes_role_page_budget` holds the real
 first authenticated Control responses beyond the role-page budget in a two-device
 bootstrap fixture. It then requires reciprocal capabilities and the exact signed

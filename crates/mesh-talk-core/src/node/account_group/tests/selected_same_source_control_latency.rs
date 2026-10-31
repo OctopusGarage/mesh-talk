@@ -1601,6 +1601,27 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
     // Keep the setup interval too: a natural Control read may legitimately
     // yield to authenticated publication before either operation is admitted.
     let abort_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let prefix_consumption = || {
+        siblings
+            .iter()
+            .enumerate()
+            .map(|(index, current)| {
+                let consumed = prefix_metadata
+                    .iter()
+                    .filter(|meta| current.operation_input_consumed_for_test(meta))
+                    .count();
+                (index, consumed, prefix_metadata.len())
+            })
+            .collect::<Vec<_>>()
+    };
+    let cold_prefix_consumed = prefix_consumption();
+    eprintln!("diagnostic_cold_prefix_consumed={cold_prefix_consumed:?}");
+    record_b_trace(
+        &abort_trace,
+        b_clock,
+        "fixture",
+        format!("cold_prefix_consumed={cold_prefix_consumed:?}"),
+    );
     let active_a_page = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let control_pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let classes = Arc::new(Mutex::new(Vec::new()));
@@ -1750,7 +1771,11 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         let trace = abort_trace.clone();
         let peer = reference.identity.public();
         move |observed, phase| {
-            if phase.starts_with("operation_local_published") {
+            if phase.starts_with("operation_owner ")
+                || phase.starts_with("operation_publication_owner ")
+            {
+                record_b_trace(&trace, b_clock, "A_owner_phase", phase);
+            } else if phase.starts_with("operation_local_published") {
                 if let Some(source) = source.upgrade() {
                     record_b_trace(
                         &trace,
@@ -2120,6 +2145,14 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
     *active_operation.lock().unwrap() = Some(id);
+    let admission_prefix_consumed = prefix_consumption();
+    eprintln!("diagnostic_A_admission_prefix_consumed={admission_prefix_consumed:?}");
+    record_b_trace(
+        &abort_trace,
+        b_clock,
+        "fixture",
+        format!("A_admission_prefix_consumed={admission_prefix_consumed:?}"),
+    );
     record_b_trace(&abort_trace, b_clock, "fixture", "A_admission_begin".into());
     reference
         .submit_account_group_operation_if(
@@ -2146,6 +2179,7 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         .unwrap();
     record_b_trace(&abort_trace, b_clock, "fixture", "A_admitted".into());
     let receipt = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut observed_committed = false;
         loop {
             let requester = reference
                 .account_group_operation_status(&account.account_id(), id)
@@ -2153,6 +2187,19 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             let source = owner
                 .account_group_operation_status(&account.account_id(), id)
                 .unwrap();
+            if !observed_committed
+                && source
+                    .as_ref()
+                    .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)
+            {
+                observed_committed = true;
+                record_b_trace(
+                    &abort_trace,
+                    b_clock,
+                    "fixture",
+                    "A_source_committed_first_observed".into(),
+                );
+            }
             if let (Some(requester), Some(source)) = (requester, source)
                 && requester.phase == AccountGroupOperationPhase::Committed
                 && source.phase == AccountGroupOperationPhase::Committed
@@ -2190,6 +2237,11 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         }
         .into(),
     );
+    if std::env::var_os("MESH_TALK_OPERATION_TRACE").is_some()
+        || std::env::var("MESH_TALK_TEST_TIMING").is_ok_and(|value| value == "1")
+    {
+        eprintln!("A_receipt_owner_phases={:?}", abort_trace.lock().unwrap());
+    }
     let before_release_requester = reference
         .account_group_operation_status(&account.account_id(), id)
         .unwrap();

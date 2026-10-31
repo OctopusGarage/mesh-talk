@@ -114,6 +114,19 @@ impl Node {
     pub(in crate::node) fn maintain_account_group_operation_effects(
         self: &Arc<Self>,
     ) -> Vec<ConversationId> {
+        #[cfg(test)]
+        let phase_clock = std::time::Instant::now();
+        #[cfg(test)]
+        let owner_phase = |phase: &str| {
+            self.trace_account_client(&self.identity.public(), || {
+                format!(
+                    "operation_owner phase={phase} elapsed_ms={}",
+                    phase_clock.elapsed().as_millis()
+                )
+            });
+        };
+        #[cfg(test)]
+        owner_phase("legacy_inputs_begin");
         // Link the separately signed child namespace before ordinary admission
         // can interpret a physical departure as a whole-account coordinator.
         for (key, hash, frame) in self.unseen_account_group_legacy_inputs() {
@@ -218,6 +231,8 @@ impl Node {
                     .insert(key, hash);
             }
         }
+        #[cfg(test)]
+        owner_phase("legacy_inputs_end_ordinary_inputs_begin");
         for (key, hash, frame) in self.unseen_account_group_operation_inputs() {
             if self
                 .operation_seen
@@ -231,6 +246,14 @@ impl Node {
             let mut processed = true;
             for request in frame.projection.requests {
                 if request.reference.executor.device == self.identity.public() {
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        format!(
+                            "operation_owner request_observed id={:?} elapsed_ms={}",
+                            request.reference.id,
+                            phase_clock.elapsed().as_millis()
+                        )
+                    });
                     let query = (request.reference.clone(), request.nonce);
                     if self.admit_source_group_request(request).is_err()
                         || self
@@ -297,6 +320,8 @@ impl Node {
                     .insert(key, hash);
             }
         }
+        #[cfg(test)]
+        owner_phase("ordinary_inputs_end_ready_begin");
         let ready = self
             .group_operations
             .lock()
@@ -321,6 +346,14 @@ impl Node {
             if self.admit_source_group_request(request).is_err() {
                 continue;
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!(
+                    "operation_owner execute_begin id={:?} elapsed_ms={}",
+                    entry.reference.id,
+                    phase_clock.elapsed().as_millis()
+                )
+            });
             match self.execute_source_control(entry.reference.id) {
                 Ok(Some(group)) => {
                     fanout.insert(group.as_bytes().to_owned());
@@ -328,16 +361,36 @@ impl Node {
                 Ok(None) => {}
                 Err(error) => log::debug!("account group effect awaits recovery: {error}"),
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!(
+                    "operation_owner execute_end id={:?} elapsed_ms={}",
+                    entry.reference.id,
+                    phase_clock.elapsed().as_millis()
+                )
+            });
         }
         // Publish each affected canonical source before an unrelated slow
         // member can hold up the existing public control distribution.
         for group in &fanout {
             let group = ConversationId::new(*group);
+            #[cfg(test)]
+            owner_phase("access_publication_begin");
             self.publish_account_group_access_for(group);
+            #[cfg(test)]
+            owner_phase("access_publication_end_inventory_begin");
             self.publish_group_inventory_for(group);
+            #[cfg(test)]
+            owner_phase("inventory_publication_end");
         }
+        #[cfg(test)]
+        owner_phase("operation_publication_begin");
         self.publish_account_group_operations();
+        #[cfg(test)]
+        owner_phase("operation_publication_end_legacy_begin");
         self.publish_account_group_legacy_operations();
+        #[cfg(test)]
+        owner_phase("legacy_publication_end");
         // No host, journal, membership or delivery guard escapes local work.
         fanout.into_iter().map(ConversationId::new).collect()
     }
