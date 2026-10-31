@@ -25,6 +25,28 @@ test("Windows native helper only emits bounded owned-PID control keys with ABI-s
   assert.ok(runner.includes("redact(child.output.slice(-2000))"));
   assert.ok(runner.includes("nativeWindowsKeyboardScript(pid, value)"));
 });
+test("every emitted Windows control key is accepted by the native policy", async () => {
+  const { nativeWindowsKeyboardScript } = await import("./native-core-scenarios.mjs");
+  for (const [key, vk] of [["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33], ["\uE00F", 34]]) {
+    const script = nativeWindowsKeyboardScript(12345, key);
+    const rejected = script.match(/if \((vk !=[^)]*)\) throw new InvalidOperationException\("Unsupported control key"\)/)?.[1];
+    assert.ok(rejected, "generated native key rejection policy is present");
+    const acceptedKeys = [...rejected.matchAll(/vk != (\d+)/g)].map(match => Number(match[1]));
+    assert.ok(acceptedKeys.includes(vk), `emitted VK${vk} is accepted by native policy`);
+    assert.deepEqual(acceptedKeys, [9, 13, 27, 33, 34], "native policy rejects every unsupported VK");
+  }
+});
+test("Windows paging keys retain the extended-key flag without changing other controls", async () => {
+  const { nativeWindowsKeyboardScript } = await import("./native-core-scenarios.mjs");
+  for (const [key, vk, extended] of [["\uE004", 9, false], ["\uE007", 13, false], ["\uE00C", 27, false], ["\uE00E", 33, true], ["\uE00F", 34, true]]) {
+    const script = nativeWindowsKeyboardScript(12345, key);
+    const policy = script.match(/uint extended = (.*?) \? 1u : 0u;/)?.[1];
+    assert.ok(policy, "generated native extended-key policy is present");
+    const extendedKeys = [...policy.matchAll(/vk == (\d+)/g)].map(match => Number(match[1]));
+    assert.equal(extendedKeys.includes(vk), extended, `VK${vk} native extended flag`);
+    assert.deepEqual(extendedKeys, [33, 34], "only paging keys use the extended flag");
+  }
+});
 test("cold receipt checkpoint requires exited peer and durable original IDs before navigation", async () => {
   const { receiptColdRestartCheckpoint } = await import("./native-core-scenarios.mjs");
   const ids = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];

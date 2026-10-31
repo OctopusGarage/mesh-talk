@@ -53,8 +53,18 @@ second line
 
 // CI-only OS input, never DOM keyboard events. INPUT's union includes MOUSEINPUT
 // so Marshal.SizeOf retains the native x64 40-byte layout (not keyboard-only 32).
+const nativeWindowsControlKeys = new Map([
+  ["\uE004", { vk: 9, extended: false }],
+  ["\uE007", { vk: 13, extended: false }],
+  ["\uE00C", { vk: 27, extended: false }],
+  ["\uE00E", { vk: 33, extended: true }],
+  ["\uE00F", { vk: 34, extended: true }],
+]);
 export function nativeWindowsKeyboardScript(pid, key) {
-  const vk = new Map([["\uE004", 9], ["\uE007", 13], ["\uE00C", 27], ["\uE00E", 33], ["\uE00F", 34]]).get(key);
+  const vk = nativeWindowsControlKeys.get(key)?.vk;
+  const controls = [...nativeWindowsControlKeys.values()];
+  const rejected = controls.map(control => `vk != ${control.vk}`).join(" && ");
+  const extended = controls.filter(control => control.extended).map(control => `vk == ${control.vk}`).join(" || ");
   assert.ok(Number.isSafeInteger(pid) && pid > 0 && pid <= 0xffffffff, "owned Windows PID");
   assert.ok(vk, "allowlisted native control key");
   return `$ErrorActionPreference = 'Stop';
@@ -121,9 +131,9 @@ public static class NativeKeyboard {
       "}; SetForegroundWindow=" + activated + (activationError.HasValue ? "; SetForegroundWindowError=" + activationError.Value : ""));
   }
   public static void SendOwned(uint ownedPid, ushort vk) {
-    if (vk != 9 && vk != 13 && vk != 27 && vk != 33) throw new InvalidOperationException("Unsupported control key");
+    if (${rejected}) throw new InvalidOperationException("Unsupported control key");
     const uint KEYEVENTF_KEYUP = 2;
-    uint extended = vk == 33 ? 1u : 0u;
+    uint extended = ${extended} ? 1u : 0u;
     INPUT[] inputs = new INPUT[2];
     inputs[0].type = inputs[1].type = 1;
     inputs[0].data.ki.wVk = inputs[1].data.ki.wVk = vk;

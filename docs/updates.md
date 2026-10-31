@@ -291,7 +291,11 @@ Prepare and review the intended next version using the [version lifecycle](#vers
 test the chosen main-branch source, and use the existing `vX.Y.Z` draft build and explicit
 **publish_release** process.
 A Nightly release is not promoted by changing its prerelease flag or renaming its assets. Stable
-publication retains its source-check, artifact-verification and container gates. Nightly tags
+publication retains its source-check, artifact-verification and container gates.
+Current-source acceptance includes ASan and mutation-runner contracts. Stable
+rechecks that same policy immediately before public container upload and final
+release publication, after all intervening verification/build preparation; a newly
+failed or pending source check prevents the corresponding public mutation. Nightly tags
 must never be made the repository's latest Stable release.
 
 Local validation selects the updater, frontend update store/browser flow and release-script

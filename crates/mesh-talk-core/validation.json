@@ -293,7 +293,8 @@
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/account_documents/custody.rs",
         "crates/mesh-talk-core/src/node/node_tests.rs",
-        "crates/mesh-talk-core/src/node/media_store.rs"
+        "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/node/account_documents/tests.rs"
       ],
       "rust": [
         {
@@ -325,7 +326,8 @@
       },
       "consumers": ["desktop-shared-channel-custody"],
       "escalation": [
-        "Require real linked-sibling/other-member loopback evidence, holder-offline/restart and delayed confirmation/revocation convergence. Verify old optional-domain rejection preserves supported domains."
+        "Require real linked-sibling/other-member loopback evidence, holder-offline/restart and delayed confirmation/revocation convergence. Verify old optional-domain rejection preserves supported domains.",
+        "Custody fixtures must observe post-creation authenticated channel inventory/control heads and settled linked routes before starting the existing custody observation. A held real inventory response must keep setup pending; release must permit real authenticated convergence. Accept authentic superseding heads without waiting for obsolete metadata. Keep setup separate from custody timing and preserve mandatory-lane independence, source-offline restart and missing-state assertions. Matching ASan execution is required when an instrumented failure exposed the fixture ordering."
       ]
     },
     {

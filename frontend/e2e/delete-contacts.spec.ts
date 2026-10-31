@@ -75,7 +75,13 @@ test("offline deletion requires confirmation and erases history across restart a
   await expect(page.getByTestId(`conversation-row-${bob}`)).toBeVisible();
   await expect(page.getByTestId(`conversation-row-${carol}`)).toHaveCount(0);
   await setCarolOnline(page);
-  await page.waitForTimeout(1200);
+  // Complete a real roster refresh before checking deletion survives discovery.
+  // An absence checked before the periodic refresh would prove no refresh behavior.
+  await page.evaluate(async () => {
+    const path = "/src/store/chat.ts";
+    const { useChat } = await import(/* @vite-ignore */ path);
+    await useChat.getState().refreshRoster();
+  });
   await expect(page.getByTestId(`conversation-row-${carol}`)).toHaveCount(0);
   await page.evaluate(
     (account) =>
