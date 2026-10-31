@@ -47,6 +47,7 @@ impl ChannelCheckpointStore {
     ) -> Result<(), LogError> {
         self.check_account_on(c)?;
         let first = &preview.first;
+        check_event_owner_on(c, &first.owner)?;
         replay::require_source_on(c, first.channel, first.source_job, first.source_revision)?;
         let revision: Option<i64> = c.query_row(
             "SELECT revision FROM channel_receivers WHERE channel=?1 AND author=?2 AND epoch=?3",

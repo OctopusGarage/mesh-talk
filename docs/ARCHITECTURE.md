@@ -1468,7 +1468,13 @@ The explicit standalone `PersistentEventLog::open` remains the collecting legacy
 SDK owner and rejects a retired participant source. Transcripts, crypto and
 projections still have separate migration boundaries. Transcript history ordering
 and account routes use persisted metadata selectors; ordinary recent and
-exact-context reads hydrate selected rows only. Production network authorization
+exact-context reads hydrate selected rows only. Combined-order input checkpoints
+seek after the prior transcript ordinal on ordinary appends and reuse the signed
+order owner’s safe-tail generation. Rewrites, deletion, due expiry, late roots and
+identity changes invalidate this prefix; interrupted retirement or extension
+cannot publish partial ranks. Unsafe changes retain the synchronous metadata
+rebuild, and file-eligibility revisions currently invalidate conservatively.
+Production network authorization
 prepares finite SQL selections through yielded header/edge turns. Individual
 channel-control authority queries and the explicit collecting SDK compatibility
 adapter remain separate; these cuts do not establish the complete participant
@@ -1730,8 +1736,11 @@ Raw account-group access observations remain separate from admitted channel
 authority: rejected signed controls still contribute to their original sorted-ID
 fingerprint. The access owner computes this metadata using bounded header and
 parent pages with disk ancestry marks, and caches the completed result against
-the exact retained source revision. The frontier is capped with an overflow
-sentinel; an incomplete local frontier cannot establish a complete observation.
+the raw control revision, destructive revision and canonical generation. Ordinary
+safe message appends reuse that observation; late parents or reordered sources
+invalidate it even when the signed control set is unchanged. A source whose kind
+index is still catching up uses the complete retained revision. The frontier is
+capped with an overflow sentinel; an incomplete local frontier cannot establish a complete observation.
 This bounds memory and makes unchanged observations reusable; a changed source
 can still require metadata work proportional to its retained graph.
 
@@ -2033,10 +2042,26 @@ Large legal parent lists resume at an exact edge cursor. An undersized budget
 returns an explicit error without discarding the event. Have-dependent export
 closure stages the admitted peer Have in bounded batches and resumes its vertex
 and edge together; replacing Have also retires old rows incrementally.
-Channel checkpoint projection remains the authority for signed controls. Its
-individual synchronous ancestry query still needs the preparing-graph integration;
-outer preparation turns alone do not establish a complete control-work bound.
-The explicit collecting SyncStore compatibility API is separate from this runtime.
+Channel checkpoint projection remains the authority for signed controls. A private
+reducer suspends when an exact graph answer or historical predicate is unfinished.
+The existing encrypted ancestry owner advances caller-budgeted vertices and edges;
+quantified predicates retain their last fully checked fact key. Partial decisions
+never publish receiver state, transcripts, reception effects or authority. Decision
+progress is fenced by the exact control as well as its source generation.
+
+Causal query handles return Pending with charged work or one complete leased
+projection. Owner queries additionally retain the validated strict-causal state
+until later ownership-loss checks finish. Runtime-owned ancestor selections retire
+incrementally after cancellation or restart; transferring a walk to a durable
+checkpoint reference is atomic. Captured account generations reject old receiver,
+source and query handles after an account is adopted again. The initial query API
+still conservatively invalidates on same-channel source revisions, including safe
+tails. Canonical outer work accounting and startup/runtime callers that drain steps
+remain separate integration work; these primitives alone do not establish bounded
+whole-call startup latency. The explicit collecting SyncStore compatibility API is
+separate from the paged runtime. Durable-Have requests prepare a finite view through
+the same yielding session loop and test exact selected membership before syncing;
+they do not collect the conversation's historical payloads.
 
 Selection lifetimes use the existing eight-connection exchange limit and admitted
 remote-Have budget. Each connection may hold its primary selection and one

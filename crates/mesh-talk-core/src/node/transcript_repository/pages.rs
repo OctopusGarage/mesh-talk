@@ -1,5 +1,15 @@
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static HEADER_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(super) fn take_header_reads() -> usize {
+    HEADER_READS.with(|reads| reads.replace(0))
+}
+
+#[cfg(test)]
 impl Header {
     fn cursor(&self) -> TranscriptCursor {
         TranscriptCursor {
@@ -17,6 +27,8 @@ fn admit(
     let mut selected = Vec::new();
     let mut bytes = 0usize;
     while let Some(row) = rows.next()? {
+        #[cfg(test)]
+        HEADER_READS.with(|reads| reads.set(reads.get() + 1));
         let h = header(row)?;
         let charge = if bodies {
             h.body_bytes
@@ -41,6 +53,7 @@ fn admit(
     Ok((selected, false))
 }
 impl TranscriptRepository {
+    #[cfg(test)]
     pub(in crate::node) fn page(
         &self,
         conversation: Option<&ConversationId>,
@@ -49,6 +62,7 @@ impl TranscriptRepository {
     ) -> Result<TranscriptPage<StoredRow>, LogError> {
         self.history_page(conversation, after, limit, false)
     }
+    #[cfg(test)]
     pub(in crate::node) fn recent_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -57,6 +71,7 @@ impl TranscriptRepository {
     ) -> Result<TranscriptPage<StoredRow>, LogError> {
         self.history_page(conversation, before, limit, true)
     }
+    #[cfg(test)]
     fn history_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -78,6 +93,7 @@ impl TranscriptRepository {
         })
     }
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn select_history_on(
         &self,
         c: &Connection,
@@ -159,6 +175,7 @@ impl TranscriptRepository {
         admit(&mut rows, limit, true)
     }
     /// Metadata-only page; each fixed-width header is charged 256 bytes.
+    #[cfg(test)]
     pub(crate) fn header_page(
         &self,
         conversation: Option<&ConversationId>,

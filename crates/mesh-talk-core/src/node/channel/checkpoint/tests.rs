@@ -134,6 +134,10 @@ impl Fixture {
         }
     }
     fn project(&self) {
+        // Projection now admits one canonical header per turn. The receive-gap
+        // fixture intentionally exceeds MAX_SKIP, so setup's progress guard
+        // must scale with its signed rows rather than assuming batched replay.
+        let turn_limit = 1024 + 4 * (self.messages.len() + 2);
         let mut turns = 0;
         while !self
             .store
@@ -141,7 +145,7 @@ impl Fixture {
             .unwrap()
         {
             turns += 1;
-            assert!(turns < 1000);
+            assert!(turns < turn_limit, "channel fixture projection stalled");
         }
     }
     fn row(&self, index: usize, prepared: &PreparedChannelReceive) -> ReceivedEntry {
@@ -1729,5 +1733,401 @@ fn channel_indexed_legacy_parent_cut_rebuild_preserves_account_lifetime_and_leas
         repository.body_read_counts(),
         before,
         "unchanged warm authority does not decode historical controls"
+    );
+}
+
+#[test]
+fn channel_receiver_and_source_handles_stay_stale_after_account_returns() {
+    use crate::storage::profile::participant::{finish_adoption, prepare_adoption};
+    let mut fixture = Fixture::new(1);
+    fixture.project();
+    let source = fixture
+        .store
+        .source_binding(fixture.channel)
+        .unwrap()
+        .unwrap();
+    let prepared = fixture
+        .store
+        .prepare_receive(&fixture.messages[0])
+        .unwrap()
+        .unwrap();
+    let next = Account::generate();
+    let database = fixture.store.profile.database();
+    prepare_adoption(database, &fixture.account.public(), &next.public()).unwrap();
+    finish_adoption(database, &next.public()).unwrap();
+    prepare_adoption(database, &next.public(), &fixture.account.public()).unwrap();
+    finish_adoption(database, &fixture.account.public()).unwrap();
+
+    assert!(
+        matches!(
+            fixture.store.check_source(&source),
+            Err(LogError::StaleCursor)
+        ),
+        "returning to the same account must not revive a captured source handle"
+    );
+    assert!(matches!(
+        fixture.store.prepare_receive(&fixture.messages[0]),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(
+        matches!(
+            database.transaction(|c| ChannelCheckpointStore::install_receive_on(c, &prepared)),
+            Err(LogError::StaleCursor)
+        ),
+        "the static consuming transaction must reject an earlier account lifetime"
+    );
+    assert!(
+        fixture
+            .received
+            .entry(fixture.messages[0].id)
+            .unwrap()
+            .is_none()
+    );
+    let current = ChannelCheckpointStore::open(fixture.store.profile.clone()).unwrap();
+    assert!(
+        matches!(current.check_source(&source), Err(LogError::StaleCursor)),
+        "a new owner must also reject a source captured before adoption"
+    );
+    let prepared = current
+        .prepare_receive(&fixture.messages[0])
+        .unwrap()
+        .unwrap();
+    let entry = ReceivedEntry {
+        conversation: fixture.channel,
+        event_id: prepared.event_id(),
+        wall_clock: prepared.wall_clock(),
+        from: prepared.author().to_owned(),
+        plaintext: prepared.plaintext().to_vec(),
+    };
+    assert!(
+        current
+            .commit_message(&prepared, &mut fixture.received, &entry, None)
+            .unwrap()
+    );
+    assert_eq!(
+        fixture
+            .received
+            .entry(entry.event_id)
+            .unwrap()
+            .unwrap()
+            .plaintext,
+        b"message 0"
+    );
+}
+
+#[test]
+fn channel_projection_control_does_not_drain_historical_ancestry_in_one_turn() {
+    let fixture = Fixture::new(600);
+    let repository = fixture.log.repository().unwrap();
+    let leave = Event::new(
+        &fixture.me,
+        fixture.channel,
+        1,
+        vec![fixture.genesis],
+        2,
+        2,
+        EventKind::ChannelLeave,
+        vec![],
+    );
+    repository.append(&leave).unwrap();
+    fixture.project();
+    let change = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        603,
+        vec![fixture.messages.last().unwrap().id],
+        603,
+        603,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "concurrent leave".into(),
+            members: vec![fixture.sender.public(), fixture.me.public()],
+            epoch: 1,
+            owner: fixture.sender.user_id(),
+        }
+        .encode(),
+    );
+    repository.append(&change).unwrap();
+    let mut complete = false;
+    for _ in 0..256 {
+        let before = repository.ancestry_vertex_reads();
+        complete = fixture
+            .store
+            .project_step(repository, &fixture.me, fixture.channel)
+            .unwrap();
+        let examined = repository.ancestry_vertex_reads() - before;
+        assert!(
+            examined <= 64,
+            "one actual channel projection turn traversed {examined} historical vertices"
+        );
+        if complete {
+            break;
+        }
+    }
+    assert!(
+        complete,
+        "bounded authority work must eventually publish its exact decision"
+    );
+    let state = fixture
+        .store
+        .current_state(fixture.channel)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !state.is_member(&fixture.me.user_id()),
+        "the unobserved signed leave must still block resurrection"
+    );
+}
+
+#[test]
+fn channel_causal_query_yields_exact_work_and_preserves_strict_ancestry() {
+    use super::causal::{CausalProjectionQuery, CausalProjectionStep};
+    use crate::eventlog::sync::network::PreparationBudget;
+    fn send<T: Send>() {}
+    send::<CausalProjectionQuery>();
+    send::<crate::node::channel::ChannelMembershipProjection>();
+    let fixture = Fixture::new(128);
+    let repository = fixture.log.repository().unwrap();
+    let target = fixture.messages.last().unwrap().id;
+    assert!(
+        matches!(
+            fixture
+                .store
+                .start_causal_projection(fixture.channel, &[target], false),
+            Err(LogError::StaleCursor)
+        ),
+        "unfinished canonical legacy discovery cannot authorize a causal query"
+    );
+    fixture.project();
+    let mut query = fixture
+        .store
+        .start_causal_projection(fixture.channel, &[target], false)
+        .unwrap();
+    let budget = PreparationBudget {
+        rows: 8,
+        edges: 16,
+        bytes: 32 * 1024,
+    };
+    let before = repository.body_read_counts();
+    let mut pending = 0;
+    let mut ready = None;
+    for _ in 0..4096 {
+        let step = fixture
+            .store
+            .causal_projection_step(repository, &mut query, budget)
+            .unwrap();
+        let work = match step {
+            CausalProjectionStep::Pending(work) => {
+                pending += 1;
+                work
+            }
+            CausalProjectionStep::Ready { projection, work } => {
+                ready = projection;
+                work
+            }
+        };
+        assert!(
+            work.rows <= budget.rows && work.edges <= budget.edges && work.bytes <= budget.bytes,
+            "{work:?}"
+        );
+        if ready.is_some() {
+            break;
+        }
+    }
+    assert!(pending > 16, "the signed ancestor prefix must yield");
+    let ready = ready.expect("finite strict ancestor preparation completes");
+    assert!(
+        ready
+            .state
+            .as_ref()
+            .unwrap()
+            .members()
+            .contains(&fixture.sender.public())
+    );
+    assert!(
+        ready
+            .state
+            .as_ref()
+            .unwrap()
+            .members()
+            .contains(&fixture.me.public())
+    );
+    fixture.store.check_causal_projection(&query).unwrap();
+    assert!(
+        !ready
+            .historical
+            .as_ref()
+            .unwrap()
+            .contains_event(target)
+            .unwrap(),
+        "the queried event itself is excluded"
+    );
+    let reads = repository.body_read_counts();
+    assert_eq!(
+        reads.0 - before.0,
+        1,
+        "only the genesis membership control is decoded, not retained message bodies"
+    );
+}
+
+#[test]
+fn channel_owner_query_preserves_later_unobserved_ownership_loss() {
+    use crate::eventlog::sync::network::PreparationBudget;
+    use crate::node::join_history::indexed::{
+        IndexedView, OwnerAuthorizationQuery, OwnerAuthorizationStep,
+    };
+    fn send<T: Send>() {}
+    send::<OwnerAuthorizationQuery>();
+    for observed in [false, true] {
+        let fixture = Fixture::new(0);
+        let repository = fixture.log.repository().unwrap();
+        let publication = Event::new(
+            &fixture.sender,
+            fixture.channel,
+            3,
+            vec![fixture.genesis],
+            3,
+            3,
+            EventKind::ChannelRename,
+            b"publication".to_vec(),
+        );
+        repository.append(&publication).unwrap();
+        let transfer = Event::new(
+            &fixture.sender,
+            fixture.channel,
+            4,
+            vec![if observed {
+                publication.id
+            } else {
+                fixture.genesis
+            }],
+            4,
+            4,
+            EventKind::ChannelOwnerTransfer,
+            fixture.me.user_id().into_bytes(),
+        );
+        repository.append(&transfer).unwrap();
+        fixture.project();
+        let source = fixture
+            .store
+            .source_binding(fixture.channel)
+            .unwrap()
+            .unwrap();
+        let view = IndexedView::new(&fixture.store, repository, &fixture.me, source);
+        let mut query = view
+            .start_owner_authorization(&repository.header(&publication.id).unwrap().unwrap())
+            .unwrap();
+        let budget = PreparationBudget {
+            rows: 8,
+            edges: 16,
+            bytes: 32 * 1024,
+        };
+        let mut result = None;
+        for _ in 0..512 {
+            let work = match view.owner_authorized_step(&mut query, budget).unwrap() {
+                OwnerAuthorizationStep::Pending(work) => work,
+                OwnerAuthorizationStep::Ready {
+                    authorized,
+                    before,
+                    work,
+                } => {
+                    assert_eq!(before.is_some(), authorized);
+                    if let Some(before) = before {
+                        assert_eq!(before.owner(), fixture.sender.user_id());
+                    }
+                    result = Some(authorized);
+                    work
+                }
+            };
+            assert!(
+                work.rows <= budget.rows
+                    && work.edges <= budget.edges
+                    && work.bytes <= budget.bytes,
+                "{work:?}"
+            );
+            if result.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            result,
+            Some(observed),
+            "only an observed publication survives later owner loss"
+        );
+    }
+}
+
+#[test]
+fn channel_decision_replacement_rejects_old_predicate_publication() {
+    use crate::eventlog::sync::network::PreparationBudget;
+    use crate::node::channel::graph::{AuthorityGraph, preparing::PreparingGraph};
+    let fixture = Fixture::new(2);
+    fixture.project();
+    let repository = fixture.log.repository().unwrap();
+    let source = fixture
+        .store
+        .source_binding(fixture.channel)
+        .unwrap()
+        .unwrap();
+    let first = PreparingGraph::open(
+        fixture.store.profile.clone(),
+        repository,
+        crate::node::channel::graph::preparing::DecisionBinding {
+            job: source.job,
+            source_job: source.job,
+            revision: source.revision,
+            channel: fixture.channel,
+            event: fixture.messages[0].id,
+        },
+        PreparationBudget::default(),
+    )
+    .unwrap();
+    while !first.prepare().unwrap() {}
+    first
+        .save_predicate(b"predicate", None, Some(true))
+        .unwrap();
+    let next = PreparingGraph::open(
+        fixture.store.profile.clone(),
+        repository,
+        crate::node::channel::graph::preparing::DecisionBinding {
+            job: source.job,
+            source_job: source.job,
+            revision: source.revision,
+            channel: fixture.channel,
+            event: fixture.messages[1].id,
+        },
+        PreparationBudget::default(),
+    )
+    .unwrap();
+    while !next.prepare().unwrap() {}
+    assert!(
+        matches!(
+            first.save_predicate(b"predicate", None, Some(true)),
+            Err(LogError::StaleCursor)
+        ),
+        "an old private reducer must not contaminate the next event's answers"
+    );
+    assert!(matches!(
+        first.predicate(b"predicate"),
+        Err(LogError::StaleCursor)
+    ));
+    assert!(matches!(
+        next.predicate(b"predicate").unwrap(),
+        crate::node::channel::graph::PredicateProgress::Scan(None)
+    ));
+    next.save_predicate(b"predicate", None, Some(false))
+        .unwrap();
+    fixture
+        .store
+        .profile
+        .database()
+        .transaction(|c| next.complete_on(c))
+        .unwrap();
+    assert!(
+        matches!(
+            next.save_predicate(b"late", None, Some(true)),
+            Err(LogError::StaleCursor)
+        ),
+        "a completed decision is immutable"
     );
 }

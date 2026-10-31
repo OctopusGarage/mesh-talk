@@ -12,7 +12,7 @@ use crate::{
     },
     identity::device::DeviceIdentity,
     node::channel::{
-        graph::IndexedGraph,
+        graph::{AuthorityGraph, preparing::PreparingGraph},
         projection_facts::{ProjectionFacts, is_membership_control},
     },
 };
@@ -123,10 +123,6 @@ impl ChannelCheckpointStore {
         if next > count {
             return Err(invalid("channel reducer cursor exceeds source"));
         }
-        let graph = IndexedGraph {
-            repository,
-            conversation: channel,
-        };
         let own = me.public().user_id();
         if next < count {
             let OrderReadState::Ready(page) = repository.causal_headers_after_rank(
@@ -135,7 +131,7 @@ impl ChannelCheckpointStore {
                 generation.job,
                 next - 1,
                 PageBudget {
-                    rows: ROWS,
+                    rows: 1,
                     bytes: 64 * 1024,
                 },
             )?
@@ -143,6 +139,25 @@ impl ChannelCheckpointStore {
                 return Ok(false);
             };
             for header in page.items {
+                let graph = PreparingGraph::open(
+                    self.profile.clone(),
+                    repository,
+                    crate::node::channel::graph::preparing::DecisionBinding {
+                        job: generation.job,
+                        source_job: generation.job,
+                        revision: generation.source_revision,
+                        channel,
+                        event: header.id,
+                    },
+                    crate::eventlog::sync::network::PreparationBudget {
+                        rows: 63,
+                        edges: 512,
+                        bytes: 8 * 1024 * 1024 - 256,
+                    },
+                )?;
+                if !graph.prepare()? {
+                    return Ok(false);
+                }
                 let processed = self
                     .profile
                     .database()
@@ -158,10 +173,14 @@ impl ChannelCheckpointStore {
                         header.kind,
                         EventKind::ChannelReplica | EventKind::ChannelJoinHistory
                     ) {
+                    let event = graph.event(header.id)?;
+                    if graph.pending() {
+                        return Ok(false);
+                    }
                     Some(
-                        repository
-                            .get(&header.id)?
-                            .ok_or_else(|| invalid("channel control disappeared"))?,
+                        event
+                            .ok_or_else(|| invalid("channel control disappeared"))?
+                            .into_owned(),
                     )
                 } else {
                     None
@@ -175,8 +194,11 @@ impl ChannelCheckpointStore {
                         &graph,
                     )?
                 } else {
-                    reducer.step_header(&header)?
+                    reducer.step_header(&header, &graph)?
                 };
+                if graph.pending() {
+                    return Ok(false);
+                }
                 // Open authenticated control payloads outside the database mutex.
                 // Only immutable preparation occurs before the guarded commit.
                 let mut distributions = Vec::new();
@@ -217,12 +239,19 @@ impl ChannelCheckpointStore {
                         }
                     }
                 }
+                if graph.pending() {
+                    return Ok(false);
+                }
                 let activity = activity_before.finish(&reducer, &header, event.as_ref(), &own);
                 let facts = reducer
                     .history
                     .as_ref()
                     .ok_or_else(|| invalid("missing channel projection owner"))?
                     .clone();
+                let after_accept = facts.after_accept(&reducer, &header, &graph)?;
+                if graph.pending() {
+                    return Ok(false);
+                }
                 self.profile.database().transaction(|c| {
                     self.check_account_on(c)?;
                     require_source_on(c,channel,generation.job,generation.source_revision)?;
@@ -249,7 +278,8 @@ impl ChannelCheckpointStore {
                         c.execute("INSERT INTO channel_replica_preferences VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(job,channel,member) DO UPDATE SET lamport=excluded.lamport,event=excluded.event,enabled=excluded.enabled WHERE (excluded.lamport,excluded.event)>(lamport,event)",params![generation.job.as_slice(),channel.as_bytes().as_slice(),header.author.user_id(),header.lamport.to_be_bytes().as_slice(),header.id.as_bytes().as_slice(),*enabled==1])?;
                     }
                     super::recall::wake_on(c,channel,header.id)?;
-                    let admitted=facts.checkpoint_on(c,&mut reducer,&header,next,allowed,&own)?;
+                    let admitted=facts.checkpoint_on(c,&mut reducer,&header,next,(allowed,after_accept),&own)?;
+                    graph.complete_on(c)?;
                     if matches!(header.kind,EventKind::Message|EventKind::FileManifest|EventKind::Delete|EventKind::ChannelDeviceInheritance) && !processed {
                         c.execute("INSERT INTO channel_pending(channel,event,ordinal,reason,author,kind,admitted) VALUES(?1,?2,?3,?7,?4,?5,?6) ON CONFLICT(channel,event) DO UPDATE SET ordinal=excluded.ordinal,admitted=excluded.admitted,reason=CASE WHEN channel_pending.attempt_job<>?8 THEN excluded.reason ELSE channel_pending.reason END",params![channel.as_bytes().as_slice(),header.id.as_bytes().as_slice(),next,header.author.user_id(),header.kind as i64,admitted,0,generation.job.as_slice()])?;
                     }

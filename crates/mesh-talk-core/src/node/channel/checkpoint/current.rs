@@ -100,25 +100,42 @@ impl ChannelCheckpointStore {
         event: EventId,
         include_event: bool,
     ) -> Result<Option<ChannelState>, LogError> {
+        Ok(self
+            .canonical_state_budgeted(channel, event, include_event, usize::MAX)?
+            .0)
+    }
+    pub(in crate::node) fn canonical_state_budgeted(
+        &self,
+        channel: ConversationId,
+        event: EventId,
+        include_event: bool,
+        budget: usize,
+    ) -> Result<(Option<ChannelState>, usize), LogError> {
+        if budget < 64 {
+            return Err(LogError::PageBudgetTooSmall { required: 64 });
+        }
         self.profile.database().read(|c| {
             self.check_account_on(c)?;
             let binding: Option<(Vec<u8>, i64)> = c.query_row(
                 "SELECT source_job,source_revision FROM channel_current WHERE channel=?1 AND owner_account=?2",
                 params![channel.as_bytes().as_slice(),self.account.as_slice()],
                 |row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-            let Some((job,revision)) = binding else { return Ok(None); };
+            let Some((job,revision)) = binding else { return Ok((None,0)); };
             let job: [u8;16] = job.try_into().map_err(|_|invalid("invalid channel current job"))?;
             replay::require_source_on(c, channel, job, revision)?;
             let rank: Option<i64> = c.query_row(
                 "SELECT rank FROM channel_event_authority WHERE job=?1 AND channel=?2 AND event=?3",
                 params![job.as_slice(),channel.as_bytes().as_slice(),event.as_bytes().as_slice()],
                 |row| row.get(0)).optional()?;
-            let Some(rank) = rank else { return Ok(None); };
+            let Some(rank) = rank else { return Ok((None,0)); };
             let through = if include_event { rank } else { rank - 1 };
-            let bytes: Option<Vec<u8>> = c.query_row(
-                "SELECT state FROM channel_membership_snapshots WHERE job=?1 AND channel=?2 AND rank<=?3 ORDER BY rank DESC LIMIT 1",
-                params![job.as_slice(),channel.as_bytes().as_slice(),through],|row|row.get(0)).optional()?;
-            bytes.map(|bytes| ChannelState::decode_current(&bytes).map_err(|error| invalid(&error.to_string()))).transpose()
+            let selected:Option<(i64,i64)>=c.query_row("SELECT rank,length(state) FROM channel_membership_snapshots WHERE job=?1 AND channel=?2 AND rank<=?3 ORDER BY rank DESC LIMIT 1",params![job.as_slice(),channel.as_bytes().as_slice(),through],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            let Some((rank,length))=selected else{return Ok((None,64));};
+            let required=usize::try_from(length).ok().and_then(|n|n.checked_mul(3)).and_then(|n|n.checked_add(64)).ok_or(LogError::RepositoryCounterExhausted)?;
+            if required>budget {return Err(LogError::PageBudgetTooSmall {required});}
+            let bytes:Vec<u8>=c.query_row("SELECT state FROM channel_membership_snapshots WHERE job=?1 AND channel=?2 AND rank=?3",params![job.as_slice(),channel.as_bytes().as_slice(),rank],|r|r.get(0))?;
+            let state=ChannelState::decode_current(&bytes).map_err(|error|invalid(&error.to_string()))?;
+            Ok((Some(state),required))
         })
     }
     pub(in crate::node) fn published_projection(
@@ -211,6 +228,7 @@ pub(in crate::node) struct ChannelSource {
     pub(in crate::node) job: [u8; 16],
     pub(in crate::node) revision: i64,
     account: [u8; 32],
+    generation: i64,
 }
 impl ChannelCheckpointStore {
     pub(in crate::node) fn source_binding(
@@ -220,7 +238,7 @@ impl ChannelCheckpointStore {
         self.profile.database().read(|c| {
             self.check_account_on(c)?;
             let row: Option<(Vec<u8>,i64)> = c.query_row("SELECT source_job,source_revision FROM channel_current WHERE channel=?1 AND owner_account=?2",params![channel.as_bytes().as_slice(),self.account.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            let source = row.map(|(job,revision)|Ok::<_,LogError>(ChannelSource {channel,job:job.try_into().map_err(|_|invalid("invalid channel source generation"))?,revision,account:self.account})).transpose()?;
+            let source = row.map(|(job,revision)|Ok::<_,LogError>(ChannelSource {channel,job:job.try_into().map_err(|_|invalid("invalid channel source generation"))?,revision,account:self.account,generation:self.generation})).transpose()?;
             if let Some(source)=&source {self.check_source_on(c,source)?;}
             Ok(source)
         })
@@ -231,7 +249,7 @@ impl ChannelCheckpointStore {
         source: &ChannelSource,
     ) -> Result<(), LogError> {
         self.check_account_on(c)?;
-        if source.account != self.account {
+        if source.account != self.account || source.generation != self.generation {
             return Err(LogError::StaleCursor);
         }
         let current:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM channel_current WHERE channel=?1 AND source_job=?2 AND source_revision=?3 AND owner_account=?4)",params![source.channel.as_bytes().as_slice(),source.job.as_slice(),source.revision,self.account.as_slice()],|r|r.get(0))?;

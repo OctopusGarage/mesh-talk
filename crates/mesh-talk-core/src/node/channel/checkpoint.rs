@@ -1,6 +1,9 @@
 //! Durable channel projection and consuming receiver owner. Authority replay is
 //! separately versioned from receiver progress: reordering controls never rolls
 //! a consumed key back. All records use the already leased profile database.
+use crate::storage::profile::participant::event_ownership::{
+    ParticipantEventOwner, capture_event_owner_on, check_event_owner_on,
+};
 use crate::{
     channel::{ChannelState, model::PreparedChannelMessage, sender_key::SenderKeyDistribution},
     eventlog::{
@@ -67,6 +70,8 @@ CREATE TABLE channel_retry_chains(
 pub(in crate::node) struct ChannelCheckpointStore {
     profile: Arc<ProfileStorage>,
     account: [u8; 32],
+    generation: i64,
+    owner: Option<ParticipantEventOwner>,
     causal_query: std::sync::Mutex<()>,
 }
 pub(in crate::node) struct PreparedChannelReceive {
@@ -79,6 +84,7 @@ pub(in crate::node) struct PreparedChannelReceive {
     source_job: [u8; 16],
     source_revision: i64,
     account: [u8; 32],
+    owner: ParticipantEventOwner,
     candidate: PreparedChannelMessage,
 }
 impl PreparedChannelReceive {
@@ -121,18 +127,51 @@ impl ChannelCheckpointStore {
             sharing::initialize(c, !present)?;
             activity::initialize(c, !present)?;
             causal::initialize(c, !present)?;
+            super::graph::preparing::initialize(c)?;
             file_preview::initialize(c)?;
             crate::node::join_history::initialize_indexed(c, !present)
         })?;
-        let account = profile.database().read(active_account_on)?;
+        let (account, generation, owner) = profile.database().read(|c| {
+            let account = active_account_on(c)?;
+            let generation: i64 = c.query_row(
+                "SELECT generation FROM participant_event_ownership WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            if generation < 0 {
+                return Err(invalid("invalid channel account generation"));
+            }
+            let loaded = crate::identity::account::AccountPublic {
+                ed25519_pub: account,
+            };
+            let owner = match capture_event_owner_on(c, &loaded) {
+                Ok(owner) => Some(owner),
+                // Constructor migration can project signed authority before
+                // adoption finishes; it cannot prepare a consuming receiver.
+                Err(LogError::StaleCursor) => None,
+                Err(error) => return Err(error),
+            };
+            Ok((account, generation, owner))
+        })?;
         Ok(Self {
             profile,
             account,
+            generation,
+            owner,
             causal_query: std::sync::Mutex::new(()),
         })
     }
     fn check_account_on(&self, c: &Connection) -> Result<(), LogError> {
-        if active_account_on(c)? != self.account {
+        if let Some(owner) = &self.owner {
+            return check_event_owner_on(c, owner);
+        }
+        // A bootstrap owner is valid only while its exact pending adoption
+        // remains open. Final publication requires a new owner capture.
+        let current: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM participant_profile p JOIN participant_event_ownership o ON o.singleton=p.singleton WHERE p.singleton=1 AND COALESCE(p.next_account,p.account)=?1 AND o.generation=?2 AND (p.next_account IS NOT NULL OR p.bootstrap_previous IS NOT NULL))",
+            params![self.account.as_slice(), self.generation], |row| row.get(0),
+        )?;
+        if !current {
             return Err(LogError::StaleCursor);
         }
         Ok(())
@@ -292,6 +331,7 @@ impl ChannelCheckpointStore {
         if !event.is_canonical() || !event.verify_integrity() || !event.verify_signature() {
             return Err(invalid("unauthenticated channel receiver source"));
         }
+        let owner = self.owner.as_ref().ok_or(LogError::StaleCursor)?;
         let mut attempt = None;
         let prepared = self.profile.database().read(|c| {
             self.check_account_on(c)?;
@@ -314,7 +354,7 @@ impl ChannelCheckpointStore {
             let (revision,checkpoint) = if let Some((prior,private)) = preceding.filter(|(prior,_)|
                 prior.channel==event.conversation_id && prior.candidate.author==author && prior.candidate.epoch==epoch
             ) {
-                if prior.event==event.id || prior.account!=self.account || prior.source_job!=source_job
+                if prior.event==event.id || prior.account!=self.account || &prior.owner!=owner || prior.source_job!=source_job
                     || prior.source_revision!=source_revision || prior.revision!=revision {
                     return Err(LogError::StaleCursor);
                 }
@@ -329,7 +369,7 @@ impl ChannelCheckpointStore {
                 },
                 Err(crate::channel::model::CheckpointMessageError::Malformed(error))=>return Err(invalid(&error)),
             };
-            Ok(Some(PreparedChannelReceive {channel:event.conversation_id,event:event.id,wall_clock:event.wall_clock,kind:event.kind,revision,key_revision,source_job,source_revision,account:self.account,candidate}))
+            Ok(Some(PreparedChannelReceive {channel:event.conversation_id,event:event.id,wall_clock:event.wall_clock,kind:event.kind,revision,key_revision,source_job,source_revision,account:self.account,owner:owner.clone(),candidate}))
         })?;
         if prepared.is_none()
             && let Some((epoch, revision, job, source_revision, wait_until)) = attempt
@@ -346,9 +386,7 @@ impl ChannelCheckpointStore {
         c: &Connection,
         prepared: &PreparedChannelReceive,
     ) -> Result<bool, LogError> {
-        if active_account_on(c)? != prepared.account {
-            return Err(LogError::StaleCursor);
-        }
+        check_event_owner_on(c, &prepared.owner)?;
         if Self::processed_on(c, prepared.channel, prepared.event)? {
             return Ok(false);
         }

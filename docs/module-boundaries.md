@@ -180,9 +180,14 @@ SQL authorization IDs, causal closure, and bounded retirement cleanup.
 `core/node/privacy_sync/principal/` and `principal.rs` own current principal state
 and resumable preparation; historical IDs, departures and ancestry stay on disk.
 `core/node/session.rs` releases the store lock and yields between preparation
-turns. Ready views use scalar source/proof checks. Channel-control authority still
-uses the checkpoint owner; its individual ancestry queries remain a separate
-bounded-work integration requirement.
+turns, including exact Durable-Have requests. Ready views use scalar source/proof
+checks. `core/node/channel/graph/preparing.rs` owns suspended graph decisions and
+historical predicate cursors for the existing channel reducer; unresolved answers
+cannot publish authority. `checkpoint/causal/query.rs` composes budgeted ancestry
+and reducer steps into a leased result, while `join_history/indexed/preparation.rs`
+retains the existing canonical, strict-causal and future ownership-loss rules.
+These query owners share the repository ancestry implementation and its incremental
+retirement; callers must resume Pending work without synchronously draining it.
 `core/node/channel/checkpoint/` owns indexed current membership, canonical authority,
 receiver checkpoints, exact processing evidence, activity pages and pending retries.
 Ordinary warm channel opens load current metadata and the active sending epoch;
@@ -221,7 +226,10 @@ rule; network disclosure reuses the existing exact parent authorization.
 deletion markers. Their constructors require validated participant authority;
 production Node history, recovery, recall, and account-sync consumers use these
 indexed stores. Media bytes retain their independent encryption/lifetime owner. `eventlog/repository/order/combined.rs` extends the existing causal
-order owner with disk ranks for signed events and isolated archive roots.
+order owner with disk ranks for signed events and isolated archive roots. Its
+`combined/incremental.rs` input checkpoints preserve a proven append-only prefix;
+visibility changes, expired deadlines, late roots and changed winning selectors
+rebuild that derived order before publication.
 `eventlog/repository/receiving.rs` owns resumable metadata discovery and bounded,
 fair retry selection; exact transcript evidence survives body erasure and commits
 with body/effect installation. These derived selectors do not replace the delivery

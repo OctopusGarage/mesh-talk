@@ -137,6 +137,7 @@ impl SentStore {
             .map(decode)
             .transpose()
     }
+    #[cfg(test)]
     pub(crate) fn header_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -177,6 +178,7 @@ impl SentStore {
     ) -> Result<u64, LogError> {
         self.repository.conversation_revision(conversation)
     }
+    #[cfg(test)]
     pub(crate) fn page(
         &self,
         conversation: Option<&ConversationId>,
@@ -194,6 +196,7 @@ impl SentStore {
         })
     }
     /// Newest first; the returned cursor continues strictly into older rows.
+    #[cfg(test)]
     pub(crate) fn recent_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -210,6 +213,7 @@ impl SentStore {
             next: page.next,
         })
     }
+    #[cfg(test)]
     pub(crate) fn scan_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -226,6 +230,7 @@ impl SentStore {
             next: page.next,
         })
     }
+    #[cfg(test)]
     pub(crate) fn visit(
         &self,
         conversation: Option<&ConversationId>,
@@ -243,37 +248,10 @@ impl SentStore {
             cursor = Some(next);
         }
     }
-    pub(crate) fn find(
-        &self,
-        conversation: Option<&ConversationId>,
-        mut predicate: impl FnMut(&SentEntry) -> bool,
-    ) -> Result<Option<SentEntry>, LogError> {
-        let mut found = None;
-        self.visit(conversation, |row| {
-            if predicate(row) {
-                found = Some(row.clone());
-                Ok(false)
-            } else {
-                Ok(true)
-            }
-        })?;
-        Ok(found)
-    }
-    pub(crate) fn any(
-        &self,
-        conversation: Option<&ConversationId>,
-        mut predicate: impl FnMut(&SentEntry) -> bool,
-    ) -> Result<bool, LogError> {
-        let mut found = false;
-        self.visit(conversation, |row| {
-            found = predicate(row);
-            Ok(!found)
-        })?;
-        Ok(found)
-    }
     pub(crate) fn remove_ordinals(&mut self, ordinals: &[i64]) -> Result<usize, LogError> {
         self.repository.remove_ordinals(ordinals)
     }
+    #[cfg(test)]
     pub(crate) fn remove_where(
         &mut self,
         mut predicate: impl FnMut(&SentEntry) -> bool,
@@ -281,12 +259,15 @@ impl SentStore {
         self.repository
             .remove_where(|row| Ok(predicate(&decode(row)?)))
     }
+    #[cfg(test)]
     pub(crate) fn count(&self, conversation: Option<&ConversationId>) -> Result<usize, LogError> {
         self.repository.count(conversation)
     }
+    #[cfg(test)]
     pub(crate) fn usage(&self) -> Result<TranscriptUsage, LogError> {
         self.repository.usage()
     }
+    #[cfg(test)]
     pub(crate) fn conversation_page(
         &self,
         after: Option<ConversationId>,

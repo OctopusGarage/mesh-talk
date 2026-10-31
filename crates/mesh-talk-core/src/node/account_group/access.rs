@@ -115,6 +115,84 @@ mod raw_view_tests {
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
+    async fn raw_authorization_cache_rechecks_noncontrol_reordering() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("events.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        let group = crate::channel::new_channel_id();
+        let first = Event::new(
+            &node.identity,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let missing = Event::new(
+            &node.identity,
+            group,
+            2,
+            vec![first.id],
+            2,
+            2,
+            EventKind::Message,
+            vec![8; 2048],
+        );
+        let last = Event::new(
+            &node.identity,
+            group,
+            3,
+            vec![],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let mut log = node.log.lock().unwrap();
+        log.append(first.clone()).unwrap();
+        log.append(last.clone()).unwrap();
+        let (mut frontier, stamp) = authorization_view(&node, &log, group).unwrap();
+        let mut expected = vec![first.id, last.id];
+        expected.sort();
+        frontier.sort();
+        assert_eq!(frontier, expected);
+        let cold = raw_view::cold_reads();
+        let bodies = log.repository().unwrap().body_read_counts();
+        log.append(missing).unwrap();
+        let (frontier, updated_stamp) = authorization_view(&node, &log, group).unwrap();
+        let mut frontier = frontier;
+        frontier.sort();
+        assert_eq!(
+            frontier, expected,
+            "a late ordinary branch preserves these independent controls"
+        );
+        assert_eq!(
+            updated_stamp, stamp,
+            "the exact signed control set is unchanged"
+        );
+        assert_eq!(
+            raw_view::cold_reads(),
+            cold + 1,
+            "an invalidated causal generation cannot reuse its frontier"
+        );
+        assert_eq!(log.repository().unwrap().body_read_counts(), bodies);
+    }
+
+    #[tokio::test]
     async fn raw_authorization_view_does_not_decode_retained_message_history() {
         for count in [128_u64, 512] {
             let dir = tempfile::tempdir().unwrap();
@@ -192,6 +270,42 @@ mod raw_view_tests {
             let mut expected = vec![last, rejected.id];
             expected.sort();
             assert_eq!(frontier, expected);
+            let scope = node
+                .channel_checkpoints
+                .causal_projection(log.repository().unwrap(), group, parent[0])
+                .unwrap()
+                .unwrap();
+            let before = log.repository().unwrap().body_read_counts();
+            let (scoped_frontier, (scoped_stamp, scoped_count)) =
+                authorization_view_at(&node, &log, group, Some(&scope)).unwrap();
+            assert_eq!(log.repository().unwrap().body_read_counts(), before);
+            assert_eq!(scoped_frontier, vec![last]);
+            let mut digest = Sha256::new();
+            digest.update(b"mesh-talk-group-authorization-view-v1");
+            for id in controls.iter().filter(|id| **id != rejected.id) {
+                digest.update(id.as_bytes());
+            }
+            assert_eq!(scoped_stamp, <[u8; 32]>::from(digest.finalize()));
+            assert_eq!(scoped_count, controls.len() - 1);
+            let before = raw_view::cold_reads();
+            let tail = Event::new(
+                &node.identity,
+                group,
+                count + 2,
+                parent,
+                count + 2,
+                count + 2,
+                EventKind::Message,
+                vec![4; 2048],
+            );
+            log.append(tail).unwrap();
+            let observation = authorization_view(&node, &log, group).unwrap();
+            assert_eq!(observation.1, (stamp, actual_count));
+            assert_eq!(
+                raw_view::cold_reads(),
+                before,
+                "an ordinary safe message tail must not rescan the raw control graph"
+            );
         }
     }
 }

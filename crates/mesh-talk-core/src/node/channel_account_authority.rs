@@ -1309,6 +1309,17 @@ fn validate_legacy_grant(
     legacy: &LegacyAuthorityContext,
     graph: &impl AuthorityGraph,
 ) -> Result<(), AuthorityError> {
+    use super::channel::graph::PredicateProgress;
+    use sha2::{Digest, Sha256};
+    let encoded = bincode::serialize(grant).map_err(|_| AuthorityError::Invalid)?;
+    let digest = Sha256::digest(&encoded);
+    let mut completed = vec![8];
+    completed.extend_from_slice(&digest);
+    match graph.predicate(&completed)? {
+        PredicateProgress::Complete(true) => return Ok(()),
+        PredicateProgress::Pending => return Err(AuthorityError::MissingAncestry),
+        _ => {}
+    }
     let accepted = (if grant.pending {
         &legacy.invited
     } else {
@@ -1323,30 +1334,40 @@ fn validate_legacy_grant(
     if !accepted || !descends(event.id, grant.membership_event, graph)? {
         return Err(AuthorityError::MissingAncestry);
     }
-    let membership = graph
-        .event(grant.membership_event)?
-        .ok_or(AuthorityError::MissingAncestry)?;
-    if !valid_event(&membership)
-        || membership.kind != EventKind::MembershipChange
-        || membership.conversation_id != event.conversation_id
-    {
-        return Err(AuthorityError::Invalid);
-    }
-    let meta = crate::channel::ChannelMeta::decode(&membership.ciphertext)
-        .ok_or(AuthorityError::Invalid)?;
-    if !meta.members.contains(&grant.original.public()) {
-        return Err(AuthorityError::Invalid);
-    }
+    // The membership body and optional acceptance body are independently
+    // resumable. A valid large membership need not be decoded again while its
+    // acceptance ancestry waits for another bounded turn.
+    let mut membership_key = vec![9];
+    membership_key.extend_from_slice(&digest);
+    let needs_acceptance = match graph.predicate(&membership_key)? {
+        PredicateProgress::Complete(value) => value,
+        PredicateProgress::Pending => return Err(AuthorityError::MissingAncestry),
+        PredicateProgress::Scan(_) => {
+            let membership = graph
+                .event(grant.membership_event)?
+                .ok_or(AuthorityError::MissingAncestry)?;
+            if !valid_event(&membership)
+                || membership.kind != EventKind::MembershipChange
+                || membership.conversation_id != event.conversation_id
+            {
+                return Err(AuthorityError::Invalid);
+            }
+            let meta = crate::channel::ChannelMeta::decode(&membership.ciphertext)
+                .ok_or(AuthorityError::Invalid)?;
+            if !meta.members.contains(&grant.original.public()) {
+                return Err(AuthorityError::Invalid);
+            }
+            let value = crate::channel::ChannelMeta::is_invitation(&membership.ciphertext)
+                && grant.original.public().user_id() != meta.owner;
+            graph.save_predicate(&membership_key, None, Some(value))?;
+            value
+        }
+    };
     if grant.pending {
-        if grant.acceptance_event.is_some()
-            || !crate::channel::ChannelMeta::is_invitation(&membership.ciphertext)
-            || grant.original.public().user_id() == meta.owner
-        {
+        if grant.acceptance_event.is_some() || !needs_acceptance {
             return Err(AuthorityError::Invalid);
         }
-        return Ok(());
-    }
-    if let Some(acceptance) = grant.acceptance_event {
+    } else if let Some(acceptance) = grant.acceptance_event {
         let acceptance_event = graph
             .event(acceptance)?
             .ok_or(AuthorityError::MissingAncestry)?;
@@ -1355,16 +1376,15 @@ fn validate_legacy_grant(
             || !valid_event(&acceptance_event)
             || acceptance_event.author.ed25519_pub() != &grant.original.ed25519_pub
             || acceptance_event.conversation_id != event.conversation_id
-            || !descends(acceptance, membership.id, graph)?
+            || !descends(acceptance, grant.membership_event, graph)?
             || !descends(event.id, acceptance, graph)?
         {
             return Err(AuthorityError::Invalid);
         }
-    } else if crate::channel::ChannelMeta::is_invitation(&membership.ciphertext)
-        && grant.original.public().user_id() != meta.owner
-    {
+    } else if needs_acceptance {
         return Err(AuthorityError::Invalid);
     }
+    graph.save_predicate(&completed, None, Some(true))?;
     Ok(())
 }
 /// Causality uses content-address ancestry, never wall clocks or roster freshness.

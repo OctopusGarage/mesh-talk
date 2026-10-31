@@ -498,16 +498,6 @@ impl ReceivedStore {
             .map(decode)
             .transpose()
     }
-    pub(crate) fn header_page(
-        &self,
-        conversation: Option<&ConversationId>,
-        after: Option<TranscriptCursor>,
-        limit: TranscriptPageLimit,
-        descending: bool,
-    ) -> Result<TranscriptPage<TranscriptHeader>, LogError> {
-        self.repository
-            .header_page(conversation, after, limit, descending)
-    }
     pub(crate) fn header_reverse_scan_page(
         &self,
         conversation: &ConversationId,
@@ -538,39 +528,6 @@ impl ReceivedStore {
     ) -> Result<u64, LogError> {
         self.repository.conversation_revision(conversation)
     }
-    pub(crate) fn page(
-        &self,
-        conversation: Option<&ConversationId>,
-        after: Option<TranscriptCursor>,
-        limit: TranscriptPageLimit,
-    ) -> Result<TranscriptPage<ReceivedEntry>, LogError> {
-        let page = self.repository.page(conversation, after, limit)?;
-        Ok(TranscriptPage {
-            rows: page
-                .rows
-                .into_iter()
-                .map(decode)
-                .collect::<Result<_, _>>()?,
-            next: page.next,
-        })
-    }
-    /// Newest first; the returned cursor continues strictly into older rows.
-    pub(crate) fn recent_page(
-        &self,
-        conversation: Option<&ConversationId>,
-        before: Option<TranscriptCursor>,
-        limit: TranscriptPageLimit,
-    ) -> Result<TranscriptPage<ReceivedEntry>, LogError> {
-        let page = self.repository.recent_page(conversation, before, limit)?;
-        Ok(TranscriptPage {
-            rows: page
-                .rows
-                .into_iter()
-                .map(decode)
-                .collect::<Result<_, _>>()?,
-            next: page.next,
-        })
-    }
     pub(crate) fn scan_page(
         &self,
         conversation: Option<&ConversationId>,
@@ -587,6 +544,7 @@ impl ReceivedStore {
             next: page.next,
         })
     }
+    #[cfg(test)]
     pub(crate) fn visit(
         &self,
         conversation: Option<&ConversationId>,
@@ -604,34 +562,6 @@ impl ReceivedStore {
             cursor = Some(next);
         }
     }
-    pub(crate) fn find(
-        &self,
-        conversation: Option<&ConversationId>,
-        mut predicate: impl FnMut(&ReceivedEntry) -> bool,
-    ) -> Result<Option<ReceivedEntry>, LogError> {
-        let mut found = None;
-        self.visit(conversation, |row| {
-            if predicate(row) {
-                found = Some(row.clone());
-                Ok(false)
-            } else {
-                Ok(true)
-            }
-        })?;
-        Ok(found)
-    }
-    pub(crate) fn any(
-        &self,
-        conversation: Option<&ConversationId>,
-        mut predicate: impl FnMut(&ReceivedEntry) -> bool,
-    ) -> Result<bool, LogError> {
-        let mut found = false;
-        self.visit(conversation, |row| {
-            found = predicate(row);
-            Ok(!found)
-        })?;
-        Ok(found)
-    }
     pub(crate) fn remove_exact(
         &mut self,
         conversation: ConversationId,
@@ -648,6 +578,7 @@ impl ReceivedStore {
     pub(crate) fn remove_ordinals(&mut self, ordinals: &[i64]) -> Result<usize, LogError> {
         self.repository.remove_ordinals(ordinals)
     }
+    #[cfg(test)]
     pub(crate) fn remove_where(
         &mut self,
         mut predicate: impl FnMut(&ReceivedEntry) -> bool,
@@ -658,9 +589,11 @@ impl ReceivedStore {
     pub(crate) fn count(&self, conversation: Option<&ConversationId>) -> Result<usize, LogError> {
         self.repository.count(conversation)
     }
+    #[cfg(test)]
     pub(crate) fn usage(&self) -> Result<TranscriptUsage, LogError> {
         self.repository.usage()
     }
+    #[cfg(test)]
     pub(crate) fn conversation_page(
         &self,
         after: Option<ConversationId>,
@@ -689,10 +622,6 @@ impl ReceivedStore {
     #[cfg(test)]
     pub(crate) fn fail_appends_for_test(&mut self, enabled: bool) -> std::io::Result<()> {
         self.repository.fail_appends_for_test(enabled)
-    }
-    #[cfg(test)]
-    pub(crate) fn fail_next_append_rollback_for_test(&mut self, bytes: usize) {
-        self.repository.fail_next_append_rollback_for_test(bytes);
     }
     #[cfg(test)]
     pub(crate) fn fail_once_after_for_test(&mut self, successful: usize) {

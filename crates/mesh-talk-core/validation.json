@@ -902,7 +902,14 @@
             "channel::",
             "node::channel_senders::tests::",
             "node::node::tests::channel_checkpoint_",
-            "node::node::tests::group_reception_"
+            "node::node::tests::group_reception_",
+            "channel_causal_query_yields_exact_work_and_preserves_strict_ancestry",
+            "channel_owner_query_preserves_later_unobserved_ownership_loss",
+            "channel_projection_control_does_not_drain_historical_ancestry_in_one_turn",
+            "channel_receiver_and_source_handles_stay_stale_after_account_returns",
+            "channel_decision_replacement_rejects_old_predicate_publication",
+            "ancestor_preparation_obeys_caller_work_budget_across_wide_parents",
+            "ancestor_disposable_query_crash_retires_incrementally"
           ]
         }
       ],
@@ -1881,7 +1888,8 @@
             "participant_network_",
             "paged_preparation_yields_unlocked_and_observes_concurrent_revocation",
             "node::privacy_sync::causal_export_tests::",
-            "node::session::paged_tests::"
+            "node::session::paged_tests::",
+            "participant_durable_have_request_uses_no_historical_bodies"
           ]
         }
       ],
@@ -2483,6 +2491,7 @@
         "crates/mesh-talk-core/src/node/transcript_repository/",
         "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
         "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/order/combined/",
         "crates/mesh-talk-core/src/node/filebook/",
         "crates/mesh-talk-core/src/node/attachment_consent.rs",
         "crates/mesh-talk-core/src/node/attachment_consent/",
@@ -2495,6 +2504,7 @@
             "node::transcript_repository::tests::",
             "node::account_file_repository::tests::",
             "runtime_metadata_",
+            "indexed_runtime_recent_history_",
             "node::filebook::indexed::tests::",
             "node::attachment_consent::",
             "direct_file_approval_shares_signed_revision_with_relay_delivery",

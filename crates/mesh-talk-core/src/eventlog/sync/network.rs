@@ -192,6 +192,18 @@ pub trait NetworkSyncStore {
     ) -> Result<ExportPage<Self::ExportCursor>, LogError>;
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError>;
     fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError>;
+    /// Mandatory paged callers prepare authorization before probing an exact ID.
+    /// Custom stores retain their existing exact durability implementation.
+    fn durable_have_in_view(
+        &self,
+        view: &Self::View,
+        conversation: &ConversationId,
+        id: &EventId,
+    ) -> Result<bool, LogError> {
+        self.validate_view(view)?;
+        self.durable_have(conversation, id)
+    }
+
     fn file_consent(
         &self,
         file: &ConversationId,

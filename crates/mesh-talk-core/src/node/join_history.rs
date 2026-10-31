@@ -1,7 +1,7 @@
 //! Frozen, owner-authorized history copies. The offer contains a separately
 //! encrypted snapshot, never sender-chain keys. Existing accepted holders can
 //! release its independent key only after the invitee's signed acceptance.
-mod indexed;
+pub(in crate::node) mod indexed;
 
 use super::channel::ChannelBook;
 use super::channel::{ReceivedChannelMessage, SealedPayload};
