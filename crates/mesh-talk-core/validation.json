@@ -2556,6 +2556,9 @@
     {
       "id": "core-indexed-transcripts",
       "paths": [
+        "crates/mesh-talk-core/src/node/queries.rs",
+        "crates/mesh-talk-core/src/node/account_sync/archive.rs",
+        "crates/mesh-talk-core/src/node/account_sync/read_entitlement_tests.rs",
         "crates/mesh-talk-core/src/node/sent_store.rs",
         "crates/mesh-talk-core/src/node/received_store.rs",
         "crates/mesh-talk-core/src/node/account_file_repository.rs",
@@ -2576,6 +2579,8 @@
             "node::transcript_repository::tests::",
             "node::account_file_repository::tests::",
             "runtime_metadata_",
+            "selected_history_and_archive_wait_for_admitted_recall_before_body_reads",
+            "retained_channel_without_checkpoint_cannot_publish_saved_plaintext",
             "indexed_runtime_recent_history_",
             "node::filebook::indexed::tests::",
             "node::attachment_consent::",

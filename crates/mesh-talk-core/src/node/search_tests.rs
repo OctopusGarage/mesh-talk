@@ -11,6 +11,30 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+// Authored controls invalidate the canonical source. Drive the same bounded
+// projection turns as the runtime before asserting the settled search result.
+fn settle_channel_reads(node: &Node, channel: crate::eventlog::ConversationId) {
+    for _ in 0..256 {
+        if matches!(
+            node.channel_checkpoints.source_binding(channel),
+            Ok(Some(_))
+        ) {
+            node.process_channel_recalls(channel).unwrap();
+            assert!(
+                node.channel_checkpoints
+                    .history_read_ready(channel)
+                    .unwrap()
+            );
+            return;
+        }
+        let log = node.log.lock().unwrap();
+        node.channel_checkpoints
+            .project_step(log.repository().unwrap(), &node.identity, channel)
+            .unwrap();
+    }
+    panic!("finite channel checkpoint did not settle");
+}
+
 #[tokio::test]
 async fn search_finds_a_sent_dm_by_keyword() {
     let me = DeviceIdentity::generate();
@@ -285,6 +309,7 @@ async fn search_excludes_recalled_channel_text() {
         .id;
     assert_eq!(node.search("channel text").unwrap().len(), 2);
     node.recall_channel(channel, recalled).await.unwrap();
+    settle_channel_reads(&node, channel);
     assert!(node.search("withdrawn").unwrap().is_empty());
     assert!(node.search_recent("withdrawn").unwrap().hits.is_empty());
     assert_eq!(node.search("retained").unwrap().len(), 1);
@@ -375,6 +400,7 @@ async fn recent_search_channel_reference_matches_history_and_excludes_recall() {
         }
     );
     node.recall_channel(channel, id).await.unwrap();
+    settle_channel_reads(&node, channel);
     assert!(node.search_recent("channel token").unwrap().hits.is_empty());
 }
 
@@ -760,6 +786,7 @@ async fn search_context_channel_uses_canonical_exact_identity() {
         history.iter().map(|e| e.id).collect::<Vec<_>>()
     );
     node.recall_channel(channel, history[1].id).await.unwrap();
+    settle_channel_reads(&node, channel);
     assert!(node.search_context(&reference).unwrap().is_none());
 }
 
@@ -1223,6 +1250,7 @@ async fn protected_channel_exact_reveal_excludes_search_context_recall_and_wrong
         .is_none()
     );
     node.recall_channel(channel, id).await.unwrap();
+    settle_channel_reads(&node, channel);
     assert!(
         node.protected_message_content(&reference)
             .unwrap()
@@ -1420,6 +1448,7 @@ async fn protected_images_require_exact_reveal_and_block_ordinary_bytes_and_expo
     node.log.lock().unwrap().append(foreign.clone()).unwrap();
     assert!(node.recall_channel(channel, foreign.id).await.is_err());
     node.recall_channel(channel, id).await.unwrap();
+    settle_channel_reads(&node, channel);
     assert!(node.protected_image_content(&reference).unwrap().is_none());
     let (account_id, account_file) = node
         .enqueue_protected_file_to_account_progress_expiring_if(

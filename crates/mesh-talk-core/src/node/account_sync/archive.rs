@@ -634,6 +634,16 @@ impl Node {
             while let Some(r)=rows.next()?{let charge=usize::try_from(r.get::<_,i64>(6)?).map_err(|_|LogError::InvalidPageBudget)?;if selected.len()==RECORDS_PER_PAGE||bytes.checked_add(charge).is_none_or(|n|n>8*1024*1024){if selected.is_empty(){return Err(LogError::PageBudgetTooSmall{required:charge});}more=true;break;}bytes+=charge;let id:Vec<u8>=r.get(1)?;let conv:Vec<u8>=r.get(4)?;selected.push(ArchiveRow{key:HistoryCursor{tag:r.get(0)?,id:id.try_into().map_err(|_|LogError::CorruptFile("invalid archive id".into()))?},kind:r.get(2)?,ordinal:r.get(3)?,conversation:ConversationId::new(conv.try_into().map_err(|_|LogError::CorruptFile("invalid archive host".into()))?),peer:r.get(5)?,charge});}Ok((selected,more))
         })?;
         let next = more.then(|| selected.last().expect("nonempty bounded archive page").key);
+        let read_sources = {
+            let _log = self.log.lock().expect("log mutex");
+            selected
+                .iter()
+                .map(|row| {
+                    self.capture_history_read_source(row.conversation)
+                        .map(|source| (row.conversation, source))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let mut records = Vec::new();
         for row in selected.iter().take(RECORDS_PER_PAGE) {
             if let Some(record) = self.materialize_archive_row(row)? {
@@ -658,9 +668,24 @@ impl Node {
                     .map_err(|_| LogError::CorruptFile("invalid archive count".into()))?,
             ))
         })?;
+        for (conversation, source) in read_sources {
+            self.check_history_read_source(conversation, source.as_ref())?;
+        }
         Ok((records, next, archive_digest, key.controls))
     }
     fn materialize_archive_row(
+        &self,
+        row: &ArchiveRow,
+    ) -> Result<Option<HistoryRecord>, NodeError> {
+        let source = {
+            let _log = self.log.lock().expect("log mutex");
+            self.capture_history_read_source(row.conversation)?
+        };
+        let record = self.materialize_ready_archive_row(row)?;
+        self.check_history_read_source(row.conversation, source.as_ref())?;
+        Ok(record)
+    }
+    fn materialize_ready_archive_row(
         &self,
         row: &ArchiveRow,
     ) -> Result<Option<HistoryRecord>, NodeError> {
@@ -779,7 +804,9 @@ impl Node {
             return Ok(None);
         }
         if row.key.tag == 1 {
-            if self.recipient_expired(&plaintext, target, wall_clock) {
+            if self.recipient_expired(&plaintext, target, wall_clock)
+                || self.message_recalled_selected(conversation, target, None, None)?
+            {
                 return Ok(None);
             }
             return Ok(Some(HistoryRecord::Channel(ChannelRecord {
