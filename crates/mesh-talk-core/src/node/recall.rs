@@ -25,6 +25,7 @@ pub(crate) use indexed::IndexedRecallLog;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::collections::HashSet;
 #[cfg(test)]
 use std::path::Path;
@@ -467,7 +468,8 @@ impl Node {
         Ok(false)
     }
 
-    /// Explicit compatibility enumeration for bounded invitation export and tests.
+    /// Compatibility enumeration for legacy recall fixtures.
+    #[cfg(test)]
     pub(in crate::node) fn recalled_targets_channel(
         &self,
         conv: ConversationId,

@@ -3,7 +3,7 @@
 //! head with the least archive root preserves the existing Kahn semantics.
 use super::*;
 mod incremental;
-pub(crate) use incremental::HistoryAppendPrefix;
+pub(crate) use incremental::{HistoryAppendPrefix, HistoryInputStamp};
 const SCHEMA:&str="
 CREATE TABLE history_order_jobs(domain BLOB NOT NULL,conversation BLOB NOT NULL,job BLOB NOT NULL UNIQUE CHECK(length(job)=16),token BLOB NOT NULL,ready INTEGER NOT NULL CHECK(ready IN(0,1)),next_deadline BLOB,signed_job BLOB,signed_rank INTEGER NOT NULL DEFAULT -1,archive_clock BLOB NOT NULL DEFAULT X'',archive_id BLOB NOT NULL DEFAULT X'',next_rank INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(domain,conversation)) WITHOUT ROWID;
 CREATE TABLE history_order_candidates(job BLOB NOT NULL,id BLOB NOT NULL CHECK(length(id)=32),clock BLOB NOT NULL CHECK(length(clock)=8),source_kind INTEGER NOT NULL,ordinal INTEGER NOT NULL,priority INTEGER NOT NULL,sequence BLOB NOT NULL CHECK(length(sequence)=8),charged_bytes INTEGER NOT NULL CHECK(charged_bytes>=0),archive INTEGER NOT NULL CHECK(archive IN(0,1)),PRIMARY KEY(job,id)) WITHOUT ROWID;

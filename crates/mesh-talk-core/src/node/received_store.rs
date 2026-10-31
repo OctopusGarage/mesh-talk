@@ -486,6 +486,13 @@ impl ReceivedStore {
     ) -> Result<TranscriptScanPage<TranscriptHeader>, LogError> {
         self.repository.file_headers(file, after, limit)
     }
+    pub(crate) fn ordinal_for_event(
+        &self,
+        conversation: ConversationId,
+        id: EventId,
+    ) -> Result<Option<i64>, LogError> {
+        self.repository.ordinal_for_key(conversation, id.as_bytes())
+    }
     pub(crate) fn header_by_ordinal(
         &self,
         ordinal: i64,

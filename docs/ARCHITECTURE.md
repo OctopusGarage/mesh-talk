@@ -1552,7 +1552,12 @@ eligibility revision. Selected reads recheck eligibility before hydration. Expli
 host history can select previously validated offers from a former account namespace;
 current account history, transfer routing and archive export retain the current-account
 gate. A fixed historical revision and current offer acceptance metadata support bounded
-invalidation without retaining deleted-offer history. Archive
+invalidation without retaining deleted-offer history. Combined history stores those
+acceptance watermarks separately from deletion and visibility fences. Ordinary
+FILE append reads only new transcript headers and newly accepted binding keys;
+a new proof or logical binding affecting an older ordinal rebuilds the canonical
+order before serving it. Identity acceptance upgrades establish their initial
+baseline from fixed-size header keys without reading signed bundle bodies. Archive
 retirement clears its ready marker before deleting the first bounded batch, so an
 interrupted rebuild cannot serve a partially retired generation.
 Metadata pages check row and byte budgets; selected manifest reads verify physical allocation
