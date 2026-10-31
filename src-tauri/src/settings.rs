@@ -958,6 +958,7 @@ pub async fn set_app_settings<R: tauri::Runtime>(
     expected_account: Option<String>,
     password: Option<String>,
 ) -> Result<(), CommandError> {
+    let entry_generation = app_state.session().generation();
     let mut admission = owner
         .as_deref()
         .map(|owner| RuntimeAdmission::capture(&app_state, &node_state, owner))
@@ -985,13 +986,31 @@ pub async fn set_app_settings<R: tauri::Runtime>(
             admission = Some(verified);
         }
     }
+    // Remembered credentials share authentication ordering with login, logout,
+    // and native legacy-item migration. Ordinary cosmetic changes need no such
+    // lease. Hold it from the preference commit until owned cleanup completes.
+    let previous = match owner.as_deref() {
+        Some(owner) => state.get_for_owner(owner)?,
+        None => state.get(),
+    };
+    let next = match patch.as_ref() {
+        Some(patch) => shared::patch(&previous, patch)?,
+        None => settings.clone(),
+    };
+    let mut credential_auth = if normalize_settings(next)?.stay_signed_in != previous.stay_signed_in
+    {
+        Some(app_state.auth_operation.clone().lock_owned().await)
+    } else {
+        None
+    };
+    let mut credential_cleanup = None;
     // Installation controls remain usable during startup. They cannot write
     // account preference rows or normalize/change private account settings.
     if let Some(owner) = owner.as_deref()
         && expected_account.is_none()
         && patch.as_ref().is_some_and(shared::installation_patch)
     {
-        return config_store::with_account_lease(
+        let clear_user = config_store::with_account_lease(
             &app_state,
             admission.as_ref().unwrap().lease(),
             SETTINGS_FILE,
@@ -1007,13 +1026,25 @@ pub async fn set_app_settings<R: tauri::Runtime>(
                     let (settings, clear_user) = preserve_login_bookkeeping(settings, &previous);
                     let global = state.update_for_owner(owner, settings)?;
                     save(&app, &global);
-                    if let Some(user) = clear_user.as_deref() {
-                        crate::session_store::clear(user);
-                    }
-                    Ok(())
+                    Ok(clear_user)
                 })
             },
-        );
+        )?;
+        if let Some(user) = clear_user {
+            credential_cleanup = Some(crate::commands::spawn_saved_credential_cleanup(
+                credential_auth
+                    .take()
+                    .expect("saved-login changes own auth ordering"),
+                user,
+            ));
+        }
+        drop(_save);
+        if let Some(cleanup) = credential_cleanup {
+            cleanup
+                .await
+                .map_err(|_| CommandError::Service("Saved-login cleanup worker stopped".into()))?;
+        }
+        return Ok(());
     }
     match owner.as_deref() {
         Some(owner) => {
@@ -1073,10 +1104,7 @@ pub async fn set_app_settings<R: tauri::Runtime>(
                     config_store::write_account(&path, &AccountSettings::from(&settings))?;
                     let global = state.update_for_owner(owner, settings)?;
                     save(&app, &global);
-                    if let Some(user) = clear_user.as_deref() {
-                        crate::session_store::clear(user);
-                    }
-                    Ok(())
+                    Ok(clear_user)
                 })
                 .await;
             if saved.is_err()
@@ -1090,39 +1118,64 @@ pub async fn set_app_settings<R: tauri::Runtime>(
                     "Could not restore screenshot shortcuts after failed settings save: {error}"
                 );
             }
-            saved?;
-        }
-        None => {
-            if app_state.session().capture().is_ok() {
-                return Err(CommandError::Authorization(
-                    "settings owner required".into(),
+            if let Some(user) = saved? {
+                credential_cleanup = Some(crate::commands::spawn_saved_credential_cleanup(
+                    credential_auth
+                        .take()
+                        .expect("saved-login changes own auth ordering"),
+                    user,
                 ));
             }
-            let previous = state.get();
-            let settings = match patch.as_ref() {
-                Some(patch) => shared::patch(&previous, patch)?,
-                None => settings,
-            };
-            let (settings, clear_user) =
-                preserve_login_bookkeeping(normalize_settings(settings)?, &previous);
-            let global = state.update_without_owner(settings)?;
-            save(&app, &global);
-            if let Some(user) = clear_user.as_deref() {
-                crate::session_store::clear(user);
+        }
+        None => {
+            let clear_user = app_state
+                .session()
+                .without_session(entry_generation, || {
+                    let previous = state.get();
+                    let settings = match patch.as_ref() {
+                        Some(patch) => shared::patch(&previous, patch)?,
+                        None => settings,
+                    };
+                    let (settings, clear_user) =
+                        preserve_login_bookkeeping(normalize_settings(settings)?, &previous);
+                    let global = state.update_without_owner(settings)?;
+                    save(&app, &global);
+                    Ok::<_, CommandError>(clear_user)
+                })
+                .map_err(CommandError::Authorization)??;
+            if let Some(user) = clear_user {
+                credential_cleanup = Some(crate::commands::spawn_saved_credential_cleanup(
+                    credential_auth
+                        .take()
+                        .expect("saved-login changes own auth ordering"),
+                    user,
+                ));
             }
         }
     }
 
     drop(_save);
+    drop(credential_auth);
     // Apply the durable account preference to its running node, if still current.
-    if let (Some(owner), Some(admission)) = (owner, admission) {
+    // Its owned task starts before awaiting native credential cleanup: a blocked
+    // Keychain cannot postpone a committed network privacy or retention policy.
+    let application = if let (Some(owner), Some(admission)) = (owner, admission) {
         let (revision, settings) = state.snapshot(&owner)?;
         // Persistence succeeds even when a concurrent save or logout supersedes live application.
         let state = state.inner().clone();
-        let application = tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             apply_running_settings(admission, state, owner, revision, settings).await
-        });
+        }))
+    } else {
+        None
+    };
+    if let Some(application) = application {
         let _ = application.await;
+    }
+    if let Some(cleanup) = credential_cleanup {
+        cleanup
+            .await
+            .map_err(|_| CommandError::Service("Saved-login cleanup worker stopped".into()))?;
     }
     Ok(())
 }

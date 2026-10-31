@@ -180,7 +180,10 @@ offline, provided a reachable post office still holds the needed contents.
 Keep the sender available until postal custody has succeeded. A file card or an
 online indicator does not prove that the contents reached a post office or the
 recipient. Before the first chunk arrives, progress says **Waiting for file
-data**; the percentage remains zero. Explicit approval is still required when
+data**; the percentage remains zero. Photos use a quiet **Waiting for image**
+state, then a circular progress indicator. **Preparing image** means the image
+is not yet ready to display; it does not confirm saving or delivery to another
+member. Explicit approval is still required when
 automatic receiving is disabled. Refusal prevents local reception and stops
 further deposits once the sender learns that decision. Both clients need the
 updated file behavior; post-office storage and retention limits still apply.

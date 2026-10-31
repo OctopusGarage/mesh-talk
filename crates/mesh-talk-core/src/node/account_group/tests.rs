@@ -702,6 +702,51 @@ async fn new_account_group_rejects_a_route_whose_authenticated_account_changed()
     server.abort();
 }
 
+#[tokio::test(start_paused = true)]
+async fn new_account_group_preflight_has_one_deadline_and_creates_no_partial_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = node(dir.path(), &Account::generate());
+    let invited = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    for _ in 0..6 {
+        owner.roster.lock().unwrap().update(
+            &Announce::new_with_account(
+                &DeviceIdentity::generate(),
+                &invited,
+                "Pending account verification",
+                address.port(),
+            ),
+            address.ip(),
+            &owner.user_id(),
+        );
+    }
+    // Hold real asynchronous dial admission. Every route would otherwise get
+    // a fresh five-second query timeout, multiplying the caller's lifetime.
+    let _policy = owner.privacy.gate.write().await;
+    let committed = std::cell::Cell::new(false);
+    let result = tokio::time::timeout(
+        crate::node::route_timing::MAX_AUTHENTICATION_DEADLINE + std::time::Duration::from_secs(1),
+        owner.create_account_channel_invited_if(
+            "Must not create a partial group",
+            vec![invited.account_id()],
+            |commit| {
+                committed.set(true);
+                commit()
+            },
+        ),
+    )
+    .await
+    .expect("all target verification must share one authentication deadline");
+    assert!(matches!(result, Err(crate::node::NodeError::Channel(_))));
+    assert!(
+        !committed.get(),
+        "expired verification must not enter host admission"
+    );
+    assert!(owner.list_channels().is_empty());
+    assert!(owner.log.lock().unwrap().conversations().is_empty());
+}
+
 #[tokio::test]
 async fn new_account_group_crash_before_publication_cannot_leave_device_only_genesis() {
     let dir = tempfile::tempdir().unwrap();

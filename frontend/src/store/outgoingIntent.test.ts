@@ -85,6 +85,43 @@ beforeEach(() => {
   });
   useTransfers.getState().reset();
 });
+it.each([false, true])(
+  "settles late pre-admission failure after returning an uncertain send (protected=%s)",
+  async (protectedText) => {
+    vi.useFakeTimers();
+    const store = session();
+    const group = { kind: "channel" as const, id: "group", name: "Group" };
+    let reject!: (error: unknown) => void;
+    invoke.mockImplementation((command: string) =>
+      command === "owner_new_account_group_operation_id"
+        ? Promise.resolve("op")
+        : new Promise((_resolve, fail) => {
+            reject = fail;
+          }),
+    );
+    const sending = beginSendIntent(
+      store.setState,
+      store.getState,
+      group,
+      { kind: "text", text: "hello", replyTo: null },
+      { retainFailure: !protectedText },
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(await sending).toBe(true);
+      reject({ kind: "authorization", message: "app locked" });
+      await vi.advanceTimersByTimeAsync(0);
+      const intent = Object.values(store.getState().intents)[0];
+      expect(intent.message).toMatchObject({ pending: false, failed: true });
+      expect(intent.operationId).toBeUndefined();
+      expect(intent.payload).toMatchObject({ text: "hello" });
+    } finally {
+      reject(new Error("retired"));
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+    }
+  },
+);
 
 it("keeps durable acceptance when presentation hydration rejects", async () => {
   const store = session();

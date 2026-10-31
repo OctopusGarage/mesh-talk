@@ -234,6 +234,8 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) delivery_snapshot_hook: BlockingTestHook,
     #[cfg(test)]
+    pub(in crate::node) before_sent_delete_hook: BlockingTestHook,
+    #[cfg(test)]
     pub(in crate::node) profile_read_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) profile_prepare_hook: BlockingTestHook,
@@ -877,6 +879,8 @@ impl Node {
             group_file_asset_recv_test_hook: Mutex::new(None),
             #[cfg(test)]
             delivery_snapshot_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_sent_delete_hook: Mutex::new(None),
             #[cfg(test)]
             profile_read_hook: Mutex::new(None),
             #[cfg(test)]

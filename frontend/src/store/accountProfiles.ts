@@ -6,6 +6,7 @@ import {
 } from "@/lib/api/accountProfile";
 import { useAuth } from "./auth";
 import { captureRuntimeOwner } from "./ownership";
+import { readWithDeadline } from "@/lib/readDeadline";
 
 const requests = new Map<string, Promise<AccountProfileView | null>>();
 const versions = new Map<string, number>();
@@ -44,8 +45,9 @@ export const useAccountProfiles = create<ProfilesState>((set, get) => ({
       if (latest && latest !== pending) return latest;
       return get().profiles[accountId] ?? null;
     };
-    const pending: Promise<AccountProfileView | null> = accountProfile
-      .get(lease.owner!, accountId)
+    const pending: Promise<AccountProfileView | null> = readWithDeadline(() =>
+      accountProfile.get(lease.owner!, accountId),
+    )
       .then((value) => {
         if (
           lease.current() &&

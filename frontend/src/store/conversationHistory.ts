@@ -339,7 +339,9 @@ export async function scanConversationHistory(
           key,
         );
         try {
-          const rows = await historyFor(conversation, lease.owner!, 500);
+          const rows = await readWithDeadline(() =>
+            historyFor(conversation, lease.owner!, 500),
+          );
           if (!current()) return;
           set((state) => ({
             ...snapshotPatch(state, key, rows, {

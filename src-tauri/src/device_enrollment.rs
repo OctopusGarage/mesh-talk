@@ -319,18 +319,18 @@ pub async fn complete_device_enrollment<R: tauri::Runtime>(
     })
     .await
     .map_err(|_| CommandError::Internal("Device enrollment worker stopped".into()))??;
-    let saved_session = app_state
+    app_state
         .session()
-        .matching(&lease, |_| {
-            settings_state.activate(lease.owner());
-            crate::commands::persist_saved_login(
-                &app_handle,
-                &settings_state,
-                &user,
-                &credentials.password,
-            )
-        })
+        .matching(&lease, |_| settings_state.activate(lease.owner()))
         .map_err(CommandError::Authorization)?;
+    let saved_session = crate::commands::remember_login_owned(
+        app_handle.clone(),
+        app_state.inner().clone(),
+        settings_state.inner().clone(),
+        lease.clone(),
+        credentials.password.clone(),
+    )
+    .await?;
     crate::runtime_bootstrap::spawn_node_runtime(
         app_handle,
         lease,

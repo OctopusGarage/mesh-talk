@@ -20,6 +20,32 @@ beforeEach(() => {
   useAccountProfiles.getState().clear();
   api.get.mockReset();
 });
+it("releases a timed-out profile lane so a new observation can recover", async () => {
+  vi.useFakeTimers();
+  let finish!: (value: ReturnType<typeof profile>) => void;
+  api.get.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = useAccountProfiles.getState().load("bob");
+  const rejected = expect(pending).rejects.toThrow("timed out");
+  try {
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(api.get).toHaveBeenCalledTimes(1);
+    // Attach rejection before advancing the timer to keep unhandled errors visible.
+    await rejected;
+    api.get.mockResolvedValueOnce(profile("bob", "fresh"));
+    await useAccountProfiles.getState().load("bob");
+    finish(profile("bob", "stale"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useAccountProfiles.getState().profiles.bob?.bio).toBe("fresh");
+  } finally {
+    finish?.(profile("bob", "retired"));
+    vi.useRealTimers();
+  }
+});
 it("deduplicates profile reads and refreshes only observed accounts on events", async () => {
   api.get
     .mockResolvedValueOnce(profile("bob", "before"))

@@ -108,6 +108,28 @@ it("reconciles effective registration after a rejected shortcut replacement with
 afterEach(async () => {
   await act(async () => root.unmount());
   vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+it("releases a saved settings readback timeout and can reload without replaying the write", async () => {
+  vi.useFakeTimers();
+  await render();
+  const readback = deferred<AppSettings>();
+  mocks.get.mockReturnValueOnce(readback.promise);
+  let saving!: Promise<boolean>;
+  await act(async () => {
+    saving = controller.update({ notifications: false }, "notifications");
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+  expect(controller.saving).toBe(false);
+  expect(controller.loadError?.kind).toBe("refresh");
+  await saving;
+  await act(async () => controller.reload());
+  expect(controller.settings).toEqual(initial);
+  await act(async () => readback.resolve({ ...initial, notifications: false }));
+  expect(controller.settings).toEqual(initial);
+  expect(mocks.update).toHaveBeenCalledTimes(1);
 });
 it("keeps acknowledged settings until the write and canonical readback finish", async () => {
   await render();

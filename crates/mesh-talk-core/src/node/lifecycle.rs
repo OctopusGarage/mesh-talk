@@ -169,14 +169,18 @@ impl Node {
             }
             Some(m)
         };
+        #[cfg(test)]
+        if let Some(hook) = self.before_sent_delete_hook.lock().unwrap().take() {
+            hook();
+        }
+        // Sibling archive readers do not hold delivery. Match their sentlog ->
+        // recovered-ID order so local deletion cannot deadlock account export.
+        let mut sent = self.sentlog.lock().expect("sentlog mutex not poisoned");
         let recovered_ids = self
             .recovered_sent_ids
             .lock()
             .expect("recovered sent ids mutex not poisoned");
-        removed += self
-            .sentlog
-            .lock()
-            .expect("sentlog mutex not poisoned")
+        removed += sent
             .remove_where(|e| {
                 if e.conversation != conv {
                     return false;

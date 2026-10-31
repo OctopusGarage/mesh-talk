@@ -33,6 +33,15 @@ The composer is a stable bottom dock. Attachment, media, expression and send con
 
 ## States and accessibility
 
+Incoming photos retain an opaque, bounded media frame over personalized wallpapers.
+A static photo glyph marks waiting; a 48px radial indicator shows measured chunk
+progress, with state text and total size beneath it. Generic filenames remain in
+accessible names and details. The preparing surface stays until the current image
+loads, then dissolves in 180ms (80ms with reduced motion); known cached images do
+not replay preparation. Progress transitions last 160ms and stop under reduced
+motion. Decoded images preserve their original proportions, and file availability,
+preview failures, consent and delayed message arrival keep their separate meanings.
+
 Empty conversation and no-selection states have a quiet concentric motif, a clear explanation and the existing next action. Loading, connection, offline and error states say what is happening and offer retry or diagnostics when available. Technical values remain selectable and easy to compare. Text and controls must wrap or truncate within their pane, including long names, identifiers, messages and filenames.
 
 Group member lists show people, their presence and account role. Device counts, routing identities and per-device sharing state stay out of the list. Personal sharing options live in Group settings.

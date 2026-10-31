@@ -308,6 +308,20 @@ impl SensitiveAction {
     }
 
     /// Used when the caller already holds the exact session guard.
+    pub(crate) fn commit_at_revision<T>(
+        &self,
+        revision: u64,
+        operation: impl FnOnce() -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        if self.revision != revision {
+            return Err(CommandError::Authorization(
+                "app lock changed during authentication".into(),
+            ));
+        }
+        self.commit(operation)
+    }
+
+    /// Used when the caller already holds the exact session guard.
     pub(crate) fn commit<T>(
         &self,
         operation: impl FnOnce() -> Result<T, CommandError>,

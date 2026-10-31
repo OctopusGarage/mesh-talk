@@ -229,3 +229,31 @@ it("restores a committed leave as busy until private history cleanup completes",
     await h.stop();
   }
 });
+it("releases a timed-out control when the original invocation later proves non-admission", async () => {
+  const h = await mount();
+  const error = { kind: "authorization", message: "app locked" };
+  try {
+    await act(async () =>
+      h.get().run(async () => ({ kind: "unconfirmed", id: "late" })),
+    );
+    state.groupOperations.late = {
+      id: "late",
+      group: "group",
+      kind: "rename",
+      account_id: "account",
+      stage: "unconfirmed",
+      observation: 0,
+      admissionFailure: { error },
+    };
+    await h.render();
+    expect(h.get().busy).toBe(false);
+    expect(h.get().outcome).toEqual({
+      kind: "not_admitted",
+      id: "late",
+      error,
+    });
+  } finally {
+    state.groupOperations = {};
+    await h.stop();
+  }
+});

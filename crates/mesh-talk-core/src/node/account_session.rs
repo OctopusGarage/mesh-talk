@@ -577,6 +577,7 @@ mod timeout_tests {
             NodeError::Authorization("account session requires a certified sibling".into()),
             transport(TransportError::AdmissionDenied),
             transport(TransportError::Noise("TCP connection capacity busy".into())),
+            transport(TransportError::Noise("dial deadline exceeded".into())),
             transport(TransportError::Noise("invalid handshake".into())),
             NodeError::Channel("invalid account document exchange".into()),
         ] {

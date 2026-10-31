@@ -28,10 +28,10 @@ impl Owner {
         })
     }
     pub(super) async fn load(&self) -> Result<Option<String>, CommandError> {
-        recovery::setup::with_storage(&self.app, &self.node, Some(self.generation), |manager, username, password| {
-            if !manager.file_exists(username, GRANT_FILE) { return Ok(None); }
-            let saved: SavedGrant = manager.read_encrypted_file(username, GRANT_FILE, password)
-                .map_err(|_| CommandError::Io("Could not unlock the saved Google Drive connection. Disconnect it and connect again.".into()))?;
+        recovery::setup::with_storage(&self.app, &self.node, Some(self.generation), |storage| {
+            if !storage.exists(GRANT_FILE) { return Ok(None); }
+            let saved: SavedGrant = storage.read(GRANT_FILE,
+                "Could not unlock the saved Google Drive connection. Disconnect it and connect again.")?;
             if saved.client_id != oauth::client_id() { return Ok(None); }
             if saved.refresh_token.is_empty() || saved.refresh_token.len() > 16 * 1024 {
                 return Err(CommandError::Authentication("Saved Google Drive connection is invalid. Disconnect it and connect again.".into()));
@@ -48,44 +48,37 @@ impl Owner {
             &self.app,
             &self.node,
             Some(self.generation),
-            move |manager, username, password| {
-                // Checking cancellation inside the serialized storage operation also
-                // prevents a late OAuth response from undoing an explicit forget.
-                if *connection.cancelled.borrow() {
-                    return Err(CommandError::Authorization(
-                        "Google Drive connection was cancelled".into(),
-                    ));
-                }
+            move |storage| {
+                let check = || {
+                    if *connection.cancelled.borrow() {
+                        Err(CommandError::Authorization(
+                            "Google Drive connection was cancelled".into(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                };
+                check()?;
                 let saved = SavedGrant {
                     client_id: oauth::client_id().into(),
                     refresh_token,
                 };
-                manager
-                    .write_encrypted_file(username, GRANT_FILE, &saved, password)
-                    .map_err(|_| {
-                        CommandError::Io(
-                            "Could not remember Google Drive securely. Try connecting again."
-                                .into(),
-                        )
-                    })
+                // A late OAuth response cannot undo a forget, including cancellation
+                // while the encrypted replacement is being prepared.
+                storage.write_if(
+                    GRANT_FILE,
+                    &saved,
+                    "Could not remember Google Drive securely. Try connecting again.",
+                    check,
+                )
             },
         )
         .await
     }
     pub(super) async fn forget(&self) -> Result<(), CommandError> {
-        recovery::setup::with_storage(
-            &self.app,
-            &self.node,
-            Some(self.generation),
-            |manager, username, _| {
-                if !manager.file_exists(username, GRANT_FILE) {
-                    return Ok(());
-                }
-                manager.delete_file(username, GRANT_FILE).map_err(|_| {
-                    CommandError::Io("Could not forget Google Drive. Try again.".into())
-                })
-            },
-        )
+        recovery::setup::with_storage(&self.app, &self.node, Some(self.generation), |storage| {
+            storage.delete(GRANT_FILE, "Could not forget Google Drive. Try again.")
+        })
         .await
     }
     pub(super) async fn forget_rejected(
@@ -97,22 +90,20 @@ impl Owner {
             &self.app,
             &self.node,
             Some(self.generation),
-            move |manager, username, password| {
-                if *connection.cancelled.borrow() || !manager.file_exists(username, GRANT_FILE) {
+            move |storage| {
+                if *connection.cancelled.borrow() || !storage.exists(GRANT_FILE) {
                     return Ok(());
                 }
-                let saved: SavedGrant = manager
-                    .read_encrypted_file(username, GRANT_FILE, password)
-                    .map_err(|_| {
-                        CommandError::Io(
-                            "Could not unlock the saved Google Drive connection".into(),
-                        )
-                    })?;
+                let saved: SavedGrant = storage.read(
+                    GRANT_FILE,
+                    "Could not unlock the saved Google Drive connection",
+                )?;
                 // An older failed refresh must not forget a more recent Google login.
-                if saved.refresh_token == rejected_token && saved.client_id == oauth::client_id() {
-                    manager.delete_file(username, GRANT_FILE).map_err(|_| {
-                        CommandError::Io("Could not forget expired Google Drive access".into())
-                    })?;
+                if saved.refresh_token == rejected_token
+                    && saved.client_id == oauth::client_id()
+                    && !*connection.cancelled.borrow()
+                {
+                    storage.delete(GRANT_FILE, "Could not forget expired Google Drive access")?;
                 }
                 Ok(())
             },
