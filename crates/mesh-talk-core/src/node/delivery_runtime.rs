@@ -313,8 +313,15 @@ impl FileDeliveryScheduler {
         self.relay_cooldowns.retain(|(key, until, consent)| {
             *until > std::time::Instant::now()
                 && (!*consent
-                    || node.outgoing_file_consent_status(key.0, key.1)
-                        != Some(crate::eventlog::sync::FileConsentStatus::Accepted))
+                    || match node.outgoing_file_consent_status(key.0, key.1) {
+                        Ok(status) => {
+                            status != Some(crate::eventlog::sync::FileConsentStatus::Accepted)
+                        }
+                        Err(error) => {
+                            log::warn!("file consent retry observation failed: {error}");
+                            true
+                        }
+                    })
         });
         node.prune_outgoing_file_acks();
         FileScan {
@@ -1385,21 +1392,23 @@ impl Node {
             .outgoing_file_acks
             .lock()
             .expect("outgoing file progress lock not poisoned");
-        let consent = if recipients.iter().any(|destination| {
-            destination.active
-                && self.outgoing_file_consent_status(id, destination.binding.event_id)
-                    == Some(crate::eventlog::sync::FileConsentStatus::Declined)
-        }) {
-            Some(super::ReceiveDecision::Declined)
-        } else if recipients.iter().any(|destination| {
-            destination.active
-                && self.outgoing_file_consent_status(id, destination.binding.event_id)
-                    == Some(crate::eventlog::sync::FileConsentStatus::Pending)
-        }) {
-            Some(super::ReceiveDecision::Pending)
-        } else {
-            None
-        };
+        let mut consent = None;
+        for destination in recipients.iter().filter(|destination| destination.active) {
+            match self.outgoing_file_consent_status(id, destination.binding.event_id) {
+                Ok(Some(crate::eventlog::sync::FileConsentStatus::Declined)) => {
+                    consent = Some(super::ReceiveDecision::Declined);
+                    break;
+                }
+                Ok(Some(crate::eventlog::sync::FileConsentStatus::Pending)) => {
+                    consent = Some(super::ReceiveDecision::Pending)
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("file progress consent observation failed: {error}");
+                    return None;
+                }
+            }
+        }
         let total = card.chunk_count.saturating_mul(recipients.len() as u32);
         let done = recipients.iter().fold(0u32, |sum, destination| {
             let confirmed = if destination.active {
@@ -2766,8 +2775,13 @@ impl Node {
         destination: &super::delivery_store::FileDestination,
     ) -> bool {
         self.file_destination_current(file, destination)
-            && self.outgoing_file_consent_status(file.id, destination.binding.event_id)
-                != Some(crate::eventlog::sync::FileConsentStatus::Declined)
+            && match self.outgoing_file_consent_status(file.id, destination.binding.event_id) {
+                Ok(status) => status != Some(crate::eventlog::sync::FileConsentStatus::Declined),
+                Err(error) => {
+                    log::warn!("file custody deferred after consent read failure: {error}");
+                    false
+                }
+            }
     }
 
     pub(in crate::node) async fn retry_file_step(
@@ -2782,9 +2796,16 @@ impl Node {
             transfers.remove(&key);
             return false;
         }
-        if self.recipient_completed_file(file, destination) {
-            transfers.remove(&key);
-            return true;
+        match self.recipient_completed_file(file, destination) {
+            Ok(true) => {
+                transfers.remove(&key);
+                return true;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("file completion observation deferred: {error}");
+                return false;
+            }
         }
         if !transfers.contains_key(&key) {
             if transfers.len() == MAX_FILE_TRANSFERS {
@@ -3329,8 +3350,13 @@ impl Node {
         if !current() {
             return false;
         }
-        if self.recipient_completed_file(file, destination) {
-            return true;
+        match self.recipient_completed_file(file, destination) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("file completion observation deferred: {error}");
+                return false;
+            }
         }
         let manifest_conv =
             super::conversation::dm_conversation_id(&self.identity.public(), &binding.device);

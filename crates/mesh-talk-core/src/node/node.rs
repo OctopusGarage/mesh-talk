@@ -766,7 +766,8 @@ impl Node {
                 )
             });
             let h_consent_controls = s.spawn(|| {
-                super::file_consent_store::FileConsentStore::open(
+                super::file_consent_store::FileConsentStore::authenticate_legacy(
+                    &storage,
                     &dir.join("file-consent-controls.log"),
                     password,
                 )
@@ -823,7 +824,7 @@ impl Node {
         )?;
         recalls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         consent_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
-        let file_consent = consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
+        consent_controls_res.unwrap_or_else(|e| std::panic::resume_unwind(e))?;
         let recovery_origins = origin_res
             .unwrap_or_else(|e| std::panic::resume_unwind(e))?
             .into_iter()
@@ -888,8 +889,6 @@ impl Node {
             &dir.join("sent-manifest-scopes.log"),
             password,
         )?;
-        let media = crate::node::media_store::MediaStore::open(dir, password, &identity.user_id())
-            .map_err(|e| LogError::Io(std::io::Error::other(format!("media store open: {e}"))))?;
         let forwarding = super::forwarding::ForwardStore::open(
             &dir.join(format!("forwarding-{}.log", account.account_id())),
             password,
@@ -898,12 +897,6 @@ impl Node {
             &dir.join(format!("favorites-{}.log", account.account_id())),
             password,
         )?;
-        let favorite_media = super::media_store::MediaStore::open(
-            &dir.join(format!("favorites-{}", account.account_id())),
-            password,
-            &account.account_id(),
-        )
-        .map_err(LogError::Io)?;
         let account_sync_policy = super::account_sync_policy::DeviceSyncPolicyStore::open(
             &dir.join(format!("account-sync-policy-{}.log", account.account_id())),
             password,
@@ -940,13 +933,32 @@ impl Node {
             )?;
         account_transitions.commit_own(&identity.public(), &account.public().ed25519_pub)?;
         account_transitions.discard_pending(&identity.public(), &account.public().ed25519_pub)?;
-        let account_documents = super::account_documents::store::AccountDocumentStore::open(
-            dir,
-            password,
-            &account.public().ed25519_pub,
-        )?;
         let account_document_updates = tokio::sync::watch::channel(0).0;
         storage.complete_participant(password, legacy_previous.as_deref())?;
+        let media = super::media_store::MediaStore::open_profile(
+            storage.clone(),
+            dir,
+            password,
+            &identity.user_id(),
+            None,
+        )
+        .map_err(LogError::Io)?;
+        let favorite_media = super::media_store::MediaStore::open_profile(
+            storage.clone(),
+            &dir.join(format!("favorites-{}", account.account_id())),
+            password,
+            &account.account_id(),
+            None,
+        )
+        .map_err(LogError::Io)?;
+        let account_documents =
+            super::account_documents::store::AccountDocumentStore::open_profile(
+                storage.clone(),
+                dir,
+                password,
+                &account.public().ed25519_pub,
+            )?;
+
         let channel_custody = ChannelCustodyStore::from_profile(
             storage.clone(),
             &dir.join("channel.custody"),
@@ -1037,6 +1049,11 @@ impl Node {
         let attachment_consent = super::attachment_consent::IndexedAttachmentConsent::from_profile(
             storage.clone(),
             &dir.join("attachment-consent.log"),
+            password,
+        )?;
+        let file_consent = super::file_consent_store::FileConsentStore::from_profile(
+            storage.clone(),
+            &dir.join("file-consent-controls.log"),
             password,
         )?;
         log.repository()?.initialize_ancestry()?;
@@ -1130,19 +1147,9 @@ impl Node {
             &file_message_identities,
             &account_suppression,
         )?;
-        // Retained metadata can conservatively keep bytes without granting read
-        // authority; no history-sized set or manifest bodies are needed for GC.
-        let media_gc_page_limit = super::transcript_repository::TranscriptPageLimit::new(1, 4096)?;
-        media
-            .prune_unreferenced_where(|file| {
-                received_files
-                    .file_headers(&file, None, media_gc_page_limit)
-                    .map(|page| !page.rows.is_empty())
-                    .map_err(std::io::Error::other)
-            })
-            .map_err(|error| {
-                LogError::Io(std::io::Error::other(format!("media prune: {error}")))
-            })?;
+        // The existing FILES reference owner is consulted in bounded background
+        // turns; warm startup only schedules a persisted inventory cutoff.
+        media.schedule_gc().map_err(LogError::Io)?;
         let (profile_tx, profile_rx, call_signal_tx, call_signal_rx) = if legacy_delivery {
             let (profile_tx, profile_rx) = mpsc::unbounded_channel();
             let (call_tx, call_rx) = mpsc::unbounded_channel();
@@ -1160,9 +1167,7 @@ impl Node {
                 None,
             )
         };
-        favorite_media
-            .prune_unreferenced(&favorites.live_files(now_millis()))
-            .map_err(LogError::Io)?;
+        favorite_media.schedule_gc().map_err(LogError::Io)?;
         let opaque_receive_cache = super::opaque_receive_cache::OpaqueReceiveCache::open(
             storage.clone(),
             log_path,
@@ -1375,6 +1380,10 @@ impl Node {
         node.attachment_consent
             .lock()
             .expect("consent lock")
+            .recapture()?;
+        node.file_consent
+            .lock()
+            .expect("file consent lock")
             .recapture()?;
         node.manifest_scopes.recapture()?;
         node.queue_approved_incomplete_files();

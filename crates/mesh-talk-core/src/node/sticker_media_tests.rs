@@ -751,7 +751,7 @@ async fn installed_sticker_headers_complete_exact_offer_without_image_transfer()
             .unwrap();
         assert_eq!(b.read_media(file).as_deref(), Some(bytes.as_slice()));
         a.accept_file_consent_event(&control, &bp.public()).unwrap();
-        assert!(a.recipient_completed_file(&card, destination));
+        assert!(a.recipient_completed_file(&card, destination).unwrap());
         assert!(b.log.lock().unwrap().events(&file).unwrap().is_empty());
         serving.abort();
         let _ = serving.await;
@@ -833,7 +833,10 @@ async fn installed_sticker_wire_reuse_and_legacy_mismatch_fallback() {
                 "matching artwork sends no image ciphertext"
             );
             let card = a.delivery.lock().unwrap().file_card(first).unwrap().clone();
-            assert!(a.recipient_completed_file(&card, &card.destinations[0]));
+            assert!(
+                a.recipient_completed_file(&card, &card.destinations[0])
+                    .unwrap()
+            );
             let (second, reused) = a
                 .enqueue_file_to_account(&target, &path, FileKind::Media)
                 .await
@@ -1003,7 +1006,10 @@ async fn installed_sticker_receiver_recovery_requests_only_authorized_headers() 
             .unwrap()
             .unwrap();
         a.accept_file_consent_event(&control, &bp.public()).unwrap();
-        assert!(a.recipient_completed_file(&card, &card.destinations[0]));
+        assert!(
+            a.recipient_completed_file(&card, &card.destinations[0])
+                .unwrap()
+        );
         sender.abort();
         receiver.abort();
         let _ = sender.await;

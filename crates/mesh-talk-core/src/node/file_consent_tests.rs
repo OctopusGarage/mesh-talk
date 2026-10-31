@@ -122,7 +122,10 @@ async fn offline_dm_file_custody_precedes_consent_and_survives_sender_shutdown()
             card.final_chunk.unwrap(),
         )
     };
-    assert_eq!(sender.outgoing_file_consent_status(card, manifest), None);
+    assert_eq!(
+        sender.outgoing_file_consent_status(card, manifest).unwrap(),
+        None
+    );
     let mailbox = RelayMailbox::new(&sender.identity, &bp.public(), &relay_proof.public()).unwrap();
     let outer_final = mailbox
         .wrap(
@@ -150,7 +153,10 @@ async fn offline_dm_file_custody_precedes_consent_and_survives_sender_shutdown()
         "the post office must hold the encrypted final chunk before the recipient starts or approves"
     );
     assert!(!retained.lock().unwrap().has(&final_chunk));
-    assert_eq!(sender.outgoing_file_consent_status(card, manifest), None);
+    assert_eq!(
+        sender.outgoing_file_consent_status(card, manifest).unwrap(),
+        None
+    );
     assert!(!sender.outgoing_file_progress(card).unwrap().delivered);
     drop(sender);
 
@@ -494,6 +500,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
         .unwrap()
         .published_control(binding)
         .unwrap()
+        .unwrap()
         .clone();
     let original = super::file_consent::Decision::open(&control).unwrap();
     for wrong_binding in 0..5 {
@@ -510,13 +517,13 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             a.accept_file_consent_event(&unrelated, &bp.public())
                 .unwrap()
         );
-        assert_eq!(a.outgoing_file_consent_status(card, binding), None);
+        assert_eq!(a.outgoing_file_consent_status(card, binding).unwrap(), None);
     }
     a.delivery_suspended
         .store(true, std::sync::atomic::Ordering::Release);
     a.accept_file_consent_event(&control, &bp.public()).unwrap();
     assert_eq!(
-        a.outgoing_file_consent_status(card, binding),
+        a.outgoing_file_consent_status(card, binding).unwrap(),
         None,
         "a retired account runtime must not accept new file controls"
     );
@@ -548,7 +555,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
             .any(|text| text == b"chat survives consent storage failure"),
         "failed consent persistence must not block unrelated chat events"
     );
-    assert_eq!(a.outgoing_file_consent_status(card, binding), None);
+    assert_eq!(a.outgoing_file_consent_status(card, binding).unwrap(), None);
     let retry_mailbox =
         crate::postoffice::opaque::RelayMailbox::federated(&a.identity, &bp.public()).unwrap();
     let deferred_control = retry_mailbox.wrap(&control).unwrap().id;
@@ -567,7 +574,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     )
     .await
     .expect("a second drain during the outage must remain bounded");
-    assert_eq!(a.outgoing_file_consent_status(card, binding), None);
+    assert_eq!(a.outgoing_file_consent_status(card, binding).unwrap(), None);
     a.file_consent
         .lock()
         .unwrap()
@@ -650,7 +657,7 @@ async fn federated_file_consent_and_complete_bytes_need_no_direct_client_route()
     );
     assert!(a.outgoing_file_consents.lock().unwrap().is_empty());
     assert_eq!(
-        a.outgoing_file_consent_status(card, binding),
+        a.outgoing_file_consent_status(card, binding).unwrap(),
         Some(crate::eventlog::sync::FileConsentStatus::Accepted),
         "sender restart must retain the authenticated decision"
     );
@@ -838,6 +845,7 @@ async fn direct_file_approval_shares_signed_revision_with_relay_delivery() {
             .lock()
             .unwrap()
             .received_control(manifest)
+            .unwrap()
             .is_some(),
         "direct consent must establish the same signed watermark as mailbox consent"
     );

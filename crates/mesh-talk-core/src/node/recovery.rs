@@ -1130,7 +1130,8 @@ impl Node {
             emit(SnapshotRecordV1::Favorite { payload: payload? })?;
         }
         for (favorite, store) in [(false, &self.media), (true, &self.favorite_media)] {
-            for (file_conv, _) in store.managed_files().map_err(|_| SnapshotError::Io)? {
+            for item in store.managed_files().map_err(|_| SnapshotError::Io)? {
+                let (file_conv, _) = item.map_err(|_| SnapshotError::Io)?;
                 let visible = if favorite {
                     favorite_files
                         .get(&file_conv)
