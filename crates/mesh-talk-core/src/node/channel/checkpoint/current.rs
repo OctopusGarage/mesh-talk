@@ -122,6 +122,7 @@ impl ChannelCheckpointStore {
     }
     /// Per-source work remains on disk; only one current conversation is held
     /// while the scheduler advances its canonical reducer.
+    #[cfg(test)]
     pub(in crate::node) fn next_dirty(&self) -> Result<Option<ConversationId>, LogError> {
         self.profile.database().read(|c| {
             self.check_account_on(c)?;
@@ -250,30 +251,6 @@ impl ChannelCheckpointStore {
         self.profile
             .database()
             .read(|c| self.check_source_on(c, source))
-    }
-    pub(in crate::node) fn control_page(
-        &self,
-        source: &ChannelSource,
-        kind: crate::eventlog::event::EventKind,
-        after: Option<i64>,
-        reverse: bool,
-    ) -> Result<Vec<(i64, EventId)>, LogError> {
-        self.profile.database().read(|c| {
-            self.check_source_on(c,source)?;
-            let sql=if reverse {
-                "SELECT rank,event FROM channel_event_authority INDEXED BY channel_authority_kind WHERE job=?1 AND channel=?2 AND kind=?3 AND rank<?4 ORDER BY rank DESC LIMIT 64"
-            }else{
-                "SELECT rank,event FROM channel_event_authority INDEXED BY channel_authority_kind WHERE job=?1 AND channel=?2 AND kind=?3 AND rank>?4 ORDER BY rank LIMIT 64"
-            };
-            let mut statement=c.prepare(sql)?;
-            let mut rows=statement.query(params![source.job.as_slice(),source.channel.as_bytes().as_slice(),kind as i64,after.unwrap_or(if reverse {i64::MAX}else{-1})])?;
-            let mut page=Vec::new();
-            while let Some(row)=rows.next()? {
-                let id:Vec<u8>=row.get(1)?;
-                page.push((row.get(0)?,EventId::new(id.try_into().map_err(|_|invalid("invalid channel control identity"))?)));
-            }
-            Ok(page)
-        })
     }
     /// Ordinary messages do not invalidate current policy/permission summaries.
     /// Every control that can change membership or history does invalidate them.

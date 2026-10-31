@@ -1,34 +1,25 @@
 //! Frozen offers keep the same canonical-prefix and strict-ancestor checks as
 //! the pure replay owner. Each lookup holds only the selected bounded control.
+use super::continuation::HistoryContext;
 use super::*;
-impl IndexedView<'_> {
-    pub(super) fn descends(&self, event: EventId, parent: EventId) -> Result<bool, LogError> {
-        self.repository
-            .descends_from(self.source.channel, event, parent)
-    }
-    fn owner(&self, event: EventId) -> Result<bool, LogError> {
-        let Some(header) = self.repository.header(&event)? else {
-            return Ok(false);
-        };
-        self.owner_authorized(&header)
-    }
-    pub(super) fn offer(&self, event: &Event) -> Result<Option<Offer>, LogError> {
+impl HistoryContext {
+    pub(super) async fn offer(&self, event: &Event) -> Result<Option<Offer>, LogError> {
         let Some(HistoryControl::Offer(offer)) = decode(&event.ciphertext) else {
             return Ok(None);
         };
-        let Some(invitation) = self.repository.get(&offer.invitation)? else {
+        let Some(invitation) = self.body(offer.invitation).await? else {
             return Ok(None);
         };
-        let Some(before) = self.before(invitation.id)? else {
+        let Some(before) = self.before(invitation.id).await? else {
             return Ok(None);
         };
-        let Some(state) = self.before(event.id)? else {
+        let Some(state) = self.before(event.id).await? else {
             return Ok(None);
         };
         let Some(meta) = crate::channel::ChannelMeta::decode(&invitation.ciphertext) else {
             return Ok(None);
         };
-        let Some(mut canonical) = self.canonical(invitation.id, false)? else {
+        let Some(mut canonical) = self.canonical(invitation.id, false).await? else {
             return Ok(None);
         };
         if canonical.is_member(&offer.recipient) {
@@ -36,8 +27,8 @@ impl IndexedView<'_> {
         }
         canonical.apply_meta(meta.clone());
         if !canonical.is_member(&offer.recipient)
-            || !self.owner(invitation.id)?
-            || !self.owner(event.id)?
+            || !self.owner(invitation.id).await?
+            || !self.owner(event.id).await?
             || invitation.kind != EventKind::MembershipChange
             || !crate::channel::ChannelMeta::is_invitation(&invitation.ciphertext)
             || before.is_member(&offer.recipient)
@@ -46,9 +37,9 @@ impl IndexedView<'_> {
             || event.author != invitation.author
             || !state.can_admin(&event.author.user_id())
             || state.is_dissolved()
-            || !self.descends(event.id, invitation.id)?
+            || !self.descends(event.id, invitation.id).await?
             || offer.policy == HistoryPolicy::Off
-            || offer.policy != self.policy(Some(invitation.id))?
+            || offer.policy != self.policy(Some(invitation.id)).await?
             || offer.keys.sender != event.author.user_id()
             || offer.rows.len() > offer.policy.count()
             || offer
@@ -67,7 +58,7 @@ impl IndexedView<'_> {
         // The wire policy bounds this set to at most ten copied rows.
         let mut identities = HashSet::new();
         for row in &offer.rows {
-            let Some(original) = self.repository.header(&row.id)? else {
+            let Some(original) = self.header(row.id).await? else {
                 return Ok(None);
             };
             if !identities.insert(row.id)
@@ -75,14 +66,14 @@ impl IndexedView<'_> {
                 || !offer
                     .policy
                     .permits_time(original.wall_clock, invitation.wall_clock)
-                || !self.descends(invitation.id, original.id)?
+                || !self.descends(invitation.id, original.id).await?
             {
                 return Ok(None);
             }
-            let Some(authorized) = self.before(original.id)? else {
+            let Some(authorized) = self.before(original.id).await? else {
                 return Ok(None);
             };
-            let Some(canonical) = self.canonical(original.id, false)? else {
+            let Some(canonical) = self.canonical(original.id, false).await? else {
                 return Ok(None);
             };
             if offer.keys.entries.iter().any(|source| {
@@ -93,10 +84,9 @@ impl IndexedView<'_> {
                 return Ok(None);
             }
         }
-        self.checkpoints.check_source(&self.source)?;
         Ok(Some(offer))
     }
-    pub(super) fn lifetime_closed(
+    pub(super) async fn lifetime_closed(
         &self,
         offer: &Offer,
         cutoff: Option<EventId>,
@@ -108,27 +98,27 @@ impl IndexedView<'_> {
         ] {
             let mut after = None;
             loop {
-                let page = self
-                    .checkpoints
-                    .control_page(&self.source, kind, after, false)?;
+                let page = self.control_page(kind, after, false).await?;
                 if page.is_empty() {
                     break;
                 }
                 for (rank, id) in page {
                     after = Some(rank);
-                    if !self.descends(id, offer.invitation)? {
+                    if !self.descends(id, offer.invitation).await? {
                         continue;
                     }
                     if let Some(cutoff) = cutoff
-                        && !self.descends(cutoff, id)?
+                        && !self.descends(cutoff, id).await?
                     {
                         continue;
                     }
                     if self
-                        .canonical(id, false)?
+                        .canonical(id, false)
+                        .await?
                         .is_some_and(|s| s.is_member(&offer.recipient))
                         && self
-                            .canonical(id, true)?
+                            .canonical(id, true)
+                            .await?
                             .is_some_and(|s| !s.is_member(&offer.recipient))
                     {
                         return Ok(true);
@@ -138,7 +128,7 @@ impl IndexedView<'_> {
         }
         Ok(false)
     }
-    pub(super) fn release(
+    pub(super) async fn release(
         &self,
         event: &Event,
         offer_event: &Event,
@@ -147,16 +137,16 @@ impl IndexedView<'_> {
         let Some(HistoryControl::Release(release)) = decode(&event.ciphertext) else {
             return Ok(None);
         };
-        let Some(acceptance) = self.repository.get(&release.acceptance)? else {
+        let Some(acceptance) = self.body(release.acceptance).await? else {
             return Ok(None);
         };
-        let Some(state) = self.before(event.id)? else {
+        let Some(state) = self.before(event.id).await? else {
             return Ok(None);
         };
-        let Some(accepted_before) = self.before(acceptance.id)? else {
+        let Some(accepted_before) = self.before(acceptance.id).await? else {
             return Ok(None);
         };
-        let Some(canonical) = self.canonical(event.id, false)? else {
+        let Some(canonical) = self.canonical(event.id, false).await? else {
             return Ok(None);
         };
         if canonical.is_dissolved()
@@ -176,25 +166,92 @@ impl IndexedView<'_> {
                 .entries
                 .iter()
                 .any(|source| source.user_id == event.author.user_id())
-            || !self.descends(acceptance.id, offer.invitation)?
-            || !self.descends(event.id, acceptance.id)?
-            || !self.descends(event.id, offer_event.id)?
-            || self.lifetime_closed(offer, Some(event.id))?
+            || !self.descends(acceptance.id, offer.invitation).await?
+            || !self.descends(event.id, acceptance.id).await?
+            || !self.descends(event.id, offer_event.id).await?
+            || self.lifetime_closed(offer, Some(event.id)).await?
         {
             return Ok(None);
         }
         Ok(Some(release))
     }
-    pub(super) fn author(&self, event: EventId) -> Result<Option<PublicIdentity>, LogError> {
-        let Some(header) = self.repository.header(&event)? else {
+    pub(super) async fn author(&self, event: EventId) -> Result<Option<PublicIdentity>, LogError> {
+        let Some(header) = self.header(event).await? else {
             return Ok(None);
         };
-        Ok(self.before(event)?.and_then(|state| {
+        Ok(self.before(event).await?.and_then(|state| {
             state
                 .members()
                 .iter()
                 .find(|member| member.user_id() == header.author.user_id())
                 .cloned()
         }))
+    }
+}
+
+impl HistoryContext {
+    pub(super) async fn policy(&self, cutoff: Option<EventId>) -> Result<HistoryPolicy, LogError> {
+        let mut after = None;
+        loop {
+            let page = self
+                .control_page(EventKind::ChannelHistoryPolicy, after, true)
+                .await?;
+            if page.is_empty() {
+                return Ok(HistoryPolicy::default());
+            }
+            for (rank, id) in page {
+                after = Some(rank);
+                if let Some(cutoff) = cutoff
+                    && !self.descends(cutoff, id).await?
+                {
+                    continue;
+                }
+                if !self.owner(id).await? {
+                    continue;
+                }
+                let event = self.body(id).await?.ok_or(LogError::StaleCursor)?;
+                if let Some(policy) = decode(&event.ciphertext) {
+                    return Ok(policy);
+                }
+            }
+        }
+    }
+}
+
+impl HistoryContext {
+    pub(super) async fn first_offer(
+        &self,
+        selected: EventId,
+    ) -> Result<Option<(Event, Offer)>, LogError> {
+        let Some(event) = self.body(selected).await? else {
+            return Ok(None);
+        };
+        if event.kind != EventKind::ChannelJoinHistory {
+            return Ok(None);
+        }
+        let Some(HistoryControl::Offer(shape)) = decode(&event.ciphertext) else {
+            return Ok(None);
+        };
+        let mut after = None;
+        loop {
+            let page = self
+                .offer_candidates(shape.invitation, shape.recipient.clone(), after)
+                .await?;
+            if page.is_empty() {
+                return Ok(None);
+            }
+            for (rank, id) in page {
+                after = Some(rank);
+                let Some(candidate) = self.body(id).await? else {
+                    return Err(LogError::StaleCursor);
+                };
+                if let Some(offer) = self.offer(&candidate).await? {
+                    return Ok((id == selected).then_some((candidate, offer)));
+                }
+                if id == selected {
+                    return Ok(None);
+                }
+            }
+        }
     }
 }

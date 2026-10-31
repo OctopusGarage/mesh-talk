@@ -318,6 +318,7 @@ impl ChannelMembershipProjection {
     pub(in crate::node) fn empty(channel: ConversationId) -> Self {
         projection::MembershipReducer::new(channel).finish()
     }
+    #[cfg(test)]
     pub(in crate::node) fn pending_departure(
         &self,
         member: &str,

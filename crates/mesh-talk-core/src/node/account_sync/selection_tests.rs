@@ -3502,7 +3502,7 @@ fn restore_attachment_bytes(source: &Node, file: ConversationId, path: &std::pat
         .files
         .lock()
         .unwrap()
-        .manifest(&file)
+        .manifest(file)
         .unwrap()
         .unwrap()
         .name()

@@ -33,6 +33,23 @@ struct Observation {
     delivery_controls: u64,
     established: Option<[u8; 32]>,
 }
+impl Observation {
+    fn permits_preparation_progress(&self, current: &Self) -> bool {
+        let mut expected = self.clone();
+        match (self.controls, current.controls) {
+            // Complete kind metadata distinguishes ordinary appends from policy
+            // changes without discarding the repository's finite cutoff.
+            (Some(before), Some(after)) if before == after => expected.source = current.source,
+            // Cold backfill may establish the first control stamp, but cannot
+            // certify any concurrent append while its previous stamp is absent.
+            (None, Some(_)) if self.source == current.source => {
+                expected.controls = current.controls
+            }
+            _ => {}
+        }
+        expected == *current
+    }
+}
 pub(in crate::node) struct ParticipantView {
     pub(super) conversation: ConversationId,
     pub(super) repository: NetworkView,
@@ -221,21 +238,20 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
         budget: PreparationBudget,
     ) -> Result<PreparationStep, LogError> {
         self.validate_view(view)?;
-        let before = self.network_observation(&view.conversation)?;
+        // Keep the observation that was actually validated. Recapturing here
+        // could absorb an authority change between validation and preparation.
+        let before = view.observed.lock().expect("view observation lock").clone();
         let step = {
             let mut preparation = view.preparation.lock().expect("view preparation lock");
             preparation.step(self, view, budget)?
         };
         let after = self.network_observation(&view.conversation)?;
-        let mut expected = before;
-        // Bounded cold metadata backfill changes only derived kind readiness.
-        expected.controls = after.controls;
-        if expected != after || !self.policy_unchanged(&view.conversation, &view.policy) {
+        if !before.permits_preparation_progress(&after)
+            || !self.policy_unchanged(&view.conversation, &view.policy)
+        {
             return Err(LogError::StaleCursor);
         }
-        if step.ready {
-            *view.observed.lock().expect("view observation lock") = after;
-        }
+        *view.observed.lock().expect("view observation lock") = after;
         Ok(step)
     }
     fn validate_view(&self, view: &Self::View) -> Result<(), LogError> {
@@ -253,20 +269,19 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             .expect("view preparation lock")
             .ready();
         let mut observed = view.observed.lock().expect("view observation lock");
-        let mut expected = observed.clone();
-        if ready {
+        let unchanged = if ready {
             // Ordinary appends preserve the finite cutoff. Raw control changes,
             // including rejected controls, and all mutable policy owners do not.
+            let mut expected = observed.clone();
             expected.source = current.source;
+            expected == current
         } else {
-            expected.controls = current.controls;
-        }
-        if expected != current {
+            observed.permits_preparation_progress(&current)
+        };
+        if !unchanged {
             return Err(LogError::StaleCursor);
         }
-        if ready {
-            *observed = current;
-        }
+        *observed = current;
         Ok(())
     }
     fn metadata(&self, view: &Self::View) -> Result<SyncMetadata, LogError> {
@@ -602,6 +617,51 @@ mod tests {
     }
 
     #[test]
+    fn participant_network_pending_observation_keeps_authority_and_cold_index_fences() {
+        let captured = Observation {
+            source: 10,
+            destructive_policy: 0,
+            roster: Some([1; 32]),
+            proofs: Some(1),
+            file_scopes: (1, (1, 1)),
+            controls: Some([-1; 32]),
+            delivery_controls: 1,
+            established: Some([2; 32]),
+        };
+        let mut appended = captured.clone();
+        appended.source += 1;
+        assert!(captured.permits_preparation_progress(&appended));
+        let changes: [fn(&mut Observation); 9] = [
+            |value| value.destructive_policy += 1,
+            |value| value.roster = None,
+            |value| value.proofs = Some(2),
+            |value| value.file_scopes.0 += 1,
+            |value| value.file_scopes.1.0 += 1,
+            |value| value.file_scopes.1.1 += 1,
+            |value| value.delivery_controls += 1,
+            |value| value.established = None,
+            |value| value.controls.as_mut().unwrap()[EventKind::ChannelReplica as usize] = 11,
+        ];
+        for (index, change) in changes.into_iter().enumerate() {
+            let mut changed = appended.clone();
+            change(&mut changed);
+            assert!(
+                !captured.permits_preparation_progress(&changed),
+                "ordinary append hid changed authority field {index}"
+            );
+        }
+
+        let mut cold = captured.clone();
+        cold.controls = None;
+        assert!(cold.permits_preparation_progress(&captured));
+        assert!(!cold.permits_preparation_progress(&appended));
+        let mut still_cold = cold.clone();
+        still_cold.source += 1;
+        assert!(!cold.permits_preparation_progress(&still_cold));
+        assert!(!captured.permits_preparation_progress(&cold));
+    }
+
+    #[test]
     fn participant_network_preparation_survives_unrelated_ordinary_appends() {
         let directory = tempfile::tempdir().unwrap();
         let peer = DeviceIdentity::generate();
@@ -646,6 +706,13 @@ mod tests {
         {}
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
         let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
         let budget = PreparationBudget {
             rows: 8,
@@ -694,13 +761,6 @@ mod tests {
             NetworkSyncStore::metadata(&*store, &view).unwrap().count,
             129
         );
-        let before = node
-            .log
-            .lock()
-            .unwrap()
-            .repository()
-            .unwrap()
-            .body_read_counts();
         NetworkSyncStore::validate_view(&*store, &view).unwrap();
         assert_eq!(
             node.log
@@ -709,7 +769,8 @@ mod tests {
                 .repository()
                 .unwrap()
                 .body_read_counts(),
-            before
+            before,
+            "finite preparation and validation must not decode historical bodies"
         );
     }
 

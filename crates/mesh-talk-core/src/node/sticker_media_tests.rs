@@ -504,7 +504,7 @@ async fn v2_sticker_media_delivers_label_after_source_removal_without_receiver_i
     .expect("automatic sticker bytes become durable without installing a pack");
     // Existing peers can decode this as ordinary MFM3 media, without new enum tags.
     assert!(matches!(
-        b.files.lock().unwrap().manifest(&file).unwrap(),
+        b.files.lock().unwrap().manifest(file).unwrap(),
         Some(crate::file::AnyManifest::V3(_))
     ));
     assert!(
@@ -583,7 +583,7 @@ async fn sticker_alias_after_chunk_reclamation_gets_exact_completion_control() {
         .files
         .lock()
         .unwrap()
-        .manifest(&file)
+        .manifest(file)
         .unwrap()
         .unwrap()
         .clone()
@@ -658,7 +658,7 @@ async fn sticker_alias_completion_requires_verified_bytes_and_retained_matching_
         .files
         .lock()
         .unwrap()
-        .manifest(&file)
+        .manifest(file)
         .unwrap()
         .unwrap()
         .clone()
@@ -1363,7 +1363,7 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
         .files
         .lock()
         .unwrap()
-        .manifest(&file)
+        .manifest(file)
         .unwrap()
         .unwrap()
         .clone()
@@ -1425,7 +1425,7 @@ async fn installed_sticker_proof_rejects_untrusted_headers_before_chunk_or_media
                 .files
                 .lock()
                 .unwrap()
-                .manifest(&alternate_file)
+                .manifest(alternate_file)
                 .unwrap()
                 .is_some(),
             "alternate media is a valid admitted offer"
@@ -1466,7 +1466,7 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
         .files
         .lock()
         .unwrap()
-        .manifest(&original)
+        .manifest(original)
         .unwrap()
         .unwrap()
         .clone();

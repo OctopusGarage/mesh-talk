@@ -33,6 +33,29 @@ fn copy(from: &Node, to: &Node, channel: ConversationId) {
         to.log.lock().unwrap().append(event).unwrap();
     }
     to.process_channel(channel);
+    settle_history(to);
+}
+
+fn settle_history(node: &Node) -> Vec<ConversationId> {
+    let mut ready = Vec::new();
+    for _ in 0..30000 {
+        node.retry_channel_plaintext();
+        for channel in node.retry_join_history().unwrap() {
+            if !ready.contains(&channel) {
+                ready.push(channel);
+            }
+        }
+        if node.join_history_work.lock().unwrap().is_idle()
+            && node
+                .channel_checkpoints
+                .next_runtime(None)
+                .unwrap()
+                .is_none()
+        {
+            return ready;
+        }
+    }
+    panic!("bounded history retry turns did not settle");
 }
 
 #[tokio::test]
@@ -66,7 +89,7 @@ async fn join_history_default_is_bounded_and_requires_acceptance() {
     );
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
-    alice.retry_join_history().unwrap();
+    settle_history(&alice);
     let before = alice
         .log
         .lock()
@@ -75,7 +98,7 @@ async fn join_history_default_is_bounded_and_requires_acceptance() {
         .unwrap()
         .body_read_counts();
     for _ in 0..3 {
-        alice.retry_join_history().unwrap();
+        settle_history(&alice);
     }
     assert_eq!(
         alice
@@ -302,7 +325,7 @@ async fn join_history_foreign_protected_offer_preserves_concealed_receiver_proje
     copy(&alice, &bob, channel);
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
-    alice.retry_join_history().unwrap();
+    settle_history(&alice);
     copy(&alice, &bob, channel);
     let log = bob.log.lock().unwrap();
     let messages = received(
@@ -368,7 +391,7 @@ async fn join_history_acceptance_before_offer_arrives_is_recoverable() {
     bob.process_channel(channel);
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
-    alice.retry_join_history().unwrap();
+    settle_history(&alice);
     copy(&alice, &bob, channel);
     assert_eq!(
         bob.channel_history(channel, 10).unwrap()[0].text,
@@ -401,7 +424,7 @@ async fn join_history_policy_change_does_not_expand_or_cancel_frozen_invitation(
     copy(&alice, &bob, channel);
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
-    alice.retry_join_history().unwrap();
+    settle_history(&alice);
     copy(&alice, &bob, channel);
     assert_eq!(bob.channel_history(channel, 10).unwrap().len(), 1);
     let c = tempfile::tempdir().unwrap();
@@ -413,7 +436,7 @@ async fn join_history_policy_change_does_not_expand_or_cancel_frozen_invitation(
     copy(&alice, &carol, channel);
     carol.accept_channel_invite(channel).await.unwrap();
     copy(&carol, &alice, channel);
-    alice.retry_join_history().unwrap();
+    settle_history(&alice);
     copy(&alice, &carol, channel);
     assert!(carol.channel_history(channel, 10).unwrap().is_empty());
 }
@@ -447,10 +470,10 @@ async fn join_history_obsolete_offers_never_append_invalid_retry_releases() {
     copy(&alice, &bob, channel);
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
-    alice.retry_join_history().unwrap();
+    settle_history(&alice);
     let count = alice.log.lock().unwrap().events(&channel).unwrap().len();
     for _ in 0..3 {
-        alice.retry_join_history().unwrap();
+        settle_history(&alice);
     }
     assert_eq!(
         alice.log.lock().unwrap().events(&channel).unwrap().len(),
@@ -493,13 +516,13 @@ async fn join_history_authorized_replica_releases_without_owner_and_survives_res
     bob.set_channel_replica_enabled(channel, false)
         .await
         .unwrap();
-    bob.retry_join_history().unwrap();
+    settle_history(&bob);
     copy(&bob, &carol, channel);
     assert!(carol.channel_history(channel, 10).unwrap().is_empty());
     bob.set_channel_replica_enabled(channel, true)
         .await
         .unwrap();
-    bob.retry_join_history().unwrap();
+    settle_history(&bob);
     copy(&bob, &carol, channel);
     assert_eq!(
         carol.channel_history(channel, 10).unwrap()[0].text,
@@ -623,7 +646,7 @@ async fn join_history_expiry_and_recall_are_rechecked_before_key_release() {
     copy(&alice, &bob, channel);
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
-    alice.retry_join_history().unwrap();
+    settle_history(&alice);
     copy(&alice, &bob, channel);
     let history = bob.channel_history(channel, 10).unwrap();
     assert_eq!(history.len(), 1);
@@ -851,7 +874,7 @@ async fn join_history_leave_then_rejoin_off_closes_the_original_permission() {
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
     let count = alice.log.lock().unwrap().events(&channel).unwrap().len();
-    alice.retry_join_history().unwrap();
+    settle_history(&alice);
     assert_eq!(
         alice.log.lock().unwrap().events(&channel).unwrap().len(),
         count
@@ -971,7 +994,7 @@ async fn join_history_three_day_cutoff_checks_original_signed_times() {
     copy(&alice, &bob, channel);
     bob.accept_channel_invite(channel).await.unwrap();
     copy(&bob, &alice, channel);
-    alice.retry_join_history().unwrap();
+    settle_history(&alice);
     copy(&alice, &bob, channel);
     let history = bob.channel_history(channel, 10).unwrap();
     assert_eq!(history.len(), 1);
@@ -1260,7 +1283,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
     sibling.process_channel(channel);
     sibling.accept_channel_invite(channel).await.unwrap();
     copy(&sibling, &owner, channel);
-    owner.retry_join_history().unwrap();
+    settle_history(&owner);
     copy(&owner, &sibling, channel);
     let history = sibling.channel_history(channel, 100).unwrap();
     assert_eq!(
@@ -1652,7 +1675,7 @@ async fn join_history_retry_without_live_offers_reads_no_historical_bodies() {
             .unwrap()
             .body_read_counts();
         for _ in 0..3 {
-            assert!(alice.retry_join_history().unwrap().is_empty());
+            assert!(settle_history(&alice).is_empty());
         }
         assert_eq!(
             alice
@@ -1666,4 +1689,74 @@ async fn join_history_retry_without_live_offers_reads_no_historical_bodies() {
             "unchanged history retry scanned signed history at {count} messages"
         );
     }
+}
+
+#[tokio::test]
+async fn join_history_rejected_release_backlog_yields_before_decoding_every_control() {
+    let directory = tempfile::tempdir().unwrap();
+    let alice = node(directory.path());
+    let channel = alice
+        .create_channel("pending history", vec![])
+        .await
+        .unwrap();
+    for n in 0u64..129 {
+        alice
+            .append_event(
+                channel,
+                EventKind::ChannelJoinHistory,
+                encode(&HistoryControl::Release(Release {
+                    offer: EventId::new([7; 32]),
+                    acceptance: EventId::new([8; 32]),
+                    sealed_key: n.to_be_bytes().to_vec(),
+                })),
+            )
+            .unwrap();
+    }
+    {
+        let log = alice.log.lock().unwrap();
+        while !alice
+            .channel_checkpoints
+            .project_step(log.repository().unwrap(), &alice.identity, channel)
+            .unwrap()
+        {}
+    }
+    let counts = || {
+        alice
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts()
+            .1
+    };
+    let before = counts();
+    alice
+        .process_join_history_reception(channel, false)
+        .unwrap();
+    assert!(
+        counts() - before <= 64,
+        "one reception turn decoded {} rejected controls",
+        counts() - before
+    );
+    for _ in 0..1024 {
+        let before = counts();
+        let ready = alice
+            .process_join_history_reception(channel, false)
+            .unwrap();
+        assert!(counts() - before <= 64);
+        if ready {
+            break;
+        }
+    }
+    let before = counts();
+    alice
+        .process_join_history_reception(channel, false)
+        .unwrap();
+    assert_eq!(
+        counts(),
+        before,
+        "completed rejected controls must remain quiescent"
+    );
+    assert_eq!(alice.reception_effects.head().unwrap().sequence, 0);
 }

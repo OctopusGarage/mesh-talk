@@ -237,7 +237,8 @@ impl<'a> Index<'a> {
         let allowance = budget.rows.min(budget.bytes / 256);
         let (job, changed) = checkpoints.profile().database().transaction(|c| {
             checkpoints.check_source_on(c, &source)?;
-            let old: Option<(Vec<u8>,Vec<u8>,i64,String,Vec<u8>)> = c.query_row(
+            type StoredMetadataIdentity = (Vec<u8>,Vec<u8>,i64,String,Vec<u8>);
+            let old: Option<StoredMetadataIdentity> = c.query_row(
                 "SELECT job,source_job,authority_stamp,account,identity FROM group_metadata_index WHERE channel=?1",
                 [channel.as_bytes().as_slice()],
                 |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),

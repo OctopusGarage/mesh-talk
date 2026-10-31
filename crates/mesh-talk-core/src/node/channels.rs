@@ -565,6 +565,15 @@ impl Node {
             self.maintain_account_channels(&mut account_maintenance)
                 .await;
             self.retry_channel_plaintext();
+            match self.retry_join_history_new() {
+                Ok(channels) => {
+                    for channel in channels {
+                        let members = self.channel_members(channel);
+                        self.distribute_channel(channel, &members).await;
+                    }
+                }
+                Err(error) => log::warn!("channel history recovery deferred: {error}"),
+            }
             match self.retry_group_metadata() {
                 Ok(channels) => {
                     for channel in channels {

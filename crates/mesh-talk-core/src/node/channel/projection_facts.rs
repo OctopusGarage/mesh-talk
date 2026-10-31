@@ -278,6 +278,7 @@ impl ProjectionFacts {
         Ok(Some((event, pending)))
     }
 
+    #[cfg(test)]
     pub(super) fn pending_departure(
         &self,
         member: &str,

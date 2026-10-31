@@ -5,7 +5,7 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
 };
-pub(super) mod preparing;
+pub(in crate::node) mod preparing;
 
 /// A historical predicate resumes after its last completely checked fact.
 /// The pure graph has no persistent cursor; the production preparing graph does.

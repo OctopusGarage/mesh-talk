@@ -417,6 +417,7 @@ impl<'a> View<'a> {
         }
         Some(offer)
     }
+    #[cfg(test)]
     fn offers(&self) -> Vec<(&Event, Offer)> {
         let mut seen = HashSet::new();
         self.events
@@ -426,6 +427,7 @@ impl<'a> View<'a> {
             .filter(|(_, offer)| seen.insert((offer.invitation, offer.recipient.clone())))
             .collect()
     }
+    #[cfg(test)]
     fn lifetime_closed(&self, offer: &Offer, cutoff: Option<&Event>) -> bool {
         self.events.iter().any(|change| {
             if !matches!(
@@ -447,6 +449,7 @@ impl<'a> View<'a> {
                     .is_some_and(|after| !after.is_member(&offer.recipient))
         })
     }
+    #[cfg(test)]
     fn release(&self, event: &Event, offer_event: &Event, offer: &Offer) -> Option<Release> {
         let HistoryControl::Release(release) = decode(&event.ciphertext)? else {
             return None;
@@ -477,6 +480,7 @@ impl<'a> View<'a> {
         }
         Some(release)
     }
+    #[cfg(test)]
     fn author(&self, event: &Event) -> Option<PublicIdentity> {
         self.before(event)?
             .members()
@@ -624,14 +628,6 @@ pub(in crate::node) fn index_control_on(
     rank: i64,
 ) -> Result<(), crate::eventlog::LogError> {
     indexed::install_on(c, job, channel, event, rank)
-}
-pub(in crate::node) fn indexed_policy(
-    checkpoints: &super::channel::checkpoint::ChannelCheckpointStore,
-    repository: &crate::eventlog::repository::EventRepository,
-    me: &DeviceIdentity,
-    channel: ConversationId,
-) -> Result<HistoryPolicy, crate::eventlog::LogError> {
-    indexed::current_policy(checkpoints, repository, me, channel)
 }
 impl Node {
     pub fn channel_history_policy(

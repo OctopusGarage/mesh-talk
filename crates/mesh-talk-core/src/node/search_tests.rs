@@ -1365,7 +1365,7 @@ async fn protected_images_require_exact_reveal_and_block_ordinary_bytes_and_expo
     assert!(!entry.file.as_ref().unwrap().name.contains("sensitive"));
     {
         let book = node.files.lock().unwrap();
-        let manifest = book.manifest(&file).unwrap().unwrap();
+        let manifest = book.manifest(file).unwrap().unwrap();
         assert!(!book.accepts(manifest.unprotected()).unwrap());
         let downgraded = crate::file::AnyManifest::Protected {
             protection: MessageProtection::Click,

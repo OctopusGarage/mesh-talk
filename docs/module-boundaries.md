@@ -219,9 +219,20 @@ new signed controls resume after account adoption rather than draining in open.
 Fresh authority and recall-readiness checks remain separate from display state.
 The checkpoint cleanup owner retires disposable facts in bounded turns after
 logical channel retirement, even when no later read revisits the channel.
-Consumed receiver/evidence/receipt state is preserved. Selected join-history and
-directory consumers have separate preparation work; this caller boundary alone
-does not certify that every historical consumer is bounded. Other participant domains retain their
+Consumed receiver/evidence/receipt state is preserved.
+`join_history/indexed/continuation.rs` suspends the existing offer, first-valid
+selection, lifetime and release checks at selected database/authority operations.
+Each normal retry advances one bounded operation through the shared owner, causal
+or ancestry query APIs. The existing recovery loop resumes pending work; no task,
+connection lock or plaintext queue is retained between turns. Active receive and
+send stacks are capped by the existing retry limits and keep only protocol-capped
+encrypted snapshots and current membership. The durable release cursor advances
+only with the existing transcript/effect transaction; restart resumes its same
+uncommitted candidate. Completed unchanged sender work uses its scalar control
+stamp. Explicit local invitation creation still performs synchronous causal checks
+for its at-most-ten selected snapshot rows before the journal transaction; it is
+not covered by the normal retry latency bound. Directory preparation is a separate
+consumer boundary. Other participant domains retain their
 legacy owners until their own cutovers. `core/node/runtime_startup.rs` composes
 startup inputs and completion through `runtime_work.rs`; blocking captures and
 undelivered results remain admitted until their resources are destroyed.

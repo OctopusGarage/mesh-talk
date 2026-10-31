@@ -219,7 +219,12 @@ handshake_hash` and verifies the advertised X25519 == the Noise-authenticated st
   is the bounded exception to the acceptance cutoff. Append-only event kinds 15/16
   carry a signed policy and versioned offer/release controls; V3 channel sync gates
   them from older decoders. Invitation and offer use the existing durable delivery
-  journal as one transaction. The offer freezes a capped selection of retained text
+  journal as one transaction. Normal offer/release retry authorization yields
+  between bounded selected reads and causal steps, retaining the exact pending
+  candidate until its verdict and transcript/effect transaction complete. Explicit
+  invitation creation still checks up to ten selected rows synchronously before
+  journaling; this is separate from the bounded background retry path.
+  The offer freezes a capped selection of retained text
   at the invitation, with original event IDs and expiry framing. A fresh snapshot
   root derives independent per-message encryption keys via domain-separated HKDF;
   only existing holders authorized for every row receive the root, sealed per
@@ -1832,6 +1837,17 @@ index is still catching up uses the complete retained revision. The frontier is
 capped with an overflow sentinel; an incomplete local frontier cannot establish a complete observation.
 This bounds memory and makes unchanged observations reusable; a changed source
 can still require metadata work proportional to its retained graph.
+Directory observations reuse this owner with their distinct hexadecimal-ID
+fingerprint and rename/history-policy selector. Cold preparation advances at
+most 128 header rows and 512 ancestry edges per turn, without loading historical
+event bodies. Runtime-owned ancestry selections isolate interleaved queries and
+retire abandoned marks. At most 64 active digests/cursors are retained; a full
+cache advances resident work rather than evicting it or blocking new requests
+forever. Only complete observations are cached and signed. The existing account
+sync wake continues progress; no separate worker is created. Wire IDs remain
+limited to 512, while explicit final local receipts preserve their existing
+131,072-ID bound and are admitted by byte cost before materialization.
+
 
 Transcript lookups return owned, fallible results. Chronological, reverse and
 insertion-order pages select keys and aggregate sender/body bytes before fetching

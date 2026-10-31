@@ -555,6 +555,25 @@ pub(crate) fn install_on(
 }
 
 #[cfg(test)]
+impl IndexedFileBook {
+    pub(crate) fn file_convs(&self) -> Vec<ConversationId> {
+        self.files().collect::<Result<_, _>>().unwrap()
+    }
+    pub(crate) fn manifest_events(&self, file: ConversationId) -> Vec<EventId> {
+        self.offers(Some(file), None)
+            .map(|offer| offer.map(|offer| offer.event))
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+    pub(crate) fn is_emitted(&self, id: &EventId) -> bool {
+        self.processed(*id).unwrap()
+    }
+    pub(crate) fn pending_for_test(&self, file: ConversationId) -> bool {
+        self.profile.database().read(|c|Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_download_pending WHERE account=?1 AND file=?2)",params![self.account.as_slice(),file.as_bytes().as_slice()],|r|r.get(0))?)).unwrap()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -1780,24 +1799,5 @@ mod tests {
             ),
             "an old A acknowledgement must not retire resumed A work"
         );
-    }
-}
-
-#[cfg(test)]
-impl IndexedFileBook {
-    pub(crate) fn file_convs(&self) -> Vec<ConversationId> {
-        self.files().collect::<Result<_, _>>().unwrap()
-    }
-    pub(crate) fn manifest_events(&self, file: ConversationId) -> Vec<EventId> {
-        self.offers(Some(file), None)
-            .map(|offer| offer.map(|offer| offer.event))
-            .collect::<Result<_, _>>()
-            .unwrap()
-    }
-    pub(crate) fn is_emitted(&self, id: &EventId) -> bool {
-        self.processed(*id).unwrap()
-    }
-    pub(crate) fn pending_for_test(&self, file: ConversationId) -> bool {
-        self.profile.database().read(|c|Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_download_pending WHERE account=?1 AND file=?2)",params![self.account.as_slice(),file.as_bytes().as_slice()],|r|r.get(0))?)).unwrap()
     }
 }

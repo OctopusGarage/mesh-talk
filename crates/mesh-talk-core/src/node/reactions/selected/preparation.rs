@@ -99,7 +99,7 @@ impl ReactionQueryWork {
         let work = match step {
             CausalProjectionStep::Pending(work) => work,
             CausalProjectionStep::Ready { projection, work } => {
-                pending.ready = Some(projection);
+                pending.ready = Some(projection.map(|projection| *projection));
                 work
             }
         };

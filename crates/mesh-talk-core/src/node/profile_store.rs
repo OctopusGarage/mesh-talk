@@ -82,7 +82,7 @@ impl ProfileStore {
 
     /// Signed revisions order profiles; equal revisions use a deterministic
     /// content order, with clear tombstones winning so replay cannot resurrect them.
-
+    ///
     /// Use the same total order during journal replay and live admission.
     fn merge(by_account: &mut HashMap<String, ProfileEntry>, entry: ProfileEntry) {
         match by_account.get(&entry.account_id) {

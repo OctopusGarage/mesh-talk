@@ -1436,7 +1436,10 @@ impl Node {
             self.channel_recovery_notify.notify_one();
             return Ok(());
         }
-        self.process_join_history_reception(conv, reopening)?;
+        if !self.process_join_history_reception(conv, reopening)? {
+            pending.lanes.entry(conv).or_default().continuation = Some((arrival, reopening));
+            return Ok(());
+        }
         if let Some((event, metadata)) = self.channel_checkpoints.finish_batch(conv)? {
             self.note_reception_change();
             if !reopening && self.channel_incoming.is_legacy() {

@@ -2261,7 +2261,7 @@ fn erased_static_manifest_reopen(adopt: bool) {
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
             .unwrap()
             .is_none()
     );
@@ -2642,7 +2642,7 @@ async fn accepted_file_card_sidecar_failure_keeps_same_pending_history_id() {
         assert_eq!(a.dm_history(&bob.public(), 10).unwrap()[0].id, id);
         assert_eq!(a.delivery_status(id), Some(DeliveryStatus::Awaiting));
         assert!(a.delivery.lock().unwrap().pending_transactions().is_empty());
-        assert!(a.files.lock().unwrap().manifest(&file).unwrap().is_some());
+        assert!(a.files.lock().unwrap().manifest(file).unwrap().is_some());
     }
 }
 
@@ -2805,7 +2805,7 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         b.process_file_events(event.conversation_id);
         assert!(files.try_recv().is_err());
         assert!(b.delivery.lock().unwrap().retry_receipts(1).is_empty());
-        assert!(b.files.lock().unwrap().manifest(&file).unwrap().is_none());
+        assert!(b.files.lock().unwrap().manifest(file).unwrap().is_none());
         assert_eq!(b.reception_head().unwrap(), reception_start);
         b.received_files
             .lock()
@@ -2844,7 +2844,7 @@ async fn incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_
         b.process_file_events(event.conversation_id);
         assert!(files.try_recv().is_err());
         assert_eq!(b.account_history(&a.account_id(), 10).unwrap().len(), 1);
-        assert!(b.files.lock().unwrap().manifest(&file).unwrap().is_some());
+        assert!(b.files.lock().unwrap().manifest(file).unwrap().is_some());
         let page = b
             .reception_page(reception_start, None, Default::default())
             .unwrap();
@@ -3064,7 +3064,7 @@ fn incoming_manifest_requires_dense_signed_chunk_prefix_before_card_acceptance()
             b.files
                 .lock()
                 .unwrap()
-                .manifest(&manifest.file_conv)
+                .manifest(manifest.file_conv)
                 .unwrap()
                 .is_some(),
             accepted
@@ -3213,7 +3213,7 @@ fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() 
             let book = b.files.lock().unwrap();
             let expected = matches!(shape, "valid-account-host" | "conflicting-alias");
             assert_eq!(
-                book.manifest(&manifest.file_conv).unwrap().is_some(),
+                book.manifest(manifest.file_conv).unwrap().is_some(),
                 expected,
                 "{shape}, reopen={reopen}"
             );
@@ -3228,7 +3228,7 @@ fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() 
                     "conflicting alias must not suppress reprocessing"
                 );
                 assert!(super::files::same_file_transfer(
-                    &book.manifest(&manifest.file_conv).unwrap().unwrap(),
+                    &book.manifest(manifest.file_conv).unwrap().unwrap(),
                     &crate::file::AnyManifest::V1(manifest.clone())
                 ));
             }
@@ -3283,7 +3283,7 @@ fn file_book_rebuild_does_not_restore_outgoing_card_scope_from_mismatched_row() 
         Arc::new(crate::discovery::DiscoveryVisibility::new(true)),
     )
     .unwrap();
-    assert!(a.files.lock().unwrap().manifest(&file).unwrap().is_none());
+    assert!(a.files.lock().unwrap().manifest(file).unwrap().is_none());
     assert!(!a.has_file_scope(file).unwrap());
 }
 
@@ -3339,7 +3339,7 @@ fn durable_file_erase_removes_live_key_even_when_sidecar_rewrite_fails() {
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
             .unwrap()
             .is_none(),
         "durable erase must remove key despite later sidecar failure"
@@ -3432,7 +3432,7 @@ fn legacy_file_erasure_capacity_refusal_preserves_durable_row_and_key() {
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
             .unwrap()
             .is_some()
     );
@@ -3533,7 +3533,7 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
             .unwrap()
             .is_some()
     );
@@ -3566,7 +3566,7 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
             .unwrap()
             .is_some()
     );
@@ -3575,7 +3575,7 @@ async fn deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_l
         b.files
             .lock()
             .unwrap()
-            .manifest(&manifest.file_conv)
+            .manifest(manifest.file_conv)
             .unwrap()
             .is_none()
     );
@@ -10242,7 +10242,7 @@ async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
                 ids.sort();
                 (
                     file,
-                    book.manifest(&file).unwrap(),
+                    book.manifest(file).unwrap(),
                     ids.iter()
                         .map(|id| (*id, book.is_emitted(id)))
                         .collect::<Vec<_>>(),
@@ -10286,7 +10286,7 @@ async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
             .files
             .lock()
             .unwrap()
-            .manifest(&file)
+            .manifest(file)
             .unwrap()
             .is_some()
     );
@@ -10295,7 +10295,7 @@ async fn owned_read_failure_late_scope_reseed_preserves_all_live_projections() {
             .files
             .lock()
             .unwrap()
-            .manifest(&sentinel)
+            .manifest(sentinel)
             .unwrap()
             .is_none()
     );

@@ -52,29 +52,6 @@ impl AccountSuppression {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn suppression_survives_reopen_and_failed_append_does_not_take_effect() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("suppression.log");
-        let conversation = ConversationId::new([1; 32]);
-        let erased = EventId::new([2; 32]);
-        let failed = EventId::new([3; 32]);
-        let mut store = AccountSuppression::open(&path, "pw").unwrap();
-        store.suppress(conversation, erased).unwrap();
-        store.file.fail_appends_for_test(true).unwrap();
-        assert!(store.suppress(conversation, failed).is_err());
-        assert!(!store.contains(conversation, failed));
-        drop(store);
-        let reopened = AccountSuppression::open(&path, "pw").unwrap();
-        assert!(reopened.contains(conversation, erased));
-        assert!(!reopened.contains(conversation, failed));
-    }
-}
-
 /// Exact device-local deletion facts in the profile database. No history-sized
 /// in-memory set, expiry policy, or probabilistic membership structure is used.
 pub(super) struct IndexedAccountSuppression {
@@ -191,5 +168,28 @@ impl IndexedAccountSuppression {
             }
             Ok(keys)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suppression_survives_reopen_and_failed_append_does_not_take_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("suppression.log");
+        let conversation = ConversationId::new([1; 32]);
+        let erased = EventId::new([2; 32]);
+        let failed = EventId::new([3; 32]);
+        let mut store = AccountSuppression::open(&path, "pw").unwrap();
+        store.suppress(conversation, erased).unwrap();
+        store.file.fail_appends_for_test(true).unwrap();
+        assert!(store.suppress(conversation, failed).is_err());
+        assert!(!store.contains(conversation, failed));
+        drop(store);
+        let reopened = AccountSuppression::open(&path, "pw").unwrap();
+        assert!(reopened.contains(conversation, erased));
+        assert!(!reopened.contains(conversation, failed));
     }
 }

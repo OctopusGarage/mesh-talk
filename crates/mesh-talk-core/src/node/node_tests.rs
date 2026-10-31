@@ -9660,7 +9660,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     let (has_manifest, manifest_events) = {
         let files = reopened.files.lock().unwrap();
         (
-            files.manifest(&attachment_file).unwrap().is_some(),
+            files.manifest(attachment_file).unwrap().is_some(),
             files.manifest_events(attachment_file).len(),
         )
     };
@@ -10149,7 +10149,7 @@ async fn send_file_to_account_delivers_to_a_peer_account() {
             .files
             .lock()
             .unwrap()
-            .manifest(&compact_conv)
+            .manifest(compact_conv)
             .unwrap(),
         Some(crate::file::AnyManifest::V4(_))
     ));

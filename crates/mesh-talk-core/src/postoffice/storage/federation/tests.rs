@@ -121,7 +121,7 @@ unsafe extern "C" fn staging_compile(
             )
         };
         let selected = if count.guards {
-            // SQLCipher may recompile bounded cursor SELECTs on LIMIT rebinding.
+            // SQLCipher may recompile bounded cursor SELECT statements on LIMIT rebinding.
             // Observe fixed authority/header reads rather than cursor-only
             // projections; session staging has its separate page-cost regression.
             let column = if column.is_null() {

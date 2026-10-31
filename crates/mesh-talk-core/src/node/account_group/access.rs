@@ -92,11 +92,22 @@ fn scope_contains(
 }
 #[path = "access/view.rs"]
 mod raw_view;
+pub(in crate::node) use raw_view::{DirectoryView, RawViewCache};
+type RawAuthorizationView = (Vec<EventId>, ([u8; 32], usize));
+impl Node {
+    pub(in crate::node) fn directory_observation(
+        &self,
+        log: &PersistentEventLog,
+        group: ConversationId,
+    ) -> Result<DirectoryView, crate::eventlog::LogError> {
+        raw_view::directory_view(self, log, group)
+    }
+}
 fn authorization_view(
     node: &Node,
     log: &PersistentEventLog,
     group: ConversationId,
-) -> Result<(Vec<EventId>, ([u8; 32], usize)), crate::eventlog::LogError> {
+) -> Result<RawAuthorizationView, crate::eventlog::LogError> {
     raw_view::read(node, log, group, None)
 }
 fn authorization_view_at(
@@ -104,210 +115,8 @@ fn authorization_view_at(
     log: &PersistentEventLog,
     group: ConversationId,
     scope: Option<&crate::node::channel::ChannelMembershipProjection>,
-) -> Result<(Vec<EventId>, ([u8; 32], usize)), crate::eventlog::LogError> {
+) -> Result<RawAuthorizationView, crate::eventlog::LogError> {
     raw_view::read(node, log, group, scope)
-}
-
-#[cfg(test)]
-mod raw_view_tests {
-    use super::*;
-    use crate::{discovery::Roster, eventlog::Event, identity::device::DeviceIdentity};
-    use std::sync::{Arc, Mutex};
-
-    #[tokio::test]
-    async fn raw_authorization_cache_rechecks_noncontrol_reordering() {
-        let dir = tempfile::tempdir().unwrap();
-        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
-        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
-        let (file, _) = tokio::sync::mpsc::unbounded_channel();
-        let node = Node::open(
-            DeviceIdentity::generate(),
-            Arc::new(Mutex::new(Roster::default())),
-            dm,
-            channel,
-            file,
-            &dir.path().join("events.log"),
-            &dir.path().join("sent.log"),
-            "pw",
-        )
-        .unwrap();
-        let group = crate::channel::new_channel_id();
-        let first = Event::new(
-            &node.identity,
-            group,
-            1,
-            vec![],
-            1,
-            1,
-            EventKind::ChannelLeave,
-            vec![],
-        );
-        let missing = Event::new(
-            &node.identity,
-            group,
-            2,
-            vec![first.id],
-            2,
-            2,
-            EventKind::Message,
-            vec![8; 2048],
-        );
-        let last = Event::new(
-            &node.identity,
-            group,
-            3,
-            vec![],
-            3,
-            3,
-            EventKind::ChannelLeave,
-            vec![],
-        );
-        let mut log = node.log.lock().unwrap();
-        log.append(first.clone()).unwrap();
-        log.append(last.clone()).unwrap();
-        let (mut frontier, stamp) = authorization_view(&node, &log, group).unwrap();
-        let mut expected = vec![first.id, last.id];
-        expected.sort();
-        frontier.sort();
-        assert_eq!(frontier, expected);
-        let cold = raw_view::cold_reads();
-        let bodies = log.repository().unwrap().body_read_counts();
-        log.append(missing).unwrap();
-        let (frontier, updated_stamp) = authorization_view(&node, &log, group).unwrap();
-        let mut frontier = frontier;
-        frontier.sort();
-        assert_eq!(
-            frontier, expected,
-            "a late ordinary branch preserves these independent controls"
-        );
-        assert_eq!(
-            updated_stamp, stamp,
-            "the exact signed control set is unchanged"
-        );
-        assert_eq!(
-            raw_view::cold_reads(),
-            cold + 1,
-            "an invalidated causal generation cannot reuse its frontier"
-        );
-        assert_eq!(log.repository().unwrap().body_read_counts(), bodies);
-    }
-
-    #[tokio::test]
-    async fn raw_authorization_view_does_not_decode_retained_message_history() {
-        for count in [128_u64, 512] {
-            let dir = tempfile::tempdir().unwrap();
-            let (dm, _) = tokio::sync::mpsc::unbounded_channel();
-            let (channel, _) = tokio::sync::mpsc::unbounded_channel();
-            let (file, _) = tokio::sync::mpsc::unbounded_channel();
-            let node = Node::open(
-                DeviceIdentity::generate(),
-                Arc::new(Mutex::new(Roster::default())),
-                dm,
-                channel,
-                file,
-                &dir.path().join("events.log"),
-                &dir.path().join("sent.log"),
-                "pw",
-            )
-            .unwrap();
-            let group = crate::channel::new_channel_id();
-            let mut log = node.log.lock().unwrap();
-            let mut parent = Vec::new();
-            let mut controls = Vec::new();
-            for sequence in 1..=count {
-                let control = sequence % 31 == 0;
-                let event = Event::new(
-                    &node.identity,
-                    group,
-                    sequence,
-                    parent,
-                    sequence,
-                    sequence,
-                    if control {
-                        EventKind::ChannelLeave
-                    } else {
-                        EventKind::Message
-                    },
-                    if control { Vec::new() } else { vec![7; 2048] },
-                );
-                parent = vec![event.id];
-                if control {
-                    controls.push(event.id);
-                }
-                log.append(event).unwrap();
-            }
-            // Rejected, concurrent controls still belong to the raw view.
-            let rejected = Event::new(
-                &node.identity,
-                group,
-                count + 1,
-                vec![],
-                count + 1,
-                count + 1,
-                EventKind::ChannelLeave,
-                vec![1],
-            );
-            let last = *controls.last().unwrap();
-            controls.push(rejected.id);
-            log.append(rejected.clone()).unwrap();
-            let before = log.repository().unwrap().body_read_counts();
-            let (mut frontier, (stamp, actual_count)) =
-                authorization_view(&node, &log, group).unwrap();
-            assert_eq!(
-                log.repository().unwrap().body_read_counts(),
-                before,
-                "raw authorization metadata must not decode {count} retained messages"
-            );
-            controls.sort();
-            let mut digest = Sha256::new();
-            digest.update(b"mesh-talk-group-authorization-view-v1");
-            for id in &controls {
-                digest.update(id.as_bytes());
-            }
-            assert_eq!(stamp, <[u8; 32]>::from(digest.finalize()));
-            assert_eq!(actual_count, controls.len());
-            frontier.sort();
-            let mut expected = vec![last, rejected.id];
-            expected.sort();
-            assert_eq!(frontier, expected);
-            let scope = node
-                .channel_checkpoints
-                .causal_projection(log.repository().unwrap(), group, parent[0])
-                .unwrap()
-                .unwrap();
-            let before = log.repository().unwrap().body_read_counts();
-            let (scoped_frontier, (scoped_stamp, scoped_count)) =
-                authorization_view_at(&node, &log, group, Some(&scope)).unwrap();
-            assert_eq!(log.repository().unwrap().body_read_counts(), before);
-            assert_eq!(scoped_frontier, vec![last]);
-            let mut digest = Sha256::new();
-            digest.update(b"mesh-talk-group-authorization-view-v1");
-            for id in controls.iter().filter(|id| **id != rejected.id) {
-                digest.update(id.as_bytes());
-            }
-            assert_eq!(scoped_stamp, <[u8; 32]>::from(digest.finalize()));
-            assert_eq!(scoped_count, controls.len() - 1);
-            let before = raw_view::cold_reads();
-            let tail = Event::new(
-                &node.identity,
-                group,
-                count + 2,
-                parent,
-                count + 2,
-                count + 2,
-                EventKind::Message,
-                vec![4; 2048],
-            );
-            log.append(tail).unwrap();
-            let observation = authorization_view(&node, &log, group).unwrap();
-            assert_eq!(observation.1, (stamp, actual_count));
-            assert_eq!(
-                raw_view::cold_reads(),
-                before,
-                "an ordinary safe message tail must not rescan the raw control graph"
-            );
-        }
-    }
 }
 
 /// Immutable identity inputs captured before acquiring the public event log.
@@ -1360,5 +1169,367 @@ impl Node {
             result.make_unavailable();
         }
         Ok(Some(result))
+    }
+}
+
+#[cfg(test)]
+mod raw_view_tests {
+    use super::*;
+    use crate::{discovery::Roster, eventlog::Event, identity::device::DeviceIdentity};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn raw_authorization_cache_rechecks_noncontrol_reordering() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("events.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        let group = crate::channel::new_channel_id();
+        let first = Event::new(
+            &node.identity,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let missing = Event::new(
+            &node.identity,
+            group,
+            2,
+            vec![first.id],
+            2,
+            2,
+            EventKind::Message,
+            vec![8; 2048],
+        );
+        let last = Event::new(
+            &node.identity,
+            group,
+            3,
+            vec![],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let mut log = node.log.lock().unwrap();
+        log.append(first.clone()).unwrap();
+        log.append(last.clone()).unwrap();
+        let (mut frontier, stamp) = authorization_view(&node, &log, group).unwrap();
+        let mut expected = vec![first.id, last.id];
+        expected.sort();
+        frontier.sort();
+        assert_eq!(frontier, expected);
+        let cold = raw_view::cold_reads();
+        let bodies = log.repository().unwrap().body_read_counts();
+        log.append(missing).unwrap();
+        let (frontier, updated_stamp) = authorization_view(&node, &log, group).unwrap();
+        let mut frontier = frontier;
+        frontier.sort();
+        assert_eq!(
+            frontier, expected,
+            "a late ordinary branch preserves these independent controls"
+        );
+        assert_eq!(
+            updated_stamp, stamp,
+            "the exact signed control set is unchanged"
+        );
+        assert_eq!(
+            raw_view::cold_reads(),
+            cold + 1,
+            "an invalidated causal generation cannot reuse its frontier"
+        );
+        assert_eq!(log.repository().unwrap().body_read_counts(), bodies);
+    }
+
+    #[tokio::test]
+    async fn raw_authorization_view_does_not_decode_retained_message_history() {
+        for count in [128_u64, 512] {
+            let dir = tempfile::tempdir().unwrap();
+            let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+            let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+            let (file, _) = tokio::sync::mpsc::unbounded_channel();
+            let node = Node::open(
+                DeviceIdentity::generate(),
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                channel,
+                file,
+                &dir.path().join("events.log"),
+                &dir.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap();
+            let group = crate::channel::new_channel_id();
+            let mut log = node.log.lock().unwrap();
+            let mut parent = Vec::new();
+            let mut controls = Vec::new();
+            for sequence in 1..=count {
+                let control = sequence % 31 == 0;
+                let event = Event::new(
+                    &node.identity,
+                    group,
+                    sequence,
+                    parent,
+                    sequence,
+                    sequence,
+                    if control {
+                        EventKind::ChannelLeave
+                    } else {
+                        EventKind::Message
+                    },
+                    if control { Vec::new() } else { vec![7; 2048] },
+                );
+                parent = vec![event.id];
+                if control {
+                    controls.push(event.id);
+                }
+                log.append(event).unwrap();
+            }
+            // Rejected, concurrent controls still belong to the raw view.
+            let rejected = Event::new(
+                &node.identity,
+                group,
+                count + 1,
+                vec![],
+                count + 1,
+                count + 1,
+                EventKind::ChannelLeave,
+                vec![1],
+            );
+            let last = *controls.last().unwrap();
+            controls.push(rejected.id);
+            log.append(rejected.clone()).unwrap();
+            let before = log.repository().unwrap().body_read_counts();
+            let (mut frontier, (stamp, actual_count)) =
+                authorization_view(&node, &log, group).unwrap();
+            assert_eq!(
+                log.repository().unwrap().body_read_counts(),
+                before,
+                "raw authorization metadata must not decode {count} retained messages"
+            );
+            controls.sort();
+            let mut digest = Sha256::new();
+            digest.update(b"mesh-talk-group-authorization-view-v1");
+            for id in &controls {
+                digest.update(id.as_bytes());
+            }
+            assert_eq!(stamp, <[u8; 32]>::from(digest.finalize()));
+            assert_eq!(actual_count, controls.len());
+            frontier.sort();
+            let mut expected = vec![last, rejected.id];
+            expected.sort();
+            assert_eq!(frontier, expected);
+            let scope = node
+                .channel_checkpoints
+                .causal_projection(log.repository().unwrap(), group, parent[0])
+                .unwrap()
+                .unwrap();
+            let before = log.repository().unwrap().body_read_counts();
+            let (scoped_frontier, (scoped_stamp, scoped_count)) =
+                authorization_view_at(&node, &log, group, Some(&scope)).unwrap();
+            assert_eq!(log.repository().unwrap().body_read_counts(), before);
+            assert_eq!(scoped_frontier, vec![last]);
+            let mut digest = Sha256::new();
+            digest.update(b"mesh-talk-group-authorization-view-v1");
+            for id in controls.iter().filter(|id| **id != rejected.id) {
+                digest.update(id.as_bytes());
+            }
+            assert_eq!(scoped_stamp, <[u8; 32]>::from(digest.finalize()));
+            assert_eq!(scoped_count, controls.len() - 1);
+            let before = raw_view::cold_reads();
+            let tail = Event::new(
+                &node.identity,
+                group,
+                count + 2,
+                parent,
+                count + 2,
+                count + 2,
+                EventKind::Message,
+                vec![4; 2048],
+            );
+            log.append(tail).unwrap();
+            let observation = authorization_view(&node, &log, group).unwrap();
+            assert_eq!(observation.1, (stamp, actual_count));
+            assert_eq!(
+                raw_view::cold_reads(),
+                before,
+                "an ordinary safe message tail must not rescan the raw control graph"
+            );
+        }
+    }
+    fn directory_test_node() -> (tempfile::TempDir, Arc<Node>) {
+        let directory = tempfile::tempdir().unwrap();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &directory.path().join("events"),
+            &directory.path().join("sent"),
+            "pw",
+        )
+        .unwrap();
+        (directory, node)
+    }
+    fn finish_directory(
+        node: &Node,
+        log: &PersistentEventLog,
+        group: ConversationId,
+    ) -> DirectoryView {
+        for _ in 0..4096 {
+            let repository = log.repository().unwrap();
+            let before = repository.ancestry_vertex_reads();
+            let outcome = node.directory_observation(log, group);
+            assert!(
+                repository.ancestry_vertex_reads() - before <= 128,
+                "one directory turn drained the ancestry graph"
+            );
+            match outcome {
+                Ok(view) => return view,
+                Err(crate::eventlog::LogError::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(crate::eventlog::LogError::StaleCursor) => {}
+                Err(error) => panic!("directory preparation failed: {error}"),
+            }
+        }
+        panic!("bounded directory preparation failed to complete")
+    }
+    #[test]
+    fn directory_selector_preserves_hex_digest_raw_rejections_and_authorization_cache() {
+        let (_directory, node) = directory_test_node();
+        let group = crate::channel::new_channel_id();
+        let mut log = node.log.lock().unwrap();
+        let mut parent = Vec::new();
+        let mut selected = Vec::new();
+        for sequence in 1..=601 {
+            let kind = match sequence {
+                1 => EventKind::ChannelLeave,
+                301 => EventKind::ChannelRename,
+                601 => EventKind::ChannelHistoryPolicy,
+                _ => EventKind::Message,
+            };
+            let event = Event::new(
+                &node.identity,
+                group,
+                sequence,
+                parent,
+                sequence,
+                sequence,
+                kind,
+                vec![7; 2048],
+            );
+            parent = vec![event.id];
+            if sequence == 1 || sequence == 301 || sequence == 601 {
+                selected.push(event.id);
+            }
+            log.append(event).unwrap();
+        }
+        let authorization = authorization_view(&node, &log, group).unwrap();
+        let before = log.repository().unwrap().body_read_counts();
+        assert!(matches!(
+            node.directory_observation(&log, group),
+            Err(crate::eventlog::LogError::Io(_))
+        ));
+        // A changed source must discard its partial digest and include the raw
+        // rejected control, even though canonical membership will ignore it.
+        let rejected = Event::new(
+            &node.identity,
+            group,
+            602,
+            vec![selected[0]],
+            602,
+            602,
+            EventKind::ChannelRename,
+            vec![255],
+        );
+        log.append(rejected.clone()).unwrap();
+        selected.push(rejected.id);
+        let view = finish_directory(&node, &log, group);
+        let mut expected = Sha256::new();
+        expected.update(b"mesh-talk-group-directory-v1");
+        selected.sort();
+        for event in &selected {
+            expected.update(event.to_hex().as_bytes());
+        }
+        assert_eq!(view.fingerprint, <[u8; 32]>::from(expected.finalize()));
+        assert_eq!(view.count, 4);
+        assert_eq!(
+            view.controls,
+            selected.iter().map(EventId::to_hex).collect::<Vec<_>>()
+        );
+        let mut frontier = vec![parent[0], rejected.id];
+        frontier.sort();
+        assert_eq!(view.frontier, frontier);
+        assert_eq!(
+            authorization_view(&node, &log, group).unwrap(),
+            authorization,
+            "directory observations contaminated the authorization cache"
+        );
+        assert_eq!(log.repository().unwrap().body_read_counts(), before);
+        let before = log.repository().unwrap().ancestry_vertex_reads();
+        assert_eq!(
+            node.directory_observation(&log, group).unwrap().fingerprint,
+            view.fingerprint
+        );
+        assert_eq!(
+            log.repository().unwrap().ancestry_vertex_reads(),
+            before,
+            "warm view walked history"
+        );
+    }
+    #[test]
+    fn directory_preparation_capacity_advances_abandoned_calls_without_eviction() {
+        let (_directory, node) = directory_test_node();
+        let mut log = node.log.lock().unwrap();
+        let mut groups = Vec::new();
+        for sequence in 1..=65 {
+            let group = crate::channel::new_channel_id();
+            log.append(Event::new(
+                &node.identity,
+                group,
+                sequence,
+                vec![],
+                sequence,
+                sequence,
+                EventKind::ChannelRename,
+                vec![1],
+            ))
+            .unwrap();
+            groups.push(group);
+        }
+        for group in groups.iter().take(64) {
+            assert!(matches!(
+                node.directory_observation(&log, *group),
+                Err(crate::eventlog::LogError::Io(_))
+            ));
+        }
+        let view = finish_directory(&node, &log, groups[64]);
+        assert_eq!(
+            view.count, 1,
+            "new requests were starved by abandoned preparations"
+        );
+        assert_eq!(view.frontier.len(), 1);
+        for group in groups.iter().take(64) {
+            assert_eq!(finish_directory(&node, &log, *group).count, 1);
+        }
     }
 }

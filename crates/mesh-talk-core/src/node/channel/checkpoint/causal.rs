@@ -32,6 +32,31 @@ pub(in crate::node) struct Query {
     profile: Arc<ProfileStorage>,
     job: [u8; 16],
 }
+impl Query {
+    pub(in crate::node) fn job(&self) -> [u8; 16] {
+        self.job
+    }
+}
+impl ChannelCheckpointStore {
+    pub(in crate::node) fn start_decision_query(
+        &self,
+        source: &ChannelSource,
+    ) -> Result<Arc<Query>, LogError> {
+        let query = Arc::new(Query {
+            profile: self.profile.clone(),
+            job: *uuid::Uuid::new_v4().as_bytes(),
+        });
+        self.profile.database().transaction(|c| {
+            self.check_source_on(c, source)?;
+            c.execute(
+                "INSERT INTO channel_projection_queries VALUES(?1,?2,0)",
+                params![query.job.as_slice(), source.channel.as_bytes().as_slice()],
+            )?;
+            Ok(())
+        })?;
+        Ok(query)
+    }
+}
 impl Drop for Query {
     fn drop(&mut self) {
         if let Err(error) = self.profile.database().transaction(|c| {

@@ -166,13 +166,13 @@ impl IndexedRecallLog {
     #[cfg(test)]
     pub(crate) fn len(&self) -> Result<u64, LogError> {
         self.source.profile().database().read(|c| {
-            Ok(c.query_row(
+            c.query_row(
                 "SELECT record_count FROM transcript_sources WHERE kind=?1",
                 [RECALL_MARKS],
                 |r| r.get::<_, i64>(0),
             )?
             .try_into()
-            .map_err(|_| LogError::CorruptFile("invalid history counter".into()))?)
+            .map_err(|_| LogError::CorruptFile("invalid history counter".into()))
         })
     }
     pub(crate) fn page(
@@ -196,6 +196,24 @@ impl IndexedRecallLog {
                 result.push(RecallMark{conversation:ConversationId::new(bytes(0)?),target:EventId::new(bytes(1)?),wall_clock:u64::from_be_bytes(clock)});
             }Ok(result)
         })
+    }
+}
+
+#[cfg(test)]
+impl IndexedRecallLog {
+    pub(crate) fn targets(&self, conversation: &ConversationId) -> Vec<EventId> {
+        let mut cursor = None;
+        let mut result = Vec::new();
+        loop {
+            let page = self
+                .page(Some(*conversation), cursor, 128)
+                .expect("fixture recall marks");
+            if page.is_empty() {
+                return result;
+            }
+            cursor = page.last().map(|m| (m.conversation, m.target));
+            result.extend(page.into_iter().map(|m| m.target));
+        }
     }
 }
 
@@ -277,23 +295,5 @@ mod tests {
                 .unwrap()
         );
         assert!(store.page(None, None, usize::MAX).is_err());
-    }
-}
-
-#[cfg(test)]
-impl IndexedRecallLog {
-    pub(crate) fn targets(&self, conversation: &ConversationId) -> Vec<EventId> {
-        let mut cursor = None;
-        let mut result = Vec::new();
-        loop {
-            let page = self
-                .page(Some(*conversation), cursor, 128)
-                .expect("fixture recall marks");
-            if page.is_empty() {
-                return result;
-            }
-            cursor = page.last().map(|m| (m.conversation, m.target));
-            result.extend(page.into_iter().map(|m| m.target));
-        }
     }
 }

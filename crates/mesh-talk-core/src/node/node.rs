@@ -362,6 +362,7 @@ pub struct Node {
     pub(in crate::node) pending_channel_files: Mutex<Option<super::files::ChannelFileTurn>>,
     pub(in crate::node) channel_projection_cache:
         Mutex<super::channel_projection_cache::ChannelProjectionCache>,
+    pub(in crate::node) raw_group_views: Mutex<super::account_group::RawViewCache>,
     pub(in crate::node) group_metadata_cache: Mutex<super::group_metadata::MetadataCache>,
     #[cfg(test)]
     pub(in crate::node) channel_projection_replays: std::sync::atomic::AtomicUsize,
@@ -422,6 +423,7 @@ pub struct Node {
         Mutex<HashMap<(EventId, EventId), crate::eventlog::sync::FileConsentStatus>>,
     pub(in crate::node) channel_changes: tokio::sync::broadcast::Sender<ConversationId>,
     pub(in crate::node) channel_recovery_pending: Mutex<HashSet<ConversationId>>,
+    pub(in crate::node) join_history_work: Mutex<super::join_history::indexed::HistoryWork>,
     pub(in crate::node) channel_recovery_notify: tokio::sync::Notify,
     pub(in crate::node) channel_recovery:
         Mutex<HashMap<ConversationId, super::channels::ChannelRecovery>>,
@@ -1249,6 +1251,7 @@ impl Node {
             channel_checkpoints,
             channel_custody: Mutex::new(channel_custody),
             channel_projection_cache: Mutex::new(Default::default()),
+            raw_group_views: Mutex::new(Default::default()),
             group_metadata_cache: Mutex::new(Default::default()),
             #[cfg(test)]
             channel_projection_replays: std::sync::atomic::AtomicUsize::new(0),
@@ -1277,6 +1280,7 @@ impl Node {
             outgoing_file_consents: Mutex::new(HashMap::new()),
             channel_changes: tokio::sync::broadcast::channel(256).0,
             channel_recovery_pending: Mutex::new(HashSet::new()),
+            join_history_work: Mutex::new(Default::default()),
             channel_recovery_notify: tokio::sync::Notify::new(),
             channel_recovery: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),

@@ -7,6 +7,78 @@ use crate::{
 };
 
 #[test]
+fn group_inventory_directory_cold_preparation_does_not_hydrate_retained_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&directory.path().join("source"), &account);
+    let external = node(&directory.path().join("external"), &Account::generate());
+    let group = group_inventory_legacy_fixture(&external, &source, "Bounded directory");
+    let mut parents = source.log.lock().unwrap().heads(&group).unwrap();
+    for sequence in 2..=602 {
+        let event = Event::new(
+            &source.identity,
+            group,
+            sequence,
+            parents,
+            sequence,
+            sequence,
+            EventKind::Message,
+            vec![7; 2048],
+        );
+        parents = vec![event.id];
+        source.log.lock().unwrap().append(event).unwrap();
+    }
+    // Settle canonical authority before measuring the independent directory
+    // selector: a directory read must not hydrate historical message bodies.
+    for turn in 0..5000 {
+        let log = source.log.lock().unwrap();
+        let repository = log.repository().unwrap();
+        let canonical = source
+            .channel_checkpoints
+            .project_step(repository, &source.identity, group)
+            .unwrap();
+        if canonical {
+            source
+                .channel_checkpoints
+                .prepare_presentation_step(
+                    repository,
+                    &source.identity,
+                    group,
+                    crate::eventlog::sync::network::PreparationBudget::default(),
+                )
+                .unwrap();
+            if source
+                .channel_checkpoints
+                .prepared_history_policy(group)
+                .is_ok()
+            {
+                break;
+            }
+        }
+        assert!(turn < 4999, "finite canonical fixture did not settle");
+    }
+    let before = source
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .body_read_counts();
+    source.publish_group_inventory_for(group);
+    assert_eq!(
+        source
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts(),
+        before,
+        "cold directory publication decoded retained signed message bodies"
+    );
+}
+
+#[test]
 fn group_inventory_causal_directory_ignores_another_sources_future_revision() {
     for stale_first in [false, true] {
         let directory = tempfile::tempdir().unwrap();
@@ -637,7 +709,7 @@ fn group_inventory_directory_large_binding_envelope_publishes_bounded_invalidati
     );
     source.log.lock().unwrap().append(genesis).unwrap();
     source.process_channel(group);
-    source.publish_group_inventory(&mut None);
+    let _ = group_inventory_source_document(&source, group);
     let key = AccountDocumentKey::GroupInventory {
         channel: hex::encode(group.as_bytes()),
         source_device: source.user_id(),

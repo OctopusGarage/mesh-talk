@@ -28,7 +28,7 @@ const MAX_MEDIA_ENTRIES: usize = MAX_OWNED_BLOBS + 2;
 const MAX_LIVE: u64 = 128 * 1024 * 1024;
 // These are local encrypted-index limits, independent of document wire quotas.
 const MAX_LOCAL_ROW: usize = 12 * 1024 * 1024;
-const MAX_LOCAL_FRONTIER: usize = 131_072;
+pub(in crate::node) const MAX_LOCAL_FRONTIER: usize = 131_072;
 const MAX_LOCAL_RECEIPTS: usize = 32 * 1024 * 1024;
 const MAX_COMPACT_INDEX: usize = 112 * 1024 * 1024;
 const INDEX_HEADER: usize = 6 + crate::storage::encryption::SALT_SIZE;

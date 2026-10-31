@@ -1850,7 +1850,7 @@ mod tests {
                     .files
                     .lock()
                     .unwrap()
-                    .manifest(&file)
+                    .manifest(file)
                     .unwrap()
                     .is_some()
             );
@@ -1962,7 +1962,7 @@ mod tests {
                     .files
                     .lock()
                     .unwrap()
-                    .manifest(&file)
+                    .manifest(file)
                     .unwrap()
                     .is_some(),
                 keep_other_message,
@@ -1982,7 +1982,7 @@ mod tests {
                     .files
                     .lock()
                     .unwrap()
-                    .manifest(&file)
+                    .manifest(file)
                     .unwrap()
                     .is_some(),
                 keep_other_message
@@ -2017,7 +2017,7 @@ mod tests {
                     .files
                     .lock()
                     .unwrap()
-                    .manifest(&file)
+                    .manifest(file)
                     .unwrap()
                     .is_some(),
                 keep_other_message

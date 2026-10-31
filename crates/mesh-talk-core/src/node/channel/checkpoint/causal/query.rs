@@ -31,7 +31,7 @@ pub(in crate::node) struct CausalProjectionQuery {
 pub(in crate::node) enum CausalProjectionStep {
     Pending(PreparationStep),
     Ready {
-        projection: Option<super::super::super::ChannelMembershipProjection>,
+        projection: Option<Box<super::super::super::ChannelMembershipProjection>>,
         work: PreparationStep,
     },
 }
@@ -384,7 +384,7 @@ impl ChannelCheckpointStore {
         projection._query_lease = Some(lease.clone());
         query.completed = true;
         Ok(CausalProjectionStep::Ready {
-            projection: Some(projection),
+            projection: Some(Box::new(projection)),
             work: PreparationStep {
                 ready: true,
                 bytes: snapshot,

@@ -5,6 +5,11 @@ use super::*;
 use crate::eventlog::repository::order::{CausalOrder, OrderReadiness, OrderWorkBudget};
 use rusqlite::{OptionalExtension, params};
 use std::collections::BTreeSet;
+#[path = "view/directory.rs"]
+mod directory;
+pub(super) use directory::read as directory_view;
+pub(in crate::node) use directory::{DirectoryView, RawViewCache};
+type CachedAuthorization = (Vec<u8>, i64, Vec<u8>);
 
 #[cfg(test)]
 thread_local! { static COLD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
@@ -37,12 +42,20 @@ fn cache_key(
     group: ConversationId,
     revision: i64,
 ) -> Result<Vec<u8>, crate::eventlog::LogError> {
+    selected_cache_key(repository, group, revision, &CONTROL_KINDS)
+}
+fn selected_cache_key(
+    repository: &crate::eventlog::repository::EventRepository,
+    group: ConversationId,
+    revision: i64,
+    kinds: &[EventKind],
+) -> Result<Vec<u8>, crate::eventlog::LogError> {
     if let Some(revisions) = repository.raw_kind_revisions(group)?
         && let Some(generation) = repository.order_generation(&group, CausalOrder::Logical)?
     {
-        let control = CONTROL_KINDS
-            .into_iter()
-            .map(|kind| revisions[kind as usize])
+        let control = kinds
+            .iter()
+            .map(|kind| revisions[*kind as usize])
             .max()
             .unwrap_or(-1);
         let destructive = repository.destructive_policy_revision()?;
@@ -77,7 +90,7 @@ pub(super) fn read(
     log: &PersistentEventLog,
     group: ConversationId,
     scope: Option<&crate::node::channel::ChannelMembershipProjection>,
-) -> Result<(Vec<EventId>, ([u8; 32], usize)), crate::eventlog::LogError> {
+) -> Result<RawAuthorizationView, crate::eventlog::LogError> {
     let repository = log.repository()?;
     let revision = repository.metadata(&group)?.map_or(0, |meta| meta.revision);
     node.storage.database().transaction(|c| {
@@ -102,7 +115,7 @@ pub(super) fn read(
     })?;
     if scope.is_none() {
         let source_key = cache_key(repository, group, revision)?;
-        let cached: Option<(Vec<u8>, i64, Vec<u8>)> = node.storage.database().read(|c| {
+        let cached: Option<CachedAuthorization> = node.storage.database().read(|c| {
             c.query_row("SELECT v.fingerprint,v.event_count,v.frontier FROM group_raw_control_views v JOIN group_raw_control_inputs i ON i.channel=v.channel WHERE v.channel=?1 AND i.source_key=?2", params![group.as_bytes().as_slice(),source_key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(Into::into)
         })?;
         if let Some((fingerprint, count, bytes)) = cached {
@@ -110,8 +123,11 @@ pub(super) fn read(
                 return Err(invalid());
             }
             let frontier = bytes
-                .chunks_exact(32)
-                .map(|bytes| EventId::new(bytes.try_into().expect("fixed chunk")))
+                .as_chunks::<32>()
+                .0
+                .iter()
+                .copied()
+                .map(EventId::new)
                 .collect();
             return Ok((
                 frontier,

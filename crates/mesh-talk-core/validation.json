@@ -668,6 +668,7 @@
         "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
         "crates/mesh-talk-core/src/node/channel_account_controls.rs",
         "crates/mesh-talk-core/src/node/account_group/access.rs",
+        "crates/mesh-talk-core/src/node/account_group/access/",
         "crates/mesh-talk-core/src/node/account_group/wire.rs",
         "crates/mesh-talk-core/src/node/account_documents/group_control.rs",
         "crates/mesh-talk-core/src/node/channel_account_authority/"
@@ -678,6 +679,8 @@
           "filters": [
             "node::channel::tests::content_events_preserve_membership_without_rebuilding_account_proofs",
             "node::channel_account_authority::tests::",
+            "node::account_group::access::raw_view_tests::",
+            "group_inventory_directory_",
             "node::channel_account_bootstrap::tests::",
             "node::channel_account_maintenance::tests::",
             "captured_initial_account_upgrade_never_resurrects_a_completed_legacy_departure",

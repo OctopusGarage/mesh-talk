@@ -3615,6 +3615,14 @@ impl Node {
     }
 }
 
+// Keep local storage failures retryable at the wire delivery admission boundary.
+fn delivery_log_error(error: NodeError) -> LogError {
+    match error {
+        NodeError::Log(error) => error,
+        other => LogError::AdmissionRejected(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod diagnostic_tests {
     #[tokio::test]
@@ -4101,13 +4109,5 @@ mod diagnostic_tests {
             "revoked verification must prevent a new proactive recovery connection"
         );
         assert!(finished.is_ok());
-    }
-}
-
-// Keep local storage failures retryable at the wire delivery admission boundary.
-fn delivery_log_error(error: NodeError) -> LogError {
-    match error {
-        NodeError::Log(error) => error,
-        other => LogError::AdmissionRejected(other.to_string()),
     }
 }

@@ -87,3 +87,5 @@ mod tests;
 
 #[cfg(test)]
 pub(in crate::node) use tests::ControlTestPages;
+
+pub(in crate::node) use access::{DirectoryView, RawViewCache};

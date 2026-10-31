@@ -3629,7 +3629,47 @@ fn group_inventory_source_document(
     source: &Node,
     id: crate::eventlog::ConversationId,
 ) -> AccountDocument {
-    source.publish_group_inventory(&mut None);
+    let count = source
+        .log
+        .lock()
+        .unwrap()
+        .repository()
+        .unwrap()
+        .metadata(&id)
+        .unwrap()
+        .map_or(0, |meta| meta.count);
+    for turn in 0..count.saturating_mul(16).saturating_add(1024) {
+        {
+            let log = source.log.lock().unwrap();
+            let repository = log.repository().unwrap();
+            if source
+                .channel_checkpoints
+                .project_step(repository, &source.identity, id)
+                .unwrap()
+            {
+                source
+                    .channel_checkpoints
+                    .prepare_presentation_step(
+                        repository,
+                        &source.identity,
+                        id,
+                        crate::eventlog::sync::network::PreparationBudget::default(),
+                    )
+                    .unwrap();
+            }
+        }
+        match source.try_publish_group_inventory_groups(&[id]) {
+            Ok(()) => break,
+            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+            Err(NodeError::Log(crate::eventlog::LogError::Io(error)))
+                if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("directory fixture publication failed: {error}"),
+        }
+        assert!(
+            turn + 1 < count.saturating_mul(16).saturating_add(1024),
+            "finite directory fixture did not settle"
+        );
+    }
     source
         .account_document(&AccountDocumentKey::GroupInventory {
             channel: hex::encode(id.as_bytes()),
@@ -6338,6 +6378,7 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
         None,
         "an accepted current-account grant on a certified sibling takes precedence"
     );
+    let _ = group_inventory_source_document(&adopted, legacy);
     adopted.publish_group_inventory(&mut None);
     let new_document = adopted
         .account_document(&old_document.meta.key)
@@ -6842,7 +6883,7 @@ fn group_inventory_post_office_display_fact_keeps_existing_member_count_consiste
         .unwrap();
     source.process_channel(id);
     assert_eq!(source.list_channels().unwrap()[0].member_count, 2);
-    source.publish_group_inventory(&mut None);
+    let _ = group_inventory_source_document(&source, id);
     let key = AccountDocumentKey::GroupInventory {
         channel: hex::encode(id.as_bytes()),
         source_device: source.user_id(),
@@ -6939,7 +6980,7 @@ fn group_inventory_long_canonical_names_fit_payload_budget_and_preserve_required
             .unwrap();
         source.process_channel(id);
         let count = source.list_channels().unwrap()[0].member_count;
-        source.publish_group_inventory(&mut None);
+        let _ = group_inventory_source_document(&source, id);
         let key = AccountDocumentKey::GroupInventory {
             channel: hex::encode(id.as_bytes()),
             source_device: source.user_id(),
@@ -7016,7 +7057,7 @@ async fn group_inventory_display_labels_cover_real_create_and_rename_without_cha
     ];
     for name in cases {
         let id = source.create_channel(name, vec![]).await.unwrap();
-        source.publish_group_inventory(&mut None);
+        let _ = group_inventory_source_document(&source, id);
         let key = AccountDocumentKey::GroupInventory {
             channel: hex::encode(id.as_bytes()),
             source_device: source.user_id(),

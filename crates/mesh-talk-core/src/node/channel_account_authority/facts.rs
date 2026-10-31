@@ -485,101 +485,6 @@ impl AccountAuthority {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        eventlog::{
-            persist::PersistentEventLog,
-            repository::order::{CausalOrder, OrderReadiness, OrderWorkBudget},
-        },
-        identity::{account::Account, device::DeviceIdentity},
-        storage::profile::ProfileStorageLease,
-    };
-    #[test]
-    fn channel_historical_device_binding_keeps_each_account_certificate() {
-        let dir = tempfile::tempdir().unwrap();
-        let device = DeviceIdentity::generate();
-        let first = Account::generate();
-        let second = Account::generate();
-        let profile = ProfileStorage::open_participant(
-            ProfileStorageLease::acquire(dir.path()).unwrap(),
-            &device.public(),
-            &first.public(),
-            &dir.path().join("messages.log"),
-            &dir.path().join("sent.log"),
-            "pw",
-        )
-        .unwrap();
-        profile.complete_participant("pw", None).unwrap();
-        let log = PersistentEventLog::open_profile(profile.clone(), "pw").unwrap();
-        let channel = ConversationId::new([37; 32]);
-        let root = Event::new(
-            &device,
-            channel,
-            1,
-            vec![],
-            1,
-            1,
-            EventKind::MembershipChange,
-            crate::channel::ChannelMeta {
-                name: "binding".into(),
-                members: vec![device.public()],
-                owner: device.user_id(),
-                epoch: 0,
-            }
-            .encode(),
-        );
-        let repository = log.repository().unwrap();
-        repository.append(&root).unwrap();
-        while repository
-            .order_step(&channel, CausalOrder::Logical, OrderWorkBudget::default())
-            .unwrap()
-            .readiness
-            != OrderReadiness::Ready
-        {}
-        let job = repository
-            .order_generation(&channel, CausalOrder::Logical)
-            .unwrap()
-            .unwrap()
-            .job;
-        profile
-            .database()
-            .transaction(|c| AuthorityHistory::initialize(c, true))
-            .unwrap();
-        let first_proof = Announce::new_with_account(&device, &first, "first", 1);
-        let second_proof = Announce::new_with_account(&device, &second, "second", 1);
-        assert!(first_proof.valid_presence() && second_proof.valid_presence());
-        // The reducer supplies authenticated bindings at distinct grant lifetimes;
-        // each checkpoint then drops retired roles from its current-only blob.
-        for proof in [&first_proof, &second_proof] {
-            let mut candidate = AuthorityHistory::load(profile.clone(), job, channel).unwrap();
-            candidate.originals.push(proof.clone());
-            profile
-                .database()
-                .transaction(|c| candidate.checkpoint_on(c))
-                .unwrap();
-        }
-        let restored = AuthorityHistory::load(profile, job, channel).unwrap();
-        assert_eq!(
-            restored
-                .try_registered_account(&device.public(), &first_proof)
-                .unwrap(),
-            Some(first.public().ed25519_pub)
-        );
-        assert_eq!(
-            restored
-                .try_registered_account(&device.public(), &second_proof)
-                .unwrap(),
-            Some(second.public().ed25519_pub)
-        );
-        assert!(!restored.conflicting_original(&device.public()).unwrap());
-        let mut conflicting = DeviceIdentity::generate().public();
-        conflicting.ed25519_pub = device.public().ed25519_pub;
-        assert!(restored.conflicting_original(&conflicting).unwrap());
-    }
-}
-
 impl AccountAuthority {
     pub(in crate::node) fn legacy_candidate(
         &self,
@@ -864,5 +769,100 @@ impl AccountAuthority {
             .ok_or_else(|| invalid("causal authority lease already shared"))?;
         history._query_lease = Some(lease);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        eventlog::{
+            persist::PersistentEventLog,
+            repository::order::{CausalOrder, OrderReadiness, OrderWorkBudget},
+        },
+        identity::{account::Account, device::DeviceIdentity},
+        storage::profile::ProfileStorageLease,
+    };
+    #[test]
+    fn channel_historical_device_binding_keeps_each_account_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let device = DeviceIdentity::generate();
+        let first = Account::generate();
+        let second = Account::generate();
+        let profile = ProfileStorage::open_participant(
+            ProfileStorageLease::acquire(dir.path()).unwrap(),
+            &device.public(),
+            &first.public(),
+            &dir.path().join("messages.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        profile.complete_participant("pw", None).unwrap();
+        let log = PersistentEventLog::open_profile(profile.clone(), "pw").unwrap();
+        let channel = ConversationId::new([37; 32]);
+        let root = Event::new(
+            &device,
+            channel,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::MembershipChange,
+            crate::channel::ChannelMeta {
+                name: "binding".into(),
+                members: vec![device.public()],
+                owner: device.user_id(),
+                epoch: 0,
+            }
+            .encode(),
+        );
+        let repository = log.repository().unwrap();
+        repository.append(&root).unwrap();
+        while repository
+            .order_step(&channel, CausalOrder::Logical, OrderWorkBudget::default())
+            .unwrap()
+            .readiness
+            != OrderReadiness::Ready
+        {}
+        let job = repository
+            .order_generation(&channel, CausalOrder::Logical)
+            .unwrap()
+            .unwrap()
+            .job;
+        profile
+            .database()
+            .transaction(|c| AuthorityHistory::initialize(c, true))
+            .unwrap();
+        let first_proof = Announce::new_with_account(&device, &first, "first", 1);
+        let second_proof = Announce::new_with_account(&device, &second, "second", 1);
+        assert!(first_proof.valid_presence() && second_proof.valid_presence());
+        // The reducer supplies authenticated bindings at distinct grant lifetimes;
+        // each checkpoint then drops retired roles from its current-only blob.
+        for proof in [&first_proof, &second_proof] {
+            let mut candidate = AuthorityHistory::load(profile.clone(), job, channel).unwrap();
+            candidate.originals.push(proof.clone());
+            profile
+                .database()
+                .transaction(|c| candidate.checkpoint_on(c))
+                .unwrap();
+        }
+        let restored = AuthorityHistory::load(profile, job, channel).unwrap();
+        assert_eq!(
+            restored
+                .try_registered_account(&device.public(), &first_proof)
+                .unwrap(),
+            Some(first.public().ed25519_pub)
+        );
+        assert_eq!(
+            restored
+                .try_registered_account(&device.public(), &second_proof)
+                .unwrap(),
+            Some(second.public().ed25519_pub)
+        );
+        assert!(!restored.conflicting_original(&device.public()).unwrap());
+        let mut conflicting = DeviceIdentity::generate().public();
+        conflicting.ed25519_pub = device.public().ed25519_pub;
+        assert!(restored.conflicting_original(&conflicting).unwrap());
     }
 }
