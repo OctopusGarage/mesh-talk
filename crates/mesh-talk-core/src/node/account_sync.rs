@@ -64,8 +64,8 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const ATTACHMENT_AVAILABILITY_TTL: Duration = Duration::from_secs(60);
 const MAX_UNAVAILABLE_ATTACHMENTS: usize = 256;
 
-/// Mandatory document admission respects its retained page retry deadline.
-/// Optional workers also own history/favorites and keep their independent scheduling.
+/// Deferred synchronization peers retain their place until their retry deadline;
+/// another ready peer can proceed without consuming the deferred demand.
 pub(in crate::node) fn take_ready_mandatory_peer<K>(
     queue: &mut std::collections::VecDeque<(K, PeerRecord)>,
     retry_at: impl Fn(&K) -> Option<std::time::Instant>,
@@ -3199,21 +3199,17 @@ impl Node {
                 fanout_owners.insert(task.id(), group);
             }
             while active.len() < HISTORY_WORKERS {
-                let Some((id, peer)) = queue.pop_front() else {
+                let Some((id, peer)) = take_ready_mandatory_peer(
+                    &mut queue,
+                    |id| cursors.get(id).and_then(|state| state.history_retry_at),
+                    std::time::Instant::now(),
+                ) else {
                     break;
                 };
                 if !active.insert(id.clone()) {
                     continue;
                 }
                 let mut state = cursors.remove(&id).unwrap_or_default();
-                if state
-                    .history_retry_at
-                    .is_some_and(|at| at > std::time::Instant::now())
-                {
-                    active.remove(&id);
-                    cursors.insert(id, state);
-                    continue;
-                }
                 state.history_retry_at = None;
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
@@ -3355,9 +3351,17 @@ impl Node {
                     })
                 })
                 .min();
+            let history_retry = (active.len() < HISTORY_WORKERS)
+                .then(|| {
+                    mandatory_retry_deadline(&queue, |id| {
+                        cursors.get(id).and_then(|state| state.history_retry_at)
+                    })
+                })
+                .flatten();
+            let worker_retry = document_retry.into_iter().chain(history_retry).min();
             tokio::select! {
                 _ = async {
-                    if let Some(at) = document_retry {
+                    if let Some(at) = worker_retry {
                         tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
                     } else {
                         std::future::pending::<()>().await;
@@ -3554,7 +3558,7 @@ impl Node {
                                 }
                                 Err(error) if local_sync_capacity_busy(&error) => {
                                     // Admission never began an exchange. Retain history and
-                                    // favorite cursors; the regular tick retries without a spin.
+                                    // favorite cursors and queued demand until its retry deadline.
                                     status.phase = SyncPhase::CatchingUp;
                                     state.history_retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
                                     continuation = false;
@@ -3608,12 +3612,13 @@ impl Node {
                                 status.phase = SyncPhase::CatchingUp;
                             }
                             self.set_account_sync_status(id.clone(), status);
+                            let deferred_history = state.history_retry_at.is_some();
                             cursors.insert(id.clone(), state);
-                            if continuation {
+                            if continuation || deferred_history {
                                 // One page per peer per turn: tail insertion gives waiting siblings
                                 // their turn while bounded workers immediately drain the backlog.
                                 queue.push_back((id, peer));
-                                tokio::task::yield_now().await;
+                                if continuation { tokio::task::yield_now().await; }
                             }
                         }
                     }

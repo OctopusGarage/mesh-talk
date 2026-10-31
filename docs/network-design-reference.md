@@ -1552,6 +1552,12 @@ parent still checks the captured policy revision and certified sibling before
 scheduling selected files; cancellation retains the blocking worker's admission
 until it exits.
 
+Local history admission backpressure retains the peer, history/favorites cursors
+and pending refresh through the existing five-second backoff. The queued retry
+deadline wakes the existing history lane when its worker is available; ordinary
+wakes and periodic refresh cannot consume that deferred demand or shorten its
+backoff. Other ready peers can proceed while it waits, without a busy retry loop.
+
 Message Yourself is the self-account route. With no siblings, acceptance commits local history and encrypted file retention without reserving remote delivery capacity. A later certified sibling can reconcile retained records with their original logical IDs. Signed personal file evidence binds the exact manifest to its personal host; it does not grant access to unrelated account or channel files. Local acceptance and a completed selected exchange are distinct facts, and neither promises indefinite availability.
 
 Favorites is a separate account-owned encrypted snapshot collection. Its optional,

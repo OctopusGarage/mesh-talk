@@ -1864,6 +1864,133 @@ async fn account_history_worker_drains_continuation_without_waiting_retry_interv
     outcome.expect("backlog drains promptly instead of waiting ten seconds per page");
 }
 
+#[tokio::test]
+async fn account_history_capacity_backoff_retains_demand_without_periodic_repair() {
+    use futures_util::FutureExt;
+    use tokio::net::TcpListener;
+
+    let (_dir, source, receiver) = sibling_nodes();
+    let original = source
+        .enqueue_to_account(&source.account_id(), b"after admission recovers", None)
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = sibling_peer(&receiver, &source, address);
+    // Hold the real authentication owner: the worker must report local
+    // backpressure before any history request reaches the source.
+    let admission = receiver
+        .sessions
+        .authentication_admission(receiver.peer_endpoint_key(address, &peer.public))
+        .await
+        .unwrap();
+    let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (busy_tx, busy_rx) = tokio::sync::oneshot::channel();
+    let busy_tx = Arc::new(std::sync::Mutex::new(Some(busy_tx)));
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let expected = peer.public;
+        let attempts = attempts.clone();
+        move |public, phase| {
+            if public != expected {
+                return;
+            }
+            if phase.starts_with("history_begin ") {
+                attempts.lock().unwrap().push(std::time::Instant::now());
+            }
+            if phase == "history_end outcome=capacity_busy"
+                && let Some(tx) = busy_tx.lock().unwrap().take()
+            {
+                let _ = tx.send(std::time::Instant::now());
+            }
+        }
+    }));
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn({
+        let source = source.clone();
+        async move {
+            loop {
+                let (mut io, version, frame) =
+                    accept_account_test_request(&listener, &source).await;
+                match frame {
+                    AccountHistoryFrame::Request {
+                        account_id,
+                        cursor,
+                        known_digest,
+                        wanted,
+                        ..
+                    } => {
+                        assert!(
+                            source
+                                .serve_account_history(
+                                    &mut io,
+                                    version,
+                                    &account_id,
+                                    cursor,
+                                    known_digest,
+                                    wanted,
+                                )
+                                .await
+                        );
+                    }
+                    // Neither optional domain can import content or emit a
+                    // fresh data-change wake that rescues the lost retry.
+                    AccountHistoryFrame::FavoritesRequest { .. }
+                    | AccountHistoryFrame::DocumentsRequest { .. } => {}
+                    _ => panic!("unexpected request in admission-retry fixture"),
+                }
+            }
+        }
+    });
+    let _ = receiver.account_sync_notify.notified().now_or_never();
+    receiver.account_sync_notify.notify_one();
+    tasks.spawn(receiver.clone().run_account_history_loop_with_tick(None));
+
+    let busy_at = tokio::time::timeout(Duration::from_secs(10), busy_rx)
+        .await
+        .expect("held authentication must reach local history backpressure")
+        .unwrap();
+    assert!(
+        receiver
+            .account_history(&receiver.account_id(), 10)
+            .is_empty()
+    );
+    drop(admission);
+    // Releasing capacity does not publish data or notify the history scheduler.
+    // Retained demand must respect the existing five-second backoff, then run
+    // without a periodic tick or another account publication.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let early_attempts = attempts.lock().unwrap().len();
+    let recovered = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if receiver
+                .account_history(&receiver.account_id(), 10)
+                .iter()
+                .any(|entry| entry.id == original && entry.text == b"after admission recovers")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    *receiver.account_client_test_hook.lock().unwrap() = None;
+    tasks.abort_all();
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            assert!(error.is_cancelled(), "fixture worker failed: {error}");
+        }
+    }
+    assert_eq!(early_attempts, 1, "local capacity retry must not spin");
+    recovered
+        .expect("admitted history must retry after backoff without a fresh wake or repair tick");
+    let attempts = attempts.lock().unwrap();
+    assert!(attempts.len() >= 2);
+    assert!(
+        attempts[1].duration_since(busy_at) >= Duration::from_secs(5),
+        "retained demand must not bypass its local-admission backoff"
+    );
+}
+
 #[test]
 fn growing_archive_continuation_keeps_progress_without_claiming_up_to_date() {
     let mut state = PeerCursor::default();

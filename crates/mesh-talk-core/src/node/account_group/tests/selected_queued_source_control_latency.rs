@@ -6,7 +6,76 @@ use super::*;
 use crate::node::account_documents::wire::DocumentRequest;
 use crate::node::account_sync_wire::AccountHistoryFrame;
 use std::time::Duration;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{Notify, Semaphore, oneshot};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QueuedRecoverySnapshot {
+    rows_complete: bool,
+    public_receipt: bool,
+    pair_retired: bool,
+}
+
+impl QueuedRecoverySnapshot {
+    fn complete(self) -> bool {
+        self.rows_complete && self.public_receipt && self.pair_retired
+    }
+}
+
+async fn observe_queued_recovery(
+    changed: &Notify,
+    mut snapshot: impl FnMut() -> QueuedRecoverySnapshot,
+) {
+    loop {
+        // The final pair can retire between periodic checks just before the
+        // deadline. Register before reading its state so that transition cannot
+        // leave a complete recovery sleeping past the unchanged watchdog.
+        let notification = changed.notified();
+        tokio::pin!(notification);
+        notification.as_mut().enable();
+        if snapshot().complete() {
+            return;
+        }
+        tokio::select! {
+            () = notification => {}
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_recovery_observes_retirement_before_its_deadline_between_periodic_checks() {
+    let changed = Notify::new();
+    let retired = std::sync::atomic::AtomicBool::new(false);
+    let started = tokio::time::Instant::now();
+    let mut recovery = Box::pin(tokio::time::timeout(
+        Duration::from_secs(8),
+        observe_queued_recovery(&changed, || QueuedRecoverySnapshot {
+            rows_complete: true,
+            public_receipt: true,
+            pair_retired: retired.load(std::sync::atomic::Ordering::Acquire),
+        }),
+    ));
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    // A scheduled observer can run at any offset from the owning deadline.
+    // Its last periodic check here sleeps beyond that deadline, while the
+    // actual final transition still arrives inside the unchanged eight seconds.
+    tokio::time::advance(Duration::from_millis(7_990)).await;
+    assert!(futures_util::poll!(recovery.as_mut()).is_pending());
+    changed.notify_one();
+    assert!(
+        futures_util::poll!(recovery.as_mut()).is_pending(),
+        "a notification cannot replace the complete recovery predicate"
+    );
+    tokio::time::advance(Duration::from_millis(9)).await;
+    retired.store(true, std::sync::atomic::Ordering::Release);
+    changed.notify_one();
+    assert!(started.elapsed() < Duration::from_secs(8));
+    let observed = recovery.await;
+    assert!(
+        observed.is_ok(),
+        "completed recovery inside its existing deadline must not wait for a later periodic check"
+    );
+}
 
 struct ReleaseQueuedReads(Arc<Semaphore>);
 impl Drop for ReleaseQueuedReads {
@@ -209,6 +278,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     let a_requests = Arc::new(Mutex::new(Vec::new()));
     let origins = Arc::new(Mutex::new(Vec::new()));
     let b_retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let recovery_changed = Arc::new(Notify::new());
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let clock = std::time::Instant::now();
     let operation = Arc::new(Mutex::new(None));
@@ -307,6 +377,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let origins = origins.clone();
         let b_partial = b_partial.clone();
         let b_retired = b_retired.clone();
+        let recovery_changed = recovery_changed.clone();
         let trace = trace.clone();
         let admitted = admitted.clone();
         let first_foreground = first_foreground.clone();
@@ -428,6 +499,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                 && admitted.load(std::sync::atomic::Ordering::Acquire)
             {
                 b_retired.store(true, std::sync::atomic::Ordering::Relaxed);
+                recovery_changed.notify_one();
             }
         }
     }));
@@ -793,25 +865,30 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         .unwrap()
         .first()
         .is_some_and(Option::is_none);
-    let recovered = tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            if keys
-                .iter()
-                .all(|key| reference.account_document_meta(key).is_some())
-                && external
-                    .channels
-                    .lock()
-                    .unwrap()
-                    .state(&group_b)
-                    .is_some_and(|state| state.name() == "Queued foreground")
-                && (!first_fresh || b_retired.load(std::sync::atomic::Ordering::Relaxed))
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
+    let recovery_snapshot = || QueuedRecoverySnapshot {
+        rows_complete: keys
+            .iter()
+            .all(|key| reference.account_document_meta(key).is_some()),
+        public_receipt: external
+            .channels
+            .lock()
+            .unwrap()
+            .state(&group_b)
+            .is_some_and(|state| state.name() == "Queued foreground"),
+        pair_retired: !first_fresh || b_retired.load(std::sync::atomic::Ordering::Relaxed),
+    };
+    let recovery_started = clock.elapsed();
+    let mut last_recovery_observation = None;
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(8),
+        observe_queued_recovery(&recovery_changed, || {
+            let snapshot = recovery_snapshot();
+            last_recovery_observation = Some((clock.elapsed(), snapshot));
+            snapshot
+        }),
+    )
     .await;
+    let recovery_at_completion = (clock.elapsed(), recovery_snapshot());
     *a.account_session_test_hook.lock().unwrap() = None;
     *b.account_session_test_hook.lock().unwrap() = None;
     *b.account_client_test_hook.lock().unwrap() = None;
@@ -828,7 +905,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     }
     assert!(
         recovered.is_ok(),
-        "releasing A must restore actual public receipt and complete all signed rows; phases={:?}",
+        "releasing A must restore actual public receipt and complete all signed rows; first_fresh={first_fresh} recovery_started={recovery_started:?} last_observation={last_recovery_observation:?} completion={recovery_at_completion:?}; phases={:?}",
         trace.lock().unwrap()
     );
     assert!(

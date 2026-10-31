@@ -187,6 +187,14 @@ must not discard unfinished history or a refresh received during the exchange.
 Consume a coalesced wake only when its follow-up remains scheduled after every
 error branch. A failure without pending work must still avoid a busy retry loop.
 
+Retain demand throughout backoff. A future retry deadline makes queued work
+temporarily ineligible; it does not consume that work. Wake the existing scheduler
+at the earliest retained deadline when a worker is available, without relying on
+periodic repair. A queued deadline must not spin while its worker is occupied.
+The `account_history_capacity_backoff_retains_demand_without_periodic_repair`
+regression in [account sync tests](../crates/mesh-talk-core/src/node/account_sync/selection_tests.rs)
+checks real admission contention, retained work and the unchanged backoff.
+
 Keep count, byte, task and concurrency budgets intact. Fair scheduling does not
 guarantee a successful write into a full store, justify eviction of durable intent
 or permit increasing capacity without reviewing consumers.
@@ -312,6 +320,11 @@ Start a progress deadline only after the required stalled operation is admitted,
 and prove the competing work is still incomplete at that point. Release only
 that work's barrier while retaining the stall. Measure cancellation separately
 from setup and history progress; preserve each behavior's required bound.
+
+A periodic probe can miss readiness between its last check and the deadline.
+Use [R05](#r05-bounded-work-must-also-make-progress)'s waiter protocol to recheck
+the actual condition on a transition, retaining the original deadline and bounded
+fallback. A snapshot taken after timeout is diagnostic evidence, not success.
 
 A deadlock regression must not hang its own runner: bound coordination, arrange
 fixture release even when assertions fail, and use an isolated process with an

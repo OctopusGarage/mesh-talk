@@ -129,7 +129,8 @@
             "group_publication_lanes_reach_every_retained_group_independently",
             "new_account_group_preflight_has_one_deadline_and_creates_no_partial_group",
             "new_group_invites_one_account_and_starts_with_account_owner_authority",
-            "new_account_group_rejects_a_route_whose_authenticated_account_changed"
+            "new_account_group_rejects_a_route_whose_authenticated_account_changed",
+            "queued_recovery_observes_retirement_before_its_deadline_between_periodic_checks"
           ]
         }
       ],
@@ -419,7 +420,8 @@
             "liveness_dial_deadline_includes_admission_and_releases_policy_writer",
             "liveness_control_dial_deadline_includes_admission_and_releases_policy_writer",
             "liveness_control_dial_cancellation_releases_authentication_and_socket_owners",
-            "only_remote_dial_timeout_allows_wake_recovery"
+            "only_remote_dial_timeout_allows_wake_recovery",
+            "account_history_capacity_backoff_retains_demand_without_periodic_repair"
           ]
         }
       ],
@@ -458,6 +460,10 @@
           {
             "name": "Ordinary and Control dials share one twenty-second deadline across privacy/authentication admission, TCP capacity and all candidate routes; cancellation releases the disclosure gate, authentication lease and sockets. Aggregate admission/dial expiry stays distinct from a remote Noise timeout and cannot authorize Wake recovery.",
             "reference": "docs/network-design-reference.md#session-reuse-contract"
+          },
+          {
+            "name": "Capacity-deferred history retains its peer and cursors through the existing five-second backoff; the queued deadline wakes the available history worker without periodic repair, premature retry or a busy loop.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
       },
