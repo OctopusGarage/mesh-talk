@@ -2244,7 +2244,8 @@
         "crates/mesh-talk-core/src/eventlog/persist.rs",
         "crates/mesh-talk-core/src/eventlog/sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
-        "crates/mesh-talk-core/src/node/node.rs"
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/group_metadata/**"
       ],
       "rust": [
         {

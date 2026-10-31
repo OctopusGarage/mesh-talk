@@ -48,7 +48,10 @@ impl<'a> IndexedView<'a> {
         }
     }
 
-    fn before(&self, event: EventId) -> Result<Option<crate::channel::ChannelState>, LogError> {
+    pub(in crate::node) fn before(
+        &self,
+        event: EventId,
+    ) -> Result<Option<crate::channel::ChannelState>, LogError> {
         self.checkpoints.check_source(&self.source)?;
         let state =
             self.checkpoints
@@ -56,7 +59,7 @@ impl<'a> IndexedView<'a> {
         self.checkpoints.check_source(&self.source)?;
         Ok(state)
     }
-    fn canonical(
+    pub(in crate::node) fn canonical(
         &self,
         event: EventId,
         include: bool,
@@ -68,7 +71,7 @@ impl<'a> IndexedView<'a> {
         self.checkpoints.check_source(&self.source)?;
         Ok(state)
     }
-    fn owner_authorized(&self, event: &EventHeader) -> Result<bool, LogError> {
+    pub(in crate::node) fn owner_authorized(&self, event: &EventHeader) -> Result<bool, LogError> {
         let author = event.author.user_id();
         let Some(current) = self.canonical(event.id, false)? else {
             return Ok(false);

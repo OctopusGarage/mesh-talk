@@ -1,11 +1,7 @@
 //! Owner-published group metadata. Each publication has an independent content key;
 //! current accepted holders can release only the current field to new members.
 //! These are durable group controls, independent of ordinary message retention.
-use super::{
-    Node, NodeError,
-    channel::{ChannelBook, SealedPayload},
-    join_history::View,
-};
+use super::{Node, NodeError, channel::SealedPayload};
 use crate::{
     channel::{GroupKey, open_channel_message, seal_channel_message},
     eventlog::{ConversationId, Event, EventId, EventKind, LogError},
@@ -14,7 +10,10 @@ use crate::{
 use base64::Engine;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+mod indexed;
+pub(in crate::node) use indexed::{initialize as initialize_indexed, retire_index_on};
 
 const MAX_CONTROL: usize = 60 * 1024;
 const MAX_COVER: usize = 32 * 1024;
@@ -25,11 +24,13 @@ const MAX_HISTORY: usize = 20;
 #[derive(Default)]
 pub(super) struct MetadataCache {
     values: std::collections::VecDeque<CachedMetadata>,
-    reconciled: std::collections::VecDeque<(ConversationId, ([u8; 32], usize))>,
+    reconciled: std::collections::VecDeque<(ConversationId, indexed::Stamp)>,
+    after_channel: Option<ConversationId>,
+    preparations: indexed::PreparationCache,
 }
 struct CachedMetadata {
     channel: ConversationId,
-    source: ([u8; 32], usize),
+    source: indexed::Stamp,
     account: String,
     identity: PublicIdentity,
     value: ChannelMetadata,
@@ -37,6 +38,8 @@ struct CachedMetadata {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ChannelMetadata {
+    /// Selected history or authority is still being indexed; no partial values are exposed.
+    pub query_pending: bool,
     pub cover: Option<ChannelMetadataValue>,
     /// A validated current publication exists, but this device still needs its content key.
     pub cover_pending: bool,
@@ -143,217 +146,67 @@ fn validate_content(field: Field, content: Option<&str>) -> Result<(), NodeError
     }
     Ok(())
 }
-struct Publication<'a> {
-    event: &'a Event,
-    field: Field,
-    keys: SealedPayload,
-    ciphertext: Vec<u8>,
-    author: PublicIdentity,
-}
-struct MetadataView<'a> {
-    view: View<'a>,
-    events: Vec<&'a Event>,
-    publications: Vec<Publication<'a>>,
-    by_id: HashMap<EventId, &'a Event>,
-}
-impl<'a> MetadataView<'a> {
-    fn new(events: &[&'a Event]) -> Self {
-        let by_id: HashMap<_, _> = events.iter().map(|e| (e.id, *e)).collect();
-        let ordered: Vec<_> = super::timeline::ordered_ids(events, &[], true)
-            .iter()
-            .filter_map(|id| by_id.get(id).copied())
-            .collect();
-        let view = View::new(&ordered);
-        let publications = ordered
-            .iter()
-            .filter_map(|event| {
-                let Control::Publish {
-                    field,
-                    keys,
-                    ciphertext,
-                } = decode(event)?
-                else {
-                    return None;
-                };
-                if !view.owner_authorized(event)
-                    || keys.sender != event.author.user_id()
-                    || keys.entries.is_empty()
-                    || keys.entries.len() > MAX_RECIPIENTS
-                    || ciphertext.len() > MAX_COVER + 128
-                {
-                    return None;
-                }
-                let before = view.before(event)?;
-                let canonical = view.canonical_before(event)?;
-                let mut recipients = HashSet::new();
-                if keys.entries.iter().any(|entry| {
-                    !before.is_accepted_member(&entry.user_id)
-                        || !canonical.is_accepted_member(&entry.user_id)
-                        || entry.sealed.is_empty()
-                        || entry.sealed.len() > 256
-                        || !recipients.insert(&entry.user_id)
-                }) {
-                    return None;
-                }
-                let author = before
-                    .members()
-                    .iter()
-                    .find(|member| member.user_id() == event.author.user_id())?
-                    .clone();
-                Some(Publication {
-                    event,
-                    field,
-                    keys,
-                    ciphertext,
-                    author,
-                })
-            })
-            .collect();
-        Self {
-            view,
-            events: ordered,
-            publications,
-            by_id,
-        }
-    }
-    fn latest(&self, field: Field) -> Option<&Publication<'a>> {
-        self.publications.iter().rev().find(|p| p.field == field)
-    }
-    fn release_valid(
-        &self,
-        event: &Event,
-        publication: &Publication<'_>,
-        recipient: &PublicIdentity,
-    ) -> bool {
-        if !super::channel::descends_from(event, publication.event.id, &self.by_id) {
-            return false;
-        }
-        // A release grants current metadata only. Later publication events never
-        // revive eligibility for old announcement history.
-        if self
-            .publications
-            .iter()
-            .rev()
-            .find(|p| {
-                p.field == publication.field
-                    && (p.event.lamport, p.event.id) < (event.lamport, event.id)
-            })
-            .is_none_or(|p| p.event.id != publication.event.id)
-        {
-            return false;
-        }
-        let author = event.author.user_id();
-        [self.view.before(event), self.view.canonical_before(event)]
-            .into_iter()
-            .all(|state| {
-                state.is_some_and(|state| {
-                    !state.is_dissolved()
-                        && state.is_accepted_member(&author)
-                        && state.is_accepted_member(&recipient.user_id())
-                        && state.members().contains(recipient)
-                })
-            })
-    }
-    fn key(
-        &self,
-        publication: &Publication<'_>,
-        identity: &crate::identity::device::DeviceIdentity,
-    ) -> Option<GroupKey> {
-        let own = identity.user_id();
-        if let Some(mut bytes) = publication
-            .keys
-            .open(identity, &publication.author.x25519_pub)
-        {
-            let key = bytes.as_slice().try_into().ok().map(GroupKey::from_bytes);
-            zeroize::Zeroize::zeroize(&mut bytes);
-            if let Some(key) = key
-                && open_channel_message(&key, &publication.ciphertext).is_ok()
-            {
-                return Some(key);
-            }
-        }
-        for event in &self.events {
-            let Some(Control::Release {
-                publication: id,
-                recipient,
-                sealed_key,
-            }) = decode(event)
-            else {
-                continue;
-            };
-            if id != publication.event.id
-                || recipient.user_id() != own
-                || recipient != identity.public()
-                || !self.release_valid(event, publication, &recipient)
-            {
-                continue;
-            }
-            let Some(before) = self.view.before(event) else {
-                continue;
-            };
-            let Some(author) = before
-                .members()
-                .iter()
-                .find(|m| m.user_id() == event.author.user_id())
-            else {
-                continue;
-            };
-            if let Ok(mut bytes) = crate::dm::open(identity, &author.x25519_pub, &sealed_key) {
-                let key = bytes.as_slice().try_into().ok().map(GroupKey::from_bytes);
-                zeroize::Zeroize::zeroize(&mut bytes);
-                if let Some(key) = key
-                    && open_channel_message(&key, &publication.ciphertext).is_ok()
-                {
-                    return Some(key);
-                }
-            }
-        }
-        None
-    }
-    fn value(
-        &self,
-        publication: &Publication<'_>,
-        identity: &crate::identity::device::DeviceIdentity,
-    ) -> Option<ChannelMetadataValue> {
-        let key = self.key(publication, identity)?;
-        let bytes =
-            zeroize::Zeroizing::new(open_channel_message(&key, &publication.ciphertext).ok()?);
-        let content: Option<String> = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit((MAX_COVER + 32) as u64)
-            .reject_trailing_bytes()
-            .deserialize(&bytes)
-            .ok()?;
-        validate_content(publication.field, content.as_deref()).ok()?;
-        let state = self.view.before(publication.event)?;
-        Some(ChannelMetadataValue {
-            revision: hex::encode(publication.event.id.as_bytes()),
-            content,
-            author: state
-                .member_account_id(&publication.author.user_id())
-                .unwrap_or(&publication.author.user_id())
-                .to_owned(),
-            authored_at: publication.event.wall_clock,
-        })
-    }
-}
 impl Node {
+    #[cfg(test)]
     fn metadata_events(&self, channel: ConversationId) -> Result<Vec<Event>, LogError> {
         self.log.lock().expect("log lock").events(&channel)
     }
+    fn pending_metadata() -> ChannelMetadata {
+        ChannelMetadata {
+            query_pending: true,
+            ..ChannelMetadata::default()
+        }
+    }
+    fn prepare_metadata_projection(
+        &self,
+        repository: &crate::eventlog::repository::EventRepository,
+        channel: ConversationId,
+        budget: &mut indexed::Budget,
+    ) -> Result<bool, LogError> {
+        match self.channel_checkpoints.source_binding(channel) {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) | Err(LogError::StaleCursor) => {
+                if budget.exhausted() {
+                    return Ok(false);
+                }
+                let work = self.channel_checkpoints.project_step_with_budget(
+                    repository,
+                    &self.identity,
+                    channel,
+                    budget.preparation(),
+                )?;
+                budget.charge(work)?;
+                if work.rows != 0 || work.edges != 0 || work.bytes != 0 {
+                    self.channel_recovery_notify.notify_one();
+                }
+                Ok(work.ready)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    fn selected_metadata_state(
+        &self,
+        channel: ConversationId,
+    ) -> Result<crate::channel::ChannelState, NodeError> {
+        let state = self
+            .channel_checkpoints
+            .current_state(channel)?
+            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
+        let projection = self
+            .channel_checkpoints
+            .published_projection(channel)?
+            .ok_or(LogError::StaleCursor)?;
+        if !self.channel_identity_is_current_in(&state, &projection) {
+            return Err(NodeError::Authorization(
+                "accepted group membership required".into(),
+            ));
+        }
+        Ok(state)
+    }
     pub fn channel_metadata(&self, channel: ConversationId) -> Result<ChannelMetadata, NodeError> {
-        let (present, source) = {
-            let log = self.log.lock().expect("log lock");
-            (
-                log.requires_channel_v5(&channel)?,
-                if log.requires_channel_v5(&channel)? {
-                    log.fingerprint_and_len(&channel)?
-                } else {
-                    ([0; 32], 0)
-                },
-            )
-        };
-        if !present {
+        use indexed::Progress;
+        let log = self.log.lock().expect("log lock");
+        if !log.requires_channel_v5(&channel)? {
             let book = self.channels.lock().expect("channels lock");
             let state = book
                 .state(&channel)
@@ -367,6 +220,20 @@ impl Node {
             }
             return Ok(ChannelMetadata::default());
         }
+        let mut budget = indexed::Budget::default();
+        if !self.prepare_metadata_projection(log.repository()?, channel, &mut budget)? {
+            return Ok(Self::pending_metadata());
+        }
+        match self.selected_metadata_state(channel) {
+            Err(NodeError::Log(LogError::StaleCursor)) => return Ok(Self::pending_metadata()),
+            result => {
+                result?;
+            }
+        }
+        let index = match indexed::Index::open(self, log.repository()?, channel, &mut budget)? {
+            Progress::Pending => return Ok(Self::pending_metadata()),
+            Progress::Ready(index) => index,
+        };
         let account = self.account_id();
         let identity = self.identity.public();
         if let Some(cached) = self
@@ -375,60 +242,63 @@ impl Node {
             .expect("metadata cache lock")
             .values
             .iter()
-            .find(|cached| {
-                cached.channel == channel
-                    && cached.source == source
-                    && cached.account == account
-                    && cached.identity == identity
+            .find(|c| {
+                c.channel == channel
+                    && c.source == index.stamp
+                    && c.account == account
+                    && c.identity == identity
             })
         {
+            index.check_source()?;
             return Ok(cached.value.clone());
         }
-        let events = self.metadata_events(channel)?;
-        let refs: Vec<_> = events.iter().collect();
-        let state = ChannelBook::projected_metadata(channel, &refs)
-            .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-        if !self.channel_identity_is_current(&state)? {
-            return Err(NodeError::Authorization(
-                "accepted group membership required".into(),
-            ));
+        if !index.advance(&mut budget)? {
+            return Ok(Self::pending_metadata());
         }
-        let view = MetadataView::new(&refs);
-        let cover = view
-            .latest(Field::Cover)
-            .and_then(|p| view.value(p, &self.identity));
-        let announcement = view
-            .latest(Field::Announcement)
-            .and_then(|p| view.value(p, &self.identity));
-        let value = ChannelMetadata {
-            cover_pending: view.latest(Field::Cover).is_some() && cover.is_none(),
-            announcement_pending: view.latest(Field::Announcement).is_some()
-                && announcement.is_none(),
-            cover,
-            announcement,
-            announcement_history: view
-                .publications
-                .iter()
-                .rev()
-                .filter(|p| p.field == Field::Announcement)
-                .take(MAX_HISTORY)
-                .filter_map(|p| view.value(p, &self.identity))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect(),
-        };
+        let cover_id = index.publications(Field::Cover, 1)?.first().copied();
+        let announcements = index.publications(Field::Announcement, MAX_HISTORY)?;
+        let mut value = ChannelMetadata::default();
+        if let Some(id) = cover_id {
+            let publication = match index.load(id, &mut budget)? {
+                Progress::Ready(value) => value,
+                Progress::Pending => return Ok(Self::pending_metadata()),
+            };
+            value.cover = match index.value(&publication, &mut budget)? {
+                Progress::Ready(value) => value,
+                Progress::Pending => return Ok(Self::pending_metadata()),
+            };
+            value.cover_pending = value.cover.is_none();
+        }
+        for (position, id) in announcements.into_iter().enumerate() {
+            let publication = match index.load(id, &mut budget)? {
+                Progress::Ready(value) => value,
+                Progress::Pending => return Ok(Self::pending_metadata()),
+            };
+            let selected = match index.value(&publication, &mut budget)? {
+                Progress::Ready(value) => value,
+                Progress::Pending => return Ok(Self::pending_metadata()),
+            };
+            if position == 0 {
+                value.announcement_pending = selected.is_none();
+                value.announcement = selected.clone();
+            }
+            if let Some(selected) = selected {
+                value.announcement_history.push(selected);
+            }
+        }
+        value.announcement_history.reverse();
+        index.check_source()?;
         let mut cache = self
             .group_metadata_cache
             .lock()
             .expect("metadata cache lock");
-        cache.values.retain(|cached| cached.channel != channel);
+        cache.values.retain(|c| c.channel != channel);
         if cache.values.len() == 64 {
             cache.values.pop_front();
         }
         cache.values.push_back(CachedMetadata {
             channel,
-            source,
+            source: index.stamp,
             account,
             identity,
             value: value.clone(),
@@ -481,22 +351,59 @@ impl Node {
                     "only the active group owner can publish group metadata".into(),
                 ));
             }
-            let events = self.metadata_events(channel)?;
-            let refs: Vec<_> = events.iter().collect();
-            let state = ChannelBook::projected_metadata(channel, &refs)
-                .ok_or_else(|| NodeError::Channel("unknown group".into()))?;
-            if state.is_dissolved() {
-                return Err(NodeError::Channel("group is dissolved".into()));
-            }
-            let view = MetadataView::new(&refs);
-            let latest = view.latest(field);
-            if latest.map(|p| p.event.id) != expected_revision {
-                return Err(NodeError::RequestConflict);
-            }
-            if latest
-                .and_then(|p| view.value(p, &self.identity))
-                .is_some_and(|v| v.content.as_deref() == content)
-            {
+            let (state, source, unchanged) = {
+                use indexed::Progress;
+                let log = self.log.lock().expect("log lock");
+                let mut budget = indexed::Budget::default();
+                if !self.prepare_metadata_projection(log.repository()?, channel, &mut budget)? {
+                    return Err(NodeError::Channel("group metadata is still loading".into()));
+                }
+                let state = self.selected_metadata_state(channel)?;
+                if state.is_dissolved() {
+                    return Err(NodeError::Channel("group is dissolved".into()));
+                }
+                let index =
+                    match indexed::Index::open(self, log.repository()?, channel, &mut budget)? {
+                        Progress::Ready(index) => index,
+                        Progress::Pending => {
+                            return Err(NodeError::Channel(
+                                "group metadata is still loading".into(),
+                            ));
+                        }
+                    };
+                if !index.advance(&mut budget)? {
+                    return Err(NodeError::Channel("group metadata is still loading".into()));
+                }
+                let latest = index.publications(field, 1)?.first().copied();
+                if latest != expected_revision {
+                    return Err(NodeError::RequestConflict);
+                }
+                let unchanged = if let Some(id) = latest {
+                    let selected = match index.load(id, &mut budget)? {
+                        Progress::Ready(value) => value,
+                        Progress::Pending => {
+                            return Err(NodeError::Channel(
+                                "group metadata is still loading".into(),
+                            ));
+                        }
+                    };
+                    match index.value(&selected, &mut budget)? {
+                        Progress::Ready(value) => {
+                            value.is_some_and(|v| v.content.as_deref() == content)
+                        }
+                        Progress::Pending => {
+                            return Err(NodeError::Channel(
+                                "group metadata is still loading".into(),
+                            ));
+                        }
+                    }
+                } else {
+                    false
+                };
+                index.check_source()?;
+                (state, index.source, unchanged)
+            };
+            if unchanged {
                 return Ok(());
             }
             let members: Vec<_> = std::iter::once(self.identity.public())
@@ -521,8 +428,8 @@ impl Node {
             zeroize::Zeroize::zeroize(&mut plaintext);
             let keys = SealedPayload::seal(&self.identity, &members, key.as_bytes())
                 .map_err(|e| NodeError::Channel(e.to_string()))?;
-            self.append_event(
-                channel,
+            self.append_channel_control_from_source(
+                &source,
                 EventKind::ChannelMetadata,
                 encode(&Control::Publish {
                     field,
@@ -542,106 +449,169 @@ impl Node {
     /// Bounded existing control worker; no additional network loop. Any accepted
     /// holder can share the current metadata keys after the owner goes offline.
     pub(super) fn retry_group_metadata(&self) -> Result<Vec<ConversationId>, NodeError> {
+        use indexed::Progress;
         let _membership = self
             .channel_membership_commit
             .lock()
             .expect("channel membership commit lock");
-        let mut channels = self.channels.lock().expect("channels lock").channel_ids();
-        channels.sort_by_key(|c| *c.as_bytes());
-        if !channels.is_empty() {
-            let offset = (super::node::now_millis() / 3000) as usize % channels.len();
-            channels.rotate_left(offset);
+        let after = self
+            .group_metadata_cache
+            .lock()
+            .expect("metadata cache lock")
+            .after_channel;
+        let mut states = self.channel_checkpoints.current_page(after)?;
+        if states.is_empty() && after.is_some() {
+            states = self.channel_checkpoints.current_page(None)?;
+        }
+        if states.is_empty() {
+            self.group_metadata_cache
+                .lock()
+                .expect("metadata cache lock")
+                .after_channel = None;
+            return Ok(Vec::new());
         }
         let mut changed = Vec::new();
-        let mut budget = 8;
-        for channel in channels.into_iter().take(32) {
-            let source = {
+        let mut send_budget = 8;
+        let mut budget = indexed::Budget::default();
+        for state in states {
+            if budget.exhausted() {
+                break;
+            }
+            let channel = state.id();
+            self.group_metadata_cache
+                .lock()
+                .expect("metadata cache lock")
+                .after_channel = Some(channel);
+            if state.is_dissolved() || !self.channel_replica_enabled(channel, &self.user_id()) {
+                continue;
+            }
+            let prepared = {
                 let log = self.log.lock().expect("log lock");
                 if !log.requires_channel_v5(&channel)? {
                     continue;
                 }
-                log.fingerprint_and_len(&channel)?
-            };
-            if self
-                .group_metadata_cache
-                .lock()
-                .expect("metadata cache lock")
-                .reconciled
-                .contains(&(channel, source))
-            {
-                continue;
-            }
-            let events = self.metadata_events(channel)?;
-            let refs: Vec<_> = events.iter().collect();
-            let Some(state) = ChannelBook::projected_metadata(channel, &refs) else {
-                continue;
-            };
-            if state.is_dissolved()
-                || !self.channel_identity_is_current(&state)?
-                || !self.channel_replica_enabled(channel, &self.user_id())
-            {
-                continue;
-            }
-            let view = MetadataView::new(&refs);
-            for field in [Field::Cover, Field::Announcement] {
-                let Some(publication) = view.latest(field) else {
-                    continue;
+                match self.channel_checkpoints.source_binding(channel) {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(LogError::StaleCursor) => {
+                        if !self.prepare_metadata_projection(
+                            log.repository()?,
+                            channel,
+                            &mut budget,
+                        )? {
+                            continue;
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                let state = match self.selected_metadata_state(channel) {
+                    Ok(state) => state,
+                    Err(
+                        NodeError::Authorization(_)
+                        | NodeError::Channel(_)
+                        | NodeError::Log(LogError::StaleCursor),
+                    ) => continue,
+                    Err(error) => return Err(error),
                 };
-                let Some(key) = view.key(publication, &self.identity) else {
+                if state.is_dissolved() {
                     continue;
-                };
-                for recipient in state
-                    .members()
-                    .iter()
-                    .filter(|m| state.is_accepted_member(&m.user_id()))
+                }
+                let index =
+                    match indexed::Index::open(self, log.repository()?, channel, &mut budget)? {
+                        Progress::Pending => continue,
+                        Progress::Ready(index) => index,
+                    };
+                if self
+                    .group_metadata_cache
+                    .lock()
+                    .expect("metadata cache lock")
+                    .reconciled
+                    .contains(&(channel, index.stamp))
                 {
-                    let included = publication
-                        .keys
-                        .entries
-                        .iter()
-                        .any(|entry| entry.user_id == recipient.user_id());
-                    // Another member's opaque release cannot prove it carried the correct key.
-                    // Each holder deduplicates its own releases, allowing honest fallback sources.
-                    let already_released = view.events.iter().any(|event| {
-                        event.author.user_id() == self.user_id() && matches!(decode(event), Some(Control::Release {publication: id, recipient: ref target, ..}) if id == publication.event.id && target == recipient && view.release_valid(event, publication, target))
-                    });
-                    if included || already_released {
+                    continue;
+                }
+                if !index.advance(&mut budget)? {
+                    continue;
+                }
+                let mut prepared = None;
+                let mut pending = false;
+                for field in [Field::Cover, Field::Announcement] {
+                    let Some(id) = index.publications(field, 1)?.first().copied() else {
                         continue;
+                    };
+                    let publication = match index.load(id, &mut budget)? {
+                        Progress::Ready(value) => value,
+                        Progress::Pending => {
+                            pending = true;
+                            break;
+                        }
+                    };
+                    let key = match index.key(&publication, &mut budget)? {
+                        Progress::Ready(Some(key)) => key,
+                        Progress::Ready(None) => continue,
+                        Progress::Pending => {
+                            pending = true;
+                            break;
+                        }
+                    };
+                    for recipient in state
+                        .members()
+                        .iter()
+                        .filter(|m| state.is_accepted_member(&m.user_id()))
+                    {
+                        if publication
+                            .keys
+                            .entries
+                            .iter()
+                            .any(|e| e.user_id == recipient.user_id())
+                            || index.already_released(id, recipient)?
+                        {
+                            continue;
+                        }
+                        let sealed_key =
+                            crate::dm::seal(&self.identity, &recipient.x25519_pub, key.as_bytes())
+                                .map_err(NodeError::Seal)?;
+                        prepared = Some((
+                            index.source,
+                            encode(&Control::Release {
+                                publication: id,
+                                recipient: recipient.clone(),
+                                sealed_key,
+                            })?,
+                        ));
+                        break;
                     }
-                    if budget == 0 {
-                        return Ok(changed);
+                    if prepared.is_some() {
+                        break;
                     }
-                    let sealed_key =
-                        crate::dm::seal(&self.identity, &recipient.x25519_pub, key.as_bytes())
-                            .map_err(NodeError::Seal)?;
-                    self.append_event(
-                        channel,
-                        EventKind::ChannelMetadata,
-                        encode(&Control::Release {
-                            publication: publication.event.id,
-                            recipient: recipient.clone(),
-                            sealed_key,
-                        })?,
-                    )?;
-                    budget -= 1;
-                    if !changed.contains(&channel) {
-                        changed.push(channel);
+                }
+                index.check_source()?;
+                if !pending && prepared.is_none() {
+                    let mut cache = self
+                        .group_metadata_cache
+                        .lock()
+                        .expect("metadata cache lock");
+                    cache.reconciled.retain(|(id, _)| *id != channel);
+                    if cache.reconciled.len() == 64 {
+                        cache.reconciled.pop_front();
                     }
+                    cache.reconciled.push_back((channel, index.stamp));
                     let _ = self.channel_changes.send(channel);
                 }
+                prepared
+            };
+            if let Some((source, payload)) = prepared {
+                self.append_channel_control_from_source(
+                    &source,
+                    EventKind::ChannelMetadata,
+                    payload,
+                )?;
+                changed.push(channel);
+                let _ = self.channel_changes.send(channel);
+                send_budget -= 1;
+                if send_budget == 0 {
+                    break;
+                }
             }
-            // Record only the source actually examined. Own appended releases
-            // or concurrent imports require another pass, never an unseen-source skip.
-            let completed = source;
-            let mut cache = self
-                .group_metadata_cache
-                .lock()
-                .expect("metadata cache lock");
-            cache.reconciled.retain(|(id, _)| *id != channel);
-            if cache.reconciled.len() == 64 {
-                cache.reconciled.pop_front();
-            }
-            cache.reconciled.push_back((channel, completed));
         }
         Ok(changed)
     }

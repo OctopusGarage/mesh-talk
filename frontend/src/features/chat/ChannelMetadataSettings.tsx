@@ -52,11 +52,13 @@ function MetadataEditor({
         ?.revision,
   );
   const readRequest = useRef(0);
+  const readBusy = useRef(false);
+  const readAgain = useRef(false);
   const pendingState = useChat((s) => {
     const current = s.channels.find(
       (c) => c.channel_id === channelId,
     )?.metadata;
-    return `${!!current?.cover_pending}:${!!current?.announcement_pending}`;
+    return `${!!current?.query_pending}:${!!current?.cover_pending}:${!!current?.announcement_pending}`;
   });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -78,28 +80,51 @@ function MetadataEditor({
     };
   }, [lifetime]);
   const bytes = new TextEncoder().encode(draft.trim()).length;
-  const refresh = useCallback(async () => {
-    const lease = captureRuntimeOwner();
-    if (!lease.owner || !lease.current() || !account) return;
-    const request = ++readRequest.current;
-    setError(null);
-    try {
-      const result = await chat.channelMetadata(
-        lease.owner,
-        account,
-        channelId,
-      );
-      if (lifetime.live && lease.current() && readRequest.current === request) {
-        setMetadata(result);
+  const refresh = useCallback(
+    async function refreshMetadata(): Promise<void> {
+      const lease = captureRuntimeOwner();
+      if (!lease.owner || !lease.current() || !account) return;
+      const request = ++readRequest.current;
+      if (readBusy.current) {
+        readAgain.current = true;
+        return;
       }
-    } catch {
-      if (lifetime.live && lease.current() && readRequest.current === request)
-        setError(t("groupMetadata.loadFailed"));
-    }
-  }, [account, channelId, lifetime, t]);
+      readBusy.current = true;
+      setError(null);
+      try {
+        const result = await chat.channelMetadata(
+          lease.owner,
+          account,
+          channelId,
+        );
+        if (
+          lifetime.live &&
+          lease.current() &&
+          readRequest.current === request
+        ) {
+          setMetadata(result);
+        }
+      } catch {
+        if (lifetime.live && lease.current() && readRequest.current === request)
+          setError(t("groupMetadata.loadFailed"));
+      } finally {
+        readBusy.current = false;
+        if (readAgain.current && lifetime.live) {
+          readAgain.current = false;
+          void refreshMetadata();
+        }
+      }
+    },
+    [account, channelId, lifetime, t],
+  );
   useEffect(() => {
     void refresh();
   }, [refresh, coverRevision, announcementRevision, pendingState]);
+  useEffect(() => {
+    if (!metadata?.query_pending) return;
+    const timer = window.setTimeout(() => void refresh(), 250);
+    return () => window.clearTimeout(timer);
+  }, [metadata, refresh]);
   const save = async (
     kind: "cover" | "announcement",
     content: string | null,
@@ -111,6 +136,7 @@ function MetadataEditor({
       !lifetime.live ||
       busy ||
       !metadata ||
+      metadata.query_pending ||
       !lease.owner ||
       !lease.current() ||
       !account
@@ -202,7 +228,12 @@ function MetadataEditor({
             <Button
               variant="outline"
               size="sm"
-              disabled={!metadata || busy || metadata.cover_pending}
+              disabled={
+                !metadata ||
+                busy ||
+                metadata.query_pending ||
+                metadata.cover_pending
+              }
               onClick={() => void chooseCover()}
             >
               {t(
@@ -230,21 +261,24 @@ function MetadataEditor({
         <h3 className="text-sm font-medium">
           {t("groupMetadata.announcement")}
         </h3>
-        {!metadata && !error && (
+        {(!metadata || metadata.query_pending) && !error && (
           <p role="status" className="text-sm text-muted-foreground">
             {t("common.loading")}
           </p>
         )}
         {!editing && (
           <>
-            <p
-              data-testid="group-announcement-content"
-              className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-relaxed [overflow-wrap:anywhere]"
-            >
-              {metadata?.announcement_pending
-                ? t("groupMetadata.waiting")
-                : (metadata?.announcement?.content ?? t("groupMetadata.empty"))}
-            </p>
+            {metadata && !metadata.query_pending && (
+              <p
+                data-testid="group-announcement-content"
+                className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-relaxed [overflow-wrap:anywhere]"
+              >
+                {metadata.announcement_pending
+                  ? t("groupMetadata.waiting")
+                  : (metadata.announcement?.content ??
+                    t("groupMetadata.empty"))}
+              </p>
+            )}
             {metadata?.announcement?.content && (
               <p className="break-all text-xs text-muted-foreground">
                 {t("groupMetadata.publishedBy", {
@@ -260,7 +294,12 @@ function MetadataEditor({
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={!metadata || busy || metadata.announcement_pending}
+                  disabled={
+                    !metadata ||
+                    busy ||
+                    metadata.query_pending ||
+                    metadata.announcement_pending
+                  }
                   onClick={() => {
                     setDraft(metadata?.announcement?.content ?? "");
                     setBaseRevision(metadata?.announcement?.revision ?? null);
