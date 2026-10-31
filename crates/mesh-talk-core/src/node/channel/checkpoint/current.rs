@@ -198,6 +198,9 @@ impl ChannelCheckpointStore {
     ) -> Result<bool, LogError> {
         self.profile.database().read(|c| {
             self.check_account_on(c)?;
+            if !self.history_read_ready_on(c, channel)? {
+                return Err(LogError::StaleCursor);
+            }
             let row:Option<(Vec<u8>,i64,Vec<u8>)>=c.query_row("SELECT source_job,source_revision,state FROM channel_current WHERE channel=?1 AND owner_account=?2",params![channel.as_bytes().as_slice(),self.account.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             let Some((job,revision,bytes))=row else {return Ok(true);};
             let job:[u8;16]=job.try_into().map_err(|_|invalid("invalid channel source job"))?;
@@ -207,6 +210,53 @@ impl ChannelCheckpointStore {
             let Some(accept)=state.accepted_event_id() else {return Ok(true);};
             c.query_row("SELECT EXISTS(SELECT 1 FROM channel_event_authority WHERE job=?1 AND channel=?2 AND event=?3 AND accept_root=?4 AND after_accept=1)",params![job.as_slice(),channel.as_bytes().as_slice(),event.as_bytes().as_slice(),accept.as_bytes().as_slice()],|r|r.get(0)).map_err(Into::into)
         })
+    }
+
+    /// A completed membership projection is not yet safe for plaintext reads
+    /// while newly admitted recalls still await their first attempt. Dormant
+    /// missing-prerequisite retries remain nonblocking until their exact wake.
+    pub(in crate::node) fn history_read_ready(
+        &self,
+        channel: ConversationId,
+    ) -> Result<bool, LogError> {
+        self.profile
+            .database()
+            .read(|c| self.history_read_ready_on(c, channel))
+    }
+
+    fn history_read_ready_on(
+        &self,
+        c: &Connection,
+        channel: ConversationId,
+    ) -> Result<bool, LogError> {
+        self.check_account_on(c)?;
+        let binding: Option<(Vec<u8>, i64)> = c.query_row(
+            "SELECT source_job,source_revision FROM channel_current WHERE channel=?1 AND owner_account=?2",
+            params![channel.as_bytes().as_slice(),self.account.as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((job, revision)) = binding else {
+            // Retained signed metadata identifies a channel even before its
+            // first checkpoint. A presentation cache cannot classify it as DM.
+            return c.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM retained_events INDEXED BY retained_events_kind_author WHERE domain=?1 AND conversation=?2 AND kind=?3)",
+                params![b"MeshPartEventsV1".as_slice(),channel.as_bytes().as_slice(),crate::eventlog::EventKind::MembershipChange as i64],
+                |row| row.get(0),
+            ).map_err(Into::into);
+        };
+        let job = job
+            .try_into()
+            .map_err(|_| invalid("invalid channel source job"))?;
+        match replay::require_source_on(c, channel, job, revision) {
+            Ok(()) => {}
+            Err(LogError::StaleCursor) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        c.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM channel_pending INDEXED BY channel_pending_new WHERE channel=?1 AND kind=?2 AND reason=0 AND admitted=1) AND NOT EXISTS(SELECT 1 FROM channel_recall_wakes WHERE channel=?1)",
+            params![channel.as_bytes().as_slice(),crate::eventlog::EventKind::Delete as i64],
+            |row| row.get(0),
+        ).map_err(Into::into)
     }
 
     /// Exact selected-header admission for file/recall consumers. The source

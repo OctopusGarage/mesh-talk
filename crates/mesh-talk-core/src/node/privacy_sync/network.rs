@@ -602,6 +602,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn participant_network_canonical_authority_respects_each_preparation_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let peer = DeviceIdentity::generate();
+        let proof = Announce::new_with_account(&peer, &account, "Peer", 9);
+        let (node, _, _) = super::super::super::test_support::node_with_files(
+            directory.path(),
+            DeviceIdentity::generate(),
+            account,
+            &proof,
+        );
+        let channel = node
+            .create_channel("Bounded authority", vec![peer.public()])
+            .await
+            .unwrap();
+        // These retained, rejected controls must still consume canonical work.
+        // Do not run the producer after appending: preparation owns this backlog.
+        let mut parent = node
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .unwrap()
+            .last()
+            .unwrap()
+            .id;
+        for n in 0..129 {
+            let event = Event::new(
+                &peer,
+                channel,
+                n + 1,
+                vec![parent],
+                1000 + n,
+                1000 + n,
+                EventKind::ChannelRename,
+                vec![255],
+            );
+            parent = event.id;
+            node.log.lock().unwrap().append_durable(event).unwrap();
+        }
+        let owner = node.sync_store(&peer.public());
+        let store = owner.lock().unwrap();
+        let view = NetworkSyncStore::open_view(&*store, &channel).unwrap();
+        let budget = PreparationBudget {
+            rows: 3,
+            edges: 7,
+            bytes: 64 * 1024,
+        };
+        let mut ready = false;
+        let mut turns = 0;
+        for _ in 0..20_000 {
+            let step = NetworkSyncStore::prepare_view_step(&*store, &view, budget).unwrap();
+            assert!(
+                step.rows <= budget.rows
+                    && step.edges <= budget.edges
+                    && step.bytes <= budget.bytes,
+                "canonical authority exceeded the caller's complete turn budget: {step:?}"
+            );
+            turns += 1;
+            if step.ready {
+                ready = true;
+                break;
+            }
+        }
+        assert!(
+            ready,
+            "small turns must eventually finish canonical authority"
+        );
+        assert!(
+            turns > 129 / budget.rows,
+            "preparation silently drained rejected controls"
+        );
+        NetworkSyncStore::validate_view(&*store, &view).unwrap();
+        let expected = store.visible_projection(&channel, false).unwrap();
+        assert_eq!(
+            NetworkSyncStore::metadata(&*store, &view).unwrap().count as usize,
+            expected.len(),
+            "bounded authority changed the legacy permission result"
+        );
+    }
+
+    #[tokio::test]
     async fn participant_network_wide_parent_preparation_honors_small_byte_turns() {
         let directory = tempfile::tempdir().unwrap();
         let account = Account::generate();

@@ -2131,3 +2131,82 @@ fn channel_decision_replacement_rejects_old_predicate_publication() {
         "a completed decision is immutable"
     );
 }
+
+#[test]
+fn channel_canonical_readiness_does_not_publish_history_before_recall_attempt() {
+    let fixture = Fixture::new(1);
+    assert!(!fixture.store.history_read_ready(fixture.channel).unwrap());
+    assert!(matches!(
+        fixture
+            .store
+            .content_visible(fixture.channel, fixture.messages[0].id),
+        Err(LogError::StaleCursor)
+    ));
+    fixture.project();
+    assert!(fixture.store.history_read_ready(fixture.channel).unwrap());
+    let target = fixture.messages[0].id;
+    let recall = Event::new(
+        &fixture.sender,
+        fixture.channel,
+        4,
+        vec![target],
+        4,
+        4,
+        EventKind::Delete,
+        vec![0],
+    );
+    fixture.log.repository().unwrap().append(&recall).unwrap();
+    assert!(!fixture.store.history_read_ready(fixture.channel).unwrap());
+    fixture.project();
+    assert!(
+        fixture
+            .store
+            .source_binding(fixture.channel)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        matches!(
+            fixture.store.content_visible(fixture.channel, target),
+            Err(LogError::StaleCursor)
+        ),
+        "canonical readiness exposed history while an admitted recall had not been attempted"
+    );
+    let before = fixture.log.repository().unwrap().body_read_counts();
+    let source = fixture
+        .store
+        .source_binding(fixture.channel)
+        .unwrap()
+        .unwrap();
+    // Unknown target identities keep their exact retry, but do not indefinitely
+    // block unrelated readable history after the first authorization attempt.
+    fixture
+        .store
+        .defer_recall(&source, recall.id, Some(target))
+        .unwrap();
+    assert!(fixture.store.history_read_ready(fixture.channel).unwrap());
+    assert!(
+        fixture
+            .store
+            .content_visible(fixture.channel, target)
+            .unwrap()
+    );
+    fixture
+        .store
+        .profile
+        .database()
+        .transaction(|c| recall::wake_on(c, fixture.channel, target))
+        .unwrap();
+    assert!(!fixture.store.history_read_ready(fixture.channel).unwrap());
+    assert_eq!(
+        fixture.store.recall_page(&source).unwrap().ids,
+        vec![recall.id]
+    );
+    assert!(!fixture.store.history_read_ready(fixture.channel).unwrap());
+    fixture
+        .store
+        .defer_recall(&source, recall.id, None)
+        .unwrap();
+    assert!(fixture.store.history_read_ready(fixture.channel).unwrap());
+    assert_eq!(fixture.log.repository().unwrap().body_read_counts(), before);
+}

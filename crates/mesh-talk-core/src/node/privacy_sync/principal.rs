@@ -285,16 +285,19 @@ impl Preparation {
                     .is_some();
                 if kinds[EventKind::MembershipChange as usize] >= 0 || known {
                     let log = store.node.log.lock().expect("log lock");
-                    if !store.node.channel_checkpoints.project_step(
+                    let step = store.node.channel_checkpoints.project_step_with_budget(
                         log.repository()?,
                         &store.node.identity,
                         view.conversation,
-                    )? {
-                        return Ok(PreparationStep {
-                            rows: 64,
-                            ..Default::default()
-                        });
+                        budget,
+                    )?;
+                    if step.ready {
+                        self.phase = Phase::Classify;
                     }
+                    return Ok(PreparationStep {
+                        ready: false,
+                        ..step
+                    });
                 }
                 Ok(self.stage(Phase::Classify))
             }
