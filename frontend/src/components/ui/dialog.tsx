@@ -41,8 +41,8 @@ const DialogContent = React.forwardRef<
         onCloseAutoFocus={(event) => {
           onCloseAutoFocus?.(event);
           if (event.defaultPrevented) return;
-          const closing = event.target;
-          if (!(closing instanceof Element)) return;
+          // Radix FocusScope dispatches this event on the closing DOM element.
+          const closing = event.target as Element;
           const ownerDocument = closing.ownerDocument;
           const active = ownerDocument.activeElement;
           // Radix restores focus after unmount. A newer interaction may have
