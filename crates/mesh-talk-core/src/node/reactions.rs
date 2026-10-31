@@ -21,12 +21,6 @@ pub(in crate::node) fn take_reaction_projection_work_for_test() -> (usize, usize
 }
 
 impl Node {
-    /// Aggregated reactions in the DM with `peer` (derives the conversation id).
-    pub fn reactions_dm(&self, peer: &PublicIdentity) -> Result<Vec<ReactionView>, NodeError> {
-        let conv = dm_conversation_id(&self.identity.public(), peer);
-        self.reactions(conv)
-    }
-
     /// React to a message in a DM (toggle off with `remove = true`).
     pub async fn react_dm(
         &self,
@@ -155,6 +149,7 @@ impl Node {
     /// `React` events across every device-pair conversation between us and that
     /// account's devices (and our own devices), opens each account reaction envelope,
     /// keys it by its logical target + reacting account, and merges our own.
+    #[cfg(test)]
     pub fn account_reactions(&self, peer_account_id: &str) -> Result<Vec<ReactionView>, NodeError> {
         let my_account = self.account.account_id();
         let me = self.identity.public().user_id();
@@ -282,8 +277,8 @@ impl Node {
             }
             (state.recipient_members(), state.epoch())
         };
-        // Reactions must be re-readable by every member (aggregated on each `reactions`
-        // call), so they are sealed per-member with the DM sealed box, not the
+        // Reactions must be re-readable by every member for summary queries,
+        // so they are sealed per-member with the DM sealed box, not the
         // single-use sender-key ratchet used for messages.
         let sealed =
             crate::node::channel::SealedPayload::seal(&self.identity, &members, &payload.encode())
@@ -314,6 +309,7 @@ impl Node {
     /// Aggregated reactions for a conversation (DM or channel). Opens each `React`
     /// event with the conversation crypto, merges our own (un-openable) DM reactions,
     /// and folds them per `(target, emoji)`.
+    #[cfg(test)]
     pub fn reactions(&self, conv: ConversationId) -> Result<Vec<ReactionView>, NodeError> {
         let content_gate = self.channel_content_gate(conv)?;
         let state = self
@@ -562,12 +558,9 @@ impl Node {
         Ok(aggregate(&decoded))
     }
 
-    /// Record one of OUR OWN reactions (sealed to the peer, so un-openable from our log)
-    /// for later merge in `reactions`/`account_reactions`. Collapsed to the latest action
-    /// per `(conv, target, emoji)` — newer wall_clock wins, and on an exact tie a `remove`
-    /// beats an `add` — so the map matches `aggregate`'s per-author max-reduction and
-    /// stays bounded by the number of distinct (conv, target, emoji) keys (no per-toggle
-    /// growth, no linear scan blow-up).
+    /// Persist our own sealed-to-peer reaction for selected summary queries. SQL
+    /// retains the latest action per `(conversation, target, emoji)`, with a remove
+    /// winning an exact clock tie. Repeated toggles replace the same current row.
     fn record_my_reaction(
         &self,
         conv: ConversationId,

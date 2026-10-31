@@ -198,7 +198,9 @@ pub use privacy::{AllowedAccount, PermissionSource, PrivacyPolicy, PrivacySnapsh
 pub use privacy_runtime::AccountBindingChange;
 pub use profile::{MAX_AVATAR_BYTES, ProfilePayload};
 pub use ratchet_sessions::RatchetSessions;
-pub use reaction::{ReactionPayload, ReactionView, aggregate};
+pub use reaction::ReactionPayload;
+#[cfg(test)]
+pub use reaction::{ReactionView, aggregate};
 pub use reactions::{ReactionSummary, ReactionSummaryPage};
 pub use received_log::{ReceivedEntry, ReceivedLog};
 pub use runtime::{

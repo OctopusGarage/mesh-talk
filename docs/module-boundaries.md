@@ -255,8 +255,8 @@ registry selector varies. Node warm open reads no authored reaction payloads;
 conversation and target pages admit keys and bytes before bodies. Unsigned action
 clocks and remove-wins ties are unchanged. Bulk physical cleanup uses bounded
 transactions and evaluates external predicates outside the SQL mutex. Incoming
-reaction aggregation and the account-document startup owner retain separate
-consumer work; this source cut does not establish bounded reaction-view queries.
+reaction aggregation belongs to the selected-query owner below; the
+account-document startup owner has a separate lifetime and validation boundary.
 
 `core/node/reactions/selected.rs` owns selected-target reaction preparation and
 summary pages. Its SQL projection reduces the latest authenticated action per
@@ -271,9 +271,10 @@ checkpoint query and its Ready fact lease. Discovery, causal work and body reads
 use separate turns; target pages in the same channel share raw decode progress.
 Unfinished or stale authority never advances the selected event's decode cursor.
 The checkpoint's exact revision fence remains conservative under continuous
-same-channel appends. Legacy collecting view APIs remain for
-the pending native/frontend cutover, so this query prefix alone does not establish
-an end-to-end bounded reaction UI or change the account-document startup owner.
+same-channel appends. The native host requests summary pages only for displayed
+targets; core production APIs expose the same selected demand boundary. Legacy
+collecting reducers remain test-only references for principal semantics. This
+query contract does not change the account-document startup owner.
 
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary

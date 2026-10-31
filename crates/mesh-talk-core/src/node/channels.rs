@@ -754,6 +754,7 @@ impl Node {
 
     /// Event ids visible to this device after it accepted an invitation.
     /// `None` means this channel has no acceptance cutoff (or is not a channel).
+    #[cfg(test)]
     pub(in crate::node) fn channel_content_gate(
         &self,
         channel: ConversationId,
