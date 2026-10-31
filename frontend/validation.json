@@ -1994,7 +1994,7 @@
         ]
       },
       "escalation": [
-        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior."
+        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior. Geometry polls must retain unavailable measurements as pending, capture positive baselines and reuse coherent visible image/frame samples. A transient unavailable measurement must recover and permanent absence must fail without weakening exact geometry, cache reuse or assertion budgets."
       ]
     },
     {

@@ -235,7 +235,7 @@
         "core-message-forwarding"
       ],
       "escalation": [
-        "Require signed legacy-owner/member/reference sibling scenarios, current account binding, offline availability, transfer/revocation replay, durable pending operations and exact committed effects. Role display tests do not prove mutation authority or native cross-device convergence."
+        "Require signed legacy-owner/member/reference sibling scenarios, current account binding, offline availability, transfer/revocation replay, durable pending operations and exact committed effects. Role display tests do not prove mutation authority or native cross-device convergence. Explicit File result/retry fixtures must observe exact authenticated File capabilities in both directions before admission; a forward role view does not establish the executor's reverse asset-fetch capability. Verify setup with a held real reverse Control response while preserving operation deadlines, capability-refusal coverage, byte identity and matching-retry assertions. Keep phase-only failure evidence for executor commitment, requester result adoption and external manifest receipt."
       ]
     },
     {

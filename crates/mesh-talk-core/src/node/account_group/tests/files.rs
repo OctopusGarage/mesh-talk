@@ -606,6 +606,108 @@ fn file_result_timeout_stage(
     "result timeout: complete managed bytes did not reach the preparation observation"
 }
 
+// The executor fetches the original assets back from the requester. Forward
+// role discovery alone does not establish that reverse File protocol receipt.
+async fn wait_file_fixture_capabilities(source: &Node, origin: &Node) {
+    super::cold_account_setup(super::observe_account_fixture_condition(|| {
+        [(source, origin), (origin, source)]
+            .into_iter()
+            .all(|(node, peer)| {
+                super::has_account_group_operation_support(
+                    node,
+                    peer,
+                    Some(AccountGroupOperationKind::File),
+                )
+            })
+    }))
+    .await
+    .expect("both exact authenticated File capabilities must precede explicit file admission");
+}
+
+struct ReverseFileBootstrapHold {
+    release: Arc<tokio::sync::Semaphore>,
+    arrived: tokio::sync::oneshot::Receiver<()>,
+}
+impl Drop for ReverseFileBootstrapHold {
+    fn drop(&mut self) {
+        self.release.close();
+    }
+}
+
+fn hold_reverse_file_bootstrap(origin: &Node, source: &Node) -> ReverseFileBootstrapHold {
+    use crate::node::{
+        account_documents::wire::DocumentRequest, account_sync_wire::AccountHistoryFrame,
+    };
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (arrived, held) = tokio::sync::oneshot::channel();
+    let arrived = Arc::new(Mutex::new(Some(arrived)));
+    let exact_source = source.identity.public();
+    *origin.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let release = release.clone();
+        move |peer, frame| {
+            let release = release.clone();
+            let arrived = arrived.clone();
+            let exact_source = exact_source.clone();
+            Box::pin(async move {
+                if peer == exact_source
+                    && matches!(frame, AccountHistoryFrame::DocumentsRequest { ref body }
+                    if DocumentRequest::decode(body).is_some_and(|request| request.domain == crate::node::AccountDocumentDomain::GroupControl))
+                {
+                    let signal = arrived.lock().unwrap().take();
+                    if let Some(signal) = signal {
+                        let _ = signal.send(());
+                    }
+                    // Keep replacement requests gated too. The hook runs after
+                    // SessionReady, outside store/disclosure guards.
+                    let _ = release.acquire().await;
+                }
+            })
+        }
+    }));
+    ReverseFileBootstrapHold {
+        release,
+        arrived: held,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn file_fixture_waits_for_reverse_authenticated_file_capability_before_admission() {
+    // Mode 6 retains mode 4's matching-retry race and every original byte/result
+    // assertion, with a controlled cold reverse capability bootstrap added.
+    file_result_roundtrip(6).await;
+}
+
+fn initial_file_result_timeout_stage(
+    origin: &Node,
+    source: &Node,
+    external: &Node,
+    account: &Account,
+    id: AccountGroupOperationId,
+) -> &'static str {
+    let Ok(Some(source_status)) = source.account_group_operation_status(&account.account_id(), id)
+    else {
+        return "explicit File timeout: pinned source has not imported the request";
+    };
+    if source_status.phase != AccountGroupOperationPhase::Committed {
+        return "explicit File timeout: pinned source operation has not committed";
+    }
+    if !origin
+        .account_group_operation_status(&account.account_id(), id)
+        .ok()
+        .flatten()
+        .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)
+    {
+        return "explicit File timeout: requester has not adopted the committed source result";
+    }
+    if source_status
+        .primary_event
+        .is_some_and(|event| external.log.lock().unwrap().get(&event).is_none())
+    {
+        return "explicit File timeout: committed manifest has not reached the external member";
+    }
+    "explicit File timeout: completion predicate missed its deadline"
+}
+
 async fn file_result_roundtrip(mode: u8) {
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
@@ -614,6 +716,8 @@ async fn file_result_roundtrip(mode: u8) {
     let source = node(&dir.path().join("source"), &account);
     let origin = node(&dir.path().join("origin"), &account);
     let external = node(&dir.path().join("external"), &Account::generate());
+    // Arm before either background owner can learn the reverse capability.
+    let mut reverse_bootstrap = (mode == 6).then(|| hold_reverse_file_bootstrap(&origin, &source));
     let genesis = Event::new(
         &offline_owner.identity,
         new_channel_id(),
@@ -683,6 +787,47 @@ async fn file_result_roundtrip(mode: u8) {
         AccountGroupRole::Member
     );
     assert!(origin.channel_members(group).is_empty());
+    if let Some(hold) = reverse_bootstrap.as_mut() {
+        super::cold_account_setup(async {
+            (&mut hold.arrived)
+                .await
+                .expect("the real reverse authenticated Control exchange must reach the hold");
+            assert!(
+                super::has_account_group_operation_support(
+                    &origin,
+                    &source,
+                    Some(AccountGroupOperationKind::File)
+                ),
+                "the original forward role bootstrap is already ready"
+            );
+            assert!(
+                !super::has_account_group_operation_support(
+                    &source,
+                    &origin,
+                    Some(AccountGroupOperationKind::File)
+                ),
+                "the held reverse response must still lack its File capability receipt"
+            );
+            let setup = wait_file_fixture_capabilities(&source, &origin);
+            tokio::pin!(setup);
+            assert!(
+                futures_util::poll!(setup.as_mut()).is_pending(),
+                "forward-only role readiness must not admit an explicit file while reverse File support is held"
+            );
+            tokio::task::yield_now().await;
+            assert!(
+                futures_util::poll!(setup.as_mut()).is_pending(),
+                "a scheduling turn cannot replace the missing authenticated reverse receipt"
+            );
+            hold.release.close();
+            setup.await;
+            *origin.account_session_test_hook.lock().unwrap() = None;
+        })
+        .await
+        .expect("held reverse File bootstrap and readiness must share the existing cold setup budget");
+    } else {
+        wait_file_fixture_capabilities(&source, &origin).await;
+    }
     let bytes = vec![0x61; crate::file::CHUNK_SIZE * 2 + 137];
     let original_path = dir.path().join("origin").join("explicit.bin");
     std::fs::write(&original_path, &bytes).unwrap();
@@ -721,7 +866,12 @@ async fn file_result_roundtrip(mode: u8) {
         }
     })
     .await
-    .expect("explicit File must commit on its pinned source and reach the external member");
+    .unwrap_or_else(|_| {
+        panic!(
+            "{}",
+            initial_file_result_timeout_stage(&origin, &source, &external, &account, id)
+        )
+    });
     let event_id = status.primary_event.unwrap();
     let event = external
         .log

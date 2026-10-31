@@ -111,6 +111,13 @@ programmatic scroll can instead be treated as layout correction. The missing-rea
 negative control must fail. Retain explicit live-edge setup, exact history-start
 position, unmount, return-to-latest, row geometry and media URL reuse assertions.
 
+Geometry polling treats an unavailable bounding box as pending. Poll callbacks
+must return that unavailable state rather than dereference it or invent zero-sized
+geometry; callback exceptions abort polling. Capture a positive baseline and keep
+accepted image/frame rectangles from one visible decoded instance, as in the reply
+preview fixture. A temporary disappearance must recover within the existing assertion
+budget, while a permanently missing row must still fail the same geometry assertion.
+
 Presence expiry fixtures observe consumption of the distinctive lease source
 before failing subsequent reads. Deleted-contact fixtures await the post-change
 roster refresh before asserting absence. A sleep shorter or longer than a polling
@@ -125,6 +132,14 @@ superseding heads so an obsolete captured version cannot strand the fixture.
 Keep the existing custody observation budget, real network exchange, offline-holder
 and restart assertions. This setup boundary does not establish a production latency
 guarantee or a dependency between independent mandatory/optional worker lanes.
+
+Explicit-file result fixtures establish authenticated File capabilities in both
+directions before admitting their first request. A forward role view does not
+prove that the executor can fetch the sender's prepared assets: document import
+can wake work before its authenticated capability receipt is installed. Hold a
+real reverse Control response to verify this setup boundary, then retain the
+original operation deadlines, matching-retry and byte assertions. Deliberate
+capability-refusal scenarios must preserve their missing-capability state.
 
 ## Validation stages and agent responsibilities
 
