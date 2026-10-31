@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
@@ -68,4 +70,47 @@ test("desktop browser burst waits for Health while Linux starts independently", 
   assert.match(job("desktop"), /needs: health/);
   assert.doesNotMatch(job("desktop"), /if: always\(\)/);
   assert.doesNotMatch(job("linux"), /needs:/);
+});
+
+function renderReports(t, { missing = [], attempt = 1, linux = "success", desktop = "success", mergeCode = 0 } = {}) {
+  const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-report-gate-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const frontend = path.join(directory, "frontend");
+  mkdirSync(frontend);
+  for (const os of ["ubuntu-24.04", "macos-latest", "windows-latest"]) {
+    for (const shard of [1, 2, 3, 4]) {
+      if (missing.includes(`${os}:${shard}`)) continue;
+      const blobs = path.join(directory, "target/ui-reports", `playwright-ui-${os}-${shard}-${attempt}`, "blob-report");
+      mkdirSync(blobs, { recursive: true });
+      writeFileSync(path.join(blobs, `report-${shard}.zip`), "selected shard fixture");
+    }
+  }
+  const block = job("reports").split(/^      - /m).find(step => step.startsWith("name: Render each OS report from its raw blobs\n"));
+  const script = 'npx() { return "$REPORT_MERGE_CODE"; }\n' + block.split("        run: |\n")[1].replace(/^          /gm, "").replaceAll("${{ github.run_attempt }}", "1");
+  const result = spawnSync("bash", ["-e", "-c", script], {
+    cwd: frontend,
+    encoding: "utf8",
+    env: { ...process.env, LINUX: linux, DESKTOP: desktop, REPORT_MERGE_CODE: String(mergeCode) },
+  });
+  return result;
+}
+
+test("HTML reports require all four current-attempt shards for every mandatory OS", t => {
+  assert.equal(renderReports(t).status, 0);
+  for (const os of ["ubuntu-24.04", "macos-latest", "windows-latest"]) {
+    const partial = renderReports(t, { missing: [`${os}:2`, `${os}:3`, `${os}:4`] });
+    assert.notEqual(partial.status, 0, `${os} accepted only one shard`);
+  }
+  assert.notEqual(renderReports(t, { attempt: 2 }).status, 0, "another attempt cannot satisfy current artifacts");
+});
+
+test("HTML reports do not certify unsuccessful producers or failed merging", t => {
+  assert.match(job("reports"), /LINUX: \$\{\{ needs\.linux\.result \}\}/);
+  assert.match(job("reports"), /DESKTOP: \$\{\{ needs\.desktop\.result \}\}/);
+  for (const producer of ["linux", "desktop"]) {
+    for (const result of ["failure", "cancelled", "skipped", ""]) {
+      assert.notEqual(renderReports(t, { [producer]: result }).status, 0, `accepted ${producer} ${result}`);
+    }
+  }
+  assert.notEqual(renderReports(t, { mergeCode: 1 }).status, 0);
 });

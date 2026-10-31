@@ -230,28 +230,36 @@ test("shared Cargo configuration selects every workspace crate via owning contra
   const profile = buildAffectedPlan(["crates/mesh-talk-core/src/node/account_profile.rs"], { contracts: registered });
   assert(!profile.owners.some(owner => owner.id === "core-node"), "established focused ownership must not widen through the catch-all Node prefix");
   assert.deepEqual(profile.rust.find(item => item.package === "mesh-talk-core").filters, [
+    "account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
     "node::account_profile::tests::",
+    "node::account_profile_data::indexed::tests::",
     "node::account_profile_data::tests::",
     "node::account_profile_io::tests::",
     "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
+    "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
     "node::node::tests::account_profile_exhausted_avatar_revision_rejects_before_either_store_mutates",
     "node::node::tests::account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent",
     "node::node::tests::account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime",
     "node::node::tests::account_profile_propagates_signed_claims_over_loopback",
     "node::node::tests::account_profile_reconciles_newer_sibling_legacy_avatar",
     "node::node::tests::account_profile_terminal_legacy_avatar_reconciles_on_restart",
+    "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled",
     "node::node::tests::own_signed_profile_and_clear_survive_restart_for_new_peers",
     "node::node::tests::setting_an_avatar_propagates_to_a_peer_account_over_loopback",
     "node::node::tests::signed_avatar_reaches_a_peer_through_a_post_office_without_direct_tcp",
     "node::node::tests::signed_avatar_retries_after_relay_publication_is_reenabled",
     "node::opaque_relay::",
     "node::profile::tests::",
+    "node::profile_receive_work::tests::",
+    "node::profile_store::indexed::tests::",
     "node::profile_store::tests::",
     "node::runtime::tests::account_nickname_preserves_bio_and_wins_over_host_name_on_restart",
     "node::runtime::tests::contact_nickname_survives_a_stale_signed_card_name_and_restart",
     "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
     "node::runtime::tests::profile_republish_targets_fires_on_first_sight_and_on_reconnect",
+    "node::trust_card::indexed::tests::",
     "node::trust_card::tests::",
+    "warm_open_reads_no_avatar_payloads",
   ]);
   const consentFixture = buildAffectedPlan(["crates/mesh-talk-core/src/node/file_consent_tests.rs"], {contracts:registered});
   assert.deepEqual(consentFixture.owners.map(owner => owner.id), ["core-file-consent-tests"]);

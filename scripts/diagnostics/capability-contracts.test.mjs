@@ -171,6 +171,11 @@ test("session capability retains executable generation and retirement obligation
       "src-tauri/src/commands.rs",
     ],
     [
+      "Startup serialization outlives canceled construction and actual blocking captures/results; retired profile handles drop before replacement admission opens. Runtime handoffs retain the original non-cryptographic host local-user label.",
+      "commands::tests::actual_preinstall_rejection_stops_runtime_before_releasing_startup_serialization",
+      "src-tauri/src/commands.rs",
+    ],
+    [
       "Stalled network producers allow observations and unrelated sends while blocking runtime retirement",
       "runtime_admission::integration_lease_tests::stalled_producer_allows_observation_but_prevents_runtime_retirement",
       "src-tauri/src/runtime_admission.rs",

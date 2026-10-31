@@ -141,6 +141,12 @@ run when a dependency fails and explicitly reject failed, cancelled, missing or
 unexpectedly skipped required work. An `always()` condition schedules a collector;
 it does not validate its dependencies. See [required-check troubleshooting](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
 
+The UI HTML collector follows the mandatory full-shard producers, independently
+of the optional extended-browser jobs. If Health prevents desktop shards from
+starting, their missing reports remain incomplete evidence. The collector checks
+all four current-attempt shards per OS; fixing the upstream failure and rerunning
+the selected producers supplies that evidence, rather than omitting those OSes.
+
 ## Bound parallelism and preserve isolation
 
 Choose shards from observed work and available runner capacity. Count setup and

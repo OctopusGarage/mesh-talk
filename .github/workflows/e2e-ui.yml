@@ -167,13 +167,26 @@ jobs:
           path: target/ui-reports
       - name: Render each OS report from its raw blobs
         shell: bash
+        env:
+          LINUX: ${{ needs.linux.result }}
+          DESKTOP: ${{ needs.desktop.result }}
         run: |
           status=0
           for os in ubuntu-24.04 macos-latest windows-latest; do
+            producer="$DESKTOP"
+            if [ "$os" = ubuntu-24.04 ]; then producer="$LINUX"; fi
+            if [ "$producer" != success ]; then
+              echo "::error::$os full-shard producer was '$producer'; required evidence is incomplete."
+              status=1
+            fi
             mkdir -p "../target/ui-report-blobs/$os"
             available=true
-            for artifact in ../target/ui-reports/playwright-ui-"$os"-*-${{ github.run_attempt }}; do
-              cp "$artifact"/blob-report/*.zip "../target/ui-report-blobs/$os/" || available=false
+            for shard in 1 2 3 4; do
+              artifact="../target/ui-reports/playwright-ui-$os-$shard-${{ github.run_attempt }}"
+              if ! cp "$artifact"/blob-report/*.zip "../target/ui-report-blobs/$os/"; then
+                echo "::error::Missing $os shard $shard blobs for this run attempt."
+                available=false
+              fi
             done
             if [ "$available" != true ]; then
               status=1
