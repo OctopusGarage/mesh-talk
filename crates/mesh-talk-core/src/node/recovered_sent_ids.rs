@@ -226,13 +226,13 @@ impl IndexedRecoveredSentIds {
     }
     pub(crate) fn revision(&self) -> Result<u64, LogError> {
         self.source.profile().database().read(|c| {
-            Ok(c.query_row(
+            c.query_row(
                 "SELECT revision FROM transcript_sources WHERE kind=?1",
                 [super::transcript_repository::RECOVERED_IDS],
                 |r| r.get::<_, i64>(0),
             )?
             .try_into()
-            .map_err(|_| LogError::CorruptFile("invalid history counter".into()))?)
+            .map_err(|_| LogError::CorruptFile("invalid history counter".into()))
         })
     }
     pub(crate) fn id_for_header(

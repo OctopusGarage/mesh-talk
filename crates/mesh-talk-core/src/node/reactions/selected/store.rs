@@ -154,7 +154,8 @@ impl Store {
                 (key,0)
             }
         };
-        let row:Option<(i64,i64,i64,Option<Vec<u8>>,i64)>=c.query_row("SELECT phase,after_row,target_position,document_cursor,revision FROM reaction_query_state WHERE id=?1 AND account=?2 AND tag=?3 AND retired=0",params![selected.as_slice(),self.owner.account().as_slice(),tag.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+        type QueryStateRow = (i64,i64,i64,Option<Vec<u8>>,i64);
+        let row:Option<QueryStateRow>=c.query_row("SELECT phase,after_row,target_position,document_cursor,revision FROM reaction_query_state WHERE id=?1 AND account=?2 AND tag=?3 AND retired=0",params![selected.as_slice(),self.owner.account().as_slice(),tag.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
         let (phase,position,target,document_cursor,revision)=row.ok_or(LogError::StaleCursor)?;
         Ok((State{id:selected,phase,after:position,target:usize::try_from(target).map_err(|_|invalid("invalid reaction target cursor"))?,document_cursor,revision},after))
     })
@@ -355,7 +356,8 @@ impl Store {
         let mut rows=statement.query(params![self.owner.account().as_slice(),scope_key.as_slice(),stamp.as_slice(),state.after,peer,self.owner.namespace(),through,physical.as_bytes().as_slice()])?;
         let (selected,next)=admit_strings(&mut rows,8*1024*1024)?;drop(rows);drop(statement);
         let mut out=Vec::new();for ordinal in selected{
-            let row:(Vec<u8>,String,Vec<u8>,Option<String>,Vec<u8>,bool,Option<String>)=c.query_row("SELECT event,emoji,source,principal,clock,removed,route_sender FROM reaction_decoded WHERE account=?1 AND scope=?2 AND stamp=?3 AND target=?4 AND ordinal=?5",params![self.owner.account().as_slice(),scope_key.as_slice(),stamp.as_slice(),physical.as_bytes().as_slice(),ordinal],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+            type DecodedReactionRow = (Vec<u8>,String,Vec<u8>,Option<String>,Vec<u8>,bool,Option<String>);
+            let row:DecodedReactionRow=c.query_row("SELECT event,emoji,source,principal,clock,removed,route_sender FROM reaction_decoded WHERE account=?1 AND scope=?2 AND stamp=?3 AND target=?4 AND ordinal=?5",params![self.owner.account().as_slice(),scope_key.as_slice(),stamp.as_slice(),physical.as_bytes().as_slice(),ordinal],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
             let public:[u8;64]=row.2.try_into().map_err(|_|invalid("invalid decoded reaction source"))?;
             out.push(RawSelected{id:id(row.0)?,source:PublicIdentity{ed25519_pub:public[..32].try_into().expect("fixed identity"),x25519_pub:public[32..].try_into().expect("fixed identity")},principal:if peer.is_some(){row.6}else{row.3},wall:clock(row.4)?,payload:ReactionPayload{target:logical,emoji:row.1,remove:row.5}});
         }

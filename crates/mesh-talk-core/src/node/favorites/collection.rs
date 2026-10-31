@@ -18,7 +18,7 @@ impl Node {
                     self.files
                         .lock()
                         .expect("files mutex")
-                        .manifest(&conv)
+                        .manifest(conv)
                         .map(|manifest| {
                             manifest.is_some_and(|manifest| manifest.protection().is_some())
                         })

@@ -584,7 +584,8 @@ impl EventRepository {
         id: [u8; 16],
     ) -> Result<Option<AncestorSelection>, LogError> {
         self.database.read(|c| {
-            let row:Option<(Vec<u8>,Vec<u8>,Vec<u8>,Vec<u8>,i64,i64)>=c.query_row("SELECT s.store_uuid,s.domain,s.conversation,s.job,s.revision,s.child_rank FROM event_ancestry_selection s JOIN event_ancestry_queries q ON q.query=s.query AND q.retired=0 WHERE s.query=?1",[id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+            type StoredSelection = (Vec<u8>,Vec<u8>,Vec<u8>,Vec<u8>,i64,i64);
+            let row:Option<StoredSelection>=c.query_row("SELECT s.store_uuid,s.domain,s.conversation,s.job,s.revision,s.child_rank FROM event_ancestry_selection s JOIN event_ancestry_queries q ON q.query=s.query AND q.retired=0 WHERE s.query=?1",[id.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
             let Some((uuid,domain,conversation,job,revision,child_rank))=row else{return Ok(None);};
             if uuid!=self.store_uuid || domain!=self.domain.0 {return Err(LogError::StaleCursor);}
             let selection=AncestorSelection {marks:Marks {database:self.database.clone(),query:id,retire_on_drop:false,runtime_owned:false},store_uuid:self.store_uuid,domain:self.domain,conversation:ConversationId::new(conversation.try_into().map_err(|_|LogError::StaleCursor)?),job:job.try_into().map_err(|_|LogError::StaleCursor)?,revision,child_rank};

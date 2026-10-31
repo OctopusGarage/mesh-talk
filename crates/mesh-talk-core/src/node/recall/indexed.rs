@@ -63,13 +63,13 @@ impl IndexedRecallLog {
             },
         )?;
         let revision = source.profile().database().read(|c| {
-            Ok(c.query_row(
+            c.query_row(
                 "SELECT revision FROM transcript_sources WHERE kind=?1",
                 [RECALL_MARKS],
                 |r| r.get::<_, i64>(0),
             )?
             .try_into()
-            .map_err(|_| LogError::CorruptFile("invalid history counter".into()))?)
+            .map_err(|_| LogError::CorruptFile("invalid history counter".into()))
         })?;
         Ok(Self { source, revision })
     }

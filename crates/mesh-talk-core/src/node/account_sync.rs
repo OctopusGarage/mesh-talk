@@ -1858,10 +1858,9 @@ impl Node {
         let Ok(mut source) = tokio::fs::File::open(&path).await else {
             return false;
         };
-        if self
+        if !self
             .select_attachment_for_sibling(file_conv, channel.peer_identity(), Some(&selected))
             .is_ok_and(|value| value.is_some())
-            == false
         {
             return false;
         }
@@ -1894,10 +1893,9 @@ impl Node {
             if read == 0 {
                 break;
             }
-            if self
+            if !self
                 .select_attachment_for_sibling(file_conv, channel.peer_identity(), Some(&selected))
                 .is_ok_and(|value| value.is_some())
-                == false
             {
                 return false;
             }
@@ -2007,7 +2005,7 @@ impl Node {
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)?
+            .manifest(file_conv)?
             .ok_or_else(|| NodeError::File("unknown attachment".into()))?;
         let mut channel = self
             .begin_account_exchange(
@@ -2217,7 +2215,7 @@ impl Node {
             .files
             .lock()
             .expect("files mutex not poisoned")
-            .manifest(&file_conv)?
+            .manifest(file_conv)?
             .ok_or_else(|| NodeError::File("unknown attachment".into()))?;
         let controls = self.private_dm_control_revision();
         let personal_cut = self.capture_personal_history_cut(&self.identity.public());
@@ -3658,7 +3656,7 @@ impl Node {
                                     let node = self.clone(); let peer = peer.clone(); let id = id.clone();
                                     let version = if status.legacy_file_metadata { AccountSyncVersion::V1 } else { AccountSyncVersion::V2 };
                                     let transfer_size = if favorite { self.favorite_file_size(file).unwrap_or(0) } else { self.files.lock().expect("files mutex not poisoned")
-                                        .manifest(&file).map(|manifest|manifest.map_or(0,|manifest|manifest.size())).unwrap_or_else(|error| {log::warn!("attachment size lookup deferred: {error}");0}) };
+                                        .manifest(file).map(|manifest|manifest.map_or(0,|manifest|manifest.size())).unwrap_or_else(|error| {log::warn!("attachment size lookup deferred: {error}");0}) };
                                     // Bound the complete exchange without rejecting large legitimate
                                     // archives solely because they need more than a fixed short timeout.
                                     let deadline = attachment_deadline(transfer_size);

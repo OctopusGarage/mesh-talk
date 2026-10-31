@@ -168,8 +168,10 @@ impl IndexedAccountFileProofs {
             author,
             seq,
             parents: parent_data
-                .chunks_exact(32)
-                .map(|chunk| EventId::new(chunk.try_into().expect("fixed parent width")))
+                .as_chunks::<32>()
+                .0
+                .iter()
+                .map(|chunk| EventId::new(*chunk))
                 .collect(),
             lamport,
             wall_clock,

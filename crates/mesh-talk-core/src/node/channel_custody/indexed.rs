@@ -21,6 +21,8 @@ pub(in crate::node) struct IndexedChannelCustodyStore {
     pub(super) replayed_records: usize,
 }
 
+type CustodyDecision = ((EventId, String), bool);
+
 impl IndexedChannelCustodyStore {
     pub(in crate::node) fn authenticate_legacy(
         profile: &ProfileStorage,
@@ -98,7 +100,7 @@ impl IndexedChannelCustodyStore {
     pub(in crate::node) fn observations_after(
         &self,
         after: Option<&(EventId, String)>,
-    ) -> Result<Vec<((EventId, String), bool)>, LogError> {
+    ) -> Result<Vec<CustodyDecision>, LogError> {
         self.profile.database().read(|c| {
             let query = if after.is_some() {
                 "SELECT event,peer,held FROM channel_custody_observations WHERE (event,peer)>(?1,?2) ORDER BY event,peer LIMIT 32"

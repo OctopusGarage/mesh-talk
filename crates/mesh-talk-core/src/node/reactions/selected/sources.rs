@@ -4,9 +4,12 @@ use crate::discovery::Announce;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+type DevicePublicKeys = ([u8; 32], [u8; 32]);
+type AccountIdsByDevice = BTreeMap<DevicePublicKeys, BTreeSet<[u8; 32]>>;
+
 pub(super) struct Evidence {
     pub proofs: Vec<Announce>,
-    accounts: BTreeMap<([u8; 32], [u8; 32]), BTreeSet<[u8; 32]>>,
+    accounts: AccountIdsByDevice,
     ambiguous: HashSet<([u8; 32], [u8; 32])>,
     pub stamp: [u8; 32],
 }

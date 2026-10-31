@@ -216,7 +216,7 @@ impl Node {
             .files
             .lock()
             .expect("files lock")
-            .manifest(&file.file_conv)?
+            .manifest(file.file_conv)?
         else {
             return Ok(None);
         };

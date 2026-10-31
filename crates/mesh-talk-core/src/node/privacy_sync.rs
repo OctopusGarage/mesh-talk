@@ -1573,7 +1573,7 @@ impl SyncStore for GuardedSyncStore<'_> {
                 .files
                 .lock()
                 .expect("files lock not poisoned")
-                .manifest(&event.conversation_id)?;
+                .manifest(event.conversation_id)?;
             if let Some(manifest) = manifest.filter(super::media_store::automatic_inline_image) {
                 let first_chunk = self
                     .node

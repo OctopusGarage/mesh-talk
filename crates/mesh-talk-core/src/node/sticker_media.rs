@@ -67,7 +67,7 @@ impl Node {
                 if !book.has_author(file.file_conv, own)? {
                     continue;
                 }
-                book.manifest(&file.file_conv)?
+                book.manifest(file.file_conv)?
             };
             let Some(AnyManifest::V3(manifest)) = manifest else {
                 continue;
@@ -149,7 +149,7 @@ impl Node {
         &self,
         file: ConversationId,
     ) -> Result<Option<Vec<Event>>, crate::eventlog::LogError> {
-        let Some(manifest) = self.files.lock().expect("files lock").manifest(&file)? else {
+        let Some(manifest) = self.files.lock().expect("files lock").manifest(file)? else {
             return Ok(None);
         };
         let AnyManifest::V3(manifest) = manifest else {
@@ -199,7 +199,7 @@ impl Node {
     ) -> Result<Option<EventId>, crate::eventlog::LogError> {
         let (manifest, ids) = {
             let files = self.files.lock().expect("files lock");
-            let Some(manifest) = files.manifest(&file)? else {
+            let Some(manifest) = files.manifest(file)? else {
                 return Ok(None);
             };
             (manifest, files.offers(Some(file), None))
@@ -251,7 +251,7 @@ impl Node {
         {
             return Ok(None);
         }
-        let Some(manifest) = self.files.lock().expect("files lock").manifest(&file)? else {
+        let Some(manifest) = self.files.lock().expect("files lock").manifest(file)? else {
             return Ok(None);
         };
         let AnyManifest::V3(ref media) = manifest else {

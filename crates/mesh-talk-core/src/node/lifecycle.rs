@@ -534,7 +534,7 @@ impl Node {
             .lock()
             .expect("control ids mutex")
             .replace(delivery.control_ids());
-        self.reseed_live_file_book(&delivery)?;
+        self.reseed_live_file_book(delivery)?;
         Ok(removed)
     }
 

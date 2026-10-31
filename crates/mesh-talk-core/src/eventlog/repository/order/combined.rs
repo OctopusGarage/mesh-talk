@@ -136,7 +136,8 @@ impl EventRepository {
     }
     pub(crate) fn history_order_step(&self, job: [u8; 16]) -> Result<HistoryGeneration, LogError> {
         self.database.transaction(|c|{
-            let (ready,signed,mut signed_rank,mut clock,mut archive,mut rank):(bool,Option<Vec<u8>>,i64,Vec<u8>,Vec<u8>,i64)=c.query_row("SELECT ready,signed_job,signed_rank,archive_clock,archive_id,next_rank FROM history_order_jobs WHERE job=?1",[job.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+            type HistoryJobRow = (bool,Option<Vec<u8>>,i64,Vec<u8>,Vec<u8>,i64);
+            let (ready,signed,mut signed_rank,mut clock,mut archive,mut rank):HistoryJobRow=c.query_row("SELECT ready,signed_job,signed_rank,archive_clock,archive_id,next_rank FROM history_order_jobs WHERE job=?1",[job.as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
             if ready{return Ok(HistoryGeneration{job,ready:true,count:usize::try_from(rank).map_err(|_|LogError::RepositoryCounterExhausted)?});}
             let mut done=false;
             for _ in 0..128 {

@@ -10,6 +10,11 @@ use crate::{
     },
 };
 
+type SelectedReactionDocuments = (
+    Vec<(String, u64, ReactionPayload)>,
+    Option<AccountDocumentKey>,
+);
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Control {
     wall: u64,
@@ -118,13 +123,7 @@ impl Node {
         peer: &str,
         target: EventId,
         after: Option<&AccountDocumentKey>,
-    ) -> Result<
-        (
-            Vec<(String, u64, ReactionPayload)>,
-            Option<AccountDocumentKey>,
-        ),
-        crate::eventlog::LogError,
-    > {
+    ) -> Result<SelectedReactionDocuments, crate::eventlog::LogError> {
         let conversation = account_conversation_id(&self.account_id(), peer);
         if self
             .account_suppression

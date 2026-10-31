@@ -124,7 +124,8 @@ impl EventRepository {
         deadline: Option<u64>,
     ) -> Result<bool, LogError> {
         let safe = self.database.read(|c| {
-            let old: Option<(i64,Vec<u8>,Vec<u8>,i64,bool)> = c.query_row("SELECT priority,clock,sequence,ordinal,archive FROM history_order_candidates WHERE job=?1 AND id=?2",params![job.as_slice(),candidate.id.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+            type ExistingCandidate = (i64,Vec<u8>,Vec<u8>,i64,bool);
+            let old: Option<ExistingCandidate> = c.query_row("SELECT priority,clock,sequence,ordinal,archive FROM history_order_candidates WHERE job=?1 AND id=?2",params![job.as_slice(),candidate.id.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
             let signed: Option<Vec<u8>> = c.query_row("SELECT signed_job FROM history_order_jobs WHERE job=?1",[job.as_slice()],|r|r.get(0))?;
             let rank: Option<i64> = if let Some(signed)=&signed {c.query_row("SELECT rank FROM event_order_rows WHERE job=?1 AND id=?2",params![signed,candidate.id.as_bytes().as_slice()],|r|r.get(0)).optional()?} else {None};
             if let Some((priority,clock,sequence,ordinal,archive))=old {
