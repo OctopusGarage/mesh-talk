@@ -1537,7 +1537,12 @@ ordering, legacy parent cuts, generation cleanup and one reducer decision. A
 completed phase yields before the next one; network preparation forwards actual
 work counts. Canonical readiness alone does not authorize plaintext reads:
 admitted recalls must first be attempted, and exact dependency wakes close that
-read gate again. Dormant missing-target retries remain nonblocking. Constructor
+read gate again. Selected history and sibling plaintext export check this gate
+before body hydration and recheck the captured exact channel source before
+returning their result. Retained signed membership identifies pending channels
+even when presentation metadata is absent; completed recall facts omit archived
+plaintext while local history keeps its tombstone. Dormant missing-target retries
+remain nonblocking. Constructor
 and remaining synchronous compatibility callers still require separate bounded
 caller integration; this preparation interface does not establish that bound.
 An ordinary warm Node open loads current channel metadata without decoding completed

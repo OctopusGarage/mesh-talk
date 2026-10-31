@@ -265,6 +265,8 @@ async fn recalled_channel_content_is_not_disclosed_from_a_cached_private_archive
 
     source.recall_channel(group, message).await.unwrap();
     source.recall_channel(group, file_event).await.unwrap();
+    settle_read_checkpoint(&source, group);
+    source.process_channel_recalls(group).unwrap();
     let after = exported();
     assert!(!after.iter().any(|record| matches!(record, HistoryRecord::Channel(row) if row.event_id == *message.as_bytes())), "a canonical recall must invalidate the cached plaintext selector");
     assert!(!after.iter().any(|record| matches!(record, HistoryRecord::FileCard(row) if row.event_id == *file_event.as_bytes())), "a recalled protected manifest must not be copied to a new reference");
@@ -627,4 +629,203 @@ async fn staged_private_attachment_stops_at_monotonic_expiry() {
 #[tokio::test]
 async fn staged_attachment_cannot_replace_its_expired_original_with_a_live_alias() {
     private_stream_stops_after_its_monotonic_deadline(true, true).await;
+}
+
+fn settle_read_checkpoint(node: &Node, channel: ConversationId) {
+    for _ in 0..256 {
+        if matches!(
+            node.channel_checkpoints.source_binding(channel),
+            Ok(Some(_))
+        ) {
+            return;
+        }
+        let log = node.log.lock().unwrap();
+        node.channel_checkpoints
+            .project_step(log.repository().unwrap(), &node.identity, channel)
+            .unwrap();
+    }
+    panic!("finite channel checkpoint did not settle");
+}
+
+#[tokio::test]
+async fn selected_history_and_archive_wait_for_admitted_recall_before_body_reads() {
+    let directory = tempfile::tempdir().unwrap();
+    let open = |name: &str| {
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let profile = directory.path().join(name);
+        std::fs::create_dir(&profile).unwrap();
+        Node::open(
+            crate::identity::device::DeviceIdentity::generate(),
+            Arc::new(std::sync::Mutex::new(
+                crate::discovery::roster::Roster::default(),
+            )),
+            dm,
+            channel,
+            file,
+            &profile.join("events"),
+            &profile.join("sent"),
+            "pw",
+        )
+        .unwrap()
+    };
+    let sender = open("sender");
+    let source = open("receiver");
+    let channel = sender
+        .create_channel("read readiness", vec![source.identity.public()])
+        .await
+        .unwrap();
+    let target = sender
+        .enqueue_channel_message_reply_expiring_if(
+            channel,
+            b"withhold recalled plaintext",
+            None,
+            None,
+            |commit| commit(),
+        )
+        .unwrap();
+    for event in sender.log.lock().unwrap().events(&channel).unwrap() {
+        source.log.lock().unwrap().append(event).unwrap();
+    }
+    source
+        .process_channel_reception_inner(channel, "live", false)
+        .unwrap();
+    assert!(
+        source
+            .history(channel, 10)
+            .unwrap()
+            .iter()
+            .any(|row| row.id == target && !row.recalled)
+    );
+    let row = ArchiveRow {
+        key: HistoryCursor {
+            tag: 1,
+            id: *target.as_bytes(),
+        },
+        kind: RECEIVED,
+        ordinal: source
+            .received
+            .lock()
+            .unwrap()
+            .header_scan_page(Some(&channel), None, TranscriptPageLimit::default())
+            .unwrap()
+            .rows[0]
+            .ordinal,
+        conversation: channel,
+        peer: None,
+        charge: 4096,
+    };
+    assert!(source.materialize_archive_row(&row).unwrap().is_some());
+    let captured = {
+        let _log = source.log.lock().unwrap();
+        source.capture_history_read_source(channel).unwrap()
+    };
+    sender.recall_channel(channel, target).await.unwrap();
+    let recall = sender
+        .log
+        .lock()
+        .unwrap()
+        .events(&channel)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == crate::eventlog::EventKind::Delete)
+        .unwrap();
+    source.log.lock().unwrap().append(recall).unwrap();
+    settle_read_checkpoint(&source, channel);
+    assert!(
+        !source
+            .channel_checkpoints
+            .history_read_ready(channel)
+            .unwrap()
+    );
+    // Presentation state may not yet exist during startup; retained signed
+    // membership must still classify this as a channel.
+    *source.channels.lock().unwrap() = crate::node::channel::ChannelBook::new();
+    let reads = source.received.lock().unwrap().body_reads();
+    assert!(matches!(
+        source.history(channel, 10),
+        Err(NodeError::Log(LogError::StaleCursor))
+    ));
+    assert!(matches!(
+        source.materialize_archive_row(&row),
+        Err(NodeError::Log(LogError::StaleCursor))
+    ));
+    assert_eq!(
+        source.received.lock().unwrap().body_reads(),
+        reads,
+        "pending recall hydrated retained plaintext"
+    );
+    source.process_channel_recalls(channel).unwrap();
+    assert!(
+        source
+            .channel_checkpoints
+            .history_read_ready(channel)
+            .unwrap()
+    );
+    // Ready may have returned again after a concurrent Delete fully completed.
+    // The original source, not just a fresh readiness boolean, fences the read.
+    assert!(matches!(
+        source.check_history_read_source(channel, captured.as_ref()),
+        Err(LogError::StaleCursor)
+    ));
+    let history = source.history(channel, 10).unwrap();
+    let recalled = history.iter().find(|row| row.id == target).unwrap();
+    assert!(recalled.recalled);
+    assert!(recalled.text.is_empty());
+    assert!(source.materialize_archive_row(&row).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn retained_channel_without_checkpoint_cannot_publish_saved_plaintext() {
+    let (_dir, source, receiver) = sibling_nodes();
+    let channel = source
+        .create_account_channel_invited_if("pending initial projection", vec![], |commit| commit())
+        .await
+        .unwrap();
+    let target = source
+        .enqueue_channel_message_reply_expiring_if(
+            channel,
+            b"wait for authority",
+            None,
+            None,
+            |commit| commit(),
+        )
+        .unwrap();
+    let sent = source
+        .sentlog
+        .lock()
+        .unwrap()
+        .entries(&channel)
+        .pop()
+        .unwrap();
+    for event in source.log.lock().unwrap().events(&channel).unwrap() {
+        receiver.log.lock().unwrap().append(event).unwrap();
+    }
+    receiver
+        .received
+        .lock()
+        .unwrap()
+        .record(
+            channel,
+            source.user_id(),
+            sent.wall_clock,
+            &sent.plaintext,
+            target,
+        )
+        .unwrap();
+    assert!(receiver.channels.lock().unwrap().state(&channel).is_none());
+    assert!(
+        receiver
+            .channel_checkpoints
+            .source_binding(channel)
+            .unwrap()
+            .is_none()
+    );
+    let reads = receiver.received.lock().unwrap().body_reads();
+    assert!(matches!(
+        receiver.history(channel, 10),
+        Err(NodeError::Log(LogError::StaleCursor))
+    ));
+    assert_eq!(receiver.received.lock().unwrap().body_reads(), reads);
 }

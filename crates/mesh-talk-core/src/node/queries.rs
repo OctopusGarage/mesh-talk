@@ -10,6 +10,39 @@ use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
 
 impl Node {
+    /// Capture while holding the event-log guard, before loading selected plaintext.
+    /// A Ready checkpoint is not a lease: the captured source is checked again
+    /// after recall materialization, immediately before publishing the result.
+    pub(in crate::node) fn capture_history_read_source(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<super::channel::checkpoint::ChannelSource>, crate::eventlog::LogError> {
+        if !self.channel_checkpoints.history_read_ready(conversation)? {
+            return Err(crate::eventlog::LogError::StaleCursor);
+        }
+        self.channel_checkpoints.source_binding(conversation)
+    }
+    pub(in crate::node) fn check_history_read_source(
+        &self,
+        conversation: ConversationId,
+        source: Option<&super::channel::checkpoint::ChannelSource>,
+    ) -> Result<(), crate::eventlog::LogError> {
+        if !self.channel_checkpoints.history_read_ready(conversation)? {
+            return Err(crate::eventlog::LogError::StaleCursor);
+        }
+        if let Some(source) = source {
+            self.channel_checkpoints.check_source(source)
+        } else if self
+            .channel_checkpoints
+            .source_binding(conversation)?
+            .is_some()
+        {
+            Err(crate::eventlog::LogError::StaleCursor)
+        } else {
+            Ok(())
+        }
+    }
+
     /// The last `limit` messages of a channel in deterministic causal order.
     /// Sender-key wire keys are single-use and gone after one decrypt, so history is
     /// served from the stores — our own sent plaintext from the sent sidecar, plus the
@@ -112,7 +145,7 @@ impl Node {
             }
             other => other,
         };
-        let is_channel = account.is_none()
+        let mut is_channel = account.is_none()
             && (self.channel_shared_reference(conversation).is_some()
                 || self
                     .archived_channels
@@ -137,6 +170,9 @@ impl Node {
         let delivery = self.delivery.lock().expect("delivery mutex");
         let log = self.log.lock().expect("log mutex");
         let repository = log.repository()?;
+        is_channel |= account.is_none()
+            && repository.has_kind(&conversation, crate::eventlog::EventKind::MembershipChange)?;
+        let read_source = self.capture_history_read_source(conversation)?;
         let sent = self.sentlog.lock().expect("sent mutex");
         let recovered = self.recovered_sent_ids.lock().expect("recovered ids mutex");
         let received = self.received.lock().expect("received mutex");
@@ -682,6 +718,7 @@ impl Node {
                 entry.recalled_text = None;
             }
         }
+        self.check_history_read_source(conversation, read_source.as_ref())?;
         Ok(Some(super::search::SearchContext {
             messages,
             newer_entries: newer,
