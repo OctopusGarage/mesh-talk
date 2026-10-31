@@ -28,7 +28,10 @@ pub(super) fn wake_on(
     Ok(())
 }
 impl ChannelCheckpointStore {
-    fn recall_page(&self, source: &ChannelSource) -> Result<pending::PendingChannelPage, LogError> {
+    pub(super) fn recall_page(
+        &self,
+        source: &ChannelSource,
+    ) -> Result<pending::PendingChannelPage, LogError> {
         self.profile.database().transaction(|c| {
             self.check_source_on(c,source)?;
             let target:Option<Vec<u8>>=c.query_row("SELECT target FROM channel_recall_wakes WHERE channel=?1 ORDER BY target LIMIT 1",[source.channel.as_bytes().as_slice()],|r|r.get(0)).optional()?;
@@ -42,7 +45,7 @@ impl ChannelCheckpointStore {
             Ok(pending::PendingChannelPage{more_work:!ids.is_empty() || queued,ids})
         })
     }
-    fn defer_recall(
+    pub(super) fn defer_recall(
         &self,
         source: &ChannelSource,
         event: EventId,

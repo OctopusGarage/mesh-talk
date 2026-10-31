@@ -188,6 +188,12 @@ and reducer steps into a leased result, while `join_history/indexed/preparation.
 retains the existing canonical, strict-causal and future ownership-loss rules.
 These query owners share the repository ancestry implementation and its incremental
 retirement; callers must resume Pending work without synchronously draining it.
+Canonical preparation reports the caller's shared row, edge and byte budget
+across ordering, generation cleanup, legacy cuts and reducer decisions.
+The checkpoint's `history_read_ready` gate covers both current signed authority
+and the first attempt of admitted recalls; plaintext consumers must check it
+before hydration. Unknown-target retries become blocking again on their exact
+persisted wake, without requiring a history scan.
 `core/node/channel/checkpoint/` owns indexed current membership, canonical authority,
 receiver checkpoints, exact processing evidence, activity pages and pending retries.
 Ordinary warm channel opens load current metadata and the active sending epoch;

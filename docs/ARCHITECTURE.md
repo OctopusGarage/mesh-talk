@@ -1464,8 +1464,16 @@ The channel checkpoint owner reuses the existing canonical logical-order job and
 its source revision. Safe tails extend the same job; a late control that changes
 canonical order rebuilds derived authority in bounded turns. Current metadata,
 selected causal membership, activity rows and exact applied identities live in
-indexed tables. Retired derived generations are reclaimed incrementally. A warm
-ordinary Node open loads current channel metadata without decoding completed
+indexed tables. Retired derived generations are reclaimed incrementally. A
+canonical preparation turn shares its explicit row, edge and byte budget across
+ordering, legacy parent cuts, generation cleanup and one reducer decision. A
+completed phase yields before the next one; network preparation forwards actual
+work counts. Canonical readiness alone does not authorize plaintext reads:
+admitted recalls must first be attempted, and exact dependency wakes close that
+read gate again. Dormant missing-target retries remain nonblocking. Constructor
+and remaining synchronous compatibility callers still require separate bounded
+caller integration; this preparation interface does not establish that bound.
+An ordinary warm Node open loads current channel metadata without decoding completed
 signed channel history. Source 8 independently publishes legacy channel sender
 snapshots; only each channel's active sending epoch is loaded into memory.
 

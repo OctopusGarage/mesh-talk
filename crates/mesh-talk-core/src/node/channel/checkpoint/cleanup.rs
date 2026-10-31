@@ -2,16 +2,21 @@
 //! copy. Obsolete facts retire in bounded transactions before replay continues.
 use super::*;
 impl ChannelCheckpointStore {
-    pub(super) fn cleanup_generation_step(
+    pub(super) fn cleanup_generation_step_with_limit(
         &self,
         channel: ConversationId,
         current: [u8; 16],
-    ) -> Result<bool, LogError> {
+        limit: usize,
+    ) -> Result<usize, LogError> {
+        let limit = i64::try_from(limit).map_err(|_| LogError::InvalidPageBudget)?;
+        if limit == 0 {
+            return Err(LogError::InvalidPageBudget);
+        }
         self.profile.database().transaction(|c| {
             self.check_account_on(c)?;
             let old:Option<Vec<u8>>=c.query_row("SELECT job FROM (SELECT job,channel FROM channel_projection_work UNION SELECT job,channel FROM channel_legacy_scan) WHERE channel=?1 AND job NOT IN (SELECT job FROM channel_projection_queries) AND job<>?2 AND job<>COALESCE((SELECT source_job FROM channel_current WHERE channel=?1),x'') LIMIT 1",params![channel.as_bytes().as_slice(),current.as_slice()],|r|r.get(0)).optional()?;
-            let Some(job)=old else {return Ok(false);};
-            // Exactly one table and at most 128 identities are reclaimed per
+            let Some(job)=old else {return Ok(0);};
+            // Exactly one table and at most the admitted identities are reclaimed per
             // turn. No cascading delete or unbounded SQLite temporary set.
             for (table,key) in [
                 ("channel_decision_answers","key"),
@@ -36,11 +41,12 @@ impl ChannelCheckpointStore {
                 if table=="channel_decision_work" {
                     super::super::graph::preparing::retire_selection_on(c,&job,channel.as_bytes().as_slice())?;
                 }
-                let sql=format!("DELETE FROM {table} WHERE job=?1 AND channel=?2 AND ({key}) IN (SELECT {key} FROM {table} WHERE job=?1 AND channel=?2 LIMIT 128)");
-                if c.execute(&sql,params![&job,channel.as_bytes().as_slice()])?!=0 {return Ok(true);}
+                let sql=format!("DELETE FROM {table} WHERE job=?1 AND channel=?2 AND ({key}) IN (SELECT {key} FROM {table} WHERE job=?1 AND channel=?2 LIMIT ?3)");
+                let removed=c.execute(&sql,params![&job,channel.as_bytes().as_slice(),limit])?;
+                if removed!=0 {return Ok(removed);}
             }
             c.execute("DELETE FROM channel_projection_work WHERE job=?1 AND channel=?2",params![job,channel.as_bytes().as_slice()])?;
-            Ok(true)
+            Ok(1)
         })
     }
 }
