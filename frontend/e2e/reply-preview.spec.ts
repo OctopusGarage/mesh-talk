@@ -1,3 +1,4 @@
+import { expectMessageHighlight } from "./helpers/message-highlight";
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, BOB } from "./helpers/session";
 
@@ -140,10 +141,9 @@ for (const theme of ["light", "dark"] as const) {
     ).toHaveCount(0);
     await expect(quote).toBeInViewport();
     await quote.screenshot({ path: testInfo.outputPath(`quote-${theme}.png`) });
-    await quote.click();
+    await expectMessageHighlight(page, "photo-original", () => quote.click());
     const original = page.locator('[data-message-id="photo-original"]');
     await expect(original).toBeVisible();
-    await expect(original).toHaveClass(/bg-signal\/10/);
     await expect(page.getByTestId("file-image-lightbox")).toHaveCount(0);
     // The source photo keeps its ordinary enlarge interaction.
     await original.getByRole("button", { name: "View full size" }).click();
@@ -227,11 +227,10 @@ for (const available of [true, false]) {
     await page.getByTestId(`conversation-row-${BOB.account}`).click();
     const quote = page.getByTestId("message-parent-snippet");
     await expect(quote).toHaveText("View original");
-    await quote.click();
     if (available) {
+      await expectMessageHighlight(page, "older-original", () => quote.click());
       const original = page.locator('[data-message-id="older-original"]');
       await expect(original).toBeVisible();
-      await expect(original).toHaveClass(/bg-signal\/10/);
       await page
         .getByRole("button", { name: "Jump to latest messages", exact: true })
         .first()
@@ -240,6 +239,7 @@ for (const available of [true, false]) {
         "A reply to older history",
       );
     } else {
+      await quote.click();
       await expect(
         page
           .getByRole("status")

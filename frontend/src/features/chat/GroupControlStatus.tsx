@@ -124,7 +124,7 @@ export function PendingGroupControls({
     leave_account: "members.leave",
   };
   const terminal = (ticket: NonNullable<typeof tickets>[string]) =>
-    isGroupOperationComplete(ticket.status);
+    !!ticket.admissionFailure || isGroupOperationComplete(ticket.status);
   const controls = Object.values(tickets ?? {})
     .filter(
       (ticket) =>
@@ -163,9 +163,15 @@ export function PendingGroupControls({
             <GroupControlStatus
               cancelRequested={ticket.cancelRequested}
               outcome={
-                ticket.status
-                  ? { kind, id: ticket.id, status: ticket.status }
-                  : { kind: "unconfirmed", id: ticket.id }
+                ticket.admissionFailure
+                  ? {
+                      kind: "not_admitted",
+                      id: ticket.id,
+                      error: ticket.admissionFailure.error,
+                    }
+                  : ticket.status
+                    ? { kind, id: ticket.id, status: ticket.status }
+                    : { kind: "unconfirmed", id: ticket.id }
               }
             />
           </div>

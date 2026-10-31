@@ -56,6 +56,35 @@ afterEach(async () => {
   vi.clearAllMocks();
   vi.useRealTimers();
 });
+it("times out initial diagnostic reads and retries without accepting their late snapshots", async () => {
+  const network = deferred<null>();
+  const environment = deferred<null>();
+  native.invoke.mockImplementation((command: string) =>
+    command === "diag_network_info"
+      ? network.promise
+      : command === "env_info"
+        ? environment.promise
+        : Promise.resolve([]),
+  );
+  await render(true);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+  expect(controller.networkLoading).toBe(false);
+  expect(controller.environmentLoading).toBe(false);
+  expect(controller.networkError).toContain("timed out");
+  native.invoke.mockImplementation((command: string) =>
+    Promise.resolve(
+      command === "diag_network_info" ? { own_name: "fresh" } : [],
+    ),
+  );
+  await act(async () => {
+    await controller.loadNetwork();
+    network.resolve(null);
+    environment.resolve(null);
+  });
+  expect(controller.info).toEqual({ own_name: "fresh" });
+});
 it("does not reveal a delayed log path after the dialog closes", async () => {
   const path = deferred<string>();
   native.invoke.mockImplementation((command: string) =>

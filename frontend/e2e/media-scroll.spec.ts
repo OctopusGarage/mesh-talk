@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, BOB } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 type MediaScrollProbe = {
   reads: Record<string, number>;
   pending: Array<() => void>;
@@ -157,10 +160,10 @@ test("scrolling away and returning to latest reuses media without changing row h
     bounds.x + bounds.width / 2,
     bounds.y + bounds.height / 2,
   );
-  await page.mouse.wheel(0, -3000);
-  await expect
-    .poll(() => log.evaluate((element) => element.scrollTop))
-    .toBeLessThan(scrollTopBefore);
+  // Reach the start of history: newly decoded panorama rows can shrink enough
+  // to consume a fixed wheel distance and leave the latest row mounted.
+  await page.mouse.wheel(0, -scrollTopBefore);
+  await expect.poll(() => log.evaluate((element) => element.scrollTop)).toBe(0);
   await expect(row).toHaveCount(0);
   await page.getByTestId("jump-to-latest").click();
   await expect(row.getByTestId("file-image")).toBeVisible();

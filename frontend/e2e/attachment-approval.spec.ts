@@ -3,6 +3,9 @@ import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, openBobDm, BOB } from "./helpers/session";
 import { openSidebarMenuAction } from "./helpers/sidebar-actions";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 test("incoming folder waits for approval and can be declined or received", async ({
   page,
 }) => {

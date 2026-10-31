@@ -9,6 +9,37 @@ import { useAuth } from "./auth";
 import { registerRuntimeSnapshot } from "./ownership";
 import { DEFAULT_SCREENSHOT_SHORTCUTS } from "@/lib/screenshotShortcuts";
 
+it("retires a stalled initial settings read before a healthy retry", async () => {
+  vi.useFakeTimers();
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  let settled = false;
+  const pending = useSettings
+    .getState()
+    .load()
+    .then(() => {
+      settled = true;
+    });
+  try {
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(settled).toBe(true);
+    await pending;
+    invoke.mockResolvedValueOnce({ calls_enabled: true });
+    await useSettings.getState().load();
+    finish({ calls_enabled: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useSettings.getState().callsEnabled).toBe(true);
+  } finally {
+    finish?.({});
+    vi.useRealTimers();
+  }
+});
+
 it("loads device-local screenshot bindings and clears them when the owner changes", async () => {
   const shortcuts = { capture: "Alt+KeyB", capture_hidden: null, global: true };
   invoke.mockResolvedValue({ screenshot_shortcuts: shortcuts });

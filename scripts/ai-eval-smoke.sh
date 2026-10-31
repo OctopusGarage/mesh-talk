@@ -124,7 +124,7 @@ require_contains "scripts/check-health.sh" "scripts/ai-eval-smoke.sh" "check-hea
 require_contains "scripts/check-health.sh" "scripts/test-ai-eval.mjs" "check-health AI eval harness tests"
 require_contains "scripts/check-health.sh" "frontend/dist" "fast gate Tauri frontendDist guard"
 require_contains "hooks/pre-commit" "git diff --cached --check" "pre-commit source check trigger"
-require_contains ".github/workflows/ci.yml" "make eval-smoke" "CI eval-smoke trigger"
+require_contains ".github/workflows/check-health.yml" "make eval-smoke" "Health eval-smoke trigger"
 require_contains ".github/workflows/ai-eval.yml" "make ai-eval" "CI/manual real AI eval trigger"
 require_contains ".github/pull_request_template.md" "AI eval / smoke" "PR validation checklist"
 require_contains "specifications/task_completion_criteria.md" "make eval-smoke" "definition-of-done eval entry"

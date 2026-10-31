@@ -64,8 +64,8 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const ATTACHMENT_AVAILABILITY_TTL: Duration = Duration::from_secs(60);
 const MAX_UNAVAILABLE_ATTACHMENTS: usize = 256;
 
-/// Mandatory document admission respects its retained page retry deadline.
-/// Optional workers also own history/favorites and keep their independent scheduling.
+/// Deferred synchronization peers retain their place until their retry deadline;
+/// another ready peer can proceed without consuming the deferred demand.
 pub(in crate::node) fn take_ready_mandatory_peer<K>(
     queue: &mut std::collections::VecDeque<(K, PeerRecord)>,
     retry_at: impl Fn(&K) -> Option<std::time::Instant>,
@@ -2035,11 +2035,40 @@ impl Node {
         dir: tempfile::TempDir,
         personal_cut: &super::account_documents::personal::PersonalHistoryCut,
     ) -> Result<(), NodeError> {
+        // Bulk encryption and verification must not retain the delivery or
+        // policy commit guards. Preparation remains inside its admitted blocking
+        // worker; cancellation/retirement cannot detach it from that owner.
+        let current = || {
+            !self.runtime_work.is_closed()
+                && !self
+                    .delivery_suspended
+                    .load(std::sync::atomic::Ordering::Acquire)
+                && self.device_sync_policy_snapshot().1 == revision
+        };
+        let prepared = self
+            .media
+            .prepare_from_path_if(
+                file_conv,
+                manifest.name(),
+                &dir.path().join("incoming"),
+                || {
+                    if current() {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "attachment preparation no longer admitted",
+                        ))
+                    }
+                },
+            )
+            .map_err(|error| NodeError::File(format!("attachment preparation: {error}")))?;
         let _commit = self
             .account_sync_commit
             .lock()
             .expect("account sync commit mutex not poisoned");
-        if !self.personal_attachment_allowed(file_conv, personal_cut)
+        if !current()
+            || !self.personal_attachment_allowed(file_conv, personal_cut)
             || self.private_dm_control_revision() != controls
             || self.account_recalled_files().contains(&file_conv)
         {
@@ -2064,9 +2093,10 @@ impl Node {
         {
             return Err(NodeError::File("attachment was removed during sync".into()));
         }
-        // MediaStore encrypts verified plaintext into this account's private store.
+        // Publish only after rechecking the exact policy and live file-card
+        // lifetime. Deletion or recall during preparation cannot revive bytes.
         self.media
-            .store_from_path(file_conv, manifest.name(), &dir.path().join("incoming"))
+            .publish_prepared(prepared)
             .map_err(|e| NodeError::File(format!("attachment save: {e}")))?;
         self.note_account_history_change();
         Ok(())
@@ -2670,6 +2700,17 @@ impl Node {
     }
 
     pub(in crate::node) async fn run_account_history_loop(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(RETRY_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        self.run_account_history_loop_with_tick(Some(tick)).await;
+    }
+
+    // Tests can exclude periodic repair to prove that retained work itself
+    // schedules progress, without coupling fixture setup to the first tick.
+    async fn run_account_history_loop_with_tick(
+        self: Arc<Self>,
+        mut tick: Option<tokio::time::Interval>,
+    ) {
         use std::collections::VecDeque;
         // Partition the existing four slots: one each for control, directory,
         // optional documents, and history/favorites. Each lane retains its page
@@ -2677,8 +2718,6 @@ impl Node {
         const HISTORY_WORKERS: usize = 1;
         const DOCUMENT_WORKERS: usize = DocumentLane::ALL.len();
         const ATTACHMENT_WORKERS: usize = 2;
-        let mut tick = tokio::time::interval(RETRY_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursors: HashMap<String, PeerCursor> = HashMap::new();
         let mut queue: VecDeque<(String, PeerRecord)> = VecDeque::new();
         let mut active = HashSet::new();
@@ -3100,20 +3139,27 @@ impl Node {
                 #[cfg(test)]
                 let control_task_trace = (key.lane == DocumentLane::Control).then(|| {
                     format!(
-                        "control_task paired={} protected={} requests={:?}",
+                        "control_task paired={} protected={} requests={:?} resumed={} replacement={} hint={}",
                         control_pairs.contains_key(&key),
                         protected,
                         selected_requests
                             .get(&key.identity())
                             .cloned()
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        control_origin.0,
+                        control_origin.1,
+                        hints.iter().any(|hint| hint.public == key.public())
                     )
                 });
                 let task = documents.spawn(permit.track(async move {
                     #[cfg(test)]
-                    if let Some(event) = control_task_trace {
-                        node.trace_account_client(&peer.public, || event);
-                    }
+                    let _lifetime = control_task_trace.map(|event| {
+                        // Only the child owns this token across the pull future.
+                        // Abort, return and panic drop it without fixture callbacks.
+                        let lifetime = Arc::new(());
+                        node.trace_control_task(&peer.public, event, Arc::downgrade(&lifetime));
+                        lifetime
+                    });
                     let _ = node.pull_account_documents_page(&peer, &mut state).await;
                     (key, peer, state)
                 }));
@@ -3153,21 +3199,17 @@ impl Node {
                 fanout_owners.insert(task.id(), group);
             }
             while active.len() < HISTORY_WORKERS {
-                let Some((id, peer)) = queue.pop_front() else {
+                let Some((id, peer)) = take_ready_mandatory_peer(
+                    &mut queue,
+                    |id| cursors.get(id).and_then(|state| state.history_retry_at),
+                    std::time::Instant::now(),
+                ) else {
                     break;
                 };
                 if !active.insert(id.clone()) {
                     continue;
                 }
                 let mut state = cursors.remove(&id).unwrap_or_default();
-                if state
-                    .history_retry_at
-                    .is_some_and(|at| at > std::time::Instant::now())
-                {
-                    active.remove(&id);
-                    cursors.insert(id, state);
-                    continue;
-                }
                 state.history_retry_at = None;
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
@@ -3175,6 +3217,10 @@ impl Node {
                 };
                 let owner = id.clone();
                 let task = history.spawn(permit.track(async move {
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        format!("history_begin after={}", state.next.is_some())
+                    });
                     let result = tokio::time::timeout(
                         Duration::from_secs(20),
                         node.pull_account_history_page(&peer, state.next, state.known_digest),
@@ -3185,6 +3231,13 @@ impl Node {
                             "account history exchange timed out".into(),
                         ))
                     });
+                    #[cfg(test)]
+                    node.trace_account_client(&peer.public, || {
+                        format!(
+                            "history_end outcome={}",
+                            super::account_session::client_trace_outcome(&result)
+                        )
+                    });
                     state.favorite_error = None;
                     if result.is_ok() && node.device_sync_policy().history {
                         if state
@@ -3193,6 +3246,8 @@ impl Node {
                         {
                             state.favorite_retry_at = None;
                             let first = state.favorite_next.is_none();
+                            #[cfg(test)]
+                            node.trace_account_client(&peer.public, || "favorite_begin".into());
                             match tokio::time::timeout(
                                 Duration::from_secs(10),
                                 node.pull_message_favorites_page_at_digest(
@@ -3233,11 +3288,50 @@ impl Node {
                                     }
                                 }
                             }
+                            #[cfg(test)]
+                            node.trace_account_client(&peer.public, || {
+                                format!("favorite_end failed={}", state.favorite_error.is_some())
+                            });
                         }
                     } else if !result.as_ref().is_err_and(local_sync_capacity_busy) {
                         state.favorite_next = None;
                     }
-                    (id, peer, state, result)
+                    // Selection belongs to this existing history worker. A slow
+                    // local store must not park the parent document scheduler.
+                    let missing = if node.device_sync_policy().attachments {
+                        let favorites_supported = state.favorites_supported;
+                        node.account_blocking(move |node| {
+                            #[cfg(test)]
+                            node.trace_account_client(&node.identity.public(), || {
+                                "attachment_selection_begin".into()
+                            });
+                            let recalled = node.account_recalled_files();
+                            let mut missing = node
+                                .files
+                                .lock()
+                                .expect("files mutex not poisoned")
+                                .file_convs();
+                            missing.sort_by_key(|id| *id.as_bytes());
+                            missing.retain(|file| {
+                                !node.media.contains(*file) && !recalled.contains(file)
+                            });
+                            let mut queue: Vec<_> =
+                                missing.into_iter().map(|file| (file, false)).collect();
+                            if favorites_supported && node.device_sync_policy().history {
+                                queue.extend(
+                                    node.missing_favorite_files()
+                                        .into_iter()
+                                        .map(|file| (file, true)),
+                                );
+                            }
+                            Ok(queue)
+                        })
+                        .await
+                        .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    (id, peer, state, result, missing)
                 }));
                 history_owners.insert(task.id(), owner);
             }
@@ -3257,9 +3351,17 @@ impl Node {
                     })
                 })
                 .min();
+            let history_retry = (active.len() < HISTORY_WORKERS)
+                .then(|| {
+                    mandatory_retry_deadline(&queue, |id| {
+                        cursors.get(id).and_then(|state| state.history_retry_at)
+                    })
+                })
+                .flatten();
+            let worker_retry = document_retry.into_iter().chain(history_retry).min();
             tokio::select! {
                 _ = async {
-                    if let Some(at) = document_retry {
+                    if let Some(at) = worker_retry {
                         tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
                     } else {
                         std::future::pending::<()>().await;
@@ -3272,7 +3374,12 @@ impl Node {
                         std::future::pending::<()>().await;
                     }
                 } => {}
-                _ = tick.tick() => { enqueue_all = true; }
+                _ = async {
+                    match tick.as_mut() {
+                        Some(tick) => { tick.tick().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => { enqueue_all = true; }
                 _ = self.account_sync_notify.notified() => { enqueue_all = true; }
                 result = fanout_tasks.join_next_with_id(), if !fanout_tasks.is_empty() => {
                     let completion = match result {
@@ -3414,7 +3521,7 @@ impl Node {
                             status.error = Some("account history worker terminated".into());
                             self.set_account_sync_status(id, status);
                     }
-                    if let Some(Ok((task, (id, peer, mut state, result)))) = result {
+                    if let Some(Ok((task, (id, peer, mut state, result, missing)))) = result {
                         history_owners.remove(&task);
                         active.remove(&id);
                         let (policy, current_revision) = self.device_sync_policy_snapshot();
@@ -3434,17 +3541,24 @@ impl Node {
                                     let history_complete = state.complete_page(next, digest);
                                     if history_complete && !favorites_pending && !favorites_waiting { status.phase = SyncPhase::UpToDate; }
                                     else { continuation |= !history_complete; }
+                                    if let Some(error) = &state.favorite_error {
+                                        status.phase = SyncPhase::Error;
+                                        status.error = Some(error.chars().take(160).collect());
+                                        // A favorites failure alone must not request another turn.
+                                        // Preserve unfinished history and the coalesced refresh below;
+                                        // consuming that wake before clearing continuation loses work.
+                                        continuation = !history_complete;
+                                    }
                                     // Finish retained history/favorite pages before consuming
                                     // one coalesced wake as a fresh comparison sweep.
                                     if refresh && history_complete && state.favorite_next.is_none() {
                                         pending_refresh.remove(&id);
                                         continuation = true;
                                     }
-                                    if let Some(error)=&state.favorite_error {status.phase=SyncPhase::Error;status.error=Some(error.chars().take(160).collect());continuation=false;}
                                 }
                                 Err(error) if local_sync_capacity_busy(&error) => {
                                     // Admission never began an exchange. Retain history and
-                                    // favorite cursors; the regular tick retries without a spin.
+                                    // favorite cursors and queued demand until its retry deadline.
                                     status.phase = SyncPhase::CatchingUp;
                                     state.history_retry_at = Some(std::time::Instant::now() + Duration::from_secs(5));
                                     continuation = false;
@@ -3457,16 +3571,6 @@ impl Node {
                             if policy.attachments {
                                 unavailable.retain(|_, until| *until > tokio::time::Instant::now());
                                 attachment_unsupported.retain(|_, until| *until > tokio::time::Instant::now());
-                                let favorites_supported=state.favorites_supported;
-                                let missing = self.account_blocking(move |node| {
-                                    let recalled = node.account_recalled_files();
-                                    let mut missing = node.files.lock().expect("files mutex not poisoned").file_convs();
-                                    missing.sort_by_key(|id| *id.as_bytes());
-                                    missing.retain(|file| !node.media.contains(*file) && !recalled.contains(file));
-                                    let mut queue:Vec<_>=missing.into_iter().map(|file|(file,false)).collect();
-                                    if favorites_supported && node.device_sync_policy().history {queue.extend(node.missing_favorite_files().into_iter().map(|file|(file,true)));}
-                                    Ok(queue)
-                                }).await.unwrap_or_default();
                                 status.pending_attachments = missing.len();
                                 let selected = (0..missing.len()).map(|offset| (state.next_file.wrapping_add(offset)) % missing.len())
                                     .find(|index| !unavailable.contains_key(&(id.clone(), missing[*index].0)));
@@ -3508,12 +3612,13 @@ impl Node {
                                 status.phase = SyncPhase::CatchingUp;
                             }
                             self.set_account_sync_status(id.clone(), status);
+                            let deferred_history = state.history_retry_at.is_some();
                             cursors.insert(id.clone(), state);
-                            if continuation {
+                            if continuation || deferred_history {
                                 // One page per peer per turn: tail insertion gives waiting siblings
                                 // their turn while bounded workers immediately drain the backlog.
                                 queue.push_back((id, peer));
-                                tokio::task::yield_now().await;
+                                if continuation { tokio::task::yield_now().await; }
                             }
                         }
                     }

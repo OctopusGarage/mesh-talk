@@ -114,6 +114,37 @@ function session() {
     relogin: () => generation++,
   };
 }
+it.each(["roster", "members"] as const)(
+  "returns durable commitment after a stalled optional %s refresh times out",
+  async (lane) => {
+    vi.useFakeTimers();
+    const s = session();
+    const read = deferred<void>();
+    if (lane === "roster") s.refreshRoster.mockReturnValueOnce(read.promise);
+    else
+      s.commands.channelMembers.mockImplementationOnce(async () => {
+        await read.promise;
+        return { history_policy: "off", owner: "late", members: [] };
+      });
+    const completed = vi.fn();
+    const submitting = s.actions.removeMember("device").then(completed);
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(completed).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "committed" }),
+      );
+      expect(s.reportError).toHaveBeenCalledOnce();
+      read.resolve();
+      await submitting;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(s.read().channelOwner).toBe("old");
+    } finally {
+      read.resolve();
+      await submitting;
+      vi.useRealTimers();
+    }
+  },
+);
 it.each([
   [
     "addMember",

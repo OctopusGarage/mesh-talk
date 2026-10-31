@@ -12,6 +12,7 @@ import {
 } from "@/store/reception";
 import { captureRuntimeOwner } from "@/store/ownership";
 import { subscribeSyncInvalidation } from "./syncInvalidation";
+import { readWithDeadline } from "./readDeadline";
 
 interface ReceiptPorts {
   current: () => boolean;
@@ -80,11 +81,11 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
       if (!current() || polling) return;
       polling = true;
       try {
-        const policy = await ports.policy();
+        const policy = await readWithDeadline(ports.policy);
         if (!current()) return;
         enabled = policy.history;
         if (!enabled) return;
-        const page = await ports.list(after);
+        const page = await readWithDeadline(() => ports.list(after));
         if (!current() || !enabled) return;
         for (const meta of page.items) {
           if (meta.key.kind !== "read_receipt" || meta.tombstone) continue;
@@ -96,7 +97,9 @@ export function createLinkedReadReceiptSync(ports: ReceiptPorts) {
           ports.apply(key, [message_id]);
         }
         after = page.next;
-        await flush();
+        // A local mutation retains its serial write lane until native completion,
+        // but cannot prevent observing another device's receipts or policy.
+        void flush();
       } catch {
         /* A later invalidation or bounded poll retries the same page. */
       } finally {

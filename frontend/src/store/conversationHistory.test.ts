@@ -44,6 +44,44 @@ beforeEach(() => {
   });
 });
 
+it("times out a coverage read, scans later conversations and ignores its late response", async () => {
+  vi.useFakeTimers();
+  let finish!: (rows: unknown[]) => void;
+  try {
+    const store = session();
+    invoke.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const scanning = scanConversationHistory(
+      store.setState,
+      store.getState,
+      [conversation, { kind: "account", id: "next", name: "Next" }],
+      1,
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(store.getState().historyScanBusy).toBe(false);
+    await scanning;
+    expect(store.getState().historyScanQueue).toEqual([conversation]);
+    expect(store.getState().historyBaselines).toContain("account:next");
+    finish([row("obsolete")]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.getState().ledger[key]).toBeUndefined();
+    await scanConversationHistory(
+      store.setState,
+      store.getState,
+      [conversation],
+      1,
+    );
+    expect(store.getState().historyScanQueue).toEqual([]);
+  } finally {
+    finish?.([]);
+    vi.useRealTimers();
+  }
+});
+
 it.each(["owner_account_history", "account_reactions"])(
   "releases the history spinner when %s stalls and retries without restarting",
   async (stalledCommand) => {

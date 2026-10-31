@@ -20,6 +20,8 @@ export interface GroupOperationTicket {
   status?: AccountGroupOperationStatus;
   cancelRequested?: boolean;
   deleteHistory?: boolean;
+  /** A late native error proved no admission after the UI wait had ended. */
+  admissionFailure?: { error: unknown };
 }
 export type GroupOperationOutcome =
   | {
@@ -77,6 +79,8 @@ export interface GroupOperationRequest {
   deleteHistory?: boolean;
   /** Link payload ownership after reservation, before native mutation. */
   onReserved?: (id: string) => boolean;
+  /** Complete payload presentation when definite refusal arrives after timeout. */
+  onNotAdmitted?: (error: unknown) => void;
 }
 export function isGroupHistoryCleanupPending(
   status: AccountGroupOperationStatus | undefined,
@@ -113,6 +117,7 @@ export function unresolvedGroupLeave(
       ticket.account_id === accountId &&
       ticket.group === group &&
       ticket.kind === "leave_account" &&
+      !ticket.admissionFailure &&
       !isTerminal(ticket.status)
     )
       return ticket;
@@ -175,6 +180,12 @@ export function createGroupOperationCoordinator(
     return ticket?.account_id === lease.accountId ? ticket : undefined;
   }
   function currentOutcome(ticket: GroupOperationTicket): GroupOperationOutcome {
+    if (ticket.admissionFailure)
+      return {
+        kind: "not_admitted",
+        id: ticket.id,
+        error: ticket.admissionFailure.error,
+      };
     return ticket.status
       ? outcome(ticket.status)
       : { kind: "unconfirmed", id: ticket.id };
@@ -289,6 +300,10 @@ export function createGroupOperationCoordinator(
     ticket: GroupOperationTicket,
     send: GroupOperationInvoke,
     firstAttempt: boolean,
+    observationWait: {
+      expired(): boolean;
+      onNotAdmitted?: (error: unknown) => void;
+    },
   ): Promise<GroupOperationOutcome> {
     const key = invocationKey(lease, ticket.id);
     if (invoking.has(key))
@@ -311,7 +326,16 @@ export function createGroupOperationCoordinator(
       if (!current) return { kind: "stale" };
       if (current.status) return currentOutcome(current);
       if (firstAttempt && definiteRejection(error)) {
-        context.release(ticket.id);
+        if (observationWait.expired()) {
+          context.update({ ...current, admissionFailure: { error } });
+          if (lease.current()) {
+            try {
+              observationWait.onNotAdmitted?.(error);
+            } catch {
+              if (lease.current()) context.report("terminal_effect_failed");
+            }
+          }
+        } else context.release(ticket.id);
         return lease.current()
           ? { kind: "not_admitted", id: ticket.id, error }
           : { kind: "stale" };
@@ -322,6 +346,45 @@ export function createGroupOperationCoordinator(
         : { kind: "stale" };
     } finally {
       invoking.delete(key);
+    }
+  }
+
+  /** Bound presentation only. The original invocation keeps its ticket protected
+   * and remains the sole native writer until its own finally releases it. */
+  async function observeInvocation(
+    lease: GroupOperationLease,
+    ticket: GroupOperationTicket,
+    send: GroupOperationInvoke,
+    firstAttempt: boolean,
+    onNotAdmitted?: (error: unknown) => void,
+  ): Promise<GroupOperationOutcome> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let expired = false;
+    try {
+      return await Promise.race([
+        invoke(lease, ticket, send, firstAttempt, {
+          expired: () => expired,
+          onNotAdmitted,
+        }),
+        new Promise<GroupOperationOutcome>((resolve) => {
+          timer = setTimeout(() => {
+            expired = true;
+            if (!lease.current()) return resolve({ kind: "stale" });
+            const current = ticketFor(lease, ticket.id);
+            if (!current) return resolve({ kind: "stale" });
+            if (!current.status)
+              context.update({ ...current, stage: "unconfirmed" });
+            const latest = ticketFor(lease, ticket.id);
+            resolve(
+              lease.current() && latest
+                ? currentOutcome(latest)
+                : { kind: "stale" },
+            );
+          }, 10_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -346,7 +409,9 @@ export function createGroupOperationCoordinator(
       if (existing) return currentOutcome(existing);
       let id: string;
       try {
-        id = await context.commands.mint(lease.owner, lease.accountId);
+        id = await readWithDeadline(() =>
+          context.commands.mint(lease.owner, lease.accountId),
+        );
       } catch (error) {
         return lease.current()
           ? { kind: "not_admitted", error }
@@ -376,7 +441,13 @@ export function createGroupOperationCoordinator(
         return { kind: "stale" };
       }
       if (!lease.current()) return { kind: "stale" };
-      return invoke(lease, ticket, request.invoke, true);
+      return observeInvocation(
+        lease,
+        ticket,
+        request.invoke,
+        true,
+        request.onNotAdmitted,
+      );
     },
     async resume(
       id: string,
@@ -391,9 +462,13 @@ export function createGroupOperationCoordinator(
           id,
           error: new Error("Operation is not tracked"),
         };
-      if (isTerminal(ticket.status) || publicCommitted(ticket.status))
+      if (
+        ticket.admissionFailure ||
+        isTerminal(ticket.status) ||
+        publicCommitted(ticket.status)
+      )
         return currentOutcome(ticket);
-      return invoke(lease, ticket, send, false);
+      return observeInvocation(lease, ticket, send, false);
     },
     async cancel(id: string): Promise<GroupOperationOutcome> {
       const lease = context.capture();
@@ -405,7 +480,11 @@ export function createGroupOperationCoordinator(
           id,
           error: new Error("Operation is not tracked"),
         };
-      if (isTerminal(ticket.status) || publicCommitted(ticket.status))
+      if (
+        ticket.admissionFailure ||
+        isTerminal(ticket.status) ||
+        publicCommitted(ticket.status)
+      )
         return currentOutcome(ticket);
       context.update({ ...ticket, cancelRequested: true });
       if (!lease.current()) return { kind: "stale" };
@@ -429,7 +508,9 @@ export function createGroupOperationCoordinator(
         .tickets()
         .filter(
           (ticket) =>
-            ticket.account_id === lease.accountId && !isTerminal(ticket.status),
+            ticket.account_id === lease.accountId &&
+            !ticket.admissionFailure &&
+            !isTerminal(ticket.status),
         )
         .sort((left, right) => left.id.localeCompare(right.id));
       const selected = [

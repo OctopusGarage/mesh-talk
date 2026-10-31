@@ -553,6 +553,48 @@ impl Node {
         None
     }
 
+    /// Local recovery may finish for retained group/own media without a recipient
+    /// completion record. This predicate must never authorize a network proof.
+    pub(in crate::node) fn local_media_recovery_complete(
+        &self,
+        conversation: ConversationId,
+    ) -> bool {
+        if !self.media.contains(conversation) {
+            return false;
+        }
+        if self.has_verified_file_completion(conversation) {
+            return true;
+        }
+        // A successful byte write cannot retire an incoming offer whose durable
+        // completion metadata still needs to be committed.
+        if self
+            .delivery
+            .lock()
+            .expect("delivery lock not poisoned")
+            .cards_for_file(conversation)
+            .iter()
+            .any(|card| {
+                card.completion_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.owner_account == self.account_id())
+            })
+        {
+            return false;
+        }
+        let manifest = self
+            .files
+            .lock()
+            .expect("files lock not poisoned")
+            .manifest(&conversation)
+            .cloned();
+        manifest.is_some_and(|manifest| {
+            super::media_store::manifest_is_media(&manifest)
+                && self
+                    .managed_media_for_export(conversation, &manifest)
+                    .is_some()
+        })
+    }
+
     pub(in crate::node) fn has_verified_file_completion(
         &self,
         conversation: ConversationId,

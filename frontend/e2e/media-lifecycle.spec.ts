@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 test("same-identity disable/re-enable never returns a revoked URL", async ({
   page,
 }) => {

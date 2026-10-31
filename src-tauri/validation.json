@@ -33,9 +33,7 @@
           ]
         }
       ],
-      "consumers": [
-        "frontend-group-metadata"
-      ]
+      "consumers": ["frontend-group-metadata"]
     },
     {
       "id": "desktop-screenshot-shortcuts",
@@ -680,6 +678,10 @@
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
+            "name": "Inbound callbacks queue main-thread publication before acquiring exact-session and runtime authority, preventing native-window rendezvous from inverting the session lock.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
             "name": "Inbound DM, channel and file presentation queues before acquiring desktop-session authority; UI-thread execution revalidates the exact session and runtime without a worker/main-thread focus-query deadlock.",
             "reference": "docs/module-boundaries.md#account-document-projections"
           }
@@ -847,6 +849,10 @@
           {
             "name": "Every archive retains a fresh salt and original key compatibility; verified restoration installs its supplied key with the new local credentials.",
             "reference": "docs/backup-recovery.md#restore-after-losing-a-device"
+          },
+          {
+            "name": "Encrypted credential work retains its own serialization through caller cancellation while session and app-lock authority cover only capture, atomic publication/deletion and final plaintext release.",
+            "reference": "docs/module-boundaries.md"
           }
         ]
       },
@@ -1191,6 +1197,10 @@
           {
             "name": "X11 helper output is a bounded PNG in a private temporary directory, with bounded execution and cleanup on every result",
             "reference": "specifications/platform_permissions.md#screenshots"
+          },
+          {
+            "name": "Capture owns restoration through IPC cancellation; bounded pixel acquisition attempts restoration on timeout while stale sessions cannot restore or obtain pixels.",
+            "reference": "docs/module-boundaries.md"
           }
         ]
       },
@@ -1241,7 +1251,10 @@
         "src-tauri/src/chat_commands/account.rs",
         "src-tauri/src/linked_account.rs",
         "src-tauri/src/recovery.rs",
-        "src-tauri/src/device_enrollment.rs"
+        "src-tauri/src/device_enrollment.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/session_store.rs",
+        "src-tauri/src/session_store/"
       ],
       "rust": [
         {
@@ -1284,6 +1297,10 @@
           {
             "name": "Signed-out enrollment creates only a device identity until source proof validates; shared credentials and the verified account profile publish together through the recovery journal with login namespace and generation guards",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Shared-login profile publication retains runtime retirement, while native saved-login I/O retains only authentication ordering; cancellation and retirement cannot publish stale metadata or events after runtime, session or app-lock revision changes.",
+            "reference": "docs/ARCHITECTURE.md"
           }
         ]
       },

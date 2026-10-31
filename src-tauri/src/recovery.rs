@@ -188,20 +188,24 @@ fn create_backup_offline(
     };
     // Local status contains no key. The archive itself is already durable, so a
     // failed status update does not invalidate the successful backup.
-    let manager = FileManager::new(scratch.to_path_buf());
     if record_status {
-        let _ = authority.current(|_| {
-            proof.commit(|| {
-                manager
-                    .write_encrypted_file(
-                        username,
-                        "meta/backup_status.enc",
-                        &status,
-                        auth_password,
-                    )
-                    .map_err(|_| CommandError::Io("Could not record backup status".into()))
+        let prepared = FileManager::new(scratch.to_path_buf()).prepare_encrypted_write(
+            username,
+            "meta/backup_status.enc",
+            &status,
+            auth_password,
+        );
+        if let Ok(prepared) = prepared
+            && let Ok(Ok(published)) = authority.current(|_| {
+                proof.commit(|| {
+                    prepared
+                        .publish()
+                        .map_err(|_| CommandError::Io("Could not record backup status".into()))
+                })
             })
-        });
+        {
+            published.finish();
+        }
     }
     Ok(BackupCreated {
         recovery_key: key.display(),
@@ -330,20 +334,14 @@ pub async fn backup_status(
     app_state: tauri::State<'_, AppState>,
     node_state: tauri::State<'_, NodeState>,
 ) -> Result<Option<BackupStatus>, CommandError> {
-    setup::with_storage(
-        &app_state,
-        &node_state,
-        None,
-        |manager, username, password| {
-            if !manager.file_exists(username, "meta/backup_status.enc") {
-                return Ok(None);
-            }
-            manager
-                .read_encrypted_file(username, "meta/backup_status.enc", password)
-                .map(Some)
-                .map_err(|_| CommandError::Io("Could not read backup status".into()))
-        },
-    )
+    setup::with_storage(&app_state, &node_state, None, |storage| {
+        if !storage.exists("meta/backup_status.enc") {
+            return Ok(None);
+        }
+        storage
+            .read("meta/backup_status.enc", "Could not read backup status")
+            .map(Some)
+    })
     .await
 }
 

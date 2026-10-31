@@ -8,10 +8,19 @@ struct Fixture {
     app: AppState,
     node: NodeState,
     admission: RuntimeAdmission,
+    authority: RuntimeAuthority,
 }
 
 impl Fixture {
     async fn new(name: &str, raw_password: &str) -> Self {
+        Self::create(name, raw_password, true).await
+    }
+
+    async fn local(name: &str, raw_password: &str) -> Self {
+        Self::create(name, raw_password, false).await
+    }
+
+    async fn create(name: &str, raw_password: &str, discoverable: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let auth = AuthService::new(Arc::new(IdentityManager::new(FileManager::new(
             root.path().to_owned(),
@@ -25,7 +34,7 @@ impl Fixture {
         let authority =
             RuntimeAuthority::request(app.session().clone(), lease.clone(), node.clone()).unwrap();
         let permit = authority.begin().await.unwrap();
-        let runtime = start(root.path(), lease.owner(), name, raw_password).await;
+        let runtime = start(root.path(), lease.owner(), name, raw_password, discoverable).await;
         assert!(permit.install(runtime).await);
         let admission = RuntimeAdmission::capture_lease(&app, &node, &lease).unwrap();
         Self {
@@ -33,6 +42,7 @@ impl Fixture {
             app,
             node,
             admission,
+            authority,
         }
     }
 
@@ -42,10 +52,254 @@ impl Fixture {
     }
 }
 
-async fn start(root: &Path, owner: &str, name: &str, password: &str) -> NodeRuntime {
-    let reserve = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let port = reserve.local_addr().unwrap().port();
-    drop(reserve);
+#[tokio::test]
+async fn native_login_persistence_does_not_hold_runtime_retirement_or_publish_after_stop() {
+    use tauri::Listener;
+
+    let name = "linked-credential-retirement";
+    let fixture = Fixture::local(name, "private-password").await;
+    let settings =
+        crate::settings::SettingsState::isolated(fixture.root.path().join("settings.json"));
+    let app = tauri::test::mock_builder()
+        .manage(settings.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = published.clone();
+    app.listen("account-profile-changed", move |_| {
+        observed.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    crate::session_store::before_next_io(
+        name,
+        "save",
+        Box::new(move || {
+            let _ = entered.send(());
+            let _ = held.recv();
+        }),
+    );
+    {
+        let mut guard = fixture.node.0.write().await;
+        let runtime = guard.as_mut().unwrap();
+        initialize_source(&fixture.app, &fixture.admission, runtime).unwrap();
+        let (shutdown, stopping) = tokio::sync::oneshot::channel();
+        runtime.register_graceful_host_task(
+            shutdown,
+            tokio::spawn(reconcile(
+                app.handle().clone(),
+                fixture.root.path().to_owned(),
+                fixture.authority.clone(),
+                fixture.app.clone(),
+                fixture.node.clone(),
+                stopping,
+            )),
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    let node = fixture.node.clone();
+    let ticket = node.next_lifecycle_ticket();
+    let mut retirement = tokio::spawn(async move {
+        node.retire_if_current(ticket, async {}).await;
+    });
+    let retired_before_release =
+        tokio::time::timeout(Duration::from_secs(1), &mut retirement).await;
+    let auth_still_owned = fixture.app.auth_operation.try_lock().is_err();
+    // Release the fake provider and drain the actual auth owner before asserting,
+    // including RED: an uncancellable test worker must never outlive its fixture.
+    release.send(()).unwrap();
+    if retired_before_release.is_err() {
+        retirement.await.unwrap();
+    } else {
+        retired_before_release.as_ref().unwrap().as_ref().unwrap();
+    }
+    let _drained = fixture.app.auth_operation.lock().await;
+    assert!(
+        retired_before_release.is_ok(),
+        "native credential persistence retained runtime retirement"
+    );
+    assert!(
+        auth_still_owned,
+        "runtime retirement released credential write ordering"
+    );
+    assert!(fixture.node.0.read().await.is_none());
+    assert!(settings.get().last_user.is_none());
+    assert!(
+        crate::session_store::load(name).is_none(),
+        "retired runtime left a saved credential"
+    );
+    assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn verified_login_persistence_uses_one_app_lock_authorization() {
+    let fixture = Fixture::local("verified-linked-login", "private-password").await;
+    fixture.app.app_lock().set_identity_verifier(|| Ok(()));
+    let admission = fixture
+        .admission
+        .clone()
+        .verify_identity(None, "link a Mesh-Talk device")
+        .await
+        .unwrap();
+    {
+        let guard = fixture.node.0.read().await;
+        let revision = fixture.app.app_lock().authorization_revision().unwrap();
+        assert!(
+            admission
+                .checked_at_lock_revision(
+                    guard.as_ref().unwrap(),
+                    revision.wrapping_add(1),
+                    || -> Result<(), CommandError> {
+                        panic!("a sensitive proof cannot authorize a different revision")
+                    },
+                )
+                .is_err()
+        );
+        initialize_source(&fixture.app, &admission, guard.as_ref().unwrap()).unwrap();
+    }
+    let settings =
+        crate::settings::SettingsState::isolated(fixture.root.path().join("settings.json"));
+    let app = tauri::test::mock_builder()
+        .manage(settings.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        apply_current(
+            app.handle().clone(),
+            fixture.root.path().to_owned(),
+            fixture.app.clone(),
+            fixture.node.clone(),
+            admission,
+        ),
+    )
+    .await
+    .expect("verified login must not reacquire its held app-lock mutex")
+    .unwrap();
+    assert_eq!(
+        settings.get().last_user.as_deref(),
+        Some("verified-linked-login")
+    );
+    crate::session_store::clear("verified-linked-login");
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn native_login_persistence_keeps_auth_order_after_cancellation_and_rechecks_lock_revision() {
+    use tauri::Listener;
+
+    for (verified, cancel, invalidate) in [false, true].into_iter().flat_map(|verified| {
+        [(false, false), (true, false), (false, true), (true, true)]
+            .map(|(cancel, invalidate)| (verified, cancel, invalidate))
+    }) {
+        let name = format!("linked-credential-{verified}-{cancel}-{invalidate}");
+        let fixture = Fixture::local(&name, "private-password").await;
+        let admission = if verified {
+            fixture.app.app_lock().set_identity_verifier(|| Ok(()));
+            fixture
+                .admission
+                .clone()
+                .verify_identity(None, "link a Mesh-Talk device")
+                .await
+                .unwrap()
+        } else {
+            fixture.admission.clone()
+        };
+        let settings =
+            crate::settings::SettingsState::isolated(fixture.root.path().join("settings.json"));
+        let app = tauri::test::mock_builder()
+            .manage(settings.clone())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = published.clone();
+        app.listen("account-profile-changed", move |_| {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        {
+            let guard = fixture.node.0.read().await;
+            initialize_source(&fixture.app, &fixture.admission, guard.as_ref().unwrap()).unwrap();
+        }
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        crate::session_store::before_next_io(
+            &name,
+            "save",
+            Box::new(move || {
+                let _ = entered.send(());
+                let _ = held.recv();
+            }),
+        );
+        let caller = tokio::spawn(apply_current(
+            app.handle().clone(),
+            fixture.root.path().to_owned(),
+            fixture.app.clone(),
+            fixture.node.clone(),
+            admission,
+        ));
+        tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        if cancel {
+            caller.abort();
+        }
+        // An IPC cancellation cannot release the actual credential owner. The
+        // separate runtime writer and session/app-lock observations stay usable.
+        let runtime_available =
+            tokio::time::timeout(Duration::from_secs(1), fixture.node.0.write())
+                .await
+                .is_ok();
+        let auth_owned = fixture.app.auth_operation.try_lock().is_err();
+        assert!(fixture.app.session().get().is_some());
+        if invalidate {
+            fixture.app.app_lock().clear();
+        }
+        release.send(()).unwrap();
+        if cancel {
+            assert!(caller.await.unwrap_err().is_cancelled());
+        } else {
+            assert_eq!(caller.await.unwrap().is_err(), invalidate);
+        }
+        let drained = fixture.app.auth_operation.lock().await;
+        assert!(
+            runtime_available,
+            "native provider retained runtime read guard"
+        );
+        assert!(
+            auth_owned,
+            "caller cancellation released native write ordering"
+        );
+        assert_eq!(settings.get().last_user.is_some(), !invalidate);
+        assert_eq!(crate::session_store::load(&name).is_some(), !invalidate);
+        assert_eq!(
+            published.load(std::sync::atomic::Ordering::SeqCst),
+            !invalidate
+        );
+        crate::session_store::clear(&name);
+        drop(drained);
+        fixture.stop().await;
+    }
+}
+
+async fn start(
+    root: &Path,
+    owner: &str,
+    name: &str,
+    password: &str,
+    discoverable: bool,
+) -> NodeRuntime {
+    // Local credential/lifecycle tests do not probe discovery. Let the OS bind
+    // their port atomically instead of racing other tests after a reservation.
+    let port = if discoverable {
+        let reserve = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        reserve.local_addr().unwrap().port()
+    } else {
+        0
+    };
     NodeRuntime::start(
         root,
         owner,
@@ -264,6 +518,7 @@ async fn v4_pairing_adopts_login_preserving_storage_device_and_encrypted_history
         &before.user.user_id,
         "Messi10",
         " target-password ",
+        true,
     )
     .await;
     assert_eq!(restarted.user_id(), device);

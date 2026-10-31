@@ -179,6 +179,19 @@ four-buffer canvas budget limits animation working buffers to 64 MiB; decoder
 allocation limits are additional best-effort checks, not a process memory sandbox.
 Complete bytes are validated before durable preview persistence or exposure.
 
+Local recovery retires once retained, authenticated group or own media has a
+durable copy, even when that transfer has no recipient completion record.
+Later recovery wakes must not decode and overwrite the same completed media.
+Missing media remains recoverable, and incoming offers with completion bindings
+remain pending until their completion metadata is durable. This local decision
+does not authorize network delivery proofs or synthesize recipient receipts.
+Incoming group media retains its real bound completion evidence. Already stored
+bytes still pass through the existing chunk-reclamation owner: local-only media
+can retire its chunks, while sources with other group members retain signed chunks
+under the channel replica budget. Skipping a byte rewrite must not skip that policy.
+Chunk reclamation remains best-effort; retiring local byte recovery does not assert
+that every storage cleanup write succeeded.
+
 Repeated sends can reuse an own-authored, retained, byte-identical sticker
 transfer among the last 256 visible messages in the same conversation with the
 same expiration deadline. Reuse requires complete verified source chunks;

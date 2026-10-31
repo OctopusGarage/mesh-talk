@@ -28,6 +28,7 @@
     messages = {},
     generation = 0,
     controller = null;
+  let pendingChange = Promise.resolve();
   const normalize = (value) => value.replace(/\s+/g, " ").trim();
   function t(source, values = {}) {
     const message = messages[source] ?? source;
@@ -200,7 +201,7 @@
     if (/^zh(?:-|$)/.test(lower)) return "zh-Hans";
     return supported.find((code) => code === lower.split("-")[0]) ?? null;
   }
-  async function setLocale(code, { initial = false } = {}) {
+  async function changeLocale(code, { initial = false } = {}) {
     code = resolveLanguage(code) ?? "en";
     const current = ++generation;
     clearTimeout(statusTimer);
@@ -270,12 +271,22 @@
       clearTimeout(timeout);
     }
   }
+  function setLocale(code, options) {
+    const expectedGeneration = generation + 1;
+    const pending = changeLocale(code, options);
+    // A language-change listener can synchronously request a newer choice.
+    if (generation === expectedGeneration) pendingChange = pending;
+    return pending;
+  }
   window.MeshTalkLocale = {
     t,
     text,
     attr,
     apply,
     setLocale,
+    get ready() {
+      return pendingChange;
+    },
     get locale() {
       return locale;
     },

@@ -687,6 +687,12 @@ group connection or consume the connection budget reserved for ordinary delivery
 Private route rounds launch at most two probes concurrently and advance their
 cursor only for launched work; canceled queued routes retain their next turn.
 
+New account-group creation gives invitation-target verification one twenty-second
+deadline across the complete selected account set and its device routes. Every
+required account must pass the existing authenticated binding and capability
+checks before host authorization or durable group creation. Expiry rejects the
+selection without creating a partial group or skipping an unavailable target.
+
 Membership and key controls are signed authority. Invitations require normal acceptance; owners, transfers, removals and departures affect the projected authorized membership. A directory or relay cannot grant access. Historical recovery obeys invitation/key/visibility constraints and must not expose uninvited ancestry to a new participant.
 
 Account-authorized groups grant membership and owner roles to accounts, not
@@ -773,6 +779,16 @@ Reading a pending operation's unchanged status retains its retry nonce and does
 not wake all-peer reconciliation. Only advancing the existing one-second query
 retry gate emits that wake; admission and cancellation keep their own immediate
 notifications. UI polling must not become an unbounded synchronization producer.
+
+Normal and legacy operation publishers each select at most 128 retained groups
+per turn. When more remain, each turn includes the 64 most recently changed groups
+and rotates through the next 64 stable group keys with an independent cursor for
+each publisher. Retained terminal history therefore cannot permanently displace
+older pending requests or recovery heads. Cursors advance before document writes,
+reset on reopen and never change durable journal state. Selection releases the
+journal guard before publication; existing limits of 4,096 operation-document keys
+and 32 MiB of live operation data still bound successful writes. Fair selection
+does not evict retained authority or guarantee publication into a full store.
 
 Same-account group inventory is independent of that authority upgrade. Certified
 devices exchange bounded, versioned descriptive references through the existing
@@ -1352,9 +1368,13 @@ semantics.
 Sibling history invalidations that arrive while an older page is active retain
 one coalesced follow-up per active worker (at most four). The worker immediately
 queues that follow-up and cannot report UpToDate while it is pending; policy
-replacement/cancellation and worker failure clear the pending marker. Saved
-Messages participates in the same bounded UI history reconciliation even when
-the own account is absent from the contact roster.
+replacement, cancellation or a terminated worker retire its pending marker.
+A failed optional favorites response does not retire the history worker:
+unfinished archive pages and any coalesced refresh still schedule immediate
+history work while retaining the favorites error. Without pending history work,
+that error waits for the next normal wake or repair tick instead of creating a
+busy retry loop. Saved Messages participates in the same bounded UI history
+reconciliation even when the own account is absent from the contact roster.
 
 Every account-target enqueue persists verified recipient and sibling fanout
 bindings before constructing immutable delivery destinations. Acceptance cannot
@@ -1367,6 +1387,15 @@ under current session/policy authority and changes only that reviewed binding.
 It never marks a safety number verified or merges old-account conversations.
 
 Ongoing `MTAHS2` reconciliation separates file cards from file bytes; frozen `MTAHS1` retains its attachment-coupled behavior. Source and receiver category intersections and process-local policy revisions guard selected exports and durable imports. These changes keep the existing bounded page/frame budgets.
+
+Optional attachment encryption and verification run in admitted blocking work
+without retaining the account-sync commit, delivery or policy guards. Preparation
+checks runtime admission and the exact policy revision between chunks. Final
+publication reacquires the commit guards and rechecks personal removal, recall,
+the policy revision and the live manifest/card, so deletion, policy replacement
+(including off/on) or runtime retirement during preparation cannot revive bytes.
+The final rename and fsync remain inside this commit boundary; synchronous disk
+work is not preemptible, and retirement still waits for its admitted worker.
 
 Channel archive, file-card and attachment-byte exports require the source to
 retain accepted membership under its current account. A certified sibling with
@@ -1516,7 +1545,18 @@ documents therefore do not wait for history/favorite responses. Each keeps its
 own continuation and retry state, and all optional category/read-entitlement
 checks remain in force. Document progress and archive progress are reported
 separately; the total remains four synchronization workers sharing the same
-eight TCP slots.
+eight TCP slots. Missing-attachment selection runs inside the existing history
+worker and its tracked blocking work, so a stalled local scan cannot park the
+parent scheduler or delay otherwise ready document workers. On completion, the
+parent still checks the captured policy revision and certified sibling before
+scheduling selected files; cancellation retains the blocking worker's admission
+until it exits.
+
+Local history admission backpressure retains the peer, history/favorites cursors
+and pending refresh through the existing five-second backoff. The queued retry
+deadline wakes the existing history lane when its worker is available; ordinary
+wakes and periodic refresh cannot consume that deferred demand or shorten its
+backoff. Other ready peers can proceed while it waits, without a busy retry loop.
 
 Message Yourself is the self-account route. With no siblings, acceptance commits local history and encrypted file retention without reserving remote delivery capacity. A later certified sibling can reconcile retained records with their original logical IDs. Signed personal file evidence binds the exact manifest to its personal host; it does not grant access to unrelated account or channel files. Local acceptance and a completed selected exchange are distinct facts, and neither promises indefinite availability.
 
@@ -2263,6 +2303,26 @@ index reconstruction and uncached controls still require startup work.
 
 ### Session reuse contract
 
+A fresh node dial, including Control-priority account synchronization, has one
+twenty-second deadline across privacy admission, authentication admission, TCP
+capacity, and every candidate route. Per-route adaptive deadlines cannot extend
+that overall lifetime. Aggregate expiry is distinct from a remote Noise dial
+timeout and cannot trigger the selected-operation Wake recovery described above.
+The disclosure read gate still encloses the Noise handshake and verified-peer
+commit, so a completed privacy change cannot be followed by an old attempt's
+identity disclosure. Cancellation drops all racing sockets, their permits and
+the authentication lease before releasing the gate.
+
+Discovery owns each visibility guard together with its UDP operation. One second
+bounds the complete announcement or routed probe, including guard acquisition;
+socket backpressure cannot retain the guard indefinitely. A timeout cancels the
+send, and the existing periodic producer owns retries. Disabling visibility still
+waits for any already-admitted send and prevents subsequent publication.
+
+The optional pinned relay gateway owns its proxy accept loop and every forwarding
+task. Gateway cancellation and upstream replacement close the owned listener and
+active streams; old forwarding tasks cannot retain a port or outlive their gateway.
+
 A retained session is exclusive to one borrower and reusable only after a complete successful sequential sync exchange has consumed its responses. The key/admission checks include full public identity, endpoint, current policy generation and authenticated account/role consistency. Canceled operations, malformed replies, pending unexpected bytes, EOF and stale policy/bindings cause eviction. Idle expiry releases capacity even without another checkout. When an authenticated
 route race wins a different endpoint from the caller's verified roster hint, the
 next sync exchange may reuse the winning session only while both exact endpoints
@@ -2606,11 +2666,12 @@ reject the appended optional tags safely and keep ten-second anti-entropy.
 Existing frame indices and stored encodings remain unchanged.
 Appending records does not reset a forward cursor: a changed sweep schedules a
 fresh pass for IDs inserted behind that cursor. Up-to-date status requires a
-completed validated sweep and no pending attachment work. Four history workers
-and two attachment workers separate text/preferences from slow file downloads;
-whole-operation deadlines and policy cancellation bound their lifetimes. Tracked
-blocking work keeps source scans and durable imports out of the shared network
-accept task, and runtime retirement waits for admitted persistence work.
+completed validated sweep and no pending attachment work. Four synchronization
+workers and two attachment workers keep document/history lanes and file downloads
+within their existing budgets; network deadlines and policy cancellation bound
+asynchronous exchanges. Tracked blocking work keeps source scans and durable
+imports out of the shared network accept task, and runtime retirement waits for
+admitted persistence work.
 One metadata index selects at most sixteen payloads per page; append-only sources
 extend the index, while erasure, policy and membership changes invalidate it.
 Known-account history uses a first-DM metadata index that scans only appended

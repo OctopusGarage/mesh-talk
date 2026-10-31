@@ -5,6 +5,8 @@ import { resolve } from "node:path";
 import { mutationShard, parseSelectedMutants, validateMutationReport } from "./mutation-evidence.mjs";
 
 const args = process.argv.slice(2);
+const listOnly = args[0] === "--list-only";
+if (listOnly) args.shift();
 assert.ok(args.length === 0 || (args.length === 2 && args[0] === "--in-diff"), "unsupported mutation filter arguments");
 const shard = mutationShard(Number(process.env.GITHUB_RUN_NUMBER ?? "1"), Number(process.env.MUTATION_WORKER ?? "0"), Number(process.env.MUTATION_WORKERS ?? "1"));
 // Keep four isolated test processes and the existing per-test hang detector.
@@ -21,6 +23,11 @@ const listing = spawnSync("cargo", ["mutants", "--list", "--json", ...options], 
 if (listing.error) throw listing.error;
 assert.equal(listing.status, 0, `mutation list failed: ${listing.stderr}`);
 const selected = parseSelectedMutants(listing.stdout, listing.status);
+if (listOnly) {
+  console.log(`Mutation sample ${shard}: ${selected.length} selected`);
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `selected=${selected.length}\n`);
+  process.exit(0);
+}
 const reportPath = resolve("../mutants.out/outcomes.json");
 let exitCode = 0;
 if (selected.length > 0) {

@@ -12,12 +12,11 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 function archiveUri(uri) {
-  if (!uri.toLowerCase().includes("azure.archive.ubuntu.com")) return uri;
   let parsed;
   try {
     parsed = new URL(uri);
   } catch {
-    throw new Error("Unsupported Azure APT URI");
+    throw new Error("Unsupported APT URI");
   }
   if (parsed.hostname !== "azure.archive.ubuntu.com") return uri;
   const exact = /^https?:\/\/azure\.archive\.ubuntu\.com\/ubuntu(\/?)$/.exec(
@@ -61,11 +60,8 @@ function rewriteSource(text, deb822, references) {
             body,
           );
         if (!row) {
-          if (
-            /^[ \t]*deb(?:-src)?\b/.test(body) &&
-            body.includes("azure.archive.ubuntu.com")
-          ) {
-            throw new Error("Unsupported Azure APT source line");
+          if (/^[ \t]*deb(?:-src)?\b/.test(body)) {
+            throw new Error("Unsupported APT source line");
           }
           return line;
         }
