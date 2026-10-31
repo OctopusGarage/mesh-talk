@@ -311,6 +311,7 @@ fn registered_cloud_commands_round_trip_real_archive_and_restart_runtime() {
                 .unwrap();
             let ids: Vec<_> = node
                 .channel_history(channel, 100)
+                .unwrap()
                 .iter()
                 .map(|entry| entry.id.to_hex())
                 .collect();
@@ -459,6 +460,7 @@ fn registered_cloud_commands_round_trip_real_archive_and_restart_runtime() {
     assert!(
         reopened
             .channel_history(channel, 100)
+            .unwrap()
             .iter()
             .any(|entry| entry.text == "encrypted cloud fixture 🌍".as_bytes())
     );

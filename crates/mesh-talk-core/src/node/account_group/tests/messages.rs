@@ -92,8 +92,8 @@ async fn account_operation_send_confirms_exact_custody(external_member: bool, ba
                 if status.is_some_and(|status| {
                     status.phase == AccountGroupOperationPhase::Committed
                         && status.primary_event.is_some_and(|event| {
-                            holder.log.lock().unwrap().get(&event).is_some()
-                                && source.channel_custody_count(group, event)
+                            holder.log.lock().unwrap().get(&event).unwrap().is_some()
+                                && source.channel_custody_count(group, event).unwrap()
                                     == Some(usize::from(external_member))
                         })
                 }) {
@@ -119,12 +119,13 @@ async fn account_operation_send_confirms_exact_custody(external_member: bool, ba
     assert!(
         holder
             .channel_history(group, 10)
+            .unwrap()
             .iter()
             .any(|row| row.id == event),
         "the member received the exact account-operation message"
     );
     assert_eq!(
-        source.channel_custody_count(group, event),
+        source.channel_custody_count(group, event).unwrap(),
         Some(usize::from(external_member)),
         "the explicit send fanout confirms external durable custody and excludes own-account siblings"
     );
@@ -200,9 +201,9 @@ async fn assert_member_message(sticker: bool, protected: bool) {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == EventKind::Message)
-        .cloned()
         .collect();
     assert_eq!(effects.len(), 1);
     assert!(effects[0].verify_integrity() && effects[0].verify_signature());
@@ -219,6 +220,7 @@ async fn assert_member_message(sticker: bool, protected: bool) {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::Message)
             .count(),
@@ -341,7 +343,7 @@ pub(super) fn panic_account_send_timeout(
         panic!("action timeout: selected source has no original effect receipt; {diagnostics}");
     };
     assert!(
-        external.log.lock().unwrap().get(&event).is_some(),
+        external.log.lock().unwrap().get(&event).unwrap().is_some(),
         "action timeout: committed original effect has not reached the external member; {diagnostics}"
     );
     assert!(
@@ -534,6 +536,7 @@ async fn reference_member_send_fixture(fail_receive: bool) {
             assert!(
                 reference
                     .operation_projection(group)
+                    .unwrap()
                     .requests
                     .iter()
                     .any(|request| request.reference.id == id && request.body.is_some())
@@ -560,6 +563,7 @@ async fn reference_member_send_fixture(fail_receive: bool) {
                     && status.primary_event.is_some_and(|event| {
                         external
                             .history(group, 20)
+                            .unwrap()
                             .iter()
                             .any(|row| row.id == event)
                     })
@@ -581,7 +585,7 @@ async fn reference_member_send_fixture(fail_receive: bool) {
             .lock()
             .unwrap()
             .get(&event_id)
-            .cloned()
+            .unwrap()
             .unwrap();
         assert_eq!(event.kind, EventKind::Message);
         assert_eq!(
@@ -590,7 +594,7 @@ async fn reference_member_send_fixture(fail_receive: bool) {
         );
         assert!(event.verify_integrity() && event.verify_signature());
         assert_eq!(submit().unwrap(), status);
-        let own=reference.history(group,20).into_iter().find(|row|row.id==event_id)
+        let own=reference.history(group,20).unwrap().into_iter().find(|row|row.id==event_id)
             .expect("a committed explicit own send must survive in private history even when optional history is disabled");
         assert!(own.from_me);
         assert_eq!(own.who, "you");
@@ -600,6 +604,7 @@ async fn reference_member_send_fixture(fail_receive: bool) {
                 .lock()
                 .unwrap()
                 .entry(event_id)
+                .unwrap()
                 .unwrap()
                 .from,
             source.user_id()
@@ -616,6 +621,7 @@ async fn reference_member_send_fixture(fail_receive: bool) {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::Message)
             .count(),
@@ -680,7 +686,11 @@ async fn old_operation_source_never_receives_an_unsupported_send_body() {
         .unwrap();
     assert_eq!(status.phase, AccountGroupOperationPhase::WaitingForExecutor);
     assert!(
-        reference.operation_projection(group).requests.is_empty(),
+        reference
+            .operation_projection(group)
+            .unwrap()
+            .requests
+            .is_empty(),
         "an old v1 source must not receive a body which it can only reject as unsupported"
     );
     reference
@@ -690,7 +700,7 @@ async fn old_operation_source_never_receives_an_unsupported_send_body() {
         .get_mut(&source.user_id())
         .unwrap()
         .kinds |= AccountGroupOperationKind::Text.capability_bit();
-    let requests = reference.operation_projection(group).requests;
+    let requests = reference.operation_projection(group).unwrap().requests;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].reference.id, id);
     assert!(requests[0].body.is_some());
@@ -749,6 +759,7 @@ async fn source_rejects_a_valid_signed_send_beyond_the_ordinary_expiry_horizon()
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::Message)
             .count(),
@@ -758,15 +769,10 @@ async fn source_rejects_a_valid_signed_send_beyond_the_ordinary_expiry_horizon()
 
 #[cfg(unix)]
 #[test]
-fn an_existing_live_send_copy_must_be_synced_before_terminal_adoption() {
+fn an_existing_live_send_copy_requires_writable_storage_before_terminal_adoption() {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let requester = node(&dir.path().join("requester"), &account);
-    let received_dir = dir.path().join("received-only");
-    std::fs::create_dir(&received_dir).unwrap();
-    let received_path = received_dir.join("messages.log");
-    *requester.received.lock().unwrap() =
-        crate::node::received_log::ReceivedLog::open(&received_path, "pw").unwrap();
     let group = new_channel_id();
     let event_id = EventId::new([0x69; 32]);
     let plaintext = crate::node::MessageBody::new(b"already received live".to_vec(), None).encode();
@@ -783,14 +789,22 @@ fn an_existing_live_send_copy_must_be_synced_before_terminal_adoption() {
         wall_clock: 2,
         plaintext,
     };
-    let moved = dir.path().join("temporarily-moved-received");
-    std::fs::rename(&received_dir, &moved).unwrap();
+    requester
+        .received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(true)
+        .unwrap();
     let result = requester.import_own_account_channel_copy(&row);
-    // Always restore the owned directory before asserting or closing handles.
-    std::fs::rename(&moved, &received_dir).unwrap();
+    requester
+        .received
+        .lock()
+        .unwrap()
+        .fail_appends_for_test(false)
+        .unwrap();
     assert!(
         result.is_err(),
-        "an existing unsynced live row cannot acknowledge a durable private send copy"
+        "an existing live row cannot bypass a failed durable publication barrier"
     );
     requester.import_own_account_channel_copy(&row).unwrap();
     assert_eq!(
@@ -799,6 +813,7 @@ fn an_existing_live_send_copy_must_be_synced_before_terminal_adoption() {
             .lock()
             .unwrap()
             .entry(event_id)
+            .unwrap()
             .unwrap()
             .wall_clock,
         1,
@@ -844,9 +859,9 @@ async fn prepared_member_send_recovers_exact_sidecars_and_terminal_on_node_resta
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::Message)
-        .cloned()
         .unwrap();
     assert_eq!(source.sentlog.lock().unwrap().entries(&group).len(), 1);
     let secrets = source.identity.secret_bytes();
@@ -895,6 +910,7 @@ async fn prepared_member_send_recovers_exact_sidecars_and_terminal_on_node_resta
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::Message)
             .count(),
@@ -930,7 +946,7 @@ async fn private_send_completion_rejects_forged_or_unrelated_public_event_proofs
         )
         .unwrap();
     source.maintain_account_group_operation_effects();
-    let original = source.operation_projection(group);
+    let original = source.operation_projection(group).unwrap();
     assert!(original.results[0].message_event.is_some());
     assert!(
         OperationFrame::decode(

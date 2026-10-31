@@ -80,8 +80,8 @@ impl GroupRelayFixture {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
-            .cloned()
             .collect::<Vec<_>>();
         for event in setup {
             b.log.lock().unwrap().append_durable(event).unwrap();
@@ -178,7 +178,7 @@ impl GroupRelayFixture {
         assert_eq!(offer.event_id, manifest);
         assert_eq!(offer.file_conv, file);
         assert!(offer.is_channel);
-        assert_eq!(self.b.file_progress(file).unwrap().done, 0);
+        assert_eq!(self.b.file_progress(file).unwrap().unwrap().done, 0);
         (manifest, file, payload)
     }
 
@@ -274,7 +274,7 @@ async fn ordinary_group_file_crosses_federation_after_consent_and_client_restart
         f.return_controls().await;
         f.transfer_tick().await;
         assert_eq!(
-            f.b.file_progress(file).unwrap().done,
+            f.b.file_progress(file).unwrap().unwrap().done,
             0,
             "ordinary file bytes require explicit recipient consent"
         );
@@ -282,13 +282,13 @@ async fn ordinary_group_file_crosses_federation_after_consent_and_client_restart
         f.return_controls().await;
         f.restart_clients();
         assert_eq!(
-            f.b.attachment_consent_status(file),
+            f.b.attachment_consent_status(file).unwrap(),
             Some(ReceiveDecision::Accepted)
         );
         for _ in 0..8 {
             f.return_controls().await;
             f.transfer_tick().await;
-            if f.b.file_ready_to_save(file) {
+            if f.b.file_ready_to_save(file).unwrap() {
                 break;
             }
         }
@@ -312,7 +312,7 @@ async fn ordinary_group_file_crosses_federation_after_consent_and_client_restart
                 .lock()
                 .unwrap()
                 .received_control(manifest)
-                .cloned()
+                .unwrap()
                 .expect("verified group completion must return through federation");
         assert!(
             super::file_consent::Decision::open(&control)
@@ -339,7 +339,7 @@ async fn declined_group_file_and_removed_recipient_do_not_receive_relay_chunks()
         f.return_controls().await;
         f.transfer_tick().await;
         assert_eq!(
-            f.b.file_progress(file).unwrap().done,
+            f.b.file_progress(file).unwrap().unwrap().done,
             0,
             "a newer decline must revoke an earlier signed approval before upload"
         );
@@ -350,7 +350,7 @@ async fn declined_group_file_and_removed_recipient_do_not_receive_relay_chunks()
             .unwrap();
         f.transfer_tick().await;
         assert_eq!(
-            f.b.file_progress(file).unwrap().done,
+            f.b.file_progress(file).unwrap().unwrap().done,
             0,
             "an approval cannot outlive current membership in its exact group"
         );
@@ -373,7 +373,7 @@ async fn expired_group_file_cannot_export_chunks_after_prior_recipient_approval(
                 .lock()
                 .unwrap()
                 .received_control(manifest)
-                .cloned()
+                .unwrap()
                 .expect("the sender must first durably receive the exact approval");
         assert_eq!(
             super::file_consent::Decision::open(&approved)
@@ -386,6 +386,7 @@ async fn expired_group_file_cannot_export_chunks_after_prior_recipient_approval(
                 .lock()
                 .unwrap()
                 .events(&file)
+                .unwrap()
                 .into_iter()
                 .last()
                 .unwrap()
@@ -409,7 +410,7 @@ async fn expired_group_file_cannot_export_chunks_after_prior_recipient_approval(
             !f.ps.lock().unwrap().has(&outer) && !f.qs.lock().unwrap().has(&outer),
             "an old accepted control must not export expired ciphertext to either relay"
         );
-        assert!(f.b.log.lock().unwrap().events(&file).is_empty());
+        assert!(f.b.log.lock().unwrap().events(&file).unwrap().is_empty());
         assert!(f.b.read_file(file).is_err());
     })
     .await
@@ -436,7 +437,7 @@ async fn malformed_and_other_group_consent_cannot_authorize_group_file_chunks() 
         f.a.create_channel("Unrelated group", vec![proof.public()])
             .await
             .unwrap();
-        assert!(f.a.group_member(&proof.public()));
+        assert!(f.a.group_member(&proof.public()).unwrap());
         let decision = super::file_consent::Decision {
             file,
             manifest,
@@ -457,6 +458,7 @@ async fn malformed_and_other_group_consent_cannot_authorize_group_file_chunks() 
                 .lock()
                 .unwrap()
                 .received_control(manifest)
+                .unwrap()
                 .is_none()
         );
         let mut correct = decision;
@@ -480,10 +482,11 @@ async fn malformed_and_other_group_consent_cannot_authorize_group_file_chunks() 
                 .lock()
                 .unwrap()
                 .received_control(manifest)
+                .unwrap()
                 .is_none()
         );
         f.transfer_tick().await;
-        assert_eq!(f.b.file_progress(file).unwrap().done, 0);
+        assert_eq!(f.b.file_progress(file).unwrap().unwrap().done, 0);
         assert!(f.b.read_file(file).is_err());
     })
     .await
@@ -529,8 +532,8 @@ async fn authorized_group_file_card_surfaces_without_observing_the_senders_annou
                 .lock()
                 .unwrap()
                 .events(&f.group)
+                .unwrap()
                 .into_iter()
-                .cloned()
                 .collect::<Vec<_>>();
         for event in history {
             recipient.log.lock().unwrap().append_durable(event).unwrap();
@@ -548,11 +551,12 @@ async fn authorized_group_file_card_surfaces_without_observing_the_senders_annou
         assert!(
             recipient
                 .channel_history(f.group, 10)
+                .unwrap()
                 .into_iter()
                 .any(|row| row.id == manifest && row.file.is_some()),
             "the history projection must retain the same exact signed file identity"
         );
-        assert_eq!(recipient.file_progress(file).unwrap().done, 0);
+        assert_eq!(recipient.file_progress(file).unwrap().unwrap().done, 0);
     })
     .await
     .expect("history-only group file reception must remain bounded");
@@ -582,7 +586,14 @@ async fn invisible_group_permission_cannot_republish_revoked_private_file_consen
             f.a.enqueue_file_to_account(&f.b.account_id(), &source, crate::file::FileKind::File)
                 .await
                 .unwrap();
-        let event = f.a.log.lock().unwrap().get(&manifest).unwrap().clone();
+        let event =
+            f.a.log
+                .lock()
+                .unwrap()
+                .get(&manifest)
+                .unwrap()
+                .unwrap()
+                .clone();
         let private_scope = event.conversation_id;
         f.b.log.lock().unwrap().append_durable(event).unwrap();
         f.b.process_file_events(private_scope);
@@ -600,7 +611,7 @@ async fn invisible_group_permission_cannot_republish_revoked_private_file_consen
         f.b.set_invisible(true).await.unwrap();
         f.b.set_allowed(&f.a.account_id(), false).await.unwrap();
         assert!(!f.b.known_account_allowed(&f.ap.public()));
-        assert!(f.b.group_member(&f.ap.public()));
+        assert!(f.b.group_member(&f.ap.public()).unwrap());
         assert!(
             f.b.file_consent_events(&f.ap.public())
                 .unwrap()
@@ -629,14 +640,14 @@ async fn offline_group_file_is_deposited_before_consent_and_received_after_sende
         // The recipient has not polled its mailbox, observed the card, or
         // issued a receive decision while the sender uploads encrypted custody.
         let (manifest, file, payload) = f.enqueue_offer_expiring(None).await;
-        assert!(f.b.file_progress(file).is_none());
-        assert!(f.b.log.lock().unwrap().events(&file).is_empty());
+        assert!(f.b.file_progress(file).unwrap().is_none());
+        assert!(f.b.log.lock().unwrap().events(&file).unwrap().is_empty());
         let last_chunk = f
             .a
             .log
             .lock()
             .unwrap()
-            .events(&file)
+            .events(&file).unwrap()
             .into_iter()
             .last()
             .unwrap()
@@ -663,7 +674,7 @@ async fn offline_group_file_is_deposited_before_consent_and_received_after_sende
             f.a.file_consent
                 .lock()
                 .unwrap()
-                .received_control(manifest)
+                .received_control(manifest).unwrap()
                 .is_none(),
             "offline ciphertext custody cannot depend on a recipient control"
         );
@@ -682,7 +693,7 @@ async fn offline_group_file_is_deposited_before_consent_and_received_after_sende
         assert_eq!(offer.event_id, manifest);
         assert_eq!(offer.file_conv, file);
         assert_eq!(
-            f.b.file_progress(file).unwrap().done,
+            f.b.file_progress(file).unwrap().unwrap().done,
             0,
             "encrypted post-office custody must not bypass the recipient's local receive decision"
         );
@@ -690,7 +701,7 @@ async fn offline_group_file_is_deposited_before_consent_and_received_after_sende
         f.b.decide_attachment(file, true).unwrap();
         for _ in 0..8 {
             f.b.drain_from_post_office().await;
-            if f.b.file_ready_to_save(file) {
+            if f.b.file_ready_to_save(file).unwrap() {
                 break;
             }
         }

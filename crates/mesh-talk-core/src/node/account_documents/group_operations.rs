@@ -110,7 +110,13 @@ impl Node {
         request: RequestProjection,
     ) -> bool {
         let group = request.reference.group;
-        let mut projection = self.operation_projection(group);
+        let mut projection = match self.operation_projection(group) {
+            Ok(projection) => projection,
+            Err(error) => {
+                log::debug!("group operation preflight deferred: {error}");
+                return false;
+            }
+        };
         projection.requests.push(request);
         projection.requests.len() <= 8 && self.operation_projection_fits(group, projection)
     }
@@ -119,7 +125,13 @@ impl Node {
         lookup: LookupProjection,
     ) -> bool {
         let group = lookup.group;
-        let mut projection = self.operation_projection(group);
+        let mut projection = match self.operation_projection(group) {
+            Ok(projection) => projection,
+            Err(error) => {
+                log::debug!("group operation preflight deferred: {error}");
+                return false;
+            }
+        };
         projection.lookups.push(lookup);
         projection.lookups.len() <= 8 && self.operation_projection_fits(group, projection)
     }
@@ -159,7 +171,13 @@ impl Node {
     }
     fn publish_account_group_operation_groups(&self, groups: &[crate::eventlog::ConversationId]) {
         for &group in groups {
-            let projection = self.operation_projection(group);
+            let projection = match self.operation_projection(group) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    log::debug!("group operation publication deferred: {error}");
+                    continue;
+                }
+            };
             let key = AccountDocumentKey::GroupOperation {
                 channel: hex::encode(group.as_bytes()),
                 source_device: self.user_id(),
@@ -324,7 +342,7 @@ mod input_tests {
         assert_eq!(operations::take_frame_decode_counts_for_test(), [1, 1]);
         // A signed replacement has a new hash and cannot borrow the old witness.
         source.maintain_account_group_operation_effects();
-        let projection = source.operation_projection(group);
+        let projection = source.operation_projection(group).unwrap();
         let replacement =
             OperationFrame::new(&source, group, before.revision + 1, projection).encode();
         source

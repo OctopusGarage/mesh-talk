@@ -156,7 +156,7 @@ async fn file_forward_has_fresh_crypto_and_merged_bytes_export() {
         })
         .unwrap_err();
     assert!(archive.to_string().contains("Nested"));
-    let history = node.account_history(&node.account_id(), 100);
+    let history = node.account_history(&node.account_id(), 100).unwrap();
     let entry = history
         .iter()
         .find(|m| Some(m.id.to_hex()) == merged.items[0].message_id)
@@ -399,8 +399,8 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
-            .cloned()
             .collect::<Vec<_>>();
         for event in controls {
             recipient.log.lock().unwrap().append_durable(event).unwrap();
@@ -439,10 +439,10 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
                 .flush_accepted_message(&MessageDestination::Channel(group), id)
                 .await;
         }
-        while recipient.channel_history(group, 10).len() < 2 {
+        while recipient.channel_history(group, 10).unwrap().len() < 2 {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let history = recipient.channel_history(group, 10);
+        let history = recipient.channel_history(group, 10).unwrap();
         assert_eq!(
             history
                 .iter()
@@ -461,6 +461,7 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
         let archive_id = merged.items[0].message_id.as_ref().unwrap();
         let archive = sender
             .channel_history(group, 10)
+            .unwrap()
             .into_iter()
             .find(|row| row.id.to_hex() == *archive_id)
             .unwrap()
@@ -471,7 +472,7 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
         let offer = offers.recv().await.unwrap();
         assert_eq!(offer.name, "Chat records.mtchat");
         recipient.decide_attachment(archive, true).unwrap();
-        while !recipient.file_ready_to_save(archive) {
+        while !recipient.file_ready_to_save(archive).unwrap() {
             recipient.pull_pending_files().await;
             sender.pull_pending_files().await;
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -484,6 +485,7 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
         assert!(
             recipient
                 .account_history(&sender.account_id(), 10)
+                .unwrap()
                 .is_empty(),
             "receiver never joined original direct conversation"
         );
@@ -532,7 +534,11 @@ async fn recall_at_final_guard_prevents_forward_acceptance() {
         .unwrap();
     assert!(calls >= 6);
     assert!(result.items.iter().all(|item| item.status == "failed"));
-    assert!(node.account_history(&node.account_id(), 100).is_empty());
+    assert!(
+        node.account_history(&node.account_id(), 100)
+            .unwrap()
+            .is_empty()
+    );
 }
 #[test]
 fn protected_and_expired_canonical_sources_are_not_inspectable() {
@@ -772,6 +778,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
     assert_eq!(
         reference
             .operation_projection(group)
+            .unwrap()
             .requests
             .iter()
             .map(|request| request.reference.id)
@@ -809,6 +816,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
     assert_eq!(
         source
             .channel_history(group, 10)
+            .unwrap()
             .iter()
             .map(|row| row.text.clone())
             .collect::<Vec<_>>(),
@@ -868,6 +876,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
         .unwrap()
         .entry(event)
         .unwrap()
+        .unwrap()
         .clone();
     let manifest = crate::node::files::validated_manifest(&row.plaintext).unwrap();
     assert_ne!(
@@ -903,6 +912,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .iter()
         .filter(|event| matches!(event.kind, EventKind::Message | EventKind::FileManifest))
         .count();
@@ -962,6 +972,7 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .iter()
             .filter(|event| matches!(event.kind, EventKind::Message | EventKind::FileManifest))
             .count(),
@@ -1007,7 +1018,7 @@ async fn unknown_group_leg_fails_without_network_admission_or_file_staging() {
             }],
             mode: "merged".into(),
         };
-        let before = node.log.lock().unwrap().all_event_ids();
+        let before = node.log.lock().unwrap().all_event_ids().unwrap();
         let identity = item_identity(&request.operation_id, &request.destinations[0], &None);
         let result = node
             .forward_messages_if(request, |commit| commit())
@@ -1025,7 +1036,7 @@ async fn unknown_group_leg_fails_without_network_admission_or_file_staging() {
             "{label} must not admit a network operation"
         );
         assert_eq!(
-            node.log.lock().unwrap().all_event_ids(),
+            node.log.lock().unwrap().all_event_ids().unwrap(),
             before,
             "no ciphertext staging or outgoing effect for the {label} leg"
         );
@@ -1099,7 +1110,10 @@ async fn unauthorized_group_leg_preserves_an_accepted_account_leg() {
             .count(),
         2
     );
-    assert_eq!(node.account_history(&node.account_id(), 100).len(), 2);
+    assert_eq!(
+        node.account_history(&node.account_id(), 100).unwrap().len(),
+        2
+    );
     let replay = node
         .forward_messages_if(request, |commit| commit())
         .await
@@ -1116,7 +1130,10 @@ async fn unauthorized_group_leg_preserves_an_accepted_account_leg() {
         items
     };
     assert_eq!(by_identity(replay), by_identity(result));
-    assert_eq!(node.account_history(&node.account_id(), 100).len(), 2);
+    assert_eq!(
+        node.account_history(&node.account_id(), 100).unwrap().len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -1187,6 +1204,7 @@ async fn pending_forwarding_order_survives_restart_and_cancelled_predecessor() {
     let exported = || {
         reopened
             .operation_projection(group)
+            .unwrap()
             .requests
             .into_iter()
             .map(|request| request.reference.id)
@@ -1216,6 +1234,7 @@ async fn pending_forwarding_order_survives_restart_and_cancelled_predecessor() {
     assert_eq!(
         reopened
             .channel_history(group, 10)
+            .unwrap()
             .iter()
             .map(|row| row.text.clone())
             .collect::<Vec<_>>(),
@@ -1304,6 +1323,7 @@ async fn committed_group_progress_frees_batch_budget_and_survives_restart() {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .iter()
             .filter(|event| event.kind == EventKind::FileManifest)
             .count(),
@@ -1327,6 +1347,7 @@ async fn committed_group_progress_frees_batch_budget_and_survives_restart() {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .iter()
             .filter(|event| event.kind == EventKind::FileManifest)
             .count(),

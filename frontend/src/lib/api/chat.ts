@@ -82,7 +82,7 @@ import type {
   FileStatus,
   OutgoingFileStatus,
   PeerInfo,
-  ReactionInfo,
+  ReactionSummaryPage,
   SafetyNumber,
   SearchHitInfo,
   TrustInfo,
@@ -130,6 +130,21 @@ function mediaBytes(bytes: ArrayBuffer | number[]): ArrayBuffer {
 }
 
 export const chat = {
+  reactionSummaries: (
+    owner: string,
+    kind: "account" | "channel",
+    target: string,
+    targets: string[],
+    cursor: string | null = null,
+  ) =>
+    invoke<ReactionSummaryPage>("owner_reaction_summaries", {
+      owner,
+      kind,
+      target,
+      targets,
+      cursor,
+    }),
+
   revealMessage: (
     owner: string,
     reference: {
@@ -225,6 +240,8 @@ export const chat = {
       display_name?: string;
       history_revision?: number;
       supports_push_state?: boolean;
+      supports_bounded_delivery?: boolean;
+      runtime_id?: string;
     }>("owner_node_identity", { owner }),
   enqueueText: (
     owner: string,
@@ -513,7 +530,6 @@ export const chat = {
     invoke<void>("send_dm", { recipient, text, replyTo }),
   history: (peer: string, limit: number) =>
     invoke<HistoryItem[]>("history", { peer, limit }),
-  reactions: (peer: string) => invoke<ReactionInfo[]>("reactions", { peer }),
   reactDm: (
     recipient: string,
     target: string,
@@ -531,8 +547,6 @@ export const chat = {
   ) => invoke<void>("send_to_account", { account, text, replyTo }),
   accountHistory: (account: string, limit: number) =>
     invoke<HistoryItem[]>("account_history", { account, limit }),
-  accountReactions: (account: string) =>
-    invoke<ReactionInfo[]>("account_reactions", { account }),
   reactAccount: (
     account: string,
     target: string,
@@ -651,8 +665,6 @@ export const chat = {
     }),
   channelHistory: (channelId: string, limit: number) =>
     invoke<HistoryItem[]>("channel_history", { channelId, limit }),
-  channelReactions: (channelId: string) =>
-    invoke<ReactionInfo[]>("channel_reactions", { channelId }),
   reactChannel: (
     channelId: string,
     target: string,

@@ -7,7 +7,7 @@
 
 use crate::channel::crypto::ChannelError;
 use crate::channel::sender_key::{
-    SenderChain, SenderKey, SenderKeyDistribution, open_message as sk_open, seal_message as sk_seal,
+    SenderChain, SenderKey, SenderKeyDistribution, seal_message as sk_seal,
 };
 use crate::eventlog::event::{ConversationId, EventId};
 use crate::identity::device::PublicIdentity;
@@ -16,6 +16,10 @@ use rand_core::OsRng;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use zeroize::{Zeroize, Zeroizing};
+
+mod checkpoint;
+pub(crate) use checkpoint::{CheckpointMessageError, PreparedChannelMessage};
 
 /// The plaintext membership snapshot carried by a `MembershipChange` event: the full
 /// member set + channel name + epoch. A snapshot (not a delta) so the latest one
@@ -432,6 +436,7 @@ impl ChannelState {
     /// Current-epoch receive material for an authorized sibling. The caller owns
     /// account membership admission and encrypted transport. These distributions
     /// seed receive chains only; a new device must generate its own sending key.
+    #[cfg(test)]
     pub(crate) fn current_receive_distributions(
         &self,
     ) -> Vec<(String, u64, SenderKeyDistribution)> {
@@ -462,6 +467,7 @@ impl ChannelState {
     /// Ordinary sender-key distributions remain first-wins; only this explicit
     /// recovery path may advance an existing receiver past an unavailable gap
     /// beyond the normal skip bound. Routine snapshots preserve pending delivery.
+    #[cfg(test)]
     pub(crate) fn refresh_sender_chain(
         &mut self,
         author: String,
@@ -492,7 +498,10 @@ impl ChannelState {
             .my_sender
             .entry(epoch)
             .or_insert_with(SenderKey::generate);
-        let (n, mk) = sk.ratchet();
+        let (n, mk) = sk
+            .try_ratchet()
+            .map_err(|_| ChannelError::Malformed("sender chain exhausted".into()))?;
+        let mk = Zeroizing::new(mk);
         let hdr = MsgHeader {
             epoch,
             sender: me,
@@ -517,14 +526,20 @@ impl ChannelState {
             .my_user_id
             .clone()
             .ok_or_else(|| ChannelError::Malformed("no identity".into()))?;
-        let mut senders = self.export_my_senders();
-        let mut key = self
-            .my_sender
-            .get(&self.epoch)
-            .and_then(|key| SenderKey::deserialize(&key.serialize()))
-            .unwrap_or_else(SenderKey::generate);
-        let distribution = (!self.has_my_sender(self.epoch)).then(|| key.distribution());
-        let (n, mk) = key.ratchet();
+        let mut key = match self.my_sender.get(&self.epoch) {
+            Some(key) => {
+                let encoded = Zeroizing::new(key.serialize());
+                SenderKey::deserialize(&encoded)
+                    .ok_or_else(|| ChannelError::Malformed("invalid sender snapshot".into()))?
+            }
+            None => SenderKey::generate(),
+        };
+        let distribution =
+            (!self.has_my_sender(self.epoch)).then(|| Zeroizing::new(key.distribution()));
+        let (n, mk) = key
+            .try_ratchet()
+            .map_err(|_| ChannelError::Malformed("sender chain exhausted".into()))?;
+        let mk = Zeroizing::new(mk);
         let header = MsgHeader {
             epoch: self.epoch,
             sender: me,
@@ -536,9 +551,17 @@ impl ChannelState {
         payload.extend_from_slice(&(header.len() as u16).to_be_bytes());
         payload.extend(header);
         payload.extend(ciphertext);
-        senders.retain(|(epoch, _)| *epoch != self.epoch);
+        let mut senders = self.export_my_senders();
+        senders.retain_mut(|(epoch, encoded)| {
+            if *epoch == self.epoch {
+                encoded.zeroize();
+                false
+            } else {
+                true
+            }
+        });
         senders.push((self.epoch, key.serialize()));
-        Ok((payload, distribution, senders))
+        Ok((payload, distribution.map(|value| (*value).clone()), senders))
     }
 
     /// Open a sender-keyed message (`&mut` — the receiving chain ratchets + deletes the
@@ -567,8 +590,8 @@ impl ChannelState {
         let chain = self
             .sender_chains
             .get_mut(&(hdr.sender.clone(), hdr.epoch))?;
-        let mk = chain.message_key(hdr.n).ok()?;
-        sk_open(&mk, ct, hdr_bytes).ok()
+        let prepared = chain.prepare_open(hdr.n, ct, hdr_bytes).ok()?;
+        Some(prepared.install(chain))
     }
 }
 
@@ -770,6 +793,72 @@ mod tests {
         let skd = alice.my_sender_distribution();
         bob.record_sender_chain(alice_uid.clone(), epoch, &skd);
         (alice, bob, alice_uid)
+    }
+
+    #[test]
+    fn receiver_candidates_bind_exact_epoch_before_installation() {
+        let (mut alice, mut bob, alice_uid) = sender_pair(7);
+        let mut next_epoch = ChannelState::from_meta(
+            alice.id(),
+            ChannelMeta {
+                name: alice.name().into(),
+                members: alice.members().to_vec(),
+                epoch: 8,
+                owner: alice.owner().into(),
+            },
+        );
+        next_epoch.set_identity(alice_uid.clone());
+        bob.record_sender_chain(alice_uid.clone(), 8, &next_epoch.my_sender_distribution());
+        let old = alice.seal_sender_message(b"epoch seven").unwrap();
+        let new = next_epoch.seal_sender_message(b"epoch eight").unwrap();
+        let old_header_len = u16::from_be_bytes([old[0], old[1]]) as usize;
+        let new_header_len = u16::from_be_bytes([new[0], new[1]]) as usize;
+        let mut substituted = new[..2 + new_header_len].to_vec();
+        substituted.extend_from_slice(&old[2 + old_header_len..]);
+        assert!(bob.open_sender_message(&alice_uid, &substituted).is_none());
+        assert_eq!(
+            bob.open_sender_message(&alice_uid, &new).unwrap(),
+            b"epoch eight"
+        );
+        assert_eq!(
+            bob.open_sender_message(&alice_uid, &old).unwrap(),
+            b"epoch seven"
+        );
+        assert!(bob.open_sender_message(&alice_uid, &new).is_none());
+        assert!(bob.open_sender_message(&alice_uid, &old).is_none());
+    }
+
+    #[test]
+    fn model_send_paths_return_exhaustion_without_mutation() {
+        let (mut alice, _, _) = sender_pair(0);
+        let mut encoded = vec![13; 32];
+        encoded.extend_from_slice(&u32::MAX.to_le_bytes());
+        alice.import_my_sender(0, SenderKey::deserialize(&encoded).unwrap());
+        assert!(alice.seal_sender_message(b"cannot send").is_err());
+        assert_eq!(alice.export_my_senders(), vec![(0, encoded.clone())]);
+        assert!(alice.prepare_sender_message(b"cannot prepare").is_err());
+        assert_eq!(alice.export_my_senders(), vec![(0, encoded)]);
+    }
+
+    #[test]
+    fn failed_aead_does_not_consume_live_or_skipped_receiver_key() {
+        let (mut alice, mut bob, alice_uid) = sender_pair(0);
+        let first = alice.seal_sender_message(b"first").unwrap();
+        let second = alice.seal_sender_message(b"second").unwrap();
+        let mut forged = second.clone();
+        *forged.last_mut().unwrap() ^= 1;
+        assert!(bob.open_sender_message(&alice_uid, &forged).is_none());
+        assert_eq!(
+            bob.open_sender_message(&alice_uid, &second).unwrap(),
+            b"second"
+        );
+        let mut forged = first.clone();
+        *forged.last_mut().unwrap() ^= 1;
+        assert!(bob.open_sender_message(&alice_uid, &forged).is_none());
+        assert_eq!(
+            bob.open_sender_message(&alice_uid, &first).unwrap(),
+            b"first"
+        );
     }
 
     #[test]

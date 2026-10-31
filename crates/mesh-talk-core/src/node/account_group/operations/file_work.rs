@@ -19,7 +19,7 @@ impl Node {
     pub(super) fn account_group_file_work(
         &self,
         candidates: Vec<journal::Entry>,
-    ) -> Vec<AccountGroupFileWork> {
+    ) -> Result<Vec<AccountGroupFileWork>, crate::eventlog::LogError> {
         let (pending, copies): (Vec<_>, Vec<_>) =
             candidates.into_iter().partition(|entry| !entry.terminal());
         let mut work = Vec::new();
@@ -30,7 +30,7 @@ impl Node {
             let Some(payload) = GroupFilePayload::decode(message.encoded_body()) else {
                 continue;
             };
-            if self.account_group_file_assets_ready(&entry.reference, &payload) {
+            if self.account_group_file_assets_ready(&entry.reference, &payload)? {
                 continue;
             }
             let Some(descriptor) = payload
@@ -78,11 +78,11 @@ impl Node {
                 .account_file_proofs
                 .lock()
                 .expect("file proofs mutex")
-                .get(&event_id)
-                .cloned();
-            let Some(event) =
-                private.or_else(|| self.log.lock().expect("log mutex").get(&event_id).cloned())
-            else {
+                .get(&event_id)?;
+            let Some(event) = (match private {
+                Some(event) => Some(event),
+                None => self.log.lock().expect("log mutex").get(&event_id)?,
+            }) else {
                 continue;
             };
             let Some(descriptor) = payload
@@ -97,8 +97,7 @@ impl Node {
                     .recalls
                     .lock()
                     .expect("recalls mutex")
-                    .targets(&entry.reference.group)
-                    .contains(&event.id)
+                    .contains(entry.reference.group, event.id)?
             {
                 continue;
             }
@@ -106,7 +105,7 @@ impl Node {
                 .received_files
                 .lock()
                 .expect("received files mutex")
-                .entry(event.id)
+                .entry(event.id)?
                 .is_some_and(|row| {
                     row.conversation == entry.reference.group
                         && row.from == entry.reference.executor.device.user_id()
@@ -132,7 +131,7 @@ impl Node {
         }
         work.sort_by_key(|job| job.id);
         work.dedup_by_key(|job| job.id);
-        work
+        Ok(work)
     }
 
     pub(in crate::node) async fn execute_account_group_file_work(

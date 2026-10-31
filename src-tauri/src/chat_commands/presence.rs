@@ -316,7 +316,7 @@ pub async fn get_presence(
             });
         }
     }
-    for channel in rt.list_channels() {
+    for channel in rt.list_channels()? {
         if let Some(reference) = node.channel_shared_reference(channel.id) {
             // Account-shared display facts do not create a device membership.
             add_reference_group(
@@ -327,7 +327,7 @@ pub async fn get_presence(
             );
             continue;
         }
-        let (accounts, unbound) = node.channel_member_account_sets(channel.id);
+        let (accounts, unbound) = node.channel_member_account_sets(channel.id)?;
         add_group(
             &mut out,
             hex::encode(channel.id.as_bytes()),

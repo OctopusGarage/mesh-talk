@@ -281,7 +281,9 @@
           }
         ]
       },
-      "consumers": ["desktop-account-group-inventory"],
+      "consumers": [
+        "desktop-account-group-inventory"
+      ],
       "escalation": [
         "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. Reference state must never enter authoritative group or peer binding stores."
       ]
@@ -290,10 +292,12 @@
       "id": "core-shared-channel-custody",
       "paths": [
         "crates/mesh-talk-core/src/node/channel_custody.rs",
+        "crates/mesh-talk-core/src/node/channel_custody/**",
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/account_documents/custody.rs",
         "crates/mesh-talk-core/src/node/node_tests.rs",
-        "crates/mesh-talk-core/src/node/media_store.rs"
+        "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/node/media_store/**"
       ],
       "rust": [
         {
@@ -323,7 +327,9 @@
           }
         ]
       },
-      "consumers": ["desktop-shared-channel-custody"],
+      "consumers": [
+        "desktop-shared-channel-custody"
+      ],
       "escalation": [
         "Require real linked-sibling/other-member loopback evidence, holder-offline/restart and delayed confirmation/revocation convergence. Verify old optional-domain rejection preserves supported domains."
       ]
@@ -332,30 +338,53 @@
       "id": "core-startup-identity",
       "paths": [
         "crates/mesh-talk-core/src/node/runtime.rs",
-        "crates/mesh-talk-core/src/node/runtime_retirement_tests.rs"
+        "crates/mesh-talk-core/src/node/runtime_startup.rs",
+        "crates/mesh-talk-core/src/node/runtime_work.rs",
+        "crates/mesh-talk-core/src/node/runtime_retirement_tests.rs",
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/participant_storage_tests.rs",
+        "crates/mesh-talk-core/src/storage/profile.rs",
+        "crates/mesh-talk-core/src/storage/profile/context.rs",
+        "crates/mesh-talk-core/src/storage/profile/participant.rs",
+        "crates/mesh-talk-core/src/storage/profile/participant/**",
+        "crates/mesh-talk-core/src/storage/profile/participant_events.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
           "filters": [
             "startup_identity_precedes_blocked_durable_store_and_matches_runtime",
-            "startup_identity_rejection_stops_before_listener_and_durable_stores"
+            "startup_identity_rejection_stops_before_listener_and_durable_stores",
+            "node::node::participant_storage_tests::",
+            "node::runtime::retirement_tests::",
+            "node::runtime_work::",
+            "node::node::tests::participant_event_"
           ]
         }
       ],
       "capability": {
-        "summary": "Observe verified public device and account identity after the existing keystore unlocks without starting participant producers.",
+        "summary": "Own exclusive participant construction and observe verified public identity after keystore unlocks without starting participant producers.",
         "guide": "docs/ARCHITECTURE.md",
         "invariants": [
           {
             "name": "The optional synchronous identity observer runs before durable stores open, grants no runtime authority and can abort stale startup before producers launch. Existing constructors retain their behavior.",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Shared ownership precedes runtime keystore initialization; construction and admitted blocking captures plus undelivered outputs retain replacement admission until their actual destruction. Returned runtimes retain their consuming stop contract.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Participant event publication authenticates legacy owners before first authority, resumes under the held profile lease before journal recovery, rejects retired-source fallback, and warm-opens only persisted publication metadata and the exact downgrade barrier.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
-      "consumers": ["desktop-startup-identity"],
+      "consumers": [
+        "desktop-startup-identity"
+      ],
       "escalation": [
-        "Verify blocked-store ordering, failed unlock and observer rejection, plus packaged desktop cold-start behavior."
+        "Verify blocked-store ordering, failed unlock and observer rejection, subprocess exclusion before key creation, cancellation before and during later blocking work, retained handles, exact external/bare source paths and alias-byte preservation. Require real loopback enrollment/linking, staged recovery integration and native Windows close-before-relocation plus desktop lifecycle evidence; metadata ownership does not certify demand-loaded history or production-KDF startup performance."
       ]
     },
     {
@@ -532,7 +561,9 @@
         "Require interrupted transfer, account replacement and old-client compatibility evidence; mocked IPC does not certify physical linked-device convergence.",
         "For conversation removal, require keep/erase choices, pending/rejected/cancelled Leave safety, cleanup failure/restart retry, fresh invitation isolation, stale sibling history/draft/file rejection and exact-device loopback acknowledgements. Public Leave commitment alone is not private cleanup completion."
       ],
-      "consumers": ["core-node"]
+      "consumers": [
+        "core-node"
+      ]
     },
     {
       "id": "core-account-file-availability",
@@ -574,7 +605,10 @@
       "escalation": [
         "Verify real loopback missing, later-available and corrupt-copy exchanges, legacy fallback and native pending-file status."
       ],
-      "consumers": ["core-node", "desktop-account-documents"]
+      "consumers": [
+        "core-node",
+        "desktop-account-documents"
+      ]
     },
     {
       "id": "core-account-binding-transitions",
@@ -600,7 +634,9 @@
           ]
         }
       ],
-      "consumers": ["core-node"],
+      "consumers": [
+        "core-node"
+      ],
       "capability": {
         "summary": "Repair persisted device/account bindings after authorized linking through bounded, durable, old-account/new-account/device signed transition chains.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
@@ -632,8 +668,10 @@
         "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
         "crates/mesh-talk-core/src/node/channel_account_controls.rs",
         "crates/mesh-talk-core/src/node/account_group/access.rs",
+        "crates/mesh-talk-core/src/node/account_group/access/",
         "crates/mesh-talk-core/src/node/account_group/wire.rs",
-        "crates/mesh-talk-core/src/node/account_documents/group_control.rs"
+        "crates/mesh-talk-core/src/node/account_documents/group_control.rs",
+        "crates/mesh-talk-core/src/node/channel_account_authority/"
       ],
       "rust": [
         {
@@ -641,6 +679,8 @@
           "filters": [
             "node::channel::tests::content_events_preserve_membership_without_rebuilding_account_proofs",
             "node::channel_account_authority::tests::",
+            "node::account_group::access::raw_view_tests::",
+            "group_inventory_directory_",
             "node::channel_account_bootstrap::tests::",
             "node::channel_account_maintenance::tests::",
             "captured_initial_account_upgrade_never_resurrects_a_completed_legacy_departure",
@@ -652,7 +692,7 @@
             "account_authority_negotiates_v4_and_transfers_in_both_directions",
             "account_authority_rejects_events_in_older_followup_envelopes",
             "account_authority_requires_v4_for_fingerprint_and_event_transfer",
-            "eventlog::persist::tests::account_channel_version_index_rejects_invalid_events_and_survives_restart",
+            "eventlog::persist::legacy::tests::account_channel_version_index_rejects_invalid_events_and_survives_restart",
             "node::node::tests::group_summary_and_presence_count_accounts_while_unknown_devices_remain_distinct",
             "node::channel_account_controls::tests::",
             "channel_content_controls_recheck_membership_at_durable_acceptance",
@@ -667,6 +707,28 @@
           "package": "mesh-talk",
           "filters": [
             "contact_policy::native_mesh_tests::registered_hide_keeps_real_multi_device_delivery_and_restart_history"
+          ]
+        },
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::channel_account_authority::tests::",
+            "node::channel_account_bootstrap::tests::",
+            "node::channel_account_maintenance::tests::",
+            "channel::model::tests::account_invites_receive_no_content_keys_until_the_account_accepts",
+            "account_authority_arriving_after_probe_restarts_without_legacy_followup_leak",
+            "account_authority_negotiates_v4_and_transfers_in_both_directions",
+            "account_authority_rejects_events_in_older_followup_envelopes",
+            "account_authority_requires_v4_for_fingerprint_and_event_transfer",
+            "eventlog::persist::legacy::tests::account_channel_version_index_rejects_invalid_events_and_survives_restart",
+            "node::node::tests::group_summary_and_presence_count_accounts_while_unknown_devices_remain_distinct",
+            "node::channel_account_controls::tests::",
+            "channel_content_controls_recheck_membership_at_durable_acceptance",
+            "node::join_history::tests::account_invitation_history_reaches_accepting_sibling_while_anchor_is_offline",
+            "node::join_history::tests::account_invitation_three_event_wal_recovers_atomically_after_restart",
+            "channel::model::tests::current_receive_snapshot_recovers_a_gap_without_restoring_consumed_keys",
+            "rejected_account_authority_never_exposes_a_v4_requirement_to_legacy_members",
+            "channel::model::tests::routine_receive_snapshot_preserves_small_out_of_order_messages"
           ]
         }
       ],
@@ -715,7 +777,8 @@
       "paths": [
         "crates/mesh-talk-core/src/channel/history.rs",
         "crates/mesh-talk-core/src/node/join_history.rs",
-        "crates/mesh-talk-core/src/node/join_history_tests.rs"
+        "crates/mesh-talk-core/src/node/join_history_tests.rs",
+        "crates/mesh-talk-core/src/node/join_history/"
       ],
       "rust": [
         {
@@ -754,6 +817,10 @@
           {
             "name": "Protected rows do not consume invitation history budgets or become ordinary snapshots, and incoming protected copies retain concealed projections",
             "reference": "docs/privacy-controls.md#protected-messages"
+          },
+          {
+            "name": "Indexed offer/release selectors retain canonical and causal invitation authority and exact received identities; unchanged source retry turns decode no historical controls.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
@@ -833,7 +900,11 @@
           ]
         }
       ],
-      "consumers": ["core-node", "desktop-search", "frontend-search"],
+      "consumers": [
+        "core-node",
+        "desktop-search",
+        "frontend-search"
+      ],
       "capability": {
         "summary": "Return canonical recent search references and bounded exact context through existing history owners, preserving legacy search consumers.",
         "guide": "docs/ARCHITECTURE.md#recent-search-references",
@@ -866,53 +937,126 @@
     },
     {
       "id": "core-channel",
-      "paths": ["crates/mesh-talk-core/src/channel/"],
+      "paths": [
+        "crates/mesh-talk-core/src/channel/",
+        "crates/mesh-talk-core/tests/forward_secrecy_boundaries.rs",
+        "crates/mesh-talk-core/src/node/channel.rs",
+        "crates/mesh-talk-core/src/node/channel/",
+        "crates/mesh-talk-core/src/node/channel_senders.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/ancestry.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["channel::"]
+          "filters": [
+            "channel::",
+            "node::channel_senders::tests::",
+            "node::node::tests::channel_checkpoint_",
+            "node::node::tests::group_reception_",
+            "channel_causal_query_yields_exact_work_and_preserves_strict_ancestry",
+            "channel_owner_query_preserves_later_unobserved_ownership_loss",
+            "channel_projection_control_does_not_drain_historical_ancestry_in_one_turn",
+            "channel_receiver_and_source_handles_stay_stale_after_account_returns",
+            "channel_decision_replacement_rejects_old_predicate_publication",
+            "participant_network_canonical_authority_respects_each_preparation_budget",
+            "channel_canonical_readiness_does_not_publish_history_before_recall_attempt",
+            "ancestor_preparation_obeys_caller_work_budget_across_wide_parents",
+            "ancestor_disposable_query_crash_retires_incrementally"
+          ]
         }
       ],
+      "capability": {
+        "summary": "Keep current channel metadata and exact receiver progress on encrypted disk, with bounded pending work and atomic transcript/reception installation.",
+        "guide": "docs/ARCHITECTURE.md",
+        "invariants": [
+          {
+            "name": "Text and file manifests share the authenticated-author and epoch-bound receiver chain; bad AEAD and abandoned preparation leave live state unchanged.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "The strict bounded device-local codec preserves skipped-key identity and eviction order; exhausted u32 advancement cannot wrap, while terminal skipped keys remain consumable.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Exact discard evidence and independent role terminal facts survive retries and restart.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Failed authentication waits for new key material, gaps wait for the existing skip bound, and legal oversized work remains pending without silent completion.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Canonical preparation shares caller row, edge and byte limits across all phases; plaintext read readiness also fences unattempted admitted recalls and exact dependency wakes without blocking dormant unknown-target retries.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
       "escalation": [
-        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
+        "Receiver candidate or checkpoint changes require the separate integration selection: cargo test -p mesh-talk-core --test forward_secrecy_boundaries signed_channel_text_and_manifest_retry_over_noise_loopback. The local codec alone does not certify durable receiver/transcript atomicity or demand-loaded startup."
       ],
-      "consumers": ["core-node"]
+      "consumers": [
+        "core-node"
+      ]
     },
     {
       "id": "core-discovery",
-      "paths": ["crates/mesh-talk-core/src/discovery/"],
+      "paths": [
+        "crates/mesh-talk-core/src/discovery/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["discovery::"]
+          "filters": [
+            "discovery::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-postoffice", "core-transport"]
+      "consumers": [
+        "core-node",
+        "core-postoffice",
+        "core-transport"
+      ]
     },
     {
       "id": "core-dm",
-      "paths": ["crates/mesh-talk-core/src/dm.rs"],
+      "paths": [
+        "crates/mesh-talk-core/src/dm.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["dm::"]
+          "filters": [
+            "dm::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-channel", "core-postoffice"]
+      "consumers": [
+        "core-node",
+        "core-channel",
+        "core-postoffice"
+      ]
     },
     {
       "id": "core-eventlog",
-      "paths": ["crates/mesh-talk-core/src/eventlog/"],
+      "paths": [
+        "crates/mesh-talk-core/src/eventlog/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["eventlog::"]
+          "filters": [
+            "eventlog::",
+            "node::node::tests::participant_event_",
+            "participant_ciphertext_prefix_",
+            "participant_kind_metadata_"
+          ]
         }
       ],
       "escalation": [
@@ -926,29 +1070,99 @@
         "core-postoffice",
         "core-recovery",
         "core-storage"
-      ]
+      ],
+      "capability": {
+        "summary": "Preserve encrypted causal history, bounded indexed event queries and metadata-driven profile maintenance.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Legacy profile maintenance preserves required ancestors, latest leaves and paced rewrites; indexed participant maintenance uses bounded metadata selection and atomic SQL application with the same reclamation thresholds.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Fallible sync reads propagate local storage failures without successful empty history, fingerprint matches or custody claims; explicit peer rejection remains distinct and committed batch prefixes survive retries",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Individual durable event lookups return complete owned events or explicit read errors; absence-based proof fallbacks, media reclamation and delivery progress never hide failed reads; affected Node/runtime queries preserve errors and host success payloads",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed event domains transactionally preserve signed bytes, causal edges, frontier and full-u64 counters; bounded keyset reads validate source-bound cursors before decoding selected bodies and cache the unchanged wire fingerprint without body hydration",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Canonical signed-event generations use bounded encrypted Kahn work, atomic child-drain progress and source-bound publication; safe monotonic appends preserve progress while unsafe insertions invalidate stale order without exposing empty successful history",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed maintenance selects profile leaves through bounded metadata snapshots, preserves the newest pair and referenced ancestors, retains amortization and pending work, and atomically updates counters and ordering without unrelated body reads; drop and recreate cannot revive stale cursors",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Paged unfiltered sync uses finite commit-cutoff views with destructive-generation binding, skips peer-known IDs through a covering index before header or body reads, and preserves topological prefixes without changing canonical timeline ordering.",
+            "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
+          },
+          {
+            "name": "Indexed event-domain physical count and estimated cost remain authoritative and change together through append, whole-conversation drop and profile-leaf removal; relay bookkeeping reuses those fixed-key scalars rather than duplicating charge counters.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Repository conversation retirement atomically hides all ordinary access and invalidates prior views while retaining physical charge; indexed active selection skips hidden scopes, and lease-bound tokens reject stale generations, revisions and foreign connection identities.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Persisted reclamation phases bound auxiliary, edge and vertex work, preserve foreign keys and exact physical charge through interruption, never decode hidden bodies or republish stale derived work, and make completion idempotent only for the unchanged empty tombstone.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Retained-event payloads use integer-rowid storage with metadata before the final body column; small composite-key and covering indexes keep header and GC metadata reads independent of overflowing payload size, verified by engine plans and SQLite page-cache miss counters.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "A same-transaction new-growth gate runs only after existing event and permanent counter validation and before allocating the stored-event encoding; signed duplicates bypass reservation, and blocked growth leaves graph rows, ordinals and charge unchanged.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Production participant Nodes retain one indexed profile event owner without a body cache; owned fallible reads preserve storage errors, bounded network pages tolerate ordinary appends and revalidate policy, and delivery-journal recovery remains authoritative across independent source publication.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
     },
     {
       "id": "core-file",
-      "paths": ["crates/mesh-talk-core/src/file/"],
+      "paths": [
+        "crates/mesh-talk-core/src/file/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["file::"]
+          "filters": [
+            "file::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-eventlog", "core-recovery"]
+      "consumers": [
+        "core-node",
+        "core-eventlog",
+        "core-recovery"
+      ]
     },
     {
       "id": "core-identity",
-      "paths": ["crates/mesh-talk-core/src/identity/"],
+      "paths": [
+        "crates/mesh-talk-core/src/identity/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["identity::"]
+          "filters": [
+            "identity::"
+          ]
         }
       ],
       "escalation": [
@@ -981,21 +1195,40 @@
     },
     {
       "id": "core-postoffice",
-      "paths": ["crates/mesh-talk-core/src/postoffice/"],
+      "paths": [
+        "crates/mesh-talk-core/src/postoffice/",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node/federation_runtime.rs",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node.rs",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node/relay_runtime.rs",
+        "crates/mesh-talk-core/tests/indexed_relay_cli.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["postoffice::"]
+          "filters": [
+            "postoffice::",
+            "node::opaque_relay::",
+            "node::session::tests::",
+            "node::session::paged_tests::"
+          ]
         }
       ],
       "escalation": [
-        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance. Network trust changes also require cargo test -p mesh-talk-core --test relay_network --test relay_network_cli --test federation_config_cli and the mesh-talk-node federation_runtime:: binary tests. Membership exchanges must reject forged, copied, expired, revoked and foreign-network credentials before bulk metadata disclosure."
+        "Federation continuation cadence changes require cargo test -p mesh-talk-core --bin mesh-talk-node federation_runtime:: in addition to library metadata, paging and admission regressions.",
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance. Network trust changes also require cargo test -p mesh-talk-core --test relay_network --test relay_network_cli --test federation_config_cli and the mesh-talk-node federation_runtime:: binary tests. Membership exchanges must reject forged, copied, expired, revoked and foreign-network credentials before bulk metadata disclosure.",
+        "Indexed runtime changes require cargo test -p mesh-talk-core --bin mesh-talk-node, --test federation_config_cli and --test relay_network_cli; on Unix additionally run --test indexed_relay_cli (five real mode branches, ordinary mail exchange, pre-keystore exclusion, SIGTERM joined stop and warm restart). Library selectors do not execute binary/integration targets. Native Windows hard-stop/WAL recovery, supported-platform lock scenarios and actual discovery remain separate acceptance. Production startup/resource evidence must use a separately built normal binary with feature/KDF proof, not the fast-test binary."
       ],
-      "consumers": ["core-node"],
+      "consumers": [
+        "core-node"
+      ],
       "capability": {
-        "summary": "Authorize equal relay reconciliation through explicit pins or mutually verified operator-approved network memberships.",
+        "summary": "Authorize equal relay reconciliation and own bounded indexed dedicated-relay serving, maintenance and lifecycle without weakening event admission.",
         "guide": "docs/post-office-federation.md",
         "invariants": [
+          {
+            "name": "Unchanged mailbox metadata probes reuse persistent indexes and digests without exporting ciphertext; bounded responses clone only their causal page; rejected inner events are deferred only within a bounded mailbox operation and retried by a later operation",
+            "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
+          },
           {
             "name": "Network membership binds the authenticated device and checks authority, expiry and revocation before inventory or presence disclosure",
             "reference": "docs/post-office-federation.md#automatic-membership-in-an-approved-network"
@@ -1003,23 +1236,78 @@
           {
             "name": "Failed membership cannot downgrade to pin-only federation and ordinary mailbox clients retain opaque-only admission",
             "reference": "docs/post-office-federation.md#automatic-membership-in-an-approved-network"
+          },
+          {
+            "name": "Internal indexed relay state validates opaque admission and signed duplicates, atomically commits event and first-arrival/touch changes on the shared connection, and emits watch changes only after commit; retained physical rows alone do not qualify expiry-safe custody.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed relay metadata reads narrow physical charge and lifecycle during retirement without exposing unavailable graph summaries; ordinary hidden reads remain local availability errors, and arrival removal belongs in the same outer transaction as repository finalization.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed relay policy persists a nullable monotonic expiry cutoff through indexed deadlines, denies expired exact reads and custody before GC, preserves clock rollback and valid-origin semantics, and performs no idle history walk or policy rewrite.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Validated temporary capacity pressure commits a persistent drain request without accepting new growth; impossible individual events and permanent counter failures cannot cause futile eviction, and both base targets must be reached before drain completion.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "One indexed pending mailbox couples role state with repository retirement; bounded maintenance keeps hidden data physically charged, proves expiry selection before LRU, and removes the matching arrival with final reclamation in one transaction.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Leased relay policy views bind cutoff, arrival and repository destructive identity; stale bindings fail before newer work is interpreted, while current authority corruption and storage failures remain explicit errors.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Dedicated CLI plain, named bridge, gateway, pinned and approved-network paths share one indexed endpoint and transfer the pre-keystore profile lease without collecting historical bodies or IDs; participant and legacy SDK storage remain separate.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "Federation inventory and selected local snapshots share persisted session/row/byte budgets, finite view bindings and absolute deadlines; cancellation revokes authority before bounded cleanup releases charge, with no database lock across network await.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "Endpoint clones share nonwaiting global Have reservations through vector-to-set conversion and retained use; local overload, preparation and storage causes cannot trigger protocol fallback or false custody.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "Scoped fingerprint demand stays bounded and saturation never starts global inventory; explicit preparation advances finite key and commit-tail cursors with one digest context, preserving empty continuations and exact sent digests.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "One subscribed-before-inspection supervisor paces retention, digest and cleanup slices despite self wakes; idle performs no historical scan or policy write, faulted storage stops admission, and cooperative shutdown joins sessions, discovery and gateway proxies before lease release. Archive-only deferred failures retain original causes and independent 100 ms\u20135 s retry eligibility without blocking publication staging or other work classes; repeated identical diagnostics do not write again, constructor best-effort is limited to explicit deferral, and provenance/authoritative failures remain errors.",
+            "reference": "docs/post-office-federation.md#indexed-relay-runtime-and-resource-bounds"
+          },
+          {
+            "name": "The actual dedicated worker interleaves a physical class with a trigger at 256 free pages, a target at 64 free pages, up to 64 vacuum iterations and a 100 ms success cooldown plus duty pacing; typed BUSY/LOCKED or incomplete PASSIVE transfers back off independently without starving other classes. Restart discovers pending truncation from one known-main stat; idle/ordinary growth does not checkpoint, and shutdown drains admitted work before lease release.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       }
     },
     {
       "id": "core-ratchet",
-      "paths": ["crates/mesh-talk-core/src/ratchet/"],
+      "paths": [
+        "crates/mesh-talk-core/src/ratchet/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["ratchet::"]
+          "filters": [
+            "ratchet::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-channel"]
+      "consumers": [
+        "core-node",
+        "core-channel"
+      ]
     },
     {
       "id": "core-recovery",
@@ -1028,25 +1316,31 @@
         "crates/mesh-talk-core/src/node/recovery.rs",
         "crates/mesh-talk-core/tests/recovery_snapshot.rs",
         "crates/mesh-talk-core/tests/recovery_archive.rs",
-        "crates/mesh-talk-core/tests/recovery_key.rs"
+        "crates/mesh-talk-core/tests/recovery_key.rs",
+        "crates/mesh-talk-core/src/node/account_suppression.rs"
       ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::"]
+          "filters": [
+            "node::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
-        "Recovery has no local library tests: use conservative Node coverage and explicitly run affected recovery_key, recovery_archive and recovery_snapshot integration targets for crypto/archive/storage changes."
+        "Run the Node recovery library tests plus affected recovery_key, recovery_archive and recovery_snapshot integration targets for crypto/archive/storage changes."
       ],
-      "consumers": ["core-node", "desktop-recovery"],
+      "consumers": [
+        "core-node",
+        "desktop-recovery"
+      ],
       "capability": {
         "summary": "Validate versioned logical account snapshots and authenticated encrypted archives, including independent Favorites records and retained files, before staging publication.",
         "guide": "docs/backup-recovery.md",
         "invariants": [
           {
-            "name": "Schema 4 appends bounded Favorites and retained-file tags while preserving schema 1\u20133 compatibility and existing archive authentication",
+            "name": "Snapshot extensions preserve prior positional tags and archive authentication; schema 6 installs exact local deletion facts before history reconstruction",
             "reference": "docs/backup-recovery.md#snapshot-compatibility"
           },
           {
@@ -1059,7 +1353,7 @@
     {
       "id": "core-storage",
       "capability": {
-        "summary": "Replay encrypted record framing incrementally without buffering the complete ciphertext log, preserving exact corruption and crash-tail recovery semantics.",
+        "summary": "Own encrypted indexed storage and streamed legacy record framing, preserving authenticated errors, owner binding, transactional durability and crash-tail recovery.",
         "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
         "invariants": [
           {
@@ -1069,18 +1363,71 @@
           {
             "name": "Streaming replay preserves the encrypted file format, authenticated decode errors and platform-specific repair ownership",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed storage encrypts metadata and WAL; wrong keys, owners, versions or fatal transaction failures never become an empty successful history. Each shared connection retains at most 64 compiled SQL statements; warm relay inventory, maintenance, session guards and network metadata reads reuse compilation across conversations and sessions without caching rows or skipping current authority checks, and returned statements clear bound values.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Streaming import retains one decoded event and batches at most 64 encoded rows within 1 MiB including fixed metadata and parent capacity, with one legal oversized record alone. Ranking retains at most 64 ordered childless ready IDs, preserving parent priority and bounded child pages; initial migration may read historical body pages under the existing schema; committed batches retain owner durability. Callback errors preserve source bytes before tail repair.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "The shared profile lease excludes cooperating writers before CLI keystore initialization without unlinking node.lock; database relocation requires checked WAL checkpoint and connection close, and busy or faulted retirement cannot authorize publication.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Shared profile repositories retain device-bound ownership and one encrypted connection; authenticated streaming relay publication preserves legacy sources before freeze, resolves ancestry on disk, publishes mandatory domains together and rejects barrier mismatches without replaying archives on normal reopen.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Participant control metadata publishes only after actual legacy validation and cannot reinterpret relay authority; wrong keys/accounts, corrupt sources or orphan WAL/SHM never initialize conflicting authority. Participant history/crypto sources remain legacy without a migration barrier or bounded-memory claim.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Account adoption prepares delivery and SQL intent before keystore replacement, reloads ambiguous saves under ownership and admits only exact old/next recovery. Pre-SQL adoption retains honest legacy ID provenance through idempotent publication, delivery finalization and intent cleanup.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Relay role readiness and metadata charge validation publish with both mandatory source domains; published missing or unready authority fails closed, while warm profile open and additional role facades avoid historical body decoding and extra database connections.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Strict profile schema validation includes exact named unique-index authority and fixed relay cutoff/drain records; missing or weakened authority never becomes a repaired or empty successful profile.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Faulted or poisoned database state is typed runtime supervision input; every rollback failure remains an authoritative Database error requiring reopen and preserves both sanitized operation and rollback causes without changing COMMIT fault policy.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Fresh encrypted databases establish incremental auto-vacuum mode 2 before metadata tables; authenticated warm open rejects NONE/FULL without full VACUUM, reinitialization or empty authority fallback.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Physical reclamation accepts only positive capped budgets, consumes all row-producing pragma steps through DONE inside the existing transaction, and reports progress only after COMMIT; late statement/COMMIT/rollback failures preserve authoritative causes and fault policy.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Checked physical scalars and one known-main startup length comparison require no history-body scan; logical charges, free pages, SQL estimates, main/WAL file lengths and filesystem block release stay distinct. PASSIVE completion is outside the vacuum transaction, validates partial/no-WAL counters and has no 64-page engine-work cap.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
-      "paths": ["crates/mesh-talk-core/src/storage/"],
+      "paths": [
+        "crates/mesh-talk-core/src/storage/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["storage::"]
+          "filters": [
+            "storage::"
+          ]
         }
       ],
       "escalation": [
-        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
+        "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance.",
+        "Physical format/maintenance changes require storage::database::tests:: and postoffice::maintenance:: tests plus affected profile/repository/role and actual CLI compatibility evidence. Use the bundled SQLCipher engine to verify multiple zero-column ROW iterations, late errors, live data/counters, no-reader main shrink while open, reader-pinned partial progress/release and below-threshold restart continuation. Native filesystem/WAL and production-KDF/resource acceptance remain separate; fast-test fixtures do not certify deployment."
       ],
       "consumers": [
         "core-node",
@@ -1093,11 +1440,15 @@
     },
     {
       "id": "core-transport",
-      "paths": ["crates/mesh-talk-core/src/transport/"],
+      "paths": [
+        "crates/mesh-talk-core/src/transport/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["transport::"]
+          "filters": [
+            "transport::"
+          ]
         }
       ],
       "escalation": [
@@ -1112,17 +1463,24 @@
     },
     {
       "id": "core-util",
-      "paths": ["crates/mesh-talk-core/src/util/"],
+      "paths": [
+        "crates/mesh-talk-core/src/util/"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["util::"]
+          "filters": [
+            "util::"
+          ]
         }
       ],
       "escalation": [
         "Public core API, crypto, wire or persisted storage changes require affected consumer review and focused loopback/restart or compatibility evidence; development library selectors do not certify integration or native acceptance."
       ],
-      "consumers": ["core-node", "core-file"]
+      "consumers": [
+        "core-node",
+        "core-file"
+      ]
     },
     {
       "id": "core-account-profile",
@@ -1138,7 +1496,8 @@
         "crates/mesh-talk-core/src/node/account_profile_io_tests.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
         "crates/mesh-talk-core/src/node/runtime_routed_tests.rs",
-        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs"
+        "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
+        "crates/mesh-talk-core/src/node/profile_receive_work.rs"
       ],
       "rust": [
         {
@@ -1161,7 +1520,10 @@
             "node::node::tests::account_profile_terminal_legacy_avatar_reconciles_on_restart",
             "node::node::tests::account_profile_linked_device_pair_preserves_metadata_and_requires_card_parent",
             "node::account_profile_data::tests::",
-            "node::account_profile_io::tests::"
+            "node::account_profile_io::tests::",
+            "node::profile_receive_work::tests::",
+            "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
         },
         {
@@ -1186,7 +1548,10 @@
             "node::runtime::tests::account_nickname_preserves_bio_and_wins_over_host_name_on_restart",
             "node::runtime::tests::contact_nickname_survives_a_stale_signed_card_name_and_restart",
             "node::runtime::tests::offline_account_names_survive_roster_expiry_and_restart_without_presence",
-            "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback"
+            "node::account_sync::selection_tests::linked_account_profile_keeps_one_nickname_bio_and_avatar_over_loopback",
+            "node::profile_receive_work::tests::",
+            "node::node::tests::accept_loop_compacts_received_profiles_without_desktop_runtime",
+            "node::node::tests::disabled_profile_sync_defers_sibling_avatar_until_enabled"
           ]
         }
       ],
@@ -1234,6 +1599,10 @@
       "capability": {
         "summary": "Retry immutable delivery work across routed latency with bounded independent control lanes and cancellation-owned tasks.",
         "invariants": [
+          {
+            "name": "Paged network exchanges retain bounded chunks and frames, tolerate post-cutoff appends, invalidate destructive or authority changes, and propagate local read failures without terminal empty success or custody claims; collecting legacy adapters remain explicit.",
+            "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
+          },
           {
             "name": "Accepted channel files retain one durable event identity and their protected manifest across failed sidecar projection, lock transitions and restart; recovery never requests send authorization again",
             "reference": "docs/ARCHITECTURE.md#protected-messages"
@@ -1303,7 +1672,7 @@
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           },
           {
-            "name": "Sibling history wakes during active pulls retain a bounded immediate follow-up instead of waiting for periodic retry or reporting premature completion. Optional favorites failures preserve that refresh and unfinished history pages; without pending history work, failure does not create an immediate retry loop.",
+            "name": "Sibling history wakes during active pulls retain a bounded immediate follow-up instead of waiting for periodic retry or reporting premature completion",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
@@ -1319,8 +1688,16 @@
             "reference": "docs/network-design-reference.md#session-reuse-contract"
           },
           {
+            "name": "Optional bounded encrypted mailbox receive hints survive restart only with retained inner-event evidence and exact device/account ownership; corrupt, unavailable or saturated caches never block ordinary receive or missing-history recovery",
+            "reference": "docs/network-design-reference.md#idle-mailbox-work-and-rejected-pages"
+          },
+          {
             "name": "Healthy relay receiving keeps its own cadence while a valid slow alternative retains bounded progress; unrelated roster churn cannot cancel eligible work, current policy/network changes retire owned requests, and mailbox switches retain a dedicated receive-worker wake for prompt cancellation and resumption",
             "reference": "docs/network-design-reference.md#session-reuse-contract"
+          },
+          {
+            "name": "Sibling history wakes during active pulls retain a bounded immediate follow-up instead of waiting for periodic retry or reporting premature completion. Optional favorites failures preserve that refresh and unfinished history pages; without pending history work, failure does not create an immediate retry loop.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ],
         "guide": "docs/ARCHITECTURE.md"
@@ -1333,8 +1710,13 @@
         "Delivery observation changes require focused observation-owner and actual worker tests, exact-account/owner isolation, stale completion and recipient confirmation precedence. Host projection also requires typed frontend consumer checks; native acceptance must exercise participant retirement and the registered IPC response.",
         "Producer/session lock-order changes require send_authorization_never_retains_the_delivery_journal_lock plus concurrent ordinary profile publication and account/channel send evidence."
       ],
-      "consumers": ["desktop-session", "integration-service"],
-      "paths": ["crates/mesh-talk-core/src/node/"],
+      "consumers": [
+        "desktop-session",
+        "integration-service"
+      ],
+      "paths": [
+        "crates/mesh-talk-core/src/node/"
+      ],
       "excludePaths": [
         "crates/mesh-talk-core/src/node/account_profile.rs",
         "crates/mesh-talk-core/src/node/profile.rs",
@@ -1350,7 +1732,9 @@
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::"]
+          "filters": [
+            "node::"
+          ]
         }
       ]
     },
@@ -1376,7 +1760,10 @@
           ]
         }
       ],
-      "consumers": ["core-node", "core-file"],
+      "consumers": [
+        "core-node",
+        "core-file"
+      ],
       "escalation": [
         "Deadline framing is a wire/storage boundary; verify legacy compatibility and affected message delivery consumers."
       ],
@@ -1422,36 +1809,6 @@
       ]
     },
     {
-      "id": "core-large-directory-enqueue",
-      "paths": [
-        "crates/mesh-talk-core/tests/large_directory_enqueue.rs",
-        "crates/mesh-talk-core/src/node/files.rs",
-        "crates/mesh-talk-core/src/file/manifest.rs",
-        "crates/mesh-talk-core/src/file/directory.rs"
-      ],
-      "rust": [
-        {
-          "package": "mesh-talk-core",
-          "filters": [
-            "node::delivery_runtime_tests::large_manifest_uses_compact_wire_format_before_staging_chunks"
-          ]
-        }
-      ],
-      "capability": {
-        "summary": "Stage a real 110 MiB directory and persist its exact enqueued compact V4 manifest without exceeding the event frame limit.",
-        "guide": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding",
-        "invariants": [
-          {
-            "name": "The returned event ID resolves in the persisted event log after the writer stops; recipient decryption yields V4 with the matching file conversation, directory name/MIME and more than 2,000 chunks.",
-            "reference": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding"
-          }
-        ]
-      },
-      "escalation": [
-        "Run cargo test --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 separately, then validate the saved stdout/stderr with scripts/evals/backend-runner.mjs --validate-large-folder. The real 110 MiB fixture is explicit backend acceptance, not an ordinary affected-suite test; it proves enqueue/staging and persisted compact-manifest identity, not recipient transfer."
-      ]
-    },
-    {
       "id": "core-cli-harness",
       "paths": [
         "crates/mesh-talk-core/src/bin/",
@@ -1459,18 +1816,18 @@
         "crates/mesh-talk-core/examples/",
         "specifications/deployment_guide.md"
       ],
-      "excludePaths": [
-        "crates/mesh-talk-core/tests/large_directory_enqueue.rs"
-      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::"]
+          "filters": [
+            "node::"
+          ]
         }
       ],
       "escalation": [
         "CLI, integration test harnesses/fixtures and acceptance examples use conservative Node library fallback. Explicitly run the changed binary/example build and affected integration targets (including ignored multi-process CLI tests when behavior changes); these selectors do not execute those targets.",
-        "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --features fast-test-kdf --bin mesh-talk-node tests::profile_lock and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart."
+        "CLI data-directory ownership changes additionally require cargo test -p mesh-talk-core --lib storage::profile::tests::profile_lock -- --test-threads=1 and cargo test -p mesh-talk-core --test two_node_cli participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error -- --ignored --test-threads=1. Run the portable child-process lock scenarios on Linux, macOS and Windows; Node library fallback does not exercise OS locking or process restart.",
+        "Dedicated indexed relay lifecycle changes require the complete mesh-talk-node binary tests and, on Unix, the indexed_relay_cli integration target. Exercise all five branches and gateway proxy cancellation; successful Unix SIGTERM evidence does not establish native Windows forced-stop recovery or production-KDF startup performance."
       ],
       "capability": {
         "summary": "Exclude cooperating CLI writers before opening participant or post-office stores, retaining the OS lock through the process lifetime.",
@@ -1483,17 +1840,28 @@
           {
             "name": "Releasing ownership preserves the lock file and actual process termination permits restart",
             "reference": "specifications/deployment_guide.md#data-directory-ownership"
+          },
+          {
+            "name": "The dedicated indexed relay consumes its pre-keystore lease once and cooperatively joins owned maintenance, reconciliation, sessions, discovery and gateway proxies before storage release. Aborted or reset accepts discard only that connection and yield before continuing; interrupted or would-block failures without progress retain persistent 20 ms to 1 s capped backoff and fixed state. Unrelated work cannot reset retries or delay shutdown. Permanent accept errors retain their cause and operation context. Windows hard termination retains separate crash-recovery acceptance.",
+            "reference": "specifications/deployment_guide.md#data-directory-ownership"
           }
         ]
-      }
+      },
+      "excludePaths": [
+        "crates/mesh-talk-core/tests/large_directory_enqueue.rs"
+      ]
     },
     {
       "id": "core-file-consent-tests",
-      "paths": ["crates/mesh-talk-core/src/node/file_consent_tests.rs"],
+      "paths": [
+        "crates/mesh-talk-core/src/node/file_consent_tests.rs"
+      ],
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::file_consent_tests::"]
+          "filters": [
+            "node::file_consent_tests::"
+          ]
         }
       ],
       "escalation": [
@@ -1524,7 +1892,10 @@
           ]
         }
       ],
-      "consumers": ["desktop-session", "core-node"],
+      "consumers": [
+        "desktop-session",
+        "core-node"
+      ],
       "capability": {
         "summary": "Share account sign-in through private certified-device access records while preserving local encrypted storage ownership.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
@@ -1560,11 +1931,14 @@
       "paths": [
         "crates/mesh-talk-core/src/node/network_cost.rs",
         "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/files/chunks.rs",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/node/media_store/**",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
-        "crates/mesh-talk-core/src/node/runtime.rs"
+        "crates/mesh-talk-core/src/node/runtime.rs",
+        "crates/mesh-talk-core/src/node/privacy_sync/"
       ],
       "rust": [
         {
@@ -1573,7 +1947,13 @@
             "node::network_cost::tests::",
             "node::group_chain_tests::metered_group_file_replica_pauses_both_directions_without_losing_history_or_chunks",
             "node::group_chain_tests::metered_group_file_replica_preserves_explicit_attachment_consent",
-            "startup_network_options_precede_discovery_and_delivery_launch"
+            "startup_network_options_precede_discovery_and_delivery_launch",
+            "participant_event_growth_reads_owned_bodies_and_preserves_finite_network_view",
+            "participant_network_",
+            "paged_preparation_yields_unlocked_and_observes_concurrent_revocation",
+            "node::privacy_sync::causal_export_tests::",
+            "node::session::paged_tests::",
+            "participant_durable_have_request_uses_no_historical_bodies"
           ]
         }
       ],
@@ -1586,12 +1966,18 @@
             "reference": "docs/network-design-reference.md#cost-aware-group-attachment-sharing"
           },
           {
-            "name": "Cost-class changes expire session-local exceptions; manual share-off and conversation authorization remain authoritative.",
+            "name": "Cost-class changes expire session-local exceptions; manual share-off and conversation authorization remain authoritative. Finite participant selections preserve exact Have-dependent ancestry, fresh proof/source revocation, atomic receipt-control publication and pending invitations; unchanged paging reads no historical bodies, and cancellation cleanup is bounded.",
             "reference": "docs/help/topics/channels.md#network-data-protection"
+          },
+          {
+            "name": "Production principal preparation yields between bounded header/edge turns, persists resumable SQL selection facts, and rejects changed authorization before publication; fresh views do not collect retained event bodies. Legal wide-parent events retain progress and exact Have-dependent eligibility.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           }
         ]
       },
-      "consumers": ["desktop-group-file-network-cost"],
+      "consumers": [
+        "desktop-group-file-network-cost"
+      ],
       "escalation": [
         "Native cost signals and physical/VPN routes require platform acceptance separately; loopback policy tests do not establish hotspot classification or a zero-byte handoff guarantee."
       ]
@@ -1600,16 +1986,17 @@
       "id": "core-sticker-media",
       "paths": [
         "crates/mesh-talk-core/src/file/sticker.rs",
-        "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/sticker_media.rs",
         "crates/mesh-talk-core/src/node/sticker_media_tests.rs",
         "crates/mesh-talk-core/src/node/recall.rs",
+        "crates/mesh-talk-core/src/node/recall/",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
         "crates/mesh-talk-core/src/node/session.rs",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/eventlog/sync.rs",
-        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/files.rs"
       ],
       "rust": [
         {
@@ -1627,7 +2014,9 @@
           ]
         }
       ],
-      "consumers": ["desktop-chat"],
+      "consumers": [
+        "desktop-chat"
+      ],
       "capability": {
         "summary": "Deliver immutable encrypted sticker media without requiring recipient pack installation and reuse verified transfer bytes only within the same conversation and deadline.",
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
@@ -1675,10 +2064,14 @@
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::account_documents::"]
+          "filters": [
+            "node::account_documents::"
+          ]
         }
       ],
-      "consumers": ["desktop-private-device-hostnames"],
+      "consumers": [
+        "desktop-private-device-hostnames"
+      ],
       "capability": {
         "summary": "Display OS hostnames only within the same account through encrypted certified-sibling device synchronization.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
@@ -1717,7 +2110,10 @@
           ]
         }
       ],
-      "consumers": ["desktop-chat", "desktop-settings"],
+      "consumers": [
+        "desktop-chat",
+        "desktop-settings"
+      ],
       "capability": {
         "summary": "Preserve a participant-consented original registration office across encrypted directory and federation hops without disclosing it by default.",
         "guide": "docs/network-design-reference.md#optional-registration-origin-disclosure",
@@ -1778,6 +2174,7 @@
       "id": "core-file-message-identity",
       "paths": [
         "crates/mesh-talk-core/src/node/file_message_identity.rs",
+        "crates/mesh-talk-core/src/node/file_message_identity/",
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/delivery_store.rs",
         "crates/mesh-talk-core/src/node/node.rs",
@@ -1828,7 +2225,9 @@
           }
         ]
       },
-      "consumers": ["desktop-chat"],
+      "consumers": [
+        "desktop-chat"
+      ],
       "escalation": [
         "Run duplicate device fanout/sibling import, deliberate repeat, signed identity tampering, restart, recall/delete, relay-only and recovery snapshot regressions; test optional metadata fallback with older peers before merge."
       ]
@@ -1849,7 +2248,8 @@
         "crates/mesh-talk-core/src/eventlog/persist.rs",
         "crates/mesh-talk-core/src/eventlog/sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
-        "crates/mesh-talk-core/src/node/node.rs"
+        "crates/mesh-talk-core/src/node/node.rs",
+        "crates/mesh-talk-core/src/node/group_metadata/**"
       ],
       "rust": [
         {
@@ -1859,7 +2259,7 @@
             "current_group_metadata_crosses_real_tcp_after_owner_goes_offline",
             "node::session::tests::",
             "eventlog::event::tests::",
-            "eventlog::persist::tests::",
+            "eventlog::persist::legacy::tests::",
             "node::join_history::tests::"
           ]
         }
@@ -1878,7 +2278,9 @@
           }
         ]
       },
-      "consumers": ["desktop-group-metadata"],
+      "consumers": [
+        "desktop-group-metadata"
+      ],
       "escalation": [
         "Exercise real linked owner-account devices, removal/re-invitation, source-offline restart and mixed-version native clients. Loopback TCP tests establish encrypted event convergence but not physical LAN reachability."
       ]
@@ -1890,10 +2292,12 @@
         "crates/mesh-talk-core/src/node/group_file_delivery_tests.rs",
         "crates/mesh-talk-core/src/node/file_consent.rs",
         "crates/mesh-talk-core/src/node/file_consent_store.rs",
+        "crates/mesh-talk-core/src/node/file_consent_store/**",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/delivery_store.rs",
         "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/files/chunks.rs",
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
         "crates/mesh-talk-core/src/node/participant_runtime.rs"
@@ -1907,6 +2311,8 @@
             "node::file_consent::",
             "node::file_consent_store::",
             "node::file_completion::",
+            "file_retention_",
+            "indexed_file_payload_tests",
             "node::opaque_relay::",
             "retained_relay_file_exchange_rechecks_signed_consent_and_relay_role",
             "relay_file_worker_preserves_progress_across_slow_mailbox_exchanges",
@@ -1935,7 +2341,9 @@
           }
         ]
       },
-      "consumers": ["desktop-chat"],
+      "consumers": [
+        "desktop-chat"
+      ],
       "escalation": [
         "Run real loopback two-relay federation with unavailable direct client endpoints, pre-approval custody, sender shutdown, recipient approval/save and exact completion; include independent-recipient replay/compaction and revoke/expiry evidence. Installed Mac-to-Mac acceptance and deployed relay capacity/retention remain separate native requirements."
       ]
@@ -1949,10 +2357,14 @@
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": ["node::forwarding::"]
+          "filters": [
+            "node::forwarding::"
+          ]
         }
       ],
-      "consumers": ["frontend-message-forwarding"],
+      "consumers": [
+        "frontend-message-forwarding"
+      ],
       "capability": {
         "summary": "Forward canonical retained sources to accounts or logical account groups through the existing acceptance owners, retaining per-item identity and read-only pending receipt projections.",
         "guide": "docs/message-forwarding.md",
@@ -1978,6 +2390,327 @@
       "escalation": [
         "Run the reference-only Owner/Member Noise regressions, text/file/merged delivery, source-policy, partial retry, retirement and restart checks. Public native admission and cross-device behavior require affected host review and protected CI; browser substitutes do not prove encrypted execution."
       ]
+    },
+    {
+      "id": "core-indexed-authored-reactions",
+      "paths": [
+        "crates/mesh-talk-core/src/node/reaction_store.rs",
+        "crates/mesh-talk-core/src/node/reaction_store/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "indexed_authored_reactions_",
+            "node::reaction_store::tests::",
+            "own_account_reactions_survive_restart_and_removal",
+            "own_dm_reactions_survive_restart_and_removal"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node"
+      ],
+      "capability": {
+        "summary": "Persist authored reaction projection on encrypted disk under independently published account-qualified sources.",
+        "guide": "docs/module-boundaries.md",
+        "invariants": [
+          {
+            "name": "Warm Node open reads no authored reaction payloads; exact account/conversation/target/emoji keys retain unsigned action clocks and remove-wins ties, with key and byte admission before page bodies.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "The shared source publisher preserves unscoped identities and uses full account public keys for scoped publication, independent locators and barriers; faults resume without replay or cross-account projection.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Authored source storage does not certify incoming reaction aggregation, selected reaction-view APIs, or account-document startup memory; those consumers require separate bounded-query and runtime acceptance."
+      ]
+    },
+    {
+      "id": "core-indexed-current-profiles",
+      "paths": [
+        "crates/mesh-talk-core/src/node/profile_store/",
+        "crates/mesh-talk-core/src/node/account_profile_data/",
+        "crates/mesh-talk-core/src/node/trust_card/",
+        "crates/mesh-talk-core/src/node/account_profile.rs",
+        "crates/mesh-talk-core/src/node/account_profile_io.rs",
+        "crates/mesh-talk-core/src/node/account_profile_io_tests.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "warm_open_reads_no_avatar_payloads",
+            "node::profile_store::indexed::tests::",
+            "node::account_profile_data::indexed::tests::",
+            "node::trust_card::indexed::tests::",
+            "node::account_profile::tests::",
+            "node::account_profile_io::tests::",
+            "account_profile_projection_retry_and_restart_preserve_avatar_and_identity_lifetime"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-account-profile"
+      ],
+      "capability": {
+        "summary": "Select current account profiles, compatibility avatars and frozen trust cards from independently published encrypted disk indexes.",
+        "guide": "docs/module-boundaries.md",
+        "invariants": [
+          {
+            "name": "Warm owner opens read metadata only; row and byte admission precedes selected payload fetch. Signed profile ties, trust-card first-revision wins, immutable creation dates and existing count/wire-byte quotas retain their distinct rules.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "A failed import preserves the legacy source; failed writes do not change current values or revision. Published missing authority is an error, not an empty store.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Node authenticates all legacy sources before publication and resumes only exact pending current-value projections. Unrelated successful writes cannot acknowledge a failed avatar projection; unchanged warm opens fetch no peer payloads.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Host selected-profile/error adapters and frontend avatar-cache lifetime need their own native/browser acceptance; repository and core Node tests do not certify those consumers."
+      ]
+    },
+    {
+      "id": "core-opaque-receive-hints",
+      "paths": [
+        "crates/mesh-talk-core/src/node/opaque_receive_cache.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::opaque_receive_cache::tests::",
+            "node::opaque_relay::permission_tests::",
+            "federated_file_consent_and_complete_bytes_need_no_direct_client_route"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node"
+      ],
+      "capability": {
+        "summary": "Keep optional opaque receive mappings on encrypted disk and load only the active mailbox's bounded protocol identifiers.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Warm open decodes no historical hints; only retained inner events qualify durable hints, session progress cannot survive restart, and corrupt or foreign optional sources remain preserved without blocking login.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
+    },
+    {
+      "id": "core-reception-effects",
+      "paths": [
+        "crates/mesh-talk-core/src/storage/profile/context.rs",
+        "crates/mesh-talk-core/src/node/reception_effects/",
+        "crates/mesh-talk-core/src/node/runtime_delivery.rs",
+        "crates/mesh-talk-core/src/node/runtime_startup.rs",
+        "crates/mesh-talk-core/src/node/ui_state.rs",
+        "crates/mesh-talk-core/src/node/host_reception.rs",
+        "crates/mesh-talk-core/src/bin/mesh-talk-node/reception.rs",
+        "crates/mesh-talk-core/src/node/files/reception.rs",
+        "crates/mesh-talk-core/src/node/files/channel_receive.rs",
+        "crates/mesh-talk-core/src/node/channel/checkpoint/file_preview.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::reception_effects::tests::",
+            "node::runtime_delivery::tests::",
+            "node::host_reception::tests::",
+            "retired_account_producers_cannot_install_effects_in_the_adopted_namespace",
+            "node::files::channel_receive::tests::"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node",
+        "desktop-chat"
+      ],
+      "capability": {
+        "summary": "Deliver durable reception work through bounded runtime observations, on-demand materialization and fixed consumer acknowledgement without changing read-state ownership.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Receipt source identity, first reception provenance and terminal batch metadata commit with transcript processing before existing journal/checkpoint completion; exact installation evidence survives pending-metadata retirement.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Epoch-scoped local installation cursors and finite through bounds admit row, raw-byte and conservative serialized-byte budgets before body reads; deleted, suppressed and expired sources advance without plaintext.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Fixed-consumer ACKs advance a committed prefix; incremental pending retirement waits for every enrolled consumer and never treats RAM autosave admission as durable completion. Captured adoption generations reject former readers and ACK handles even after their account returns, while a fresh reader resumes its existing stream.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Leaf repository tests do not certify atomic integration into DM/channel/file producers or actual desktop/CLI startup selection.",
+        "Production handoff requires slow-consumer, restart, owner replacement and native/browser evidence, including one outstanding wake, one bounded pull, final recall/visibility checks and durable frontend snapshot-before-ACK."
+      ]
+    },
+    {
+      "id": "core-indexed-transcripts",
+      "paths": [
+        "crates/mesh-talk-core/src/node/queries.rs",
+        "crates/mesh-talk-core/src/node/account_sync/archive.rs",
+        "crates/mesh-talk-core/src/node/account_sync/read_entitlement_tests.rs",
+        "crates/mesh-talk-core/src/node/sent_store.rs",
+        "crates/mesh-talk-core/src/node/received_store.rs",
+        "crates/mesh-talk-core/src/node/account_file_repository.rs",
+        "crates/mesh-talk-core/src/node/recovered_sent_ids.rs",
+        "crates/mesh-talk-core/src/node/transcript_repository/",
+        "crates/mesh-talk-core/src/eventlog/repository/receiving.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/order/combined.rs",
+        "crates/mesh-talk-core/src/eventlog/repository/order/combined/",
+        "crates/mesh-talk-core/src/node/filebook/",
+        "crates/mesh-talk-core/src/node/attachment_consent.rs",
+        "crates/mesh-talk-core/src/node/attachment_consent/",
+        "crates/mesh-talk-core/src/node/account_suppression.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::transcript_repository::tests::",
+            "node::account_file_repository::tests::",
+            "runtime_metadata_",
+            "selected_history_and_archive_wait_for_admitted_recall_before_body_reads",
+            "retained_channel_without_checkpoint_cannot_publish_saved_plaintext",
+            "indexed_runtime_recent_history_",
+            "node::filebook::indexed::tests::",
+            "node::attachment_consent::",
+            "direct_file_approval_shares_signed_revision_with_relay_delivery",
+            "deleting_one_file_alias_keeps_other_host_live_then_bulk_clear_removes_last_key",
+            "node::recovered_sent_ids::tests::",
+            "node::account_suppression::tests::",
+            "indexed_file_runtime_warm_open_does_not_hydrate_retained_manifest_history",
+            "incoming_file_sidecar_failure_recovers_live_once_or_silently_on_reopen_and_delivers_ack",
+            "sent_scope_repair_failure_installs_no_permission_and_retry_recovers",
+            "legacy_signed_manifest_fanout_scopes_import_after_torn_tail_and_accept_later_append",
+            "failed_media_",
+            "participant_dm_pending_qualifies_account_before_limit_and_preserves_return_work"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node",
+        "core-recovery"
+      ],
+      "capability": {
+        "summary": "Serve production participant history, recall, archive, and exact deletion state from profile-owned indexed stores with bounded metadata discovery and selected-body reads.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Independent encrypted source snapshots preserve originals on import failure or detected source changes; durable legacy-writer barriers precede source publication, faulted publication resumes without replay, and warm opens read metadata without historical bodies.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Owned fallible lookups and forward, reverse or insertion-order pages preserve exact keys and unsigned ordering; private validated budgets select at most 128 rows and 8 MiB before body reads, while invalid budgets and oversized first rows fail without payload fetches.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Manifest receive discovery qualifies account commit intervals before pending insertion; account-indexed bounded retries preserve oversized legal rows and returning-account work, while adoption generations reject stale reads, acknowledgements and message/file reception writes even after the account returns.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Metadata-only identity and deadline selection, transactional physical deletion/counters, exact file aliases and 64-byte suppression keys survive restart without resident history sets; suppression export uses bounded keyset pages with no expiry or probabilistic lookup.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Manifest receive discovery qualifies account commit intervals before pending insertion; account-indexed bounded retries preserve oversized legal rows and returning-account work, while adoption generations reject stale reads, acknowledgements and message/file reception writes even after the account returns.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Receive preferences and exact attachment decisions migrate once through source17, remain account-scoped with durable latest-decision precedence, and warm open decodes no retained decisions; storage failure rolls back policy generation and adoption never revives old handles.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Leaf repository tests do not certify participant runtime integration, native publication behavior or production-KDF startup budgets. Node integration must retain validate_participant_request before constructors and the existing delivery journal, use pure removal predicates under the SQL lock, and continue deadline pagination until an empty page rather than a short page.",
+        "Actual consumer cutover requires affected history/search, delivery recovery, exact local deletion, snapshot export/restore and loopback/restart evidence; bounded repository APIs alone do not establish bounded startup memory."
+      ]
+    },
+    {
+      "id": "core-selected-reaction-summaries",
+      "paths": [
+        "crates/mesh-talk-core/src/node/reactions/"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::reactions::selected::tests::",
+            "reaction_account_reduction::"
+          ]
+        }
+      ],
+      "consumers": [
+        "core-node"
+      ],
+      "capability": {
+        "summary": "Project selected reaction targets into exact SQL counts and page summaries without author-list materialization.",
+        "guide": "docs/module-boundaries.md",
+        "invariants": [
+          {
+            "name": "Selected requests bind account generation, targets and authenticated source revisions; pending responses contain no partial rows and always carry a continuation.",
+            "reference": "docs/module-boundaries.md"
+          },
+          {
+            "name": "Retained bodies and summary strings are selected by key and byte budgets before allocation; latest action is reduced per principal with unsigned clocks and remove-wins ties.",
+            "reference": "docs/module-boundaries.md"
+          }
+        ]
+      },
+      "escalation": [
+        "Modern-channel causal preparation resumes through the shared checkpoint with a finite work budget and retains Ready authority until a later source-fenced hydration turn. Its exact same-channel revision fence remains conservative under continuous appends. Native/frontend changes must retain selected-target request bounds, pending empty pages, owner fencing and explicit continuation; test-only collecting reducers remain semantic references."
+      ]
+    },
+    {
+      "id": "core-large-directory-enqueue",
+      "paths": [
+        "crates/mesh-talk-core/tests/large_directory_enqueue.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/file/manifest.rs",
+        "crates/mesh-talk-core/src/file/directory.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::delivery_runtime_tests::large_manifest_uses_compact_wire_format_before_staging_chunks"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Stage a real 110 MiB directory and persist its exact enqueued compact V4 manifest without exceeding the event frame limit.",
+        "guide": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding",
+        "invariants": [
+          {
+            "name": "The returned event ID resolves in the persisted event log after the writer stops; recipient decryption yields V4 with the matching file conversation, directory name/MIME and more than 2,000 chunks.",
+            "reference": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding"
+          }
+        ]
+      },
+      "escalation": [
+        "Run cargo test --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 separately, then validate the saved stdout/stderr with scripts/evals/backend-runner.mjs --validate-large-folder. The real 110 MiB fixture is explicit backend acceptance, not an ordinary affected-suite test; it proves enqueue/staging and persisted compact-manifest identity, not recipient transfer."
+      ]
     }
   ],
   "prScenarios": [
@@ -1994,7 +2727,9 @@
         "crates/mesh-talk-core/src/node/route_timing.rs",
         "crates/mesh-talk-core/src/node/delivery_retry.rs"
       ],
-      "native": ["host"]
+      "native": [
+        "host"
+      ]
     }
   ]
 }

@@ -112,12 +112,14 @@ impl Node {
             {
                 return None;
             }
-            let event = self
-                .log
-                .lock()
-                .expect("event log mutex")
-                .get(&id)
-                .cloned()?;
+            let event = match self.log.lock().expect("event log mutex").get(&id) {
+                Ok(Some(event)) => event,
+                Ok(None) => return None,
+                Err(error) => {
+                    log::warn!("Group file asset request deferred after storage failure: {error}");
+                    return None;
+                }
+            };
             if event.kind != crate::eventlog::EventKind::FileManifest
                 || event.conversation_id != reference.group
                 || event.author.ed25519_pub() != &reference.executor.device.ed25519_pub
@@ -156,14 +158,22 @@ impl Node {
         {
             return None;
         }
-        if entry.status.primary_event.is_some_and(|event| {
-            self.recalls
+        if let Some(event) = entry.status.primary_event {
+            match self
+                .recalls
                 .lock()
                 .expect("recalls mutex")
-                .targets(&request.group)
-                .contains(&event)
-        }) {
-            return None;
+                .contains(request.group, event)
+            {
+                Ok(false) => {}
+                Ok(true) => return None,
+                Err(error) => {
+                    log::warn!(
+                        "Group file asset recall check deferred after storage failure: {error}"
+                    );
+                    return None;
+                }
+            }
         }
         Some(payload)
     }
@@ -184,7 +194,14 @@ impl Node {
         let file = manifest.file_conv();
         let ids: Vec<_> = {
             let log = self.log.lock().expect("event log mutex");
-            log.events(&file)
+            let events = match log.events(&file) {
+                Ok(events) => events,
+                Err(error) => {
+                    log::warn!("Group file asset service deferred after storage failure: {error}");
+                    return false;
+                }
+            };
+            events
                 .into_iter()
                 .filter(|event| event.kind == crate::eventlog::EventKind::Message)
                 .map(|event| event.id)
@@ -216,8 +233,13 @@ impl Node {
         for (index, id) in ids.iter().enumerate().skip(request.start_chunk as usize) {
             let ciphertext = {
                 let log = self.log.lock().expect("event log mutex");
-                let Some(event) = log.get(id) else {
-                    return false;
+                let event = match log.get(id) {
+                    Ok(Some(event)) => event,
+                    Ok(None) => return false,
+                    Err(error) => {
+                        log::warn!("Group file asset chunk read failed: {error}");
+                        return false;
+                    }
                 };
                 if !event.verify_integrity() || !event.verify_signature() {
                     return false;
@@ -486,7 +508,7 @@ impl Node {
             }
             let ids: Vec<_> = {
                 let log = node.log.lock().expect("event log mutex");
-                log.events(&file_conv)
+                log.events(&file_conv)?
                     .into_iter()
                     .filter(|event| event.kind == crate::eventlog::EventKind::Message)
                     .map(|event| event.id)
@@ -499,7 +521,7 @@ impl Node {
                     .log
                     .lock()
                     .expect("event log mutex")
-                    .get(id)
+                    .get(id)?
                     .ok_or_else(|| NodeError::File("prepared file chunk unavailable".into()))?
                     .ciphertext
                     .clone();
@@ -530,7 +552,7 @@ impl Node {
                 let (fingerprint, count) = {
                     let log = node.log.lock().expect("event log mutex");
                     log.sync().map_err(NodeError::Log)?;
-                    log.fingerprint_and_len(&file_conv)
+                    log.fingerprint_and_len(&file_conv)?
                 };
                 let receipt = GroupFileAssetsReceipt {
                     file_conv,
@@ -1033,7 +1055,7 @@ mod tests {
             crate::node::files::validated_manifest(&prepared.descriptor.as_ref().unwrap().manifest)
                 .unwrap()
                 .file_conv();
-        let before = node.log.lock().unwrap().conversations();
+        let before = node.log.lock().unwrap().conversations().unwrap();
         let duplicate = node
             .prepare_account_group_file(
                 &account_id,
@@ -1048,8 +1070,8 @@ mod tests {
             .await
             .unwrap();
         assert!(duplicate == original);
-        assert_eq!(node.log.lock().unwrap().conversations(), before);
-        assert_eq!(node.log.lock().unwrap().conversation_len(&conv), 1);
+        assert_eq!(node.log.lock().unwrap().conversations().unwrap(), before);
+        assert_eq!(node.log.lock().unwrap().conversation_len(&conv).unwrap(), 1);
         assert!(node.group_operations.lock().unwrap().entries.is_empty());
         std::fs::write(&path, b"different explicit attachment").unwrap();
         assert!(
@@ -1480,17 +1502,22 @@ mod tests {
             crate::node::files::validated_manifest(&payload.descriptor.as_ref().unwrap().manifest)
                 .unwrap();
         let file = manifest.file_conv();
-        let before = node.log.lock().unwrap().fingerprint_and_len(&file);
-        let chunk = node.log.lock().unwrap().events(&file)[0].ciphertext.clone();
+        let before = node.log.lock().unwrap().fingerprint_and_len(&file).unwrap();
+        let chunk = node.log.lock().unwrap().events(&file).unwrap()[0]
+            .ciphertext
+            .clone();
         assert_eq!(
             crate::file::open_chunk_for(&manifest, 0, &chunk).unwrap(),
             bytes
         );
         assert!(
-            !node.commit_file_completion(file, &[]),
+            !node.commit_file_completion(file, &[]).unwrap(),
             "verified local reclamation must retain an original artifact needed by a live preparation"
         );
-        assert_eq!(node.log.lock().unwrap().fingerprint_and_len(&file), before);
+        assert_eq!(
+            node.log.lock().unwrap().fingerprint_and_len(&file).unwrap(),
+            before
+        );
         assert!(
             node.prepare_account_group_file(
                 &account.account_id(),
@@ -1552,7 +1579,7 @@ mod tests {
         let (dir, node, _account, _group, _logical, _manifest, _chunk) = fixture();
         let path = dir.path().join("retired-stage.bin");
         std::fs::write(&path, vec![0x25; crate::file::CHUNK_SIZE * 3]).unwrap();
-        let before = node.log.lock().unwrap().conversations();
+        let before = node.log.lock().unwrap().conversations().unwrap();
         let mut progress = 0u32;
         let result = node.stage_file(&path, FileKind::File, |_| {
             progress += 1;
@@ -1566,11 +1593,12 @@ mod tests {
         let log = node.log.lock().unwrap();
         let staged: Vec<_> = log
             .conversations()
+            .unwrap()
             .into_iter()
             .filter(|conv| !before.contains(conv))
             .collect();
         assert_eq!(staged.len(), 1);
-        assert_eq!(log.conversation_len(&staged[0]), 1);
+        assert_eq!(log.conversation_len(&staged[0]).unwrap(), 1);
     }
     #[test]
     fn file_result_descriptor_binds_the_original_request_and_old_results_keep_their_bytes() {
@@ -1588,7 +1616,7 @@ mod tests {
             &node.identity,
             group,
             2,
-            node.log.lock().unwrap().heads(&group),
+            node.log.lock().unwrap().heads(&group).unwrap(),
             2,
             2,
             EventKind::FileManifest,
@@ -1695,6 +1723,8 @@ mod tests {
         let (dm, _) = mpsc::unbounded_channel();
         let (channels, _) = mpsc::unbounded_channel();
         let (files, _) = mpsc::unbounded_channel();
+        let sibling_dir = dir.path().join("sibling");
+        std::fs::create_dir(&sibling_dir).unwrap();
         let sibling = Node::open_with_account(
             DeviceIdentity::generate(),
             Account::from_secret_bytes(account.secret_bytes()),
@@ -1702,8 +1732,8 @@ mod tests {
             dm,
             channels,
             files,
-            &dir.path().join("sibling-events"),
-            &dir.path().join("sibling-sent"),
+            &sibling_dir.join("events"),
+            &sibling_dir.join("sent"),
             "pw",
         )
         .unwrap();

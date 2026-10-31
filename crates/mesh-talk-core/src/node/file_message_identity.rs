@@ -8,10 +8,12 @@ use crate::storage::record_log::EncryptedRecordLog;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::{collections::HashSet, path::Path};
+
+mod indexed;
+pub(crate) use indexed::IndexedFileMessageIdentities;
 
 const MAGIC: &[u8; 6] = b"MTFMID";
 const PREFIX: &[u8] =
@@ -172,6 +174,18 @@ pub(in crate::node) enum FileMessageIdentityImportError {
     Persistence(LogError),
 }
 
+/// Only explicit peer validation failures may retire an opaque envelope. Local
+/// storage, decoding and capacity failures remain retryable across backends.
+fn classify_import_failure(error: NodeError) -> FileMessageIdentityImportError {
+    match error {
+        NodeError::Log(error) if !error.is_peer_rejection() => {
+            FileMessageIdentityImportError::Persistence(error)
+        }
+        error => FileMessageIdentityImportError::Invalid(error),
+    }
+}
+
+#[cfg(test)]
 pub(in crate::node) struct FileMessageIdentities {
     log: EncryptedRecordLog<Event>,
     bundles: HashMap<(ConversationId, EventId), (Event, Identity)>,
@@ -179,6 +193,7 @@ pub(in crate::node) struct FileMessageIdentities {
     by_manifest: HashMap<EventId, (ConversationId, EventId)>,
 }
 
+#[cfg(test)]
 impl FileMessageIdentities {
     pub(super) fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (log, events) = EncryptedRecordLog::<Event>::open(path, password, MAGIC)?;
@@ -202,7 +217,7 @@ impl FileMessageIdentities {
             return if old == event {
                 Ok(())
             } else {
-                Err(LogError::CorruptFile(
+                Err(LogError::AdmissionRejected(
                     "conflicting logical file identity".into(),
                 ))
             };
@@ -210,16 +225,14 @@ impl FileMessageIdentities {
         if self.bundles.len() >= MAX_IDENTITIES
             || self.aliases.len() + identity.aliases.len() > MAX_INDEXED_ALIASES
         {
-            return Err(LogError::Serialization(
-                "logical file identity capacity exhausted".into(),
-            ));
+            return Err(std::io::Error::other("logical file identity capacity exhausted").into());
         }
         if identity.aliases.iter().any(|id| {
             self.by_manifest
                 .get(id)
                 .is_some_and(|binding| *binding != (host, identity.logical))
         }) {
-            return Err(LogError::CorruptFile(
+            return Err(LogError::AdmissionRejected(
                 "conflicting logical file identity scope".into(),
             ));
         }
@@ -228,7 +241,9 @@ impl FileMessageIdentities {
                 .get(&(host, *id))
                 .is_some_and(|logical| *logical != identity.logical)
         }) {
-            return Err(LogError::CorruptFile("conflicting manifest alias".into()));
+            return Err(LogError::AdmissionRejected(
+                "conflicting manifest alias".into(),
+            ));
         }
         Ok(())
     }
@@ -264,44 +279,6 @@ impl FileMessageIdentities {
             .filter(|(_, identity)| identity.matches(row))
             .map_or(row.event_id, |_| logical)
     }
-    pub(super) fn row_suppressed(
-        &self,
-        row: &ReceivedEntry,
-        suppression: &super::account_suppression::AccountSuppression,
-    ) -> bool {
-        suppression.contains(row.conversation, row.event_id)
-            || self
-                .by_manifest
-                .get(&row.event_id)
-                .and_then(|key| self.bundles.get(key))
-                .is_some_and(|(_, identity)| {
-                    // One signed offer may have a legacy device-host row plus an
-                    // account alias. Authority stays anchored to its signed account
-                    // group, and only exact source/content matches share deletion.
-                    identity.matches_content(row)
-                        && (suppression.contains(identity.host(), identity.logical)
-                            || suppression.contains(identity.host(), row.event_id))
-                })
-    }
-    pub(super) fn row_author_account(&self, row: &ReceivedEntry) -> Option<String> {
-        let logical = self.logical(row.conversation, row.event_id);
-        self.bundles
-            .get(&(row.conversation, logical))
-            .filter(|(_, identity)| identity.matches(row))
-            .map(|(_, identity)| identity.source.account_id())
-    }
-    pub(super) fn aliases(&self, host: ConversationId, event: EventId) -> Vec<EventId> {
-        self.bundles
-            .get(&(host, self.logical(host, event)))
-            .map_or_else(Vec::new, |(_, identity)| identity.aliases.clone())
-    }
-    fn bundle(&self, manifest: EventId) -> Option<Event> {
-        self.by_manifest
-            .get(&manifest)
-            .and_then(|key| self.bundles.get(key))
-            .map(|(event, _)| event.clone())
-    }
-
     pub(super) fn snapshot(&self) -> Vec<Event> {
         self.bundles
             .values()
@@ -311,34 +288,100 @@ impl FileMessageIdentities {
 }
 
 impl Node {
+    /// Resolve one authenticated manifest author. Supplemental logical identity
+    /// is optional for deployed/personal cards; their retained signed original
+    /// and certified device binding remain valid evidence for recall checks.
+    pub(in crate::node) fn file_message_row_author_account(
+        &self,
+        row: &ReceivedEntry,
+        original: Option<&Event>,
+    ) -> Result<Option<String>, LogError> {
+        if let Some(account) = self
+            .file_message_identities
+            .lock()
+            .expect("file identity mutex")
+            .row_author_account(row)?
+        {
+            return Ok(Some(account));
+        }
+        let retained;
+        let original = match original {
+            Some(original) => Some(original),
+            None => {
+                let selected = self.log.lock().expect("log mutex").get(&row.event_id)?;
+                retained = match selected {
+                    Some(event) => Some(event),
+                    None => self
+                        .account_file_proofs
+                        .lock()
+                        .expect("file proofs mutex")
+                        .get(&row.event_id)?,
+                };
+                retained.as_ref()
+            }
+        };
+        let Some(original) = original else {
+            return Ok(None);
+        };
+        if super::files::eligible_manifest_row(row, Some(original), None).is_none() {
+            return Ok(None);
+        }
+        let own = self.account_id();
+        if super::files::is_personal_file_proof(original)
+            && row.conversation != account_conversation_id(&own, &own)
+        {
+            return Ok(None);
+        }
+        let author = original.author.ed25519_pub();
+        if author == &self.identity.public().ed25519_pub
+            || self.linked_devices().iter().any(|device| {
+                &device.public.ed25519_pub == author
+                    && device.certificate.verify()
+                    && device.certificate.account_id() == own
+                    && device.certificate.device_ed25519_pub == device.public.ed25519_pub
+            })
+        {
+            return Ok(Some(own));
+        }
+        Ok(self
+            .historical_author(author)
+            .filter(|proof| proof.valid_presence() && !proof.post_office)
+            .and_then(|proof| proof.account_id()))
+    }
+
     pub(in crate::node) fn has_file_message_identity(
         &self,
         host: ConversationId,
         manifest: EventId,
-    ) -> bool {
+    ) -> Result<bool, LogError> {
         self.file_message_identities
             .lock()
             .expect("file identity lock")
-            .aliases
-            .contains_key(&(host, manifest))
+            .contains(host, manifest)
     }
     pub(in crate::node) fn file_message_logical_id(
         &self,
         host: ConversationId,
         event: EventId,
-    ) -> EventId {
+    ) -> Result<EventId, LogError> {
         self.file_message_identities
             .lock()
             .expect("file identity lock")
             .logical(host, event)
     }
-    pub(in crate::node) fn file_message_row_logical_id(&self, row: &ReceivedEntry) -> EventId {
+    pub(in crate::node) fn file_message_row_logical_id(
+        &self,
+        row: &ReceivedEntry,
+    ) -> Result<EventId, LogError> {
         self.file_message_identities
             .lock()
             .expect("file identity lock")
             .row_logical(row)
     }
-    pub(in crate::node) fn file_message_row_suppressed(&self, row: &ReceivedEntry) -> bool {
+    pub(in crate::node) fn file_message_row_suppressed(
+        &self,
+        row: &ReceivedEntry,
+    ) -> Result<bool, LogError> {
         let identities = self
             .file_message_identities
             .lock()
@@ -349,65 +392,20 @@ impl Node {
             .expect("account suppression lock");
         identities.row_suppressed(row, &suppression)
     }
-    pub(in crate::node) fn file_message_identity_snapshot(&self) -> Vec<Event> {
-        let source_ids: Vec<_> = self
-            .delivery
-            .lock()
-            .expect("delivery lock")
-            .file_cards()
-            .filter(|card| card.completion_binding.is_none())
-            .map(|card| card.id)
-            .collect();
-        for id in source_ids {
-            let _ = self.file_message_identity_bundle(id);
-        }
-        let retained: HashSet<_> = {
-            let files = self.received_files.lock().expect("files lock");
-            files
-                .conversations()
-                .into_iter()
-                .flat_map(|host| {
-                    files
-                        .entries_ref(&host)
-                        .iter()
-                        .filter(|row| !self.file_message_row_suppressed(row))
-                        .map(|row| (host, row.event_id))
-                        .collect::<Vec<_>>()
-                })
-                .collect()
-        };
-        let retained_ids: HashSet<_> = retained.iter().map(|(_, id)| *id).collect();
-        self.file_message_identities
-            .lock()
-            .expect("file identity lock")
-            .snapshot()
-            .into_iter()
-            .filter(|bundle| {
-                decode(bundle).is_some_and(|identity| {
-                    let local_source = identity.source.device_ed25519_pub
-                        == self.identity.public().ed25519_pub
-                        || self.recovery_origins.iter().any(|author| {
-                            author.ed25519_pub() == &identity.source.device_ed25519_pub
-                        });
-                    identity.aliases.iter().any(|alias| {
-                        retained.contains(&(identity.host(), *alias))
-                            || local_source && retained_ids.contains(alias)
-                    })
-                })
-            })
-            .collect()
-    }
     /// Retained source cards repair old per-device copies without re-sending artwork.
-    pub(in crate::node) fn file_message_identity_bundle(&self, manifest: EventId) -> Option<Event> {
+    pub(in crate::node) fn file_message_identity_bundle(
+        &self,
+        manifest: EventId,
+    ) -> Result<Option<Event>, LogError> {
         if let Some(bundle) = self
             .file_message_identities
             .lock()
             .expect("file identity lock")
-            .bundle(manifest)
+            .bundle(manifest)?
         {
-            return Some(bundle);
+            return Ok(Some(bundle));
         }
-        let card = {
+        let Some(card) = ({
             let delivery = self.delivery.lock().expect("delivery lock");
             delivery
                 .file_card(manifest)
@@ -421,35 +419,43 @@ impl Node {
                                 .any(|dest| dest.binding.event_id == manifest)
                     })
                 })
-                .cloned()?
+                .cloned()
+        }) else {
+            return Ok(None);
         };
         if card.destinations.is_empty() || card.destinations.len() > MAX_ALIASES {
-            return None;
+            return Ok(None);
         }
-        let recipient = card.destinations.first()?.binding.account.clone()?;
+        let Some(recipient) = card
+            .destinations
+            .first()
+            .and_then(|dest| dest.binding.account.clone())
+        else {
+            return Ok(None);
+        };
         if card
             .destinations
             .iter()
             .any(|dest| dest.binding.account.as_deref() != Some(recipient.as_str()))
         {
-            return None;
+            return Ok(None);
         }
         // The stable device key can survive account adoption, but a legacy
         // outgoing card retains its original account conversation. Never mint
         // its supplemental identity with the newly loaded account certificate.
         if card.conversation != account_conversation_id(&self.account_id(), &recipient) {
-            return None;
+            return Ok(None);
         }
-        let row = self
+        let Some(row) = self
             .received_files
             .lock()
             .expect("files lock")
-            .entries_ref(&card.conversation)
-            .iter()
-            .find(|row| row.event_id == card.id)
-            .cloned()?;
+            .entry_in(&card.conversation, card.id)?
+        else {
+            return Ok(None);
+        };
         if row.from != self.user_id() {
-            return None;
+            return Ok(None);
         }
         let aliases: Vec<_> = card
             .destinations
@@ -457,12 +463,12 @@ impl Node {
             .map(|dest| dest.binding.event_id)
             .collect();
         if aliases.first() != Some(&card.id) {
-            return None;
+            return Ok(None);
         }
         {
             let log = self.log.lock().expect("log lock");
-            if card.destinations.iter().any(|dest| {
-                log.get(&dest.binding.event_id).is_none_or(|event| {
+            for dest in &card.destinations {
+                if log.get(&dest.binding.event_id)?.is_none_or(|event| {
                     event.author.ed25519_pub() != &self.identity.public().ed25519_pub
                         || event.kind != EventKind::FileManifest
                         || event.wall_clock != card.wall_clock
@@ -473,9 +479,9 @@ impl Node {
                             )
                         || !event.verify_integrity()
                         || !event.verify_signature()
-                })
-            }) {
-                return None;
+                }) {
+                    return Ok(None);
+                }
             }
         }
         let identity = Identity {
@@ -491,7 +497,7 @@ impl Node {
             bincode::DefaultOptions::new()
                 .with_fixint_encoding()
                 .serialize(&identity)
-                .ok()?,
+                .map_err(|error| LogError::CorruptFile(error.to_string()))?,
         );
         let bundle = Event::new(
             &self.identity,
@@ -506,9 +512,8 @@ impl Node {
         self.file_message_identities
             .lock()
             .expect("file identity lock")
-            .insert(bundle.clone(), identity)
-            .ok()?;
-        Some(bundle)
+            .insert(bundle.clone(), identity)?;
+        Ok(Some(bundle))
     }
     pub(in crate::node) fn import_file_message_identity(
         &self,
@@ -530,10 +535,7 @@ impl Node {
         match self.import_file_message_identity_inner(bundle) {
             Ok(true) => Ok(()),
             Ok(false) => Err(FileMessageIdentityImportError::MissingProof),
-            Err(NodeError::Log(error @ LogError::Io(_))) => {
-                Err(FileMessageIdentityImportError::Persistence(error))
-            }
-            Err(error) => Err(FileMessageIdentityImportError::Invalid(error)),
+            Err(error) => Err(classify_import_failure(error)),
         }
     }
     fn import_file_message_identity_inner(&self, bundle: Event) -> Result<bool, NodeError> {
@@ -546,37 +548,17 @@ impl Node {
                 .recovery_origins
                 .iter()
                 .any(|author| author.ed25519_pub() == &identity.source.device_ed25519_pub);
-        let alias_ids: HashSet<_> = identity.aliases.iter().copied().collect();
-        let rows = {
-            let files = self.received_files.lock().expect("files lock");
-            let hosts = if local_source {
-                files.conversations()
-            } else {
-                vec![identity.host()]
-            };
-            hosts
-                .iter()
-                .flat_map(|host| files.entries_ref(host))
-                .filter(|row| alias_ids.contains(&row.event_id))
-                .take(MAX_ALIASES)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
         let own = self.account_id();
-        if own != identity.source.account_id()
-            && own != identity.recipient_account
-            && !local_source
-            && !rows.iter().any(|row| identity.matches(row))
-        {
-            return Err(NodeError::Authorization(
-                "logical file identity belongs to another account".into(),
-            ));
-        }
+        let mut matching_host = false;
         let mut matched = false;
         let log = self.log.lock().expect("log lock");
         let proofs = self.account_file_proofs.lock().expect("file proofs lock");
         for alias in &identity.aliases {
-            if let Some(proof) = log.get(alias).or_else(|| proofs.get(alias)) {
+            let selected = match log.get(alias)? {
+                Some(event) => Some(event),
+                None => proofs.get(alias)?,
+            };
+            if let Some(proof) = selected {
                 if proof.author.ed25519_pub() != &identity.source.device_ed25519_pub
                     || proof.kind != EventKind::FileManifest
                     || proof.wall_clock != bundle.wall_clock
@@ -587,8 +569,16 @@ impl Node {
                         "logical file identity conflicts with signed manifest".into(),
                     ));
                 }
-                if let Some(row) = rows.iter().find(|row| row.event_id == *alias) {
-                    if !(identity.matches(row) || local_source && identity.matches_content(row))
+                let row = {
+                    let files = self.received_files.lock().expect("files lock");
+                    if local_source {
+                        files.entry(*alias)?
+                    } else {
+                        files.entry_in(&identity.host(), *alias)?
+                    }
+                };
+                if let Some(row) = row {
+                    if !(identity.matches(&row) || local_source && identity.matches_content(&row))
                         || super::files::validated_manifest(&row.plaintext)
                             .is_none_or(|manifest| manifest.file_conv() != identity.file)
                     {
@@ -597,38 +587,42 @@ impl Node {
                         ));
                     }
                     matched = true;
+                    matching_host |= identity.matches(&row);
                 }
             }
+        }
+        if own != identity.source.account_id()
+            && own != identity.recipient_account
+            && !local_source
+            && !matching_host
+        {
+            return Err(NodeError::Authorization(
+                "logical file identity belongs to another account".into(),
+            ));
         }
         if !matched {
             return Ok(false);
         }
         drop(proofs);
         drop(log);
-        let clashes_with_text = self
-            .sentlog
-            .lock()
-            .expect("sent log lock")
-            .entries_ref(&identity.host())
-            .iter()
-            .any(|row| {
-                super::DmEnvelope::decode_ref(&row.plaintext)
-                    .is_some_and(|envelope| alias_ids.contains(&EventId::new(envelope.msg_id)))
-            })
-            || self
-                .received
+        for alias in &identity.aliases {
+            if self
+                .sentlog
                 .lock()
-                .expect("received log lock")
-                .entries_ref(&identity.host())
-                .iter()
-                .any(|row| {
-                    super::DmEnvelope::decode_ref(&row.plaintext)
-                        .is_some_and(|envelope| alias_ids.contains(&EventId::new(envelope.msg_id)))
-                });
-        if clashes_with_text {
-            return Err(NodeError::Authorization(
-                "logical file identity conflicts with text message identity".into(),
-            ));
+                .expect("sent log lock")
+                .account_entry(&identity.host(), *alias.as_bytes())?
+                .is_some()
+                || self
+                    .received
+                    .lock()
+                    .expect("received log lock")
+                    .account_entry(&identity.host(), *alias)?
+                    .is_some()
+            {
+                return Err(NodeError::Authorization(
+                    "logical file identity conflicts with text message identity".into(),
+                ));
+            }
         }
         let erased = {
             let delivery = self.delivery.lock().expect("delivery lock");
@@ -641,12 +635,11 @@ impl Node {
                 .account_suppression
                 .lock()
                 .expect("account suppression lock");
-            let suppressed = erased
-                || suppression.contains(identity.host(), identity.logical)
-                || identity
-                    .aliases
-                    .iter()
-                    .any(|id| suppression.contains(identity.host(), *id));
+            let mut suppressed =
+                erased || suppression.contains(identity.host(), identity.logical)?;
+            for id in &identity.aliases {
+                suppressed |= suppression.contains(identity.host(), *id)?;
+            }
             if suppressed {
                 // Tombstones precede publishing the canonical alias index.
                 for id in &identity.aliases {
@@ -676,7 +669,7 @@ impl Node {
             // An older accepted deletion remains authoritative even when a late
             // replica cannot allocate another physical erasure tombstone.
             let delivery = self.delivery.lock().expect("delivery lock");
-            self.reseed_live_file_book(&delivery);
+            self.reseed_live_file_book(&delivery)?;
             drop(delivery);
             self.remove_unreferenced_media(vec![file])?;
             return Err(error);
@@ -689,6 +682,57 @@ impl Node {
 mod tests {
     use super::*;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[test]
+    fn local_media_cleanup_failure_remains_retryable_for_identity_import() {
+        let f = Fixture::new();
+        let media = f.dir.path().join("receiver/media");
+        let retained = f.dir.path().join("receiver/media-before-failure");
+        std::fs::rename(&media, &retained).unwrap();
+        std::fs::write(&media, b"not a directory").unwrap();
+        let result = f
+            .receiver
+            .remove_unreferenced_media(vec![ConversationId::new([240; 32])]);
+        std::fs::remove_file(&media).unwrap();
+        std::fs::rename(&retained, &media).unwrap();
+        assert!(
+            matches!(
+                classify_import_failure(result.unwrap_err()),
+                FileMessageIdentityImportError::Persistence(_)
+            ),
+            "local media cleanup must not acknowledge an opaque identity envelope as invalid"
+        );
+    }
+
+    #[test]
+    fn identity_import_keeps_local_failures_retryable_and_rejects_conflicts() {
+        for error in [
+            LogError::Io(std::io::Error::other("local read")),
+            LogError::Database(Box::new(std::io::Error::other("database read"))),
+            LogError::CorruptFile("local row".into()),
+            LogError::StaleCursor,
+            LogError::Serialization("local decode".into()),
+            LogError::PageBudgetTooSmall { required: 1024 },
+        ] {
+            assert!(matches!(
+                classify_import_failure(NodeError::Log(error)),
+                FileMessageIdentityImportError::Persistence(_)
+            ));
+        }
+        for error in [
+            LogError::BadSignature,
+            LogError::AdmissionRejected("conflicting alias".into()),
+        ] {
+            assert!(matches!(
+                classify_import_failure(NodeError::Log(error)),
+                FileMessageIdentityImportError::Invalid(_)
+            ));
+        }
+        assert!(matches!(
+            classify_import_failure(NodeError::Authorization("wrong account".into())),
+            FileMessageIdentityImportError::Invalid(_)
+        ));
+    }
 
     fn signed(
         source: &DeviceIdentity,
@@ -945,13 +989,14 @@ mod tests {
                 .account_file_proofs
                 .lock()
                 .unwrap()
-                .insert(event)
+                .insert(event.clone())
                 .unwrap();
-            self.receiver
-                .received_files
-                .lock()
-                .unwrap()
-                .record_file_alias_durable(&row)
+            // Legacy fixtures deliberately retain even a late suppressed raw
+            // alias. The signed projection independently decides eligibility.
+            let mut received = self.receiver.received_files.lock().unwrap();
+            received.record_file_alias_durable(&row).unwrap();
+            received
+                .record_file_with_reception(&row, Some(&event), None)
                 .unwrap();
         }
     }
@@ -960,7 +1005,11 @@ mod tests {
     async fn aliases_keep_repeat_separate_and_delete_stays_deleted_after_late_import_and_restart() {
         let f = Fixture::new();
         let (first, file, first_destinations) = f.send().await;
-        let first_bundle = f.sender.file_message_identity_bundle(first).unwrap();
+        let first_bundle = f
+            .sender
+            .file_message_identity_bundle(first)
+            .unwrap()
+            .unwrap();
         f.receiver
             .import_file_message_identity(first_bundle.clone())
             .unwrap();
@@ -970,9 +1019,17 @@ mod tests {
         f.copy_other_device(first, &first_destinations);
         f.copy_other_device(second, &second_destinations);
         f.receiver
-            .import_file_message_identity(f.sender.file_message_identity_bundle(second).unwrap())
+            .import_file_message_identity(
+                f.sender
+                    .file_message_identity_bundle(second)
+                    .unwrap()
+                    .unwrap(),
+            )
             .unwrap();
-        let history = f.receiver.account_history(&f.sender.account_id(), 10);
+        let history = f
+            .receiver
+            .account_history(&f.sender.account_id(), 10)
+            .unwrap();
         assert_eq!(history.len(), 2);
         assert!(
             history
@@ -992,6 +1049,7 @@ mod tests {
                 Some(&f.sender.account_id()),
                 super::super::queries::HistorySelection::Context(alternate),
             )
+            .unwrap()
             .unwrap();
         assert!(context.messages.iter().any(|entry| entry.id == first));
         f.receiver
@@ -1000,6 +1058,7 @@ mod tests {
         assert_eq!(
             f.receiver
                 .account_history(&f.sender.account_id(), 10)
+                .unwrap()
                 .iter()
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
@@ -1012,12 +1071,14 @@ mod tests {
         assert_eq!(
             f.receiver
                 .account_history(&f.sender.account_id(), 10)
+                .unwrap()
                 .iter()
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
             vec![second]
         );
         let secret = f.receiver.identity.secret_bytes();
+        f.receiver.close_profile().unwrap();
         let reopened = open_node(
             &f.dir.path().join("receiver"),
             DeviceIdentity::from_secret_bytes(secret.0, secret.1),
@@ -1026,6 +1087,7 @@ mod tests {
         assert_eq!(
             reopened
                 .account_history(&f.sender.account_id(), 10)
+                .unwrap()
                 .iter()
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
@@ -1053,6 +1115,7 @@ mod tests {
             .lock()
             .unwrap()
             .events(&other_conv)
+            .unwrap()
             .last()
             .unwrap()
             .id;
@@ -1070,11 +1133,12 @@ mod tests {
                 .unwrap()
                 .get(&detached)
                 .unwrap()
+                .unwrap()
                 .parents
                 .contains(&missing_parent)
         );
         f.copy_other_device(id, &destinations);
-        let bundle = f.sender.file_message_identity_bundle(id).unwrap();
+        let bundle = f.sender.file_message_identity_bundle(id).unwrap().unwrap();
         let mut wrong = decode(&bundle).unwrap();
         wrong.recipient_account = Account::generate().account_id();
         assert!(
@@ -1095,17 +1159,28 @@ mod tests {
             "restored-pw",
         )
         .unwrap();
-        let history = restored.account_history(&f.sender.account_id(), 10);
+        let history = restored
+            .account_history(&f.sender.account_id(), 10)
+            .unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, id);
         assert_eq!(history[0].file_message_aliases.len(), 2);
-        assert!(restored.log.lock().unwrap().get(&detached).is_none());
+        assert!(
+            restored
+                .log
+                .lock()
+                .unwrap()
+                .get(&detached)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             restored
                 .account_file_proofs
                 .lock()
                 .unwrap()
                 .get(&detached)
+                .unwrap()
                 .is_some()
         );
         let mut source_snapshot = Vec::new();
@@ -1131,7 +1206,11 @@ mod tests {
         use crate::eventlog::sync::SyncStore;
         let store = restored_source.sync_store(&f.receiver.identity.public());
         assert_eq!(
-            store.lock().unwrap().file_message_identity(&file, &id),
+            store
+                .lock()
+                .unwrap()
+                .file_message_identity(&file, &id)
+                .unwrap(),
             Some(bundle)
         );
     }
@@ -1143,10 +1222,20 @@ mod tests {
         let (second, _, _) = f.send().await;
         f.copy_other_device(first, &first_destinations);
         f.receiver
-            .import_file_message_identity(f.sender.file_message_identity_bundle(first).unwrap())
+            .import_file_message_identity(
+                f.sender
+                    .file_message_identity_bundle(first)
+                    .unwrap()
+                    .unwrap(),
+            )
             .unwrap();
         f.receiver
-            .import_file_message_identity(f.sender.file_message_identity_bundle(second).unwrap())
+            .import_file_message_identity(
+                f.sender
+                    .file_message_identity_bundle(second)
+                    .unwrap()
+                    .unwrap(),
+            )
             .unwrap();
         let host = account_conversation_id(&f.sender.account_id(), &f.receiver.account_id());
         f.receiver
@@ -1169,9 +1258,9 @@ mod tests {
             .lock()
             .unwrap()
             .events(&conv)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::Delete)
-            .cloned()
             .collect();
         assert!(!recalls.is_empty());
         for event in recalls {
@@ -1183,14 +1272,19 @@ mod tests {
                 .unwrap();
         }
         f.receiver.project_private_dm_controls(conv).unwrap();
-        let history = f.receiver.account_history(&f.sender.account_id(), 10);
+        let history = f
+            .receiver
+            .account_history(&f.sender.account_id(), 10)
+            .unwrap();
         assert_eq!(history.len(), 2);
         assert!(first_destinations.iter().all(|destination| {
-            f.receiver.private_dm_message_recalled(
-                &f.sender.account_id(),
-                destination.event.id,
-                &f.sender.account_id(),
-            )
+            f.receiver
+                .private_dm_message_recalled(
+                    &f.sender.account_id(),
+                    destination.event.id,
+                    &f.sender.account_id(),
+                )
+                .unwrap()
         }));
         assert!(
             history
@@ -1219,20 +1313,27 @@ mod tests {
             .unwrap()
             .event
             .id;
-        assert!(!f.receiver.has_file_message_identity(
-            account_conversation_id(&f.sender.account_id(), &f.receiver.account_id()),
-            direct
-        ));
+        assert!(
+            !f.receiver
+                .has_file_message_identity(
+                    account_conversation_id(&f.sender.account_id(), &f.receiver.account_id()),
+                    direct
+                )
+                .unwrap()
+        );
         f.receiver
             .delete_account_message(&f.sender.account_id(), direct)
             .unwrap();
         f.copy_other_device(id, &destinations);
         f.receiver
-            .import_file_message_identity(f.sender.file_message_identity_bundle(id).unwrap())
+            .import_file_message_identity(
+                f.sender.file_message_identity_bundle(id).unwrap().unwrap(),
+            )
             .unwrap();
         assert!(
             f.receiver
                 .account_history(&f.sender.account_id(), 10)
+                .unwrap()
                 .is_empty()
         );
         let host = account_conversation_id(&f.sender.account_id(), &f.receiver.account_id());
@@ -1242,6 +1343,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains(host, id)
+                .unwrap()
         );
         assert!(destinations.iter().all(|destination| {
             f.receiver
@@ -1249,8 +1351,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains(host, destination.event.id)
+                .unwrap()
         }));
         let secrets = f.receiver.identity.secret_bytes();
+        f.receiver.close_profile().unwrap();
         let reopened = open_node(
             &f.dir.path().join("receiver"),
             DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
@@ -1259,6 +1363,7 @@ mod tests {
         assert!(
             reopened
                 .account_history(&f.sender.account_id(), 10)
+                .unwrap()
                 .is_empty()
         );
     }
@@ -1278,6 +1383,7 @@ mod tests {
         };
         if receiver
             .account_history(&f.sender.account_id(), 10)
+            .unwrap()
             .is_empty()
         {
             receiver
@@ -1288,9 +1394,11 @@ mod tests {
                 .unwrap();
             receiver.process_file_events(destination.event.conversation_id);
         }
-        assert!(receiver.log.lock().unwrap().get(&id).is_none());
+        assert!(receiver.log.lock().unwrap().get(&id).unwrap().is_none());
         receiver
-            .import_file_message_identity(f.sender.file_message_identity_bundle(id).unwrap())
+            .import_file_message_identity(
+                f.sender.file_message_identity_bundle(id).unwrap().unwrap(),
+            )
             .unwrap();
         for reference_id in [id, destination.event.id] {
             let reference = super::super::SearchReference::Account {
@@ -1299,6 +1407,7 @@ mod tests {
             };
             let context = receiver
                 .search_context(&reference)
+                .unwrap()
                 .expect("canonical/old references resolve by logical history");
             assert_eq!(context.messages.len(), 1);
             assert_eq!(context.messages[0].id, id);
@@ -1319,7 +1428,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            receiver.account_reactions(&f.sender.account_id())[0].target,
+            receiver.account_reactions(&f.sender.account_id()).unwrap()[0].target,
             id.to_hex()
         );
         let reply_id = [17; 32];
@@ -1346,6 +1455,7 @@ mod tests {
         assert_eq!(
             receiver
                 .account_history(&f.sender.account_id(), 10)
+                .unwrap()
                 .iter()
                 .find(|entry| entry.id == EventId::new(reply_id))
                 .unwrap()
@@ -1368,21 +1478,20 @@ mod tests {
             .delete_account_message(&f.sender.account_id(), direct)
             .unwrap();
         f.copy_other_device(id, &destinations);
-        let bundle = f.sender.file_message_identity_bundle(id).unwrap();
-        f.receiver
-            .file_message_identities
-            .lock()
-            .unwrap()
-            .log
-            .fail_appends_for_test(true)
-            .unwrap();
+        let bundle = f.sender.file_message_identity_bundle(id).unwrap().unwrap();
+        f.receiver.storage.database().transaction(|c| {
+            c.execute_batch("CREATE TRIGGER fail_identity BEFORE INSERT ON file_identity_headers BEGIN SELECT RAISE(ABORT, 'injected identity write failure'); END")?;
+            Ok(())
+        }).unwrap();
         assert!(f.receiver.import_file_message_identity(bundle).is_err());
         assert!(
             f.receiver
                 .account_history(&f.sender.account_id(), 10)
+                .unwrap()
                 .is_empty()
         );
         let secrets = f.receiver.identity.secret_bytes();
+        f.receiver.close_profile().unwrap();
         let reopened = open_node(
             &f.dir.path().join("receiver"),
             DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
@@ -1391,6 +1500,7 @@ mod tests {
         assert!(
             reopened
                 .account_history(&f.sender.account_id(), 10)
+                .unwrap()
                 .is_empty()
         );
     }
@@ -1406,18 +1516,17 @@ mod tests {
                 .file_message_identities
                 .lock()
                 .unwrap()
-                .snapshot()
+                .page(None, 1)
+                .unwrap()
                 .is_empty()
         );
         let old_host = account_conversation_id(&f.sender.account_id(), &f.receiver.account_id());
         let adopted = Account::generate();
         f.sender
-            .delivery
-            .lock()
-            .unwrap()
-            .prepare_profile_adoption(&adopted.account_id())
+            .persist_account_adoption(&adopted.public(), || Ok(()), || Ok(adopted.public()))
             .unwrap();
         let secrets = f.sender.identity.secret_bytes();
+        f.sender.close_profile().unwrap();
         let reopened = open_node(
             &f.dir.path().join("sender"),
             DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
@@ -1428,34 +1537,38 @@ mod tests {
                 .file_message_identities
                 .lock()
                 .unwrap()
-                .snapshot()
+                .page(None, 1)
+                .unwrap()
                 .is_empty()
         );
         for destination in destinations {
             assert!(
                 reopened
                     .file_message_identity_bundle(destination.event.id)
+                    .unwrap()
                     .is_none(),
                 "an old-account card cannot acquire the adopted account certificate through lazy identity repair"
             );
         }
-        assert!(reopened.file_message_identity_bundle(id).is_none());
+        assert!(reopened.file_message_identity_bundle(id).unwrap().is_none());
         assert!(
             reopened
                 .file_message_identities
                 .lock()
                 .unwrap()
-                .snapshot()
+                .page(None, 1)
+                .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            reopened.history(old_host, 10).len(),
+            reopened.history(old_host, 10).unwrap().len(),
             1,
             "refusing a new identity must retain the original historical file row"
         );
         assert!(
             reopened
                 .account_history(&f.receiver.account_id(), 10)
+                .unwrap()
                 .is_empty()
         );
     }
@@ -1465,19 +1578,17 @@ mod tests {
         let f = Fixture::new();
         let (id, _, destinations) = f.send().await;
         let original_account = f.sender.account_id();
-        let original = f.sender.file_message_identity_bundle(id).unwrap();
+        let original = f.sender.file_message_identity_bundle(id).unwrap().unwrap();
         assert_eq!(
             decode(&original).unwrap().source.account_id(),
             original_account
         );
         let adopted = Account::generate();
         f.sender
-            .delivery
-            .lock()
-            .unwrap()
-            .prepare_profile_adoption(&adopted.account_id())
+            .persist_account_adoption(&adopted.public(), || Ok(()), || Ok(adopted.public()))
             .unwrap();
         let secrets = f.sender.identity.secret_bytes();
+        f.sender.close_profile().unwrap();
         let reopened = open_node(
             &f.dir.path().join("sender"),
             DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
@@ -1486,6 +1597,7 @@ mod tests {
         for destination in destinations {
             let retained = reopened
                 .file_message_identity_bundle(destination.event.id)
+                .unwrap()
                 .unwrap();
             assert_eq!(
                 retained, original,
@@ -1499,6 +1611,7 @@ mod tests {
         assert!(
             reopened
                 .account_history(&f.receiver.account_id(), 10)
+                .unwrap()
                 .is_empty()
         );
     }
@@ -1509,30 +1622,31 @@ mod tests {
         let (id, _, destinations) = f.send().await;
         f.copy_other_device(id, &destinations);
         f.receiver
-            .import_file_message_identity(f.sender.file_message_identity_bundle(id).unwrap())
+            .import_file_message_identity(
+                f.sender.file_message_identity_bundle(id).unwrap().unwrap(),
+            )
             .unwrap();
         let historical_host =
             account_conversation_id(&f.sender.account_id(), &f.receiver.account_id());
         let adopted = Account::generate();
         f.receiver
-            .delivery
-            .lock()
-            .unwrap()
-            .prepare_profile_adoption(&adopted.account_id())
+            .persist_account_adoption(&adopted.public(), || Ok(()), || Ok(adopted.public()))
             .unwrap();
         let secrets = f.receiver.identity.secret_bytes();
+        f.receiver.close_profile().unwrap();
         let reopened = open_node(
             &f.dir.path().join("receiver"),
             DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
             &adopted,
         );
-        let history = reopened.history(historical_host, 10);
+        let history = reopened.history(historical_host, 10).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, id);
         assert_eq!(history[0].file_message_aliases.len(), 2);
         assert!(
             reopened
                 .account_history(&f.sender.account_id(), 10)
+                .unwrap()
                 .is_empty(),
             "historical identity never rebinds a new account route"
         );
@@ -1585,7 +1699,7 @@ mod tests {
             .received_files
             .lock()
             .unwrap()
-            .record_durable(&row)
+            .record_file_with_reception(&row, Some(&destination.event), None)
             .unwrap();
         row.conversation =
             account_conversation_id(&f.sender.account_id(), &f.receiver.account_id());
@@ -1593,7 +1707,7 @@ mod tests {
             .received_files
             .lock()
             .unwrap()
-            .record_file_alias_durable(&row)
+            .record_file_with_reception(&row, Some(&destination.event), None)
             .unwrap();
         assert_ne!(
             f.receiver
@@ -1602,10 +1716,11 @@ mod tests {
                 .unwrap()
                 .entry(row.event_id)
                 .unwrap()
+                .unwrap()
                 .conversation,
             row.conversation
         );
-        let bundle = f.sender.file_message_identity_bundle(id).unwrap();
+        let bundle = f.sender.file_message_identity_bundle(id).unwrap().unwrap();
         f.receiver
             .import_file_message_identity(bundle.clone())
             .unwrap();
@@ -1637,11 +1752,24 @@ mod tests {
             store
                 .lock()
                 .unwrap()
-                .file_message_identity(&file, &row.event_id),
+                .file_message_identity(&file, &row.event_id)
+                .unwrap(),
+            Some(bundle.clone())
+        );
+        assert_eq!(
+            crate::eventlog::sync::network::NetworkSyncStore::file_message_identity(
+                &*store.lock().unwrap(),
+                &file,
+                &row.event_id
+            )
+            .unwrap(),
             Some(bundle)
         );
         assert_eq!(
-            f.receiver.account_history(&f.sender.account_id(), 10)[0].id,
+            f.receiver
+                .account_history(&f.sender.account_id(), 10)
+                .unwrap()[0]
+                .id,
             id
         );
     }
@@ -1654,7 +1782,9 @@ mod tests {
             let (id, file, destinations) = f.send().await;
             f.copy_other_device(id, &destinations);
             f.receiver
-                .import_file_message_identity(f.sender.file_message_identity_bundle(id).unwrap())
+                .import_file_message_identity(
+                    f.sender.file_message_identity_bundle(id).unwrap().unwrap(),
+                )
                 .unwrap();
             let host = account_conversation_id(&f.sender.account_id(), &f.receiver.account_id());
             let mut legacy = DeliveryStore::open_with_limits(
@@ -1674,7 +1804,7 @@ mod tests {
                     &f.receiver.account_id(),
                 )
                 .unwrap();
-            f.receiver.reseed_live_file_book(&legacy);
+            f.receiver.reseed_live_file_book(&legacy).unwrap();
             *f.receiver.delivery.lock().unwrap() = legacy;
             let result = if clear {
                 f.receiver
@@ -1693,7 +1823,8 @@ mod tests {
                     .account_suppression
                     .lock()
                     .unwrap()
-                    .contains(host, destination.event.id)),
+                    .contains(host, destination.event.id)
+                    .unwrap()),
                 "refused batch must not suppress any alias"
             );
             assert!(
@@ -1714,10 +1845,19 @@ mod tests {
                     .len(),
                 2
             );
-            assert!(f.receiver.files.lock().unwrap().manifest(&file).is_some());
+            assert!(
+                f.receiver
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(file)
+                    .unwrap()
+                    .is_some()
+            );
             assert_eq!(
                 f.receiver
                     .account_history(&f.sender.account_id(), 10)
+                    .unwrap()
                     .iter()
                     .map(|entry| entry.id)
                     .collect::<Vec<_>>(),
@@ -1732,7 +1872,7 @@ mod tests {
         for keep_other_message in [false, true] {
             let f = Fixture::new();
             let (id, file, destinations) = f.send().await;
-            let bundle = f.sender.file_message_identity_bundle(id).unwrap();
+            let bundle = f.sender.file_message_identity_bundle(id).unwrap().unwrap();
             let direct = destinations
                 .iter()
                 .find(|destination| destination.device == f.receiver.identity.public())
@@ -1747,7 +1887,10 @@ mod tests {
                 assert_eq!(repeated, file);
                 f.receiver
                     .import_file_message_identity(
-                        f.sender.file_message_identity_bundle(second).unwrap(),
+                        f.sender
+                            .file_message_identity_bundle(second)
+                            .unwrap()
+                            .unwrap(),
                     )
                     .unwrap();
             }
@@ -1774,7 +1917,7 @@ mod tests {
                 .received_files
                 .lock()
                 .unwrap()
-                .record_file_alias_durable(&raw)
+                .record_file_with_reception(&raw, Some(&late.event), None)
                 .unwrap();
             f.receiver
                 .media
@@ -1797,7 +1940,7 @@ mod tests {
                     &f.receiver.account_id(),
                 )
                 .unwrap();
-            f.receiver.reseed_live_file_book(&legacy);
+            f.receiver.reseed_live_file_book(&legacy).unwrap();
             *f.receiver.delivery.lock().unwrap() = legacy;
             assert!(
                 f.receiver.read_media(file).is_some(),
@@ -1808,29 +1951,48 @@ mod tests {
                 "physical erasure cannot allocate a legacy tombstone"
             );
             assert_eq!(
-                f.receiver.account_history(&f.sender.account_id(), 10).len(),
+                f.receiver
+                    .account_history(&f.sender.account_id(), 10)
+                    .unwrap()
+                    .len(),
                 usize::from(keep_other_message)
             );
             assert_eq!(
-                f.receiver.files.lock().unwrap().manifest(&file).is_some(),
+                f.receiver
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(file)
+                    .unwrap()
+                    .is_some(),
                 keep_other_message,
                 "accepted deletion retires its key while an independent same-artwork message keeps its own scope"
             );
             assert_eq!(f.receiver.read_media(file).is_some(), keep_other_message);
             assert_eq!(f.receiver.media.contains(file), keep_other_message);
             let secrets = f.receiver.identity.secret_bytes();
+            f.receiver.close_profile().unwrap();
             let reopened = open_node(
                 &f.dir.path().join("receiver"),
                 DeviceIdentity::from_secret_bytes(secrets.0, secrets.1),
                 &f.account,
             );
             assert_eq!(
-                reopened.files.lock().unwrap().manifest(&file).is_some(),
+                reopened
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(file)
+                    .unwrap()
+                    .is_some(),
                 keep_other_message
             );
             assert_eq!(reopened.read_media(file).is_some(), keep_other_message);
             assert_eq!(
-                reopened.account_history(&f.sender.account_id(), 10).len(),
+                reopened
+                    .account_history(&f.sender.account_id(), 10)
+                    .unwrap()
+                    .len(),
                 usize::from(keep_other_message)
             );
             let mut snapshot = Vec::new();
@@ -1844,11 +2006,20 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                restored.account_history(&f.sender.account_id(), 10).len(),
+                restored
+                    .account_history(&f.sender.account_id(), 10)
+                    .unwrap()
+                    .len(),
                 usize::from(keep_other_message)
             );
             assert_eq!(
-                restored.files.lock().unwrap().manifest(&file).is_some(),
+                restored
+                    .files
+                    .lock()
+                    .unwrap()
+                    .manifest(file)
+                    .unwrap()
+                    .is_some(),
                 keep_other_message
             );
             assert_eq!(restored.read_media(file).is_some(), keep_other_message);

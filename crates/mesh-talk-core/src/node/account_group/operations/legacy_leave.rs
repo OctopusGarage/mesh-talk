@@ -199,17 +199,22 @@ impl Node {
                 .filter_map(|leg| journal.entries.get(&leg.id).cloned())
                 .collect::<Vec<_>>()
         };
-        let all_committed = children.iter().all(|entry| {
-            entry.status.phase == AccountGroupOperationPhase::Committed
-                && (!entry.status.committed_events.is_empty()
-                    || self.legacy_leave_zero_result_allowed(&ResultProjection {
+        let mut all_committed = true;
+        for entry in &children {
+            if entry.status.phase != AccountGroupOperationPhase::Committed
+                || (entry.status.committed_events.is_empty()
+                    && !self.legacy_leave_zero_result_allowed(&ResultProjection {
                         reference: entry.reference.clone(),
                         status: entry.status.clone(),
                         message_event: None,
                         file_descriptor: None,
                         recall_mark: None,
-                    }))
-        });
+                    })?)
+            {
+                all_committed = false;
+                break;
+            }
+        }
         let all_stopped = children.iter().all(Entry::terminal);
         let has_effect = children
             .iter()
@@ -267,18 +272,21 @@ impl Node {
 
     /// Zero-effect acknowledgements require the exact physical incarnation to
     /// have a signed Left observation, rather than merely an unavailable route.
-    pub(super) fn legacy_leave_zero_result_allowed(&self, result: &ResultProjection) -> bool {
+    pub(super) fn legacy_leave_zero_result_allowed(
+        &self,
+        result: &ResultProjection,
+    ) -> Result<bool, NodeError> {
         let reference = &result.reference;
         if reference.kind != AccountGroupOperationKind::LeaveAccount
             || reference.executor.authority.authority.is_some()
             || result.status.phase != AccountGroupOperationPhase::Committed
             || !result.status.committed_events.is_empty()
         {
-            return false;
+            return Ok(false);
         }
-        let projection = self.account_group_projection(reference.group);
+        let projection = self.account_group_projection(reference.group)?;
         let Some(state) = projection.state.as_ref() else {
-            return false;
+            return Ok(false);
         };
         if projection.authority.current_event().is_some()
             || state.members().contains(&reference.executor.device)
@@ -287,9 +295,10 @@ impl Node {
                 .iter()
                 .any(|(device, _)| *device == reference.executor.device.user_id())
         {
-            return false;
+            return Ok(false);
         }
-        self.group_control_heads(reference.group)
+        Ok(self
+            .group_control_heads(reference.group)
             .into_iter()
             .any(|head| {
                 head.valid(&self.account.public().ed25519_pub)
@@ -298,7 +307,7 @@ impl Node {
                     && head.access.source.role == AccountGroupRole::Left
                     && head.access.source.lifetime == reference.executor.lifetime
                     && head.access.source.authority.authority.is_none()
-            })
+            }))
     }
 
     pub(super) fn try_complete_retired_legacy_leave_child(
@@ -340,7 +349,8 @@ impl Node {
         let Some(observation) = self.account_group_local_observation(
             entry.reference.group,
             proof.as_ref().map(|proof| &proof.access),
-        ) else {
+        )?
+        else {
             return Ok(false);
         };
         if observation.source.role != AccountGroupRole::Left
@@ -542,14 +552,14 @@ mod tests {
         }
         let local_source = Node::public_account_group_source(
             group,
-            &coordinator.account_group_projection(group),
+            &coordinator.account_group_projection(group).unwrap(),
             &coordinator.identity.public(),
             &coordinator.own_group_proof(),
         )
         .unwrap();
         let mut remote_source = Node::public_account_group_source(
             group,
-            &remote.account_group_projection(group),
+            &remote.account_group_projection(group).unwrap(),
             &remote.identity.public(),
             &remote.own_group_proof(),
         )
@@ -639,6 +649,7 @@ mod tests {
             .unwrap()
             .get(&remote_result.committed_events[0])
             .unwrap()
+            .unwrap()
             .clone();
         assert!(effect.verify_signature());
         assert_eq!(effect.kind, EventKind::ChannelLeave);
@@ -711,6 +722,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .iter()
                 .filter(|event| event.kind == EventKind::ChannelLeave
                     && event.author.user_id() == coordinator.user_id())
@@ -756,7 +768,7 @@ mod tests {
         coordinator.process_channel(group);
         let local_source = Node::public_account_group_source(
             group,
-            &coordinator.account_group_projection(group),
+            &coordinator.account_group_projection(group).unwrap(),
             &coordinator.identity.public(),
             &coordinator.own_group_proof(),
         )
@@ -935,7 +947,7 @@ mod tests {
         node.process_channel(group);
         let pinned = Node::public_account_group_source(
             group,
-            &node.account_group_projection(group),
+            &node.account_group_projection(group).unwrap(),
             &node.identity.public(),
             &node.own_group_proof(),
         )

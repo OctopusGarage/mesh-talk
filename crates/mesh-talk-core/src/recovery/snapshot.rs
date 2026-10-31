@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use zeroize::Zeroize;
 
-pub const SNAPSHOT_SCHEMA_VERSION: u16 = 5;
+pub const SNAPSHOT_SCHEMA_VERSION: u16 = 6;
 const MAGIC: &[u8; 8] = b"MTSNAP1\0";
 const MAX_RECORDS: u64 = 10_000_000;
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
@@ -138,6 +138,12 @@ pub enum SnapshotRecordV1 {
     },
     AccountProfile {
         profile: crate::node::AccountProfile,
+    },
+    /// Schema 6 appends exact device-local erasure evidence. The host is part
+    /// of the identity: another host may intentionally retain the same ID.
+    LocalSuppression {
+        conversation: [u8; 32],
+        message_id: [u8; 32],
     },
 }
 
@@ -483,6 +489,13 @@ impl SnapshotValidator {
             }
         }
         match record {
+            SnapshotRecordV1::LocalSuppression { .. } => {
+                if self.schema_version < 6 {
+                    return Err(SnapshotError::UnsupportedVersion);
+                }
+                // Fixed-size, exact facts; duplicates are idempotent on import.
+                // Do not add a second history-sized dedup set to the validator.
+            }
             SnapshotRecordV1::SentDm {
                 conversation,
                 message_id,

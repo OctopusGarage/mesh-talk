@@ -1503,24 +1503,28 @@ impl Node {
     pub(in crate::node) fn account_group_fanout_message(
         &self,
         group: ConversationId,
-    ) -> Option<EventId> {
-        let event = self
+    ) -> Result<Option<EventId>, NodeError> {
+        let Some(event) = self
             .group_operations
             .lock()
             .expect("group operation journal mutex")
             .fanout_messages
             .get(group.as_bytes())
-            .map(|(_, event)| *event)?;
-        self.log
+            .map(|(_, event)| *event)
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .log
             .lock()
             .expect("log mutex")
-            .get(&event)
+            .get(&event)?
             .filter(|event| {
                 event.conversation_id == group
                     && event.kind == crate::eventlog::EventKind::Message
                     && event.author.ed25519_pub() == &self.identity.public().ed25519_pub
             })
-            .map(|event| event.id)
+            .map(|event| event.id))
     }
 
     pub(in crate::node) fn account_group_fanout_sequence(
@@ -1976,8 +1980,12 @@ mod tests {
             .begin(transaction(&accepted, &effect))
             .unwrap();
         let destination = Account::generate();
-        node.persist_account_adoption(&destination.account_id(), || Ok(()))
-            .unwrap();
+        node.persist_account_adoption(
+            &destination.public(),
+            || Ok(()),
+            || Ok(destination.public()),
+        )
+        .unwrap();
         assert_eq!(
             node.group_operations.lock().unwrap().entries[&accepted.reference.id]
                 .status
@@ -1998,8 +2006,12 @@ mod tests {
     fn a_retired_account_node_rejects_new_group_intent_before_journal_admission() {
         let (_dir, node, account, accepted, _effect) = fixture();
         let destination = Account::generate();
-        node.persist_account_adoption(&destination.account_id(), || Ok(()))
-            .unwrap();
+        node.persist_account_adoption(
+            &destination.public(),
+            || Ok(()),
+            || Ok(destination.public()),
+        )
+        .unwrap();
         let id = node
             .new_account_group_operation_id(&account.account_id())
             .unwrap();
@@ -2072,7 +2084,7 @@ mod tests {
             .unwrap();
         assert_eq!(status.phase, AccountGroupOperationPhase::Cancelled);
         assert!(status.committed_events.is_empty());
-        assert_eq!(node.log.lock().unwrap().events(&group).len(), 1);
+        assert_eq!(node.log.lock().unwrap().events(&group).unwrap().len(), 1);
     }
     #[tokio::test]
     async fn a_terminal_status_query_is_not_starved_by_active_source_results() {
@@ -2106,6 +2118,7 @@ mod tests {
         drop(journal);
         assert!(
             node.operation_projection(group)
+                .unwrap()
                 .results
                 .iter()
                 .any(|result| result.reference.id == id),
@@ -2419,7 +2432,7 @@ mod tests {
             }
             parent = effect.id;
             latest = Some(effect.id);
-            assert_eq!(node.account_group_fanout_message(group), latest);
+            assert_eq!(node.account_group_fanout_message(group).unwrap(), latest);
         }
         let control = Event::new(
             &node.identity,
@@ -2441,7 +2454,7 @@ mod tests {
             journal.put(template.clone()).unwrap();
             journal.complete(&template.reference, &[control]).unwrap();
         }
-        assert_eq!(node.account_group_fanout_message(group), latest);
+        assert_eq!(node.account_group_fanout_message(group).unwrap(), latest);
         let public = node.identity.public();
         drop(node);
         let reopened =
@@ -2657,7 +2670,7 @@ mod tests {
             node.recover_delivery(&mut node.delivery.lock().unwrap())
                 .is_err()
         );
-        assert!(node.log.lock().unwrap().get(&effect.id).is_some());
+        assert!(node.log.lock().unwrap().get(&effect.id).unwrap().is_some());
         assert_eq!(
             node.delivery.lock().unwrap().pending_transactions().len(),
             1
@@ -2729,9 +2742,9 @@ mod tests {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::ChannelRename)
-            .cloned()
             .collect();
         assert_eq!(events.len(), 2);
         assert!(

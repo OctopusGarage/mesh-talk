@@ -382,7 +382,13 @@
     "reEdit": "Re-edit",
     "mentionedYou": "Mentioned you",
     "reactionAdd": "Add {{emoji}} reaction",
-    "reactionRemove": "Remove your {{emoji}} reaction"
+    "reactionRemove": "Remove your {{emoji}} reaction",
+    "reactionsTitle": "Reactions",
+    "reactionsDescription": "Counts for this message. Select a reaction to add or remove your own.",
+    "reactionsEmpty": "No reactions",
+    "reactionsStart": "Start over",
+    "reactionsNext": "Next page",
+    "reactionsMore": "More reactions"
   },
   "transfer": {
     "preparing": "Preparing file…",
@@ -524,6 +530,12 @@
     "changeFolder": "Change",
     "sectionChat": "Chat history",
     "retention": "Keep history for",
+    "storageRefresh": "Refresh",
+    "storageUsage": "Saved data",
+    "storageUsageDesc": "Profile files on this device, including history, indexes and settings. Subfolders are excluded.",
+    "storageReview": "Saved data exceeds 1 GiB. Review your history retention or create a backup. Changing retention may not immediately reduce disk usage.",
+    "storageAtLeast": "At least {{size}}",
+    "storageUnavailable": "Storage usage is unavailable",
     "retentionDesc": "Automatically erase messages older than this from this device.",
     "retentionForever": "Forever",
     "retentionDays": "{{count}} days",

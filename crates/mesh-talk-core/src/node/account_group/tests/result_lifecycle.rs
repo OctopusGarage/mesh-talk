@@ -49,6 +49,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
     let event_id = original.primary_event.unwrap();
     let live = source
         .operation_projection(group)
+        .unwrap()
         .results
         .into_iter()
         .find(|result| result.reference.id == id)
@@ -161,11 +162,12 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
                     .lock()
                     .unwrap()
                     .entry(event_id)
+                    .unwrap()
                     .is_none()
             );
         }
     }
-    let projection = source.operation_projection(group);
+    let projection = source.operation_projection(group).unwrap();
     let retired = projection
         .results
         .iter()
@@ -206,6 +208,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .entry(event_id)
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -214,12 +217,21 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .get(&event_id)
+            .unwrap()
             .is_none()
     );
     assert!(reference.account_group_data_work(None).work.is_empty());
     assert!(reference.channel_members(group).is_empty());
-    assert!(reference.history(group, 20).is_empty());
-    assert!(reference.log.lock().unwrap().events(&file).is_empty());
+    assert!(reference.history(group, 20).unwrap().is_empty());
+    assert!(
+        reference
+            .log
+            .lock()
+            .unwrap()
+            .events(&file)
+            .unwrap()
+            .is_empty()
+    );
     let identity = reference.identity.secret_bytes();
     drop(reference);
     let (dm, _) = mpsc::unbounded_channel();
@@ -251,6 +263,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .entry(event_id)
+            .unwrap()
             .is_none()
     );
     assert!(
@@ -259,6 +272,7 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
             .lock()
             .unwrap()
             .get(&event_id)
+            .unwrap()
             .is_none()
     );
 }

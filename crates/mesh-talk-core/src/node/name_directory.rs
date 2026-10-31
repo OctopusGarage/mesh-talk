@@ -35,9 +35,19 @@ pub struct NameDirectory {
     by_user: HashMap<String, String>,
     last_changed: HashMap<String, u64>,
     next_change: u64,
+    storage: Option<std::sync::Arc<crate::storage::profile::context::ProfileStorage>>,
 }
 
 impl NameDirectory {
+    pub(crate) fn open_in_storage(
+        path: &Path,
+        password: &str,
+        storage: std::sync::Arc<crate::storage::profile::context::ProfileStorage>,
+    ) -> Result<Self, LogError> {
+        let mut directory = Self::open(path, password)?;
+        directory.storage = Some(storage);
+        Ok(directory)
+    }
     /// Open (or create) the directory at `path`, collapsing stored records to the latest
     /// name per user (append order is write order, so the last record wins).
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
@@ -54,6 +64,7 @@ impl NameDirectory {
             by_user,
             last_changed,
             next_change,
+            storage: None,
         })
     }
 

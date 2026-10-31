@@ -218,7 +218,7 @@ async fn pinned_private_probe_keeps_routes_without_online_presence_or_new_grants
     }
     alice.node.runtime_work.drain().await;
     let policy = alice.privacy_snapshot();
-    let conversations = alice.node.log.lock().unwrap().conversations();
+    let conversations = alice.node.log.lock().unwrap().conversations().unwrap();
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);
     alice.node.probe_private_routes().await;
     let visible = alice
@@ -227,7 +227,7 @@ async fn pinned_private_probe_keeps_routes_without_online_presence_or_new_grants
         .any(|p| p.public.user_id() == bob.user_id());
     let routable = alice.peer_public(bob.user_id()).is_some();
     let after_probe_policy = alice.privacy_snapshot();
-    let after_probe_conversations = alice.node.log.lock().unwrap().conversations();
+    let after_probe_conversations = alice.node.log.lock().unwrap().conversations().unwrap();
     bob.stop().await;
     alice.node.runtime_work.drain().await;
     alice.roster.lock().unwrap().evict_stale(Duration::ZERO);
@@ -268,6 +268,7 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
     assert!(
         alice
             .account_history(&old, 100)
+            .unwrap()
             .iter()
             .any(|e| e.text == b"before rekey")
     );
@@ -340,12 +341,14 @@ async fn explicit_contact_can_accept_verified_remote_rekey_without_transferring_
     assert!(
         alice
             .account_history(&old, 100)
+            .unwrap()
             .iter()
             .all(|e| e.text != b"explicit contact after rekey")
     );
     assert!(
         alice
             .account_history(&new, 100)
+            .unwrap()
             .iter()
             .all(|e| e.text != b"before rekey")
     );
@@ -559,6 +562,7 @@ async fn private_file_transfer_requires_manifest_scope_and_background_pull_does_
             .lock()
             .unwrap()
             .event_ids(&unrelated)
+            .unwrap()
             .is_empty()
     );
     alice.set_allowed(bob.account_id(), false).await.unwrap();
@@ -674,6 +678,7 @@ async fn pairing_previously_known_foreign_device_survives_both_runtime_restarts(
         loop {
             if bob
                 .account_history(contact.account_id(), 10)
+                .unwrap()
                 .iter()
                 .any(|entry| entry.text == b"after both restarts")
             {

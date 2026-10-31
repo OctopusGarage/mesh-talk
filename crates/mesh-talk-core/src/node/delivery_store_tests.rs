@@ -1495,7 +1495,7 @@ fn recovery_installs_once_scrubs_secrets_and_keeps_exact_retry_event() {
         None
     );
     assert_eq!(sent.entries(&account_conv()).len(), 1);
-    assert_eq!(log.get(&exact.id), Some(&exact));
+    assert_eq!(log.get(&exact.id).unwrap(), Some(exact.clone()));
     assert_eq!(
         std::fs::metadata(dir.path().join("delivery-transactions.log"))
             .unwrap()
@@ -2060,7 +2060,7 @@ fn typed_rename_control_enters_the_bound_effect_wal() {
         .begin(group_control_transaction(&fixture, fixture.effect.clone()))
         .expect("the narrow owner-signed rename batch must have a durable effect WAL");
     assert!(
-        log.get(&fixture.effect.id).is_none(),
+        log.get(&fixture.effect.id).unwrap().is_none(),
         "WAL admission does not publish the effect"
     );
     assert_eq!(store.pending_transactions()[0].id(), fixture.effect.id);
@@ -2127,7 +2127,7 @@ fn group_control_without_completion_adapter_does_not_install_or_retire() {
             .recover_next(&mut ratchet, &mut log, &mut sent, &mut received)
             .is_err()
     );
-    assert!(log.get(&fixture.effect.id).is_none());
+    assert!(log.get(&fixture.effect.id).unwrap().is_none());
     assert_eq!(store.pending_transactions().len(), 1);
     assert!(sent.entries(&fixture.reference.group).is_empty());
 }
@@ -2169,7 +2169,7 @@ fn failed_group_completion_keeps_exact_effect_for_restart_retry() {
             .is_err()
     );
     assert!(
-        log.get(&fixture.effect.id).is_some(),
+        log.get(&fixture.effect.id).unwrap().is_some(),
         "the terminal callback runs only after the exact effect is durable"
     );
     assert_eq!(store.pending_transactions().len(), 1);
@@ -2206,6 +2206,7 @@ fn failed_group_completion_keeps_exact_effect_for_restart_retry() {
     assert!(store.pending_transactions().is_empty());
     assert_eq!(
         log.events(&fixture.reference.group)
+            .unwrap()
             .iter()
             .filter(|event| event.kind == EventKind::ChannelRename)
             .count(),

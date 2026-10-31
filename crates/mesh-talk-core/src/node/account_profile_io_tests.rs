@@ -37,7 +37,10 @@ fn legacy_manual_dates_are_not_promoted_when_preserving_existing_profile_content
     );
     node.receive_trust_card(&legacy).unwrap();
     node.set_profile_display_name("Current name").unwrap();
-    let profile = node.account_profile(&account.account_id()).unwrap();
+    let profile = node
+        .account_profile(&account.account_id())
+        .unwrap()
+        .unwrap();
     assert_eq!(profile.created_at_ms, None);
     assert_eq!(profile.bio, "Existing bio");
     assert_eq!(profile.display_name, "Current name");
@@ -45,7 +48,7 @@ fn legacy_manual_dates_are_not_promoted_when_preserving_existing_profile_content
     drop(node);
     let reopened = open(dir.path(), &account);
     assert_eq!(
-        reopened.account_profile(&account.account_id()),
+        reopened.account_profile(&account.account_id()).unwrap(),
         Some(profile)
     );
 }
@@ -62,7 +65,10 @@ async fn biography_edits_take_the_latest_nickname_at_commit_and_keep_creation_me
     })
     .await
     .unwrap();
-    let profile = node.account_profile(&account.account_id()).unwrap();
+    let profile = node
+        .account_profile(&account.account_id())
+        .unwrap()
+        .unwrap();
     assert_eq!(profile.display_name, "Renamed while queued");
     assert_eq!(profile.bio, "New bio");
     assert_eq!(profile.created_at_ms, account.created_at_ms());
@@ -74,7 +80,7 @@ async fn rejected_bio_and_retired_authority_leave_the_saved_profile_unchanged() 
     let account = Account::generate();
     let node = open(dir.path(), &account);
     node.set_profile_display_name("Alice").unwrap();
-    let before = node.account_profile(&account.account_id());
+    let before = node.account_profile(&account.account_id()).unwrap();
     let bytes = std::fs::read(dir.path().join("account-profiles.log")).unwrap();
     assert!(
         node.save_account_bio_if("界".repeat(683), |commit| commit())
@@ -88,7 +94,7 @@ async fn rejected_bio_and_retired_authority_leave_the_saved_profile_unchanged() 
         .await
         .is_err()
     );
-    assert_eq!(node.account_profile(&account.account_id()), before);
+    assert_eq!(node.account_profile(&account.account_id()).unwrap(), before);
     assert_eq!(
         std::fs::read(dir.path().join("account-profiles.log")).unwrap(),
         bytes
@@ -101,13 +107,19 @@ fn own_unknown_creation_metadata_cannot_be_filled_by_a_received_profile() {
     let account = Account::from_secret_bytes([7; 32]);
     let node = open(dir.path(), &account);
     node.set_profile_display_name("Legacy").unwrap();
-    let before = node.account_profile(&account.account_id()).unwrap();
+    let before = node
+        .account_profile(&account.account_id())
+        .unwrap()
+        .unwrap();
     let mut contradictory = before.clone();
     contradictory.revision += 1;
     contradictory.created_at_ms = Some(42);
     contradictory.resign(&account);
     assert!(!node.receive_account_profile(&contradictory).unwrap());
-    assert_eq!(node.account_profile(&account.account_id()), Some(before));
+    assert_eq!(
+        node.account_profile(&account.account_id()).unwrap(),
+        Some(before)
+    );
 }
 
 #[test]
@@ -150,7 +162,11 @@ async fn first_bio_edit_initializes_a_missing_profile_without_losing_account_met
         node.set_avatar(Some(b"existing avatar".to_vec()))
             .await
             .unwrap();
-        assert!(node.account_profile(&account.account_id()).is_none());
+        assert!(
+            node.account_profile(&account.account_id())
+                .unwrap()
+                .is_none()
+        );
         node.save_account_bio_with_initial_name_if(
             "Current account nickname".into(),
             "New bio".into(),
@@ -158,7 +174,10 @@ async fn first_bio_edit_initializes_a_missing_profile_without_losing_account_met
         )
         .await
         .unwrap();
-        let profile = node.account_profile(&account.account_id()).unwrap();
+        let profile = node
+            .account_profile(&account.account_id())
+            .unwrap()
+            .unwrap();
         assert_eq!(profile.display_name, "Current account nickname");
         assert_eq!(profile.bio, "New bio");
         assert_eq!(profile.avatar, Some(b"existing avatar".to_vec()));
@@ -169,12 +188,14 @@ async fn first_bio_edit_initializes_a_missing_profile_without_losing_account_met
         assert_ne!(node.user_id(), sibling.user_id());
         assert!(sibling.receive_account_profile(&profile).unwrap());
         assert_eq!(
-            sibling.account_profile(&account.account_id()),
+            sibling.account_profile(&account.account_id()).unwrap(),
             Some(profile.clone())
         );
         drop(node);
         assert_eq!(
-            open(dir.path(), &account).account_profile(&account.account_id()),
+            open(dir.path(), &account)
+                .account_profile(&account.account_id())
+                .unwrap(),
             Some(profile)
         );
     }
@@ -195,7 +216,10 @@ async fn initial_bio_name_never_overwrites_a_profile_received_before_commit() {
     )
     .await
     .unwrap();
-    let profile = node.account_profile(&account.account_id()).unwrap();
+    let profile = node
+        .account_profile(&account.account_id())
+        .unwrap()
+        .unwrap();
     assert_eq!(profile.display_name, "Latest account nickname");
     assert_eq!(profile.bio, "Edited bio");
 }
@@ -211,7 +235,11 @@ async fn rejected_first_bio_edits_do_not_initialize_or_publish_a_profile() {
                 .await
                 .is_err()
         );
-        assert!(node.account_profile(&account.account_id()).is_none());
+        assert!(
+            node.account_profile(&account.account_id())
+                .unwrap()
+                .is_none()
+        );
     }
     assert!(
         node.save_account_bio_with_initial_name_if("Name".into(), "Retired".into(), |_| Err(
@@ -220,7 +248,11 @@ async fn rejected_first_bio_edits_do_not_initialize_or_publish_a_profile() {
             .await
             .is_err()
     );
-    assert!(node.account_profile(&account.account_id()).is_none());
+    assert!(
+        node.account_profile(&account.account_id())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -268,7 +300,7 @@ async fn profile_publication_releases_store_before_channel_delivery() {
             let (finished, completion) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || {
                 node.publish_group_inventory(&mut None);
-                assert!(!node.list_channels().is_empty());
+                assert!(!node.list_channels().unwrap().is_empty());
                 node.enqueue_channel_message_reply_expiring_if(
                     channel,
                     b"Concurrent channel message",
@@ -287,7 +319,11 @@ async fn profile_publication_releases_store_before_channel_delivery() {
         }));
         match operation {
             "background" => {
-                assert!(node.prepare_current_profile_delivery(&peer).is_some());
+                assert!(
+                    node.prepare_current_profile_delivery(&peer)
+                        .unwrap()
+                        .is_some()
+                );
             }
             "biography" => {
                 node.save_account_bio_if("Updated bio".into(), |commit| commit())
@@ -358,24 +394,236 @@ fn account_display_name_prefers_signed_profile_and_retains_offline_discovery_nam
         .unwrap()
         .update(&proof, IpAddr::V4(Ipv4Addr::LOCALHOST), &node.user_id());
     assert_eq!(
-        node.account_display_name(&contact.account_id()).as_deref(),
+        node.account_display_name(&contact.account_id())
+            .unwrap()
+            .as_deref(),
         Some("Duncan")
     );
     node.roster.lock().unwrap().evict_stale(Duration::ZERO);
     assert_eq!(
-        node.account_display_name(&contact.account_id()).as_deref(),
+        node.account_display_name(&contact.account_id())
+            .unwrap()
+            .as_deref(),
         Some("Duncan")
     );
     let profile = AccountProfile::new(&contact, 1, "Duncan Jones".into(), String::new(), None);
     node.receive_account_profile(&profile).unwrap();
     assert_eq!(
-        node.account_display_name(&contact.account_id()).as_deref(),
+        node.account_display_name(&contact.account_id())
+            .unwrap()
+            .as_deref(),
         Some("Duncan Jones")
     );
     assert_eq!(
-        node.account_display_name(&Account::generate().account_id()),
+        node.account_display_name(&Account::generate().account_id())
+            .unwrap(),
         None
     );
+}
+
+#[test]
+fn indexed_profiles_warm_node_keeps_peer_payloads_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = Account::generate();
+    let node = open(dir.path(), &owner);
+    let mut first = None;
+    for seed in 1..=32 {
+        let account = Account::from_secret_bytes([seed; 32]);
+        let profile = AccountProfile::new(
+            &account,
+            1,
+            "Peer".into(),
+            String::new(),
+            Some(vec![seed; 8192]),
+        );
+        node.receive_account_profile(&profile).unwrap();
+        first.get_or_insert(account.account_id());
+    }
+    for seed in 33..=48 {
+        let account = Account::from_secret_bytes([seed; 32]);
+        let card = TrustCard::new(
+            &account,
+            1,
+            "Legacy peer".into(),
+            String::new(),
+            None,
+            Some(vec![seed; 12288]),
+        );
+        node.receive_trust_card(&card).unwrap();
+    }
+    drop(node);
+    // Allow first-time bounded migration/reconciliation, then measure ordinary reopen.
+    drop(open(dir.path(), &owner));
+    crate::storage::record_log::frame_observations::reset();
+    super::super::profile_store::reset_indexed_body_reads();
+    super::super::account_profile_data::reset_indexed_body_reads();
+    super::super::trust_card::reset_indexed_body_reads();
+    let node = open(dir.path(), &owner);
+    assert!(
+        crate::storage::record_log::frame_observations::maximum_capacity() < 8192,
+        "ordinary Node reopen must not read retained avatar frames"
+    );
+    assert_eq!(super::super::profile_store::indexed_body_reads(), 0);
+    assert_eq!(super::super::account_profile_data::indexed_body_reads(), 0);
+    assert_eq!(super::super::trust_card::indexed_body_reads(), 0);
+    assert_eq!(
+        node.peer_avatar(&first.unwrap()).unwrap(),
+        Some(vec![1; 8192])
+    );
+    assert_eq!(super::super::profile_store::indexed_body_reads(), 1);
+}
+
+#[test]
+fn indexed_profiles_failed_projection_survives_unrelated_success_and_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = Account::generate();
+    let node = open(dir.path(), &owner);
+    let first = Account::generate();
+    let second = Account::generate();
+    let pending = AccountProfile::new(
+        &first,
+        1,
+        "First".into(),
+        String::new(),
+        Some(vec![1; 8192]),
+    );
+    let later = AccountProfile::new(
+        &second,
+        1,
+        "Second".into(),
+        String::new(),
+        Some(vec![2; 8192]),
+    );
+    node.account_profiles.fail_appends_for_test(true);
+    assert!(node.receive_account_profile(&pending).is_err());
+    node.account_profiles.fail_appends_for_test(false);
+    node.receive_account_profile(&later).unwrap();
+    assert_eq!(node.peer_avatar(&first.account_id()).unwrap(), None);
+    assert_eq!(
+        node.profiles
+            .lock()
+            .unwrap()
+            .pending_projection()
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(node);
+    let node = open(dir.path(), &owner);
+    assert_eq!(
+        node.peer_avatar(&first.account_id()).unwrap(),
+        pending.avatar
+    );
+    assert_eq!(
+        node.peer_avatar(&second.account_id()).unwrap(),
+        later.avatar
+    );
+    assert!(
+        node.profiles
+            .lock()
+            .unwrap()
+            .pending_projection()
+            .unwrap()
+            .is_empty()
+    );
+    drop(node);
+    super::super::profile_store::reset_indexed_body_reads();
+    super::super::account_profile_data::reset_indexed_body_reads();
+    drop(open(dir.path(), &owner));
+    assert_eq!(super::super::profile_store::indexed_body_reads(), 0);
+    assert_eq!(super::super::account_profile_data::indexed_body_reads(), 0);
+}
+
+fn projection_ack_retry_notifies(trust_card: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = Account::generate();
+    let actor = Account::generate();
+    let node = open(dir.path(), &owner);
+    let mut incoming = node.take_profile_receiver().unwrap();
+    let table = if trust_card {
+        "current_trust_card_headers"
+    } else {
+        "current_account_profile_headers"
+    };
+    node.storage.database().transaction(|c| {
+        c.execute_batch(&format!("CREATE TEMP TRIGGER fail_projection_ack BEFORE UPDATE OF projection_pending ON {table} WHEN NEW.projection_pending=0 BEGIN SELECT RAISE(ABORT,'ack failed'); END;"))?;Ok(())
+    }).unwrap();
+    let receive = || {
+        if trust_card {
+            node.receive_trust_card(&TrustCard::new(
+                &actor,
+                1,
+                "Actor".into(),
+                String::new(),
+                None,
+                Some(vec![7; 8192]),
+            ))
+        } else {
+            node.receive_account_profile(&AccountProfile::new(
+                &actor,
+                1,
+                "Actor".into(),
+                String::new(),
+                Some(vec![7; 8192]),
+            ))
+        }
+    };
+    assert!(receive().is_err());
+    assert_eq!(
+        node.peer_avatar(&actor.account_id()).unwrap(),
+        Some(vec![7; 8192])
+    );
+    assert!(incoming.try_recv().is_err());
+    node.storage
+        .database()
+        .transaction(|c| {
+            c.execute_batch("DROP TRIGGER fail_projection_ack")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        !receive().unwrap(),
+        "repair keeps the original source revision"
+    );
+    let changed = incoming
+        .try_recv()
+        .expect("successful projection retry must notify even when its avatar already committed");
+    assert_eq!(changed.account_id, actor.account_id());
+    assert_eq!(changed.avatar, Some(vec![7; 8192]));
+}
+#[test]
+fn indexed_profile_projection_ack_retry_notifies() {
+    projection_ack_retry_notifies(false);
+}
+#[test]
+fn indexed_trust_card_projection_ack_retry_notifies() {
+    projection_ack_retry_notifies(true);
+}
+
+#[test]
+fn indexed_current_profile_distinguishes_missing_clear_and_selected_avatar() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = open(dir.path(), &Account::generate());
+    let peer = Account::generate();
+    let id = peer.account_id();
+    super::super::profile_store::reset_indexed_body_reads();
+    assert!(node.current_profile(&id).unwrap().is_none());
+    assert_eq!(super::super::profile_store::indexed_body_reads(), 0);
+    node.receive_legacy_profile(&ProfilePayload::new(&peer, None, 1))
+        .unwrap();
+    super::super::profile_store::reset_indexed_body_reads();
+    let clear = node.current_profile(&id).unwrap().unwrap();
+    assert_eq!(clear.account_id, id);
+    assert_eq!(clear.avatar, None);
+    assert_eq!(super::super::profile_store::indexed_body_reads(), 1);
+    node.receive_legacy_profile(&ProfilePayload::new(&peer, Some(vec![3; 8192]), 2))
+        .unwrap();
+    super::super::profile_store::reset_indexed_body_reads();
+    assert_eq!(
+        node.current_profile(&id).unwrap().unwrap().avatar,
+        Some(vec![3; 8192])
+    );
+    assert_eq!(super::super::profile_store::indexed_body_reads(), 1);
 }
 
 #[tokio::test]
@@ -441,6 +689,7 @@ async fn publishing_profile_projects_newer_sibling_profile_pulled_in_same_round(
         .lock()
         .unwrap()
         .events(&conversation)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == EventKind::Profile && event.author.user_id() == bob.user_id())
         .map(|event| event.id)
@@ -469,16 +718,21 @@ async fn publishing_profile_projects_newer_sibling_profile_pulled_in_same_round(
     {
         let log = alice.log.lock().unwrap();
         assert!(
-            remote_profile_ids.iter().all(|id| log.get(id).is_some()),
+            remote_profile_ids
+                .iter()
+                .all(|id| log.get(id).unwrap().is_some()),
             "the outbound round durably pulls both sibling profile events"
         );
     }
     assert_eq!(
-        alice.account_profile(&account.account_id()),
+        alice.account_profile(&account.account_id()).unwrap(),
         Some(latest.clone()),
         "successful publication must project the newer profile pulled in that round"
     );
-    assert_eq!(alice.peer_avatar(&account.account_id()), latest.avatar);
+    assert_eq!(
+        alice.peer_avatar(&account.account_id()).unwrap(),
+        latest.avatar
+    );
     assert_eq!(latest.bio, old.bio);
     assert_eq!(latest.created_at_ms, old.created_at_ms);
 }

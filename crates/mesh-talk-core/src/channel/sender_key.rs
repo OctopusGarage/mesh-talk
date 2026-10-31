@@ -12,7 +12,9 @@ use rand_core::OsRng;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
+
+mod checkpoint;
 
 /// Max messages a receiver will skip forward in one sender's chain (DoS bound) and
 /// the total buffered skipped keys.
@@ -59,12 +61,24 @@ impl SenderKey {
 
     /// Advance the chain by one message: returns `(n, message_key)` and deletes the
     /// old chain key (forward secrecy).
+    ///
+    /// Legacy infallible boundary: panics before changing state when the u32
+    /// position is exhausted. Runtime callers use [`Self::try_ratchet`] instead.
     pub fn ratchet(&mut self) -> (u32, [u8; 32]) {
+        self.try_ratchet().expect("sender chain exhausted")
+    }
+
+    /// Advance only when the next position is representable. Exhaustion leaves
+    /// the chain unchanged; it never wraps or creates a replacement epoch.
+    pub fn try_ratchet(&mut self) -> Result<(u32, [u8; 32]), SenderKeyError> {
+        let next_n = self.n.checked_add(1).ok_or_else(exhausted)?;
         let (next, mk) = kdf_ck(&self.chain_key);
+        let next = Zeroizing::new(next);
         let n = self.n;
-        self.chain_key = next;
-        self.n += 1;
-        (n, mk)
+        self.chain_key.zeroize();
+        self.chain_key = *next;
+        self.n = next_n;
+        Ok((n, mk))
     }
 
     /// Serialize this sending chain (fixint bincode). The output is SECRET — callers
@@ -103,12 +117,27 @@ struct SenderKeyWire {
     chain_key: [u8; 32],
     n: u32,
 }
+impl Drop for SenderKeyWire {
+    fn drop(&mut self) {
+        self.chain_key.zeroize();
+    }
+}
 
 /// The sealed-per-member initial sender chain (chain key + starting position).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SenderKeyDistribution {
     pub chain_key: [u8; 32],
     pub n: u32,
+}
+impl Zeroize for SenderKeyDistribution {
+    fn zeroize(&mut self) {
+        self.chain_key.zeroize();
+        self.n.zeroize();
+    }
+}
+
+fn exhausted() -> SenderKeyError {
+    SenderKeyError::Malformed("sender chain exhausted".into())
 }
 
 impl SenderKeyDistribution {
@@ -138,6 +167,28 @@ pub struct SenderChain {
     order: VecDeque<u32>,
 }
 
+/// Crypto preparation only: not a durable receive transaction. Dropping an
+/// abandoned candidate wipes its chain and plaintext through their owners.
+pub(super) struct PreparedReceiverOpen {
+    next: SenderChain,
+    plaintext: Zeroizing<Vec<u8>>,
+}
+type OpenCheckpoint = (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>, u32);
+
+impl PreparedReceiverOpen {
+    pub(super) fn into_checkpoint(self) -> Result<OpenCheckpoint, SenderKeyError> {
+        Ok((self.next.encode_checkpoint()?, self.plaintext, self.next.n))
+    }
+    pub(super) fn install(self, chain: &mut SenderChain) -> Vec<u8> {
+        let Self {
+            next,
+            mut plaintext,
+        } = self;
+        *chain = next;
+        std::mem::take(&mut *plaintext)
+    }
+}
+
 impl Drop for SenderChain {
     fn drop(&mut self) {
         self.chain_key.zeroize();
@@ -148,6 +199,19 @@ impl Drop for SenderChain {
 }
 
 impl SenderChain {
+    pub(super) fn prepare_open(
+        &self,
+        target: u32,
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<PreparedReceiverOpen, SenderKeyError> {
+        // The bounded local codec is also the exact private fork: it includes
+        // consumed holes and eviction order, unlike a distribution snapshot.
+        let mut next = Self::decode_checkpoint(&self.encode_checkpoint()?)?;
+        let key = Zeroizing::new(next.message_key(target)?);
+        let plaintext = Zeroizing::new(open_message(&key, ciphertext, aad)?);
+        Ok(PreparedReceiverOpen { next, plaintext })
+    }
     /// Recover a gap the normal ratchet cannot cross. Routine out-of-order
     /// messages keep their original receive position and this device's buffered
     /// skipped keys. Only an authenticated account snapshot may jump a stalled
@@ -179,10 +243,13 @@ impl SenderChain {
     }
 
     /// The message key for position `target`, ratcheting forward (buffering skipped
-    /// keys) as needed. `None` if `target` is behind a consumed position with no
-    /// buffered key, or beyond the skip bound.
+    /// keys) as needed. Returns an error for an already-consumed position,
+    /// a jump beyond the skip bound, or exhausted fresh-chain advancement.
     pub fn message_key(&mut self, target: u32) -> Result<[u8; 32], SenderKeyError> {
-        if let Some(mk) = self.skipped.remove(&target) {
+        if let Some(stored) = self.skipped.get_mut(&target) {
+            let mk = *stored;
+            stored.zeroize();
+            self.skipped.remove(&target);
             // Drop the matching order entry too, or `order` would accumulate
             // consumed-key tombstones without bound: consuming a MIDDLE key while a
             // lower index stays buffered leaves a front-only prune unable to reclaim
@@ -196,28 +263,37 @@ impl SenderChain {
                 "message key already consumed".into(),
             ));
         }
+        // Check the entire requested advance before changing keys, skip maps or
+        // eviction order. Already-buffered keys above remain usable at terminal n.
+        let next_n = target.checked_add(1).ok_or_else(exhausted)?;
         if target - self.n > MAX_SKIP {
             return Err(SenderKeyError::TooManySkipped);
         }
         while self.n < target {
             let (next, mk) = kdf_ck(&self.chain_key);
-            self.skipped.insert(self.n, mk);
+            let next = Zeroizing::new(next);
+            let mk = Zeroizing::new(mk);
+            self.skipped.insert(self.n, *mk);
             self.order.push_back(self.n);
-            self.chain_key = next;
+            self.chain_key.zeroize();
+            self.chain_key = *next;
             self.n += 1;
             while self.skipped.len() > MAX_SKIPPED_TOTAL {
                 if let Some(old) = self.order.pop_front() {
-                    if let Some(mut evicted) = self.skipped.remove(&old) {
+                    if let Some(evicted) = self.skipped.get_mut(&old) {
                         evicted.zeroize();
                     }
+                    self.skipped.remove(&old);
                 } else {
                     break;
                 }
             }
         }
         let (next, mk) = kdf_ck(&self.chain_key);
-        self.chain_key = next;
-        self.n += 1;
+        let next = Zeroizing::new(next);
+        self.chain_key.zeroize();
+        self.chain_key = *next;
+        self.n = next_n;
         Ok(mk)
     }
 }
@@ -276,6 +352,74 @@ mod tests {
         let (rn, rmk) = (n, rc.message_key(n).unwrap());
         assert_eq!(rn, n);
         open_message(&rmk, &ct, aad).unwrap()
+    }
+
+    #[test]
+    fn abandoned_receive_preparation_leaves_source_exactly_unchanged() {
+        let sender = SenderKey::generate();
+        let receiver = SenderChain::from_distribution(&sender.distribution());
+        let before = receiver.encode_checkpoint().unwrap();
+        let mut sending = sender;
+        let (_, key) = sending.try_ratchet().unwrap();
+        let key = Zeroizing::new(key);
+        let ciphertext = seal_message(&key, b"prepared only", b"aad").unwrap();
+        let candidate = receiver.prepare_open(0, &ciphertext, b"aad").unwrap();
+        assert_eq!(candidate.plaintext.as_slice(), b"prepared only");
+        assert_eq!(*receiver.encode_checkpoint().unwrap(), *before);
+        drop(candidate);
+        assert_eq!(*receiver.encode_checkpoint().unwrap(), *before);
+        assert!(receiver.prepare_open(0, &ciphertext, b"aad").is_ok());
+    }
+
+    #[test]
+    fn sender_exhaustion_is_checked_and_legacy_panic_leaves_state_unchanged() {
+        let mut sender = SenderKey {
+            chain_key: [19; 32],
+            n: u32::MAX - 1,
+        };
+        assert_eq!(sender.try_ratchet().unwrap().0, u32::MAX - 1);
+        let before = sender.serialize();
+        assert!(sender.try_ratchet().is_err());
+        assert_eq!(sender.serialize(), before);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sender.ratchet())).is_err()
+        );
+        assert_eq!(sender.serialize(), before);
+    }
+
+    #[test]
+    fn terminal_receiver_keeps_delayed_skipped_keys() {
+        let mut receiver = SenderChain::from_distribution(&SenderKeyDistribution {
+            chain_key: [17; 32],
+            n: u32::MAX - 2,
+        });
+        receiver.message_key(u32::MAX - 1).unwrap();
+        let mut restored =
+            SenderChain::decode_checkpoint(&receiver.encode_checkpoint().unwrap()).unwrap();
+        assert!(restored.message_key(u32::MAX).is_err());
+        assert!(restored.message_key(u32::MAX - 2).is_ok());
+        assert!(restored.message_key(u32::MAX - 2).is_err());
+        assert!(restored.message_key(u32::MAX - 1).is_err());
+    }
+
+    #[test]
+    fn receiver_terminal_position_rejects_before_any_mutation() {
+        let mut receiver = SenderChain::from_distribution(&SenderKeyDistribution {
+            chain_key: [17; 32],
+            n: u32::MAX - 2,
+        });
+        let before = receiver.chain_key;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            receiver.message_key(u32::MAX)
+        }));
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "exhaustion must return an error"
+        );
+        assert_eq!(receiver.n, u32::MAX - 2);
+        assert_eq!(receiver.chain_key, before);
+        assert!(receiver.skipped.is_empty());
+        assert!(receiver.order.is_empty());
     }
 
     #[test]

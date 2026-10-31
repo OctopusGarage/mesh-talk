@@ -65,8 +65,23 @@ impl Node {
         group: ConversationId,
         members: &[crate::identity::device::PublicIdentity],
     ) -> bool {
-        if let Some(event) = self.account_group_fanout_message(group) {
-            let projection = self.account_group_projection(group);
+        let message = match self.account_group_fanout_message(group) {
+            Ok(message) => message,
+            Err(error) => {
+                log::warn!("account group fanout lookup deferred after storage failure: {error}");
+                return true;
+            }
+        };
+        if let Some(event) = message {
+            let projection = match self.account_group_projection(group) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    log::warn!(
+                        "account group distribution deferred after storage failure: {error}"
+                    );
+                    return true;
+                }
+            };
             let eligible = self
                 .channels
                 .lock()
@@ -98,7 +113,7 @@ impl Node {
         id: AccountGroupOperationId,
     ) -> Result<Option<ConversationId>, NodeError> {
         let request = self
-            .operation_projection(group)
+            .operation_projection(group)?
             .requests
             .into_iter()
             .find(|request| request.reference.id == id)
@@ -494,9 +509,11 @@ impl Node {
         });
         // Cache checks acquire their own journal/log guards before membership
         // and delivery. Bulk transfer is owned by the existing attachment lane.
-        let file_ready = file_payload.as_ref().is_some_and(|payload| {
-            self.account_group_file_assets_ready(&request.reference, payload)
-        });
+        let file_ready = file_payload
+            .as_ref()
+            .map(|payload| self.account_group_file_assets_ready(&request.reference, payload))
+            .transpose()?
+            .unwrap_or(false);
         let existing_source = self
             .group_operations
             .lock()
@@ -629,7 +646,7 @@ impl Node {
             let log = self.log.lock().expect("log mutex");
             let projection = crate::node::channel::ChannelBook::project_membership(
                 request.reference.group,
-                &log.events(&request.reference.group),
+                &log.events(&request.reference.group)?,
             );
             match self.prepare_owner_control(
                 request.reference.group,
@@ -675,7 +692,7 @@ impl Node {
             let log = self.log.lock().expect("log mutex");
             let projection = crate::node::channel::ChannelBook::project_membership(
                 request.reference.group,
-                &log.events(&request.reference.group),
+                &log.events(&request.reference.group)?,
             );
             if legacy_child {
                 match self.prepare_legacy_member_leave_locked(
@@ -767,7 +784,7 @@ impl Node {
                 let log = self.log.lock().expect("log mutex");
                 let projection = crate::node::channel::ChannelBook::project_membership(
                     request.reference.group,
-                    &log.events(&request.reference.group),
+                    &log.events(&request.reference.group)?,
                 );
                 match self.prepare_channel_message_action_locked(
                     request.reference.group,
@@ -900,9 +917,12 @@ impl Node {
                     ))
                 })
         };
-        let file_snapshot = file_snapshot.filter(|(reference, payload, _)| {
-            self.account_group_file_assets_ready(reference, payload)
-        });
+        let file_snapshot = match file_snapshot {
+            Some(snapshot) if self.account_group_file_assets_ready(&snapshot.0, &snapshot.1)? => {
+                Some(snapshot)
+            }
+            _ => None,
+        };
         let action_snapshot = self
             .group_operations
             .lock()
@@ -1061,7 +1081,7 @@ impl Node {
         let log = self.log.lock().expect("log mutex");
         let projection = crate::node::channel::ChannelBook::project_membership(
             entry.reference.group,
-            &log.events(&entry.reference.group),
+            &log.events(&entry.reference.group)?,
         );
         // The pinned source and the prepared effect must refer to this same
         // canonical log view, including modern inherited account authority.
@@ -1456,7 +1476,7 @@ impl Node {
                 Some(journal::GroupFileCopy {
                     descriptor: descriptor.clone(),
                     complete: self
-                        .account_group_file_cached_assets_ready(&result.reference, &payload),
+                        .account_group_file_cached_assets_ready(&result.reference, &payload)?,
                 })
             }
         } else {

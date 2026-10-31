@@ -3,16 +3,16 @@
 use super::*;
 use crate::{
     discovery::Announce,
-    eventlog::{ConversationId, Event, EventId, EventKind},
+    eventlog::{ConversationId, EventId, LogError},
     identity::device::{DeviceIdentity, PublicIdentity},
     node::account_devices::AccountDevice,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 const MAX_MEMBERS: usize = 256;
 const MAX_GROUP_NAME_BYTES: usize = 1024;
 const PUBLICATION_SLICE: usize = 16;
-const MAX_DIRECTORY_IDS: usize = 512;
+pub(in crate::node) const MAX_DIRECTORY_IDS: usize = 512;
 const MAX_DIRECTORY_SOURCES: usize = 65;
 const DIRECTORY_DOMAIN: &[u8] = b"mesh-talk-group-directory-v1";
 
@@ -43,14 +43,6 @@ struct GroupDirectoryObservation {
     signature: String,
 }
 
-fn directory_control(kind: EventKind) -> bool {
-    super::super::account_group::wire::authorization_control(kind)
-        || matches!(
-            kind,
-            EventKind::ChannelRename | EventKind::ChannelHistoryPolicy
-        )
-}
-
 fn directory_fingerprint(controls: &[String]) -> String {
     let mut digest = Sha256::new();
     digest.update(DIRECTORY_DOMAIN);
@@ -58,36 +50,6 @@ fn directory_fingerprint(controls: &[String]) -> String {
         digest.update(control.as_bytes());
     }
     hex::encode(digest.finalize())
-}
-
-fn directory_view(events: &[&Event]) -> (Vec<String>, Vec<EventId>) {
-    let relevant: HashSet<_> = events
-        .iter()
-        .filter(|event| directory_control(event.kind))
-        .map(|event| event.id)
-        .collect();
-    let by_id: BTreeMap<_, _> = events.iter().map(|event| (event.id, *event)).collect();
-    let mut ancestors = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut pending: Vec<_> = events
-        .iter()
-        .filter(|event| relevant.contains(&event.id))
-        .flat_map(|event| event.parents.iter().copied())
-        .collect();
-    while let Some(id) = pending.pop() {
-        if relevant.contains(&id) {
-            ancestors.insert(id);
-        } else if visited.insert(id)
-            && let Some(event) = by_id.get(&id)
-        {
-            pending.extend(event.parents.iter().copied());
-        }
-    }
-    let mut controls: Vec<_> = relevant.iter().map(EventId::to_hex).collect();
-    controls.sort();
-    let mut frontier: Vec<_> = relevant.difference(&ancestors).copied().collect();
-    frontier.sort();
-    (controls, frontier)
 }
 
 pub(super) fn source_authenticated(payload: &[u8]) -> bool {
@@ -555,11 +517,10 @@ impl Node {
         &self,
         reference: &GroupInventoryReference,
         previous: Option<&GroupInventoryReference>,
-        controls: &[String],
-        frontier: &[EventId],
+        view: &crate::node::account_group::DirectoryView,
         history_policy: crate::channel::HistoryPolicy,
-    ) -> GroupDirectoryObservation {
-        let fingerprint = directory_fingerprint(controls);
+    ) -> Result<GroupDirectoryObservation, NodeError> {
+        let fingerprint = hex::encode(view.fingerprint);
         let mut bindings: Vec<_> = self
             .historical_peer_proofs()
             .into_iter()
@@ -601,49 +562,63 @@ impl Node {
             .collect();
         {
             let store = self.account_documents.lock().expect("documents mutex");
-            for ack in store
+            let mut considered = 0;
+            for meta in store
                 .inventory_channel_rows(&reference.channel_id)
                 .into_iter()
                 .filter(|meta| !meta.tombstone && meta.writer_device != self.user_id())
-                .filter_map(|meta| {
-                    let document = store.get(&meta.key).ok()??;
-                    if !valid_payload(&meta, document.payload()) {
-                        return None;
-                    }
-                    let other: GroupInventoryReference =
-                        serde_json::from_slice(document.payload()).ok()?;
-                    let directory = other.directory.as_ref()?;
-                    if !self.account_group_binding_current(&directory.source)
-                        || !(directory.fingerprint == fingerprint
-                            && directory.event_count == controls.len()
-                            || directory.complete_frontier
-                                && directory
-                                    .frontier
-                                    .iter()
-                                    .all(|id| controls.binary_search(id).is_ok()))
-                    {
-                        return None;
-                    }
-                    let compatible = !directory.unavailable
-                        && directory.fingerprint == fingerprint
-                        && directory.event_count == controls.len()
-                        && other.name == reference.name
-                        && other.owner == reference.owner
-                        && other.owner_account_id == reference.owner_account_id
-                        && other.member_count == reference.member_count
-                        && directory.history_policy == history_policy;
-                    if compatible {
-                        return None;
-                    }
-                    Some(DirectoryAcknowledgement {
-                        source: other.source_device,
-                        revision: meta.revision,
-                        hash: hex::encode(meta.content_hash),
-                    })
-                })
-                .take(MAX_DIRECTORY_SOURCES)
             {
+                let Some(document) = store.get(&meta.key)? else {
+                    continue;
+                };
+                if !valid_payload(&meta, document.payload()) {
+                    continue;
+                }
+                let Ok(other) =
+                    serde_json::from_slice::<GroupInventoryReference>(document.payload())
+                else {
+                    continue;
+                };
+                let Some(directory) = other.directory.as_ref() else {
+                    continue;
+                };
+                if !self.account_group_binding_current(&directory.source) {
+                    continue;
+                }
+                let same =
+                    directory.fingerprint == fingerprint && directory.event_count == view.count;
+                let mut frontier_present = directory.complete_frontier;
+                if frontier_present {
+                    for id in &directory.frontier {
+                        if !view.contains(self, id)? {
+                            frontier_present = false;
+                            break;
+                        }
+                    }
+                }
+                if !same && !frontier_present {
+                    continue;
+                }
+                let compatible = !directory.unavailable
+                    && same
+                    && other.name == reference.name
+                    && other.owner == reference.owner
+                    && other.owner_account_id == reference.owner_account_id
+                    && other.member_count == reference.member_count
+                    && directory.history_policy == history_policy;
+                if compatible {
+                    continue;
+                }
+                let ack = DirectoryAcknowledgement {
+                    source: other.source_device,
+                    revision: meta.revision,
+                    hash: hex::encode(meta.content_hash),
+                };
                 acknowledgements.insert(ack.source.clone(), ack);
+                considered += 1;
+                if considered == MAX_DIRECTORY_SOURCES {
+                    break;
+                }
             }
         }
         let acknowledgements = acknowledgements
@@ -655,17 +630,18 @@ impl Node {
             source: self.own_group_proof(),
             bindings,
             certified,
-            event_count: controls.len(),
-            complete: controls.len() <= MAX_DIRECTORY_IDS,
+            event_count: view.count,
+            complete: view.count <= MAX_DIRECTORY_IDS,
             unavailable: false,
             fingerprint,
-            controls: controls.iter().take(MAX_DIRECTORY_IDS).cloned().collect(),
-            frontier: frontier
+            controls: view.controls.clone(),
+            frontier: view
+                .frontier
                 .iter()
                 .take(MAX_DIRECTORY_IDS)
                 .map(EventId::to_hex)
                 .collect(),
-            complete_frontier: frontier.len() <= MAX_DIRECTORY_IDS,
+            complete_frontier: view.frontier.len() <= MAX_DIRECTORY_IDS,
             acknowledgements,
             history_policy,
             signature: "0".repeat(128),
@@ -673,7 +649,7 @@ impl Node {
         directory
             .acknowledgements
             .sort_by(|left, right| left.source.cmp(&right.source));
-        directory
+        Ok(directory)
     }
 
     /// Returns display-only inventory only when this device has no real local group.
@@ -734,6 +710,14 @@ impl Node {
     }
 
     fn publish_group_inventory_groups(&self, ids: &[ConversationId]) {
+        if let Err(error) = self.try_publish_group_inventory_groups(ids) {
+            log::debug!("group inventory publication deferred: {error}");
+        }
+    }
+    pub(super) fn try_publish_group_inventory_groups(
+        &self,
+        ids: &[ConversationId],
+    ) -> Result<(), NodeError> {
         let own = self.user_id();
         for id in ids {
             let _membership = self
@@ -759,44 +743,52 @@ impl Node {
             if previous.as_ref().is_some_and(|meta| meta.tombstone) {
                 continue;
             }
-            let (state, controls, frontier, history_policy) = {
+            let (state, view, history_policy) = {
                 let log = self.log.lock().expect("log mutex");
-                let events = log.events(id);
-                let Some(state) =
-                    super::super::channel::ChannelBook::project_membership(*id, &events).state
-                else {
+                let Some(state) = self.account_group_projection_with_log(&log, *id)?.state else {
                     continue;
                 };
-                let (controls, frontier) = directory_view(&events);
-                (
-                    state,
-                    controls,
-                    frontier,
-                    super::super::join_history::policy(&events),
-                )
+                let history_policy = match self.channel_checkpoints.prepared_history_policy(*id) {
+                    Ok(policy) => policy,
+                    Err(LogError::StaleCursor) => {
+                        self.channel_checkpoints.queue_runtime(*id)?;
+                        self.channel_recovery_notify.notify_one();
+                        return Err(LogError::StaleCursor.into());
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let view = self.directory_observation(&log, *id)?;
+                (state, view, history_policy)
             };
-            let fingerprint = directory_fingerprint(&controls);
-            if old
+            let fingerprint = hex::encode(view.fingerprint);
+            if let Some(directory) = old
                 .as_ref()
                 .and_then(|reference| reference.directory.as_ref())
-                .is_some_and(|directory| {
-                    !(directory.fingerprint == fingerprint
-                        && directory.event_count == controls.len()
-                        || directory.complete_frontier
-                            && directory
-                                .frontier
-                                .iter()
-                                .all(|id| controls.binary_search(id).is_ok())
-                        || receipt.as_ref().is_some_and(|frontier| {
-                            frontier
-                                .iter()
-                                .all(|id| controls.binary_search(&id.to_hex()).is_ok())
-                        }))
-                })
             {
-                // A restored public prefix cannot rewrite this source's later
-                // signed floor. Its exact receipt remains in the owning index.
-                continue;
+                let same =
+                    directory.fingerprint == fingerprint && directory.event_count == view.count;
+                let mut frontier_present = directory.complete_frontier;
+                if frontier_present {
+                    for id in &directory.frontier {
+                        if !view.contains(self, id)? {
+                            frontier_present = false;
+                            break;
+                        }
+                    }
+                }
+                let mut receipt_present = receipt.is_some();
+                if let Some(receipt) = &receipt {
+                    for id in receipt {
+                        if !view.contains(self, &id.to_hex())? {
+                            receipt_present = false;
+                            break;
+                        }
+                    }
+                }
+                if !same && !frontier_present && !receipt_present {
+                    // An older public prefix cannot replace this source's exact signed floor.
+                    continue;
+                }
             }
             let eligible =
                 self.channel_identity_matches_account(&state) && state.is_accepted_member(&own);
@@ -850,7 +842,9 @@ impl Node {
                         };
                         let name = account_id
                             .as_ref()
-                            .and_then(|account| self.account_profile(account))
+                            .map(|account| self.account_profile(account))
+                            .transpose()?
+                            .flatten()
                             .map(|profile| profile.display_name)
                             .or_else(|| {
                                 self.historical_author(&public.ed25519_pub)
@@ -868,15 +862,15 @@ impl Node {
                                     && name.len() <= 512
                                     && !name.chars().any(char::is_control)
                             });
-                        GroupInventoryMember {
+                        Ok::<_, NodeError>(GroupInventoryMember {
                             post_office: self.device_is_post_office(&public),
                             pending: !state.is_accepted_member(&public.user_id()),
                             public,
                             account_id,
                             name,
-                        }
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>, _>>()?,
                 members_complete: state.members().len() <= MAX_MEMBERS,
                 observer: AccountDevice {
                     public: self.identity.public(),
@@ -885,13 +879,8 @@ impl Node {
                 directory: None,
                 directory_reconciling: false,
             };
-            reference.directory = Some(self.inventory_directory(
-                &reference,
-                old.as_ref(),
-                &controls,
-                &frontier,
-                history_policy,
-            ));
+            reference.directory =
+                Some(self.inventory_directory(&reference, old.as_ref(), &view, history_policy)?);
             if reference.bounded_payload(key.limit()).is_none() {
                 let directory = reference.directory.as_mut().expect("directory present");
                 directory.unavailable = true;
@@ -927,7 +916,9 @@ impl Node {
             {
                 continue;
             }
-            if self.log.lock().expect("log mutex").sync().is_err() {
+            let log = self.log.lock().expect("log mutex");
+            view.check(log.repository()?)?;
+            if log.sync().is_err() {
                 continue;
             }
             let changed = {
@@ -954,8 +945,9 @@ impl Node {
                         false,
                     )
                 };
-                store.merge_local_group_inventory(meta, &payload, frontier)
+                store.merge_local_group_inventory(meta, &payload, view.frontier)
             };
+            drop(log);
             match changed {
                 Ok(true) => self.documents_changed(),
                 Ok(false) => {}
@@ -963,5 +955,6 @@ impl Node {
             }
             self.publish_group_activity_for(*id);
         }
+        Ok(())
     }
 }

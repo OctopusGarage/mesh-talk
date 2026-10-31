@@ -33,6 +33,11 @@ static NAMES_OPEN_HOOKS: std::sync::LazyLock<
     Mutex<std::collections::HashMap<std::path::PathBuf, InitializationHook>>,
 > = std::sync::LazyLock::new(Default::default);
 
+#[cfg(test)]
+static PRIVACY_OPEN_HOOKS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<std::path::PathBuf, InitializationHook>>,
+> = std::sync::LazyLock::new(Default::default);
+
 struct ProfilePublication {
     revision: u64,
     conversation: ConversationId,
@@ -94,7 +99,14 @@ impl std::fmt::Display for RuntimeError {
     }
 }
 
-impl std::error::Error for RuntimeError {}
+impl std::error::Error for RuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Open(error) => Some(error),
+            Self::Io(error) => Some(error),
+        }
+    }
+}
 
 impl From<LogError> for RuntimeError {
     fn from(e: LogError) -> Self {
@@ -164,6 +176,8 @@ pub struct NodeRuntime {
     names: Arc<Mutex<NameDirectory>>,
     user_id: String,
     account_id: String,
+    /// Exact host local-user namespace, independent of cryptographic account ID.
+    host_owner: String,
     /// The display name this node advertises (for the diagnostics page).
     display_name: Mutex<String>,
     participant: ParticipantRuntime,
@@ -172,6 +186,29 @@ pub struct NodeRuntime {
     account_path: std::path::PathBuf,
     /// The session password, to re-encrypt the keystore when adopting a linked account.
     password: String,
+}
+
+/// Joined runtime producers with the original storage owner retained for a
+/// host-serialized offline export. External SDK calls remain host responsibility.
+pub struct RetiredNode {
+    node: Arc<Node>,
+    host_owner: String,
+}
+impl RetiredNode {
+    /// Originating host local-user label; never a cryptographic account ID.
+    pub fn host_account_id(&self) -> &str {
+        &self.host_owner
+    }
+    /// Physical locator used by the serialized host to match a retired handoff.
+    pub fn profile_root(&self) -> &Path {
+        self.node.storage.root()
+    }
+    pub fn node(&self) -> &Node {
+        &self.node
+    }
+    pub fn close(self) -> Result<(), LogError> {
+        self.node.close_profile()
+    }
 }
 
 impl NodeRuntime {
@@ -200,7 +237,15 @@ impl NodeRuntime {
     /// This does not cancel arbitrary SDK calls through externally held Node
     /// references; hosts must also serialize their own profile operations.
     pub async fn stop(self) {
+        drop(self.stop_for_storage().await);
+    }
+
+    pub async fn stop_for_storage(self) -> RetiredNode {
         self.participant.stop().await;
+        RetiredNode {
+            node: self.node,
+            host_owner: self.host_owner,
+        }
     }
     /// Compatibility constructor with positional startup arguments.
     /// New hosts should use [`Self::start_configured`] or
@@ -233,7 +278,7 @@ impl NodeRuntime {
             on_file,
             on_profile,
             on_call_signal,
-            |launch| Ok(launch(display_name)),
+            |launch| launch(display_name),
         )
         .await
     }
@@ -244,7 +289,7 @@ impl NodeRuntime {
         events: RuntimeEvents,
     ) -> Result<NodeRuntime, RuntimeError> {
         let display_name = config.display_name.to_owned();
-        Self::start_configured_guarded(config, events, |launch| Ok(launch(&display_name))).await
+        Self::start_configured_guarded(config, events, |launch| launch(&display_name)).await
     }
 
     /// Prepare stores without launching producers; the host authorizes the final
@@ -261,7 +306,7 @@ impl NodeRuntime {
         on_profile: impl Fn(crate::node::ReceivedProfile) + Send + 'static,
         on_call_signal: impl Fn(crate::node::ReceivedCallSignal) + Send + 'static,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         Self::start_configured_guarded(
@@ -296,7 +341,7 @@ impl NodeRuntime {
         config: RuntimeConfig<'_>,
         events: RuntimeEvents,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         Self::start_configured_guarded_with_network(
@@ -314,7 +359,7 @@ impl NodeRuntime {
         events: RuntimeEvents,
         network: RuntimeNetworkOptions,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         Self::start_configured_guarded_with_network_observed(
@@ -335,7 +380,7 @@ impl NodeRuntime {
         network: RuntimeNetworkOptions,
         observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         Self::start_configured_guarded_with_network_cost_observed(
@@ -358,7 +403,61 @@ impl NodeRuntime {
         network_cost: super::NetworkCost,
         observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
         authorize_launch: impl FnOnce(
-            &mut dyn FnMut(&str) -> NodeRuntime,
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
+        Self::start_owned(
+            super::RuntimeStartup::new(config, events)
+                .with_network(network)
+                .with_network_cost(network_cost),
+            observe_identity,
+            authorize_launch,
+        )
+        .await
+    }
+
+    /// Construct with concrete startup ownership and optional handed profile
+    /// lease. Completion joins real initializer work even if this future drops.
+    pub async fn start_owned(
+        startup: super::RuntimeStartup<'_>,
+        observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
+        ) -> Result<NodeRuntime, RuntimeError>,
+    ) -> Result<NodeRuntime, RuntimeError> {
+        let super::RuntimeStartup {
+            config,
+            events,
+            network,
+            network_cost,
+            lease,
+            work,
+            root,
+        } = startup;
+        root.track(Self::start_profile_inner(
+            config,
+            events,
+            network,
+            network_cost,
+            lease,
+            work,
+            observe_identity,
+            authorize_launch,
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_profile_inner(
+        config: RuntimeConfig<'_>,
+        events: Option<RuntimeEvents>,
+        network: RuntimeNetworkOptions,
+        network_cost: super::NetworkCost,
+        supplied_lease: Option<crate::storage::profile::ProfileStorageLease>,
+        startup_work: Arc<super::runtime_work::RuntimeWork>,
+        observe_identity: impl FnOnce(RuntimeIdentity) -> Result<(), RuntimeError>,
+        authorize_launch: impl FnOnce(
+            &mut dyn FnMut(&str) -> Result<NodeRuntime, RuntimeError>,
         ) -> Result<NodeRuntime, RuntimeError>,
     ) -> Result<NodeRuntime, RuntimeError> {
         let RuntimeConfig {
@@ -370,32 +469,46 @@ impl NodeRuntime {
             post_office_enabled,
             candidate_source,
         } = config;
-        let RuntimeEvents {
-            on_dm,
-            on_channel,
-            on_file,
-            on_profile,
-            on_call_signal,
-        } = events;
+        let host_owner = account_id.to_owned();
         let dir = base_dir.join("accounts").join(account_id);
         std::fs::create_dir_all(&dir)?;
 
         // The two keystore unlocks run sequential 600k-PBKDF2/Argon2 KDFs (~seconds of CPU,
         // the bulk of cold start). Offload them to the blocking pool so they don't monopolize
         // a tokio worker; the result is identical (same files, same ordering).
-        let (identity, account) = {
+        let (identity, account, lease) = {
+            let profile_dir = dir.clone();
+            let permit = startup_work.admit().expect("startup root admitted");
             let identity_path = dir.join("identity.keystore");
             let account_path = dir.join("account.keystore");
             let password = password.to_string();
-            tokio::task::spawn_blocking(move || {
-                let identity = keystore::load_or_create(&identity_path, &password)
-                    .map_err(|e| RuntimeError::Open(e.into()))?;
-                let account = account_keystore::load_or_create(&account_path, &password)
-                    .map_err(|e| RuntimeError::Open(e.into()))?;
-                Ok::<_, RuntimeError>((identity, account))
-            })
-            .await
-            .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??
+            permit
+                .spawn_blocking(move || {
+                    let lease = match supplied_lease {
+                        Some(lease)
+                            if lease.canonical_root() == std::fs::canonicalize(&profile_dir)? =>
+                        {
+                            lease
+                        }
+                        Some(_) => {
+                            return Err(RuntimeError::Io(std::io::Error::other(
+                                "supplied profile lease has another root",
+                            )));
+                        }
+                        None => {
+                            crate::storage::profile::ProfileStorageLease::acquire(&profile_dir)?
+                        }
+                    };
+                    lease.validate_identity_sources(&identity_path)?;
+                    let identity = keystore::load_or_create(&identity_path, &password)
+                        .map_err(|e| RuntimeError::Open(e.into()))?;
+                    let account = account_keystore::load_or_create(&account_path, &password)
+                        .map_err(|e| RuntimeError::Open(e.into()))?;
+                    Ok::<_, RuntimeError>((identity, account, lease))
+                })
+                .await
+                .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))?
+                .into_inner()?
         };
         let self_uid = identity.public().user_id();
         let account_id = account.account_id();
@@ -410,66 +523,96 @@ impl NodeRuntime {
         let tcp_port = listener.local_addr()?.port();
 
         let roster: Arc<Mutex<Roster>> = Arc::new(Mutex::new(Roster::default()));
-        let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<ReceivedDm>();
-        let (channel_tx, mut channel_rx) =
-            mpsc::unbounded_channel::<crate::node::channel::ReceivedChannelMessage>();
-        let (file_tx, mut file_rx) =
-            mpsc::unbounded_channel::<crate::node::filebook::ReceivedFile>();
+        let (targets, receivers) = if events.is_some() {
+            let (incoming, incoming_rx) = mpsc::unbounded_channel();
+            let (channel_incoming, channel_rx) = mpsc::unbounded_channel();
+            let (file_incoming, file_rx) = mpsc::unbounded_channel();
+            (
+                Some(super::node::LegacyPayloadTargets {
+                    incoming,
+                    channel_incoming,
+                    file_incoming,
+                }),
+                Some((incoming_rx, channel_rx, file_rx)),
+            )
+        } else {
+            (None, None)
+        };
         // Opening the node runs several more password KDFs (one per durable store). Offload
         // to the blocking pool so it doesn't monopolize a tokio worker during cold start;
         // `open_with_account` internally parallelizes those KDFs across scoped threads, so
         // the behavior (and result) is identical — just off the reactor.
         // Open the durable name directory in parallel with the node (its own password KDF),
         // so it doesn't add a serial step to cold start.
-        let names_handle = {
-            let names_path = dir.join("names.log");
-            let password = password.to_string();
-            tokio::task::spawn_blocking(move || {
-                #[cfg(test)]
-                {
-                    let hook = NAMES_OPEN_HOOKS.lock().unwrap().remove(&names_path);
-                    if let Some(hook) = hook {
-                        hook();
-                    }
-                }
-                NameDirectory::open(&names_path, &password)
-            })
-        };
-        let node_result = {
+        let (node, names) = {
             let roster = Arc::clone(&roster);
             let messages_log = dir.join("messages.log");
             let sent_log = dir.join("sent.log");
+            let names_path = dir.join("names.log");
             let password = password.to_string();
             let initial_display_name = display_name.to_owned();
-            tokio::task::spawn_blocking(move || {
-                let node = Node::open_with_account(
-                    identity,
-                    account,
-                    roster,
-                    incoming_tx,
-                    channel_tx,
-                    file_tx,
-                    &messages_log,
-                    &sent_log,
-                    &password,
-                )?;
-                // The keystore already durably records creation metadata. Repeating
-                // initialization after a failed launch cannot invent or lose a date.
-                if node.account_profile(&node.account_id()).is_none()
-                    && node.linked_devices().len() == 1
-                {
-                    node.set_profile_display_name(&initial_display_name)
-                        .map_err(|e| LogError::Io(std::io::Error::other(e.to_string())))?;
-                }
-                Ok::<_, LogError>(node)
-            })
-            .await
+            let permit = startup_work.admit().expect("startup root admitted");
+            permit
+                .spawn_blocking(move || {
+                    let storage =
+                        crate::storage::profile::context::ProfileStorage::open_participant(
+                            lease,
+                            &identity.public(),
+                            &account.public(),
+                            &messages_log,
+                            &sent_log,
+                            &password,
+                        )?;
+                    // Scoped children finish before this owner can return or unwind.
+                    // Both results are joined before either failure is propagated.
+                    let (node, names) = std::thread::scope(|scope| {
+                        let names_storage = storage.clone();
+                        let names_password = &password;
+                        let names = scope.spawn(move || {
+                            #[cfg(test)]
+                            if let Some(hook) = NAMES_OPEN_HOOKS.lock().unwrap().remove(&names_path)
+                            {
+                                hook();
+                            }
+                            NameDirectory::open_in_storage(
+                                &names_path,
+                                names_password,
+                                names_storage,
+                            )
+                        });
+                        let node = scope.spawn(|| {
+                            let node = Node::open_in_storage_delivery(
+                                storage.clone(),
+                                super::BoundedNodeOpenRequest {
+                                    identity,
+                                    account,
+                                    roster,
+                                    log_path: &messages_log,
+                                    sent_path: &sent_log,
+                                    password: &password,
+                                },
+                                targets,
+                            )?;
+                            if node.account_profile(&node.account_id())?.is_none()
+                                && node.linked_devices().len() == 1
+                            {
+                                node.set_profile_display_name(&initial_display_name)
+                                    .map_err(|e| {
+                                        LogError::Io(std::io::Error::other(e.to_string()))
+                                    })?;
+                            }
+                            Ok::<_, LogError>(node)
+                        });
+                        (node.join(), names.join())
+                    });
+                    let node = node.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                    let names = names.unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                    Ok::<_, LogError>((node, names))
+                })
+                .await
+                .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))?
+                .into_inner()?
         };
-        // Both blocking writers must finish even when either initializer fails.
-        // Dropping a JoinHandle would detach a writer into the replacement profile.
-        let names_result = names_handle.await;
-        let node = node_result
-            .map_err(|e| RuntimeError::Io(std::io::Error::other(format!("join error: {e}"))))??;
         node.set_post_office_permissions(
             network.post_office_send_enabled,
             network.post_office_receive_enabled,
@@ -477,9 +620,7 @@ impl NodeRuntime {
         node.set_post_office_enabled(post_office_enabled);
         node.initialize_physical_lan_only(network.physical_lan_only);
         node.set_network_cost(network_cost);
-        let names = Arc::new(Mutex::new(names_result.map_err(|e| {
-            RuntimeError::Io(std::io::Error::other(format!("join error: {e}")))
-        })??));
+        let names = Arc::new(Mutex::new(names));
         // Load policy and verified account proofs before discovery or accept/drain tasks.
         let visibility = Arc::new(crate::discovery::visibility::DiscoveryVisibility::new(
             false,
@@ -490,13 +631,20 @@ impl NodeRuntime {
             let password = password.to_string();
             let own = node.signed_announce(display_name, tcp_port);
             let visibility = visibility.clone();
-            tokio::task::spawn_blocking(move || {
-                node.configure_privacy(&directory, &password, &own, visibility)
-            })
-            .await
-            .map_err(|_| {
-                RuntimeError::Io(std::io::Error::other("privacy initialization failed"))
-            })??;
+            let permit = startup_work.admit().expect("startup root admitted");
+            permit
+                .spawn_blocking(move || {
+                    #[cfg(test)]
+                    if let Some(hook) = PRIVACY_OPEN_HOOKS.lock().unwrap().remove(&directory) {
+                        hook();
+                    }
+                    node.configure_privacy(&directory, &password, &own, visibility)
+                })
+                .await
+                .map_err(|_| {
+                    RuntimeError::Io(std::io::Error::other("privacy initialization failed"))
+                })?
+                .into_inner()?;
         }
         visibility
             .set_public(!node.privacy_snapshot().invisible)
@@ -516,7 +664,7 @@ impl NodeRuntime {
             // A persisted account claim survives host-local nicknames and adoption.
             // A rename committed while startup prepared still takes precedence.
             let canonical_name = node
-                .account_profile(&node.account_id())
+                .account_profile(&node.account_id())?
                 .map(|card| card.display_name)
                 .filter(|name| {
                     crate::identity::user::User::validate_display_name(name).as_ref() == Some(name)
@@ -528,41 +676,50 @@ impl NodeRuntime {
             };
             let mut participant = prepared.launch(current_name);
             let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-            tasks.push(tokio::spawn(async move {
-                while let Some(dm) = incoming_rx.recv().await {
-                    on_dm(dm);
+            if let Some(events) = events {
+                let RuntimeEvents {
+                    on_dm,
+                    on_channel,
+                    on_file,
+                    on_profile,
+                    on_call_signal,
+                } = events;
+                let (mut incoming_rx, mut channel_rx, mut file_rx) =
+                    receivers.expect("legacy delivery receivers");
+                tasks.push(tokio::spawn(async move {
+                    while let Some(dm) = incoming_rx.recv().await {
+                        on_dm(dm);
+                    }
+                }));
+                tasks.push(tokio::spawn(async move {
+                    while let Some(message) = channel_rx.recv().await {
+                        on_channel(message);
+                    }
+                }));
+                tasks.push(tokio::spawn(async move {
+                    while let Some(file) = file_rx.recv().await {
+                        on_file(file);
+                    }
+                }));
+                if let Some(mut receiver) = node.take_profile_receiver() {
+                    tasks.push(tokio::spawn(async move {
+                        while let Some(profile) = receiver.recv().await {
+                            on_profile(profile);
+                        }
+                    }));
                 }
-            }));
-            tasks.push(tokio::spawn(async move {
-                while let Some(msg) = channel_rx.recv().await {
-                    on_channel(msg);
+                if let Some(mut receiver) = node.take_call_signal_receiver() {
+                    tasks.push(tokio::spawn(async move {
+                        while let Some(signal) = receiver.recv().await {
+                            on_call_signal(signal);
+                        }
+                    }));
                 }
-            }));
-            tasks.push(tokio::spawn(async move {
-                while let Some(f) = file_rx.recv().await {
-                    on_file(f);
-                }
-            }));
+            }
             {
                 let node = node.clone();
                 tasks.push(tokio::spawn(async move {
                     node.run_account_access_loop().await;
-                }));
-            }
-            // Forward received peer profiles (avatar updates) to the host app.
-            if let Some(mut profile_rx) = node.take_profile_receiver() {
-                tasks.push(tokio::spawn(async move {
-                    while let Some(p) = profile_rx.recv().await {
-                        on_profile(p);
-                    }
-                }));
-            }
-            // Forward inbound call signals (WebRTC SDP/bye) to the host app — ephemeral, never logged.
-            if let Some(mut call_signal_rx) = node.take_call_signal_receiver() {
-                tasks.push(tokio::spawn(async move {
-                    while let Some(s) = call_signal_rx.recv().await {
-                        on_call_signal(s);
-                    }
                 }));
             }
             // Publish to new peers and retry failed or outdated profile publications.
@@ -608,7 +765,7 @@ impl NodeRuntime {
                                         );
                                     }
                                 }
-                                let Some(revision) = node.public_profile_revision() else { continue; };
+                                let revision = match node.public_profile_revision() { Ok(Some(revision)) => revision, Ok(None) => continue, Err(error) => { eprintln!("[profile] revision read failed: {error}"); continue; } };
                                 for peer in profile_republish_targets(&mut published, &peers, revision) {
                                     if attempts.len() >= MAX_PROFILE_PUBLICATIONS { break; }
                                     let uid = peer.public.user_id();
@@ -616,7 +773,7 @@ impl NodeRuntime {
                                     let conversation = match published.get(&uid) {
                                         Some(publication) if publication.revision == revision => publication.conversation,
                                         _ => {
-                                            let Some(conversation) = node.prepare_current_profile_delivery(&peer) else { continue; };
+                                            let conversation = match node.prepare_current_profile_delivery(&peer) { Ok(Some(conversation)) => conversation, Ok(None) => continue, Err(error) => { eprintln!("[profile] publication read failed: {error}"); continue; } };
                                             published.insert(uid.clone(), ProfilePublication { revision, conversation, complete: false, last_attempt: None });
                                             conversation
                                         }
@@ -639,23 +796,31 @@ impl NodeRuntime {
                 participant.register_host_task(task);
             }
 
-            NodeRuntime {
+            Ok(NodeRuntime {
                 node,
                 roster,
                 names,
                 user_id: self_uid,
                 account_id,
+                host_owner,
                 display_name: Mutex::new(current_name.to_string()),
                 participant,
                 account_path: dir.join("account.keystore"),
                 password: password.to_string(),
-            }
+            })
         });
         let runtime = authorize_launch(&mut |name| {
             launch.take().expect("runtime launch is single-use")(name)
         })?;
         // Authorization may supply a name changed while stores were opening.
-        if (runtime.node.account_profile(runtime.account_id()).is_some()
+        let has_profile = match runtime.node.account_profile(runtime.account_id()) {
+            Ok(profile) => profile.is_some(),
+            Err(error) => {
+                runtime.stop().await;
+                return Err(error.into());
+            }
+        };
+        if (has_profile
             || runtime.node.linked_devices().len() == 1
             || runtime.display_name() != display_name)
             && let Err(error) = runtime
@@ -743,7 +908,7 @@ impl NodeRuntime {
 
     /// Local host account namespace used for this runtime's persistent stores.
     pub fn host_account_id(&self) -> Option<&str> {
-        self.account_path.parent()?.file_name()?.to_str()
+        Some(&self.host_owner)
     }
 
     pub fn privacy_snapshot(&self) -> crate::node::PrivacySnapshot {
@@ -807,12 +972,14 @@ impl NodeRuntime {
 
     /// Account conversations retained locally, including contacts with no
     /// currently discoverable device.
-    pub fn known_account_ids(&self) -> Vec<String> {
+    pub fn known_account_ids(&self) -> Result<Vec<String>, NodeError> {
         self.node.known_account_ids()
     }
 
     /// Verified historical names for offline account rows; never supplies presence.
-    pub fn known_account_names(&self) -> std::collections::HashMap<String, Vec<String>> {
+    pub fn known_account_names(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, LogError> {
         let proofs = self.node.historical_dm_peers();
         // Record actual observed renames before projecting any UI surface. Old,
         // unchanged sibling announcements cannot displace the latest account name.
@@ -892,27 +1059,33 @@ impl NodeRuntime {
         // public cards may still contain an old login/display label from before
         // nickname edits updated those claims. A stale card must not rename a
         // contact. Its name is a fallback only if no nickname is known.
-        for card in self
-            .node
-            .profiles
-            .lock()
-            .expect("profiles mutex not poisoned")
-            .all()
-        {
-            if crate::identity::user::User::validate_display_name(&card.display_name).as_ref()
-                == Some(&card.display_name)
-            {
-                let account = card.account_id();
-                let values = names.entry(account.clone()).or_default();
-                if account == self.account_id() {
-                    values.retain(|name| *name != card.display_name);
-                    values.insert(0, card.display_name);
-                } else if values.is_empty() {
-                    values.push(card.display_name);
+        let mut after = None;
+        loop {
+            let page = self
+                .node
+                .profiles
+                .lock()
+                .expect("profiles mutex")
+                .names_page(after.as_deref())?;
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().map(|(account, _)| account.clone());
+            for (account, display_name) in page {
+                if crate::identity::user::User::validate_display_name(&display_name).as_ref()
+                    == Some(&display_name)
+                {
+                    let values = names.entry(account.clone()).or_default();
+                    if account == self.account_id() {
+                        values.retain(|name| *name != display_name);
+                        values.insert(0, display_name);
+                    } else if values.is_empty() {
+                        values.push(display_name);
+                    }
                 }
             }
         }
-        names
+        Ok(names)
     }
 
     /// The display name for a device `user_id`: the live roster's (freshest) if the peer is
@@ -953,7 +1126,11 @@ impl NodeRuntime {
     }
 
     /// The last `limit` messages of the DM with `peer`, both directions.
-    pub fn history(&self, peer: &PublicIdentity, limit: usize) -> Vec<HistoryEntry> {
+    pub fn history(
+        &self,
+        peer: &PublicIdentity,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         self.node.dm_history(peer, limit)
     }
 
@@ -975,7 +1152,11 @@ impl NodeRuntime {
     }
 
     /// Account-level conversation history with `peer_account_id`.
-    pub fn account_history(&self, peer_account_id: &str, limit: usize) -> Vec<HistoryEntry> {
+    pub fn account_history(
+        &self,
+        peer_account_id: &str,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         self.node.account_history(peer_account_id, limit)
     }
 
@@ -985,17 +1166,11 @@ impl NodeRuntime {
     }
 
     /// The avatar a peer account propagated to us (data-URL bytes), or `None`.
-    pub fn peer_avatar(&self, account_id: &str) -> Option<Vec<u8>> {
+    pub fn peer_avatar(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<Vec<u8>>, crate::eventlog::LogError> {
         self.node.peer_avatar(account_id)
-    }
-
-    /// Every peer avatar we hold, `account_id -> data-URL bytes` (for seeding the UI).
-    pub fn peer_avatars(&self) -> std::collections::HashMap<String, Vec<u8>> {
-        self.node.peer_avatars()
-    }
-
-    pub fn peer_profile_states(&self) -> std::collections::HashMap<String, Option<Vec<u8>>> {
-        self.node.peer_profile_states()
     }
 
     /// The session password held for re-encrypting the keystore — used only to
@@ -1014,15 +1189,22 @@ impl NodeRuntime {
     /// other good devices must be re-linked.
     pub fn rekey_account(&self) -> Result<String, NodeError> {
         let account = crate::identity::account::Account::generate();
-        self.node
-            .persist_account_adoption(&account.account_id(), || {
+        self.node.persist_account_adoption(
+            &account.public(),
+            || {
                 crate::identity::account_keystore::save(
                     &self.account_path,
                     &self.password,
                     &account,
                 )
                 .map_err(|e| NodeError::Channel(format!("persist new account: {e}")))
-            })?;
+            },
+            || {
+                crate::identity::account_keystore::load(&self.account_path, &self.password)
+                    .map(|account| account.public())
+                    .map_err(|e| NodeError::Channel(e.to_string()))
+            },
+        )?;
         Ok(account.account_id())
     }
 
@@ -1133,15 +1315,22 @@ impl NodeRuntime {
                     .map_err(NodeError::Log)?;
             }
             self.node.prepare_account_transition(&account)?;
-            self.node
-                .persist_account_adoption(&account.account_id(), || {
+            self.node.persist_account_adoption(
+                &account.public(),
+                || {
                     crate::identity::account_keystore::save(
                         &self.account_path,
                         &self.password,
                         &account,
                     )
                     .map_err(|e| NodeError::Channel(format!("persist linked account: {e}")))
-                })?;
+                },
+                || {
+                    crate::identity::account_keystore::load(&self.account_path, &self.password)
+                        .map(|account| account.public())
+                        .map_err(|e| NodeError::Channel(e.to_string()))
+                },
+            )?;
             adopted = true;
             Ok(())
         })?;
@@ -1164,7 +1353,7 @@ impl NodeRuntime {
     }
 
     /// Channels this node is a member of.
-    pub fn list_channels(&self) -> Vec<crate::node::ChannelSummary> {
+    pub fn list_channels(&self) -> Result<Vec<crate::node::ChannelSummary>, NodeError> {
         self.node.list_channels()
     }
 
@@ -1174,11 +1363,17 @@ impl NodeRuntime {
     ) -> Option<String> {
         self.node.channel_owner_account_id(channel)
     }
-    pub fn channel_can_manage(&self, channel: crate::eventlog::event::ConversationId) -> bool {
+    pub fn channel_can_manage(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Result<bool, NodeError> {
         self.node.channel_can_manage(channel)
     }
 
-    pub fn channel_can_send(&self, channel: crate::eventlog::event::ConversationId) -> bool {
+    pub fn channel_can_send(
+        &self,
+        channel: crate::eventlog::event::ConversationId,
+    ) -> Result<bool, NodeError> {
         self.node.channel_can_send(channel)
     }
 
@@ -1216,7 +1411,7 @@ impl NodeRuntime {
     pub fn channel_activity(
         &self,
         channel: crate::eventlog::event::ConversationId,
-    ) -> Vec<crate::node::ChannelActivity> {
+    ) -> Result<Vec<crate::node::ChannelActivity>, NodeError> {
         self.node.channel_activity(channel)
     }
 
@@ -1242,12 +1437,12 @@ impl NodeRuntime {
         &self,
         channel: crate::eventlog::event::ConversationId,
         limit: usize,
-    ) -> Vec<HistoryEntry> {
+    ) -> Result<Vec<HistoryEntry>, super::NodeError> {
         self.node.channel_history(channel, limit)
     }
 
     /// Search all DMs + channels for `query`.
-    pub fn search(&self, query: &str) -> Vec<crate::node::SearchHit> {
+    pub fn search(&self, query: &str) -> Result<Vec<crate::node::SearchHit>, super::NodeError> {
         self.node.search(query)
     }
 
@@ -1317,25 +1512,23 @@ impl NodeRuntime {
             .await
     }
 
-    /// Aggregated reactions in the DM with `peer`.
-    pub fn reactions_dm(&self, peer: &PublicIdentity) -> Vec<crate::node::reaction::ReactionView> {
-        self.node.reactions_dm(peer)
+    /// Prepare or read a bounded summary for the currently visible targets.
+    pub fn reaction_summaries(
+        &self,
+        conversation: crate::eventlog::event::ConversationId,
+        targets: &[crate::eventlog::event::EventId],
+        cursor: Option<&str>,
+    ) -> Result<crate::node::ReactionSummaryPage, NodeError> {
+        self.node.reaction_summaries(conversation, targets, cursor)
     }
 
-    /// Aggregated reactions in a channel.
-    pub fn channel_reactions(
+    pub fn account_reaction_summaries(
         &self,
-        channel: crate::eventlog::event::ConversationId,
-    ) -> Vec<crate::node::reaction::ReactionView> {
-        self.node.reactions(channel)
-    }
-
-    /// Aggregated reactions in the account conversation with `peer_account_id`.
-    pub fn account_reactions(
-        &self,
-        peer_account_id: &str,
-    ) -> Vec<crate::node::reaction::ReactionView> {
-        self.node.account_reactions(peer_account_id)
+        peer: &str,
+        targets: &[crate::eventlog::event::EventId],
+        cursor: Option<&str>,
+    ) -> Result<crate::node::ReactionSummaryPage, NodeError> {
+        self.node.account_reaction_summaries(peer, targets, cursor)
     }
 
     /// A cloned handle to the underlying node, so an IPC command can snapshot it

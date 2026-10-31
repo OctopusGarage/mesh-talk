@@ -136,6 +136,7 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == EventKind::ChannelRename)
         .unwrap()
@@ -267,7 +268,14 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
     gate.add_permits(4);
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            if external.log.lock().unwrap().get(&effect.id).is_some() {
+            if external
+                .log
+                .lock()
+                .unwrap()
+                .get(&effect.id)
+                .unwrap()
+                .is_some()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -280,6 +288,7 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
         .lock()
         .unwrap()
         .get(&effect.id)
+        .unwrap()
         .unwrap()
         .clone();
     assert_eq!(received.id, effect.id);
@@ -295,6 +304,7 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::ChannelRename)
             .count(),
@@ -359,7 +369,7 @@ async fn assert_stalled_fanout_retires_with_account_loop(adopt: bool) {
     if adopt {
         let kept = Account::generate();
         owner
-            .persist_account_adoption(&kept.account_id(), || Ok(()))
+            .persist_account_adoption(&kept.public(), || Ok(()), || Ok(kept.public()))
             .unwrap();
         tokio::time::timeout(Duration::from_secs(2), loops.join_next())
             .await

@@ -95,7 +95,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         alice_rx.recv_timeout(Duration::from_secs(15)).unwrap().text,
         b"existing conversation before hide"
     );
-    let history_before_hide = alice_handle.account_history(&bob_account, 20);
+    let history_before_hide = alice_handle.account_history(&bob_account, 20).unwrap();
     let peers_before_hide: Vec<_> = alice
         .peers()
         .iter()
@@ -207,7 +207,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     assert!(personal_row["history_floor"].is_null());
     assert_eq!(personal_row["local_cleanup_complete"], true);
     assert_eq!(
-        alice_handle.account_history(&bob_account, 20),
+        alice_handle.account_history(&bob_account, 20).unwrap(),
         history_before_hide
     );
     announce(&bob, a_port);
@@ -239,7 +239,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             .hidden
     );
     assert_eq!(
-        alice_handle.account_history(&bob_account, 20),
+        alice_handle.account_history(&bob_account, 20).unwrap(),
         history_before_hide
     );
     let restored_personal = invoke(
@@ -251,7 +251,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     .unwrap();
     assert!(restored_personal.deleted.is_empty());
     assert_eq!(
-        alice_handle.account_history(&bob_account, 20),
+        alice_handle.account_history(&bob_account, 20).unwrap(),
         history_before_hide
     );
 
@@ -287,7 +287,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         "Hiding must not mutate the authentic raw roster"
     );
     assert_eq!(
-        alice_handle.account_history(&bob_account, 20),
+        alice_handle.account_history(&bob_account, 20).unwrap(),
         history_before_hide,
         "Hiding must preserve the existing conversation"
     );
@@ -357,7 +357,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         b"outbound while hidden"
     );
     until("durable account history contains both directions", || {
-        let history = alice_handle.account_history(&bob_account, 20);
+        let history = alice_handle.account_history(&bob_account, 20).unwrap();
         history
             .iter()
             .any(|e| !e.from_me && e.text == b"inbound while hidden")
@@ -376,6 +376,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     until("real group membership reaches Alice", || {
         alice_handle
             .list_channels()
+            .unwrap()
             .iter()
             .any(|row| row.id == group)
     });
@@ -391,7 +392,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     )
     .unwrap();
     until("original group message reaches Alice", || {
-        !alice_handle.channel_history(group, 20).is_empty()
+        !alice_handle.channel_history(group, 20).unwrap().is_empty()
     });
     tauri::async_runtime::block_on(alice_handle.leave_channel(group)).unwrap();
     let deleted = invoke_raw("owner_delete_left_channel", delete_body);
@@ -402,10 +403,11 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             .unwrap()
             .is_null()
     );
-    assert!(alice_handle.channel_history(group, 20).is_empty());
+    assert!(alice_handle.channel_history(group, 20).unwrap().is_empty());
     assert!(
         alice_handle
             .list_channels()
+            .unwrap()
             .iter()
             .any(|row| row.id == group),
         "raw core membership/proof inventory must remain intact"
@@ -441,7 +443,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     assert!(group_row["history_floor"].is_string());
 
     // Drop every handle before opening stores again, exactly as logout/relaunch does.
-    let before_restart = alice_handle.account_history(&bob_account, 20);
+    let before_restart = alice_handle.account_history(&bob_account, 20).unwrap();
     let old_node = Arc::downgrade(&alice_handle);
     nodes.0.blocking_write().take();
     drop(alice_handle);
@@ -451,7 +453,10 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     drop((bob, bob_two, bob_handle));
     let (restarted, _) = start(root.path(), "alice", "Alice", a_port);
     assert_eq!(restarted.account_id(), alice_account);
-    assert_eq!(restarted.account_history(&bob_account, 20), before_restart);
+    assert_eq!(
+        restarted.account_history(&bob_account, 20).unwrap(),
+        before_restart
+    );
     assert_eq!(
         HiddenContactsState::new(root.path().to_owned())
             .get(Some("alice"), "alice")
@@ -518,7 +523,12 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     )
     .unwrap();
     assert_eq!(deleted.deleted, vec![bob_account.clone()]);
-    assert!(deletion_handle.account_history(&bob_account, 20).is_empty());
+    assert!(
+        deletion_handle
+            .account_history(&bob_account, 20)
+            .unwrap()
+            .is_empty()
+    );
     let personal_rows = invoke_raw(
         "owner_personal_conversation_states",
         serde_json::json!({"owner":"alice", "expectedAccount":alice_account}),
@@ -546,7 +556,10 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     });
     let (after_delete, _) = start(root.path(), "alice", "Alice", a_port);
     assert!(
-        after_delete.account_history(&bob_account, 20).is_empty(),
+        after_delete
+            .account_history(&bob_account, 20)
+            .unwrap()
+            .is_empty(),
         "deleted history must not return after restart"
     );
     assert!(

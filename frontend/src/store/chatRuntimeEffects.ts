@@ -23,12 +23,21 @@ export function stopChatCalls() {
 export function syncChatAvatarIdentity(
   accountId: string,
   isCurrent: () => boolean,
+  boundedDelivery = false,
 ) {
   useAccountProfiles.getState().clear();
   // Pull durable peer avatars and republish our own after a node restart.
   useAvatars.getState().setOwnId(accountId);
-  void useAvatars.getState().loadPeers(isCurrent);
-  void useAvatars.getState().reassertOwn(isCurrent);
+  if (!boundedDelivery) {
+    void useAvatars.getState().loadPeers(isCurrent);
+    void useAvatars.getState().reassertOwn(isCurrent);
+  }
+}
+
+/** Reassert old local photos only after the bounded current-value walk proved
+ * whether a signed own profile (including its clear tombstone) exists. */
+export function finishChatAvatarIdentity(isCurrent: () => boolean) {
+  void useAvatars.getState().reassertOwn(isCurrent, true);
 }
 
 export function applyChatFileProgress(event: FileProgressEvent) {

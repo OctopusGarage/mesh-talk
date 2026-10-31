@@ -4,6 +4,7 @@ use super::*;
 impl Node {
     /// Favorite snapshots have no reveal policy. Reject a retained canonical
     /// protected source rather than turning that snapshot into another reveal path.
+    /// A failed canonical read is logged and denies this snapshot/export too.
     pub(in crate::node) fn favorite_has_protected_content(
         &self,
         favorite: &MessageFavorite,
@@ -17,8 +18,14 @@ impl Node {
                     self.files
                         .lock()
                         .expect("files mutex")
-                        .manifest(&conv)
-                        .is_some_and(|manifest| manifest.protection().is_some())
+                        .manifest(conv)
+                        .map(|manifest| {
+                            manifest.is_some_and(|manifest| manifest.protection().is_some())
+                        })
+                        .unwrap_or_else(|error| {
+                            log::warn!("favorite protection lookup failed: {error}");
+                            true
+                        })
                 })
             })
         {
@@ -46,12 +53,18 @@ impl Node {
             };
             (conv, None)
         };
-        self.project_history(
+        let context = match self.project_history(
             conv,
             account,
             crate::node::queries::HistorySelection::Selected(&selected),
-        )
-        .is_some_and(|context| {
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                log::warn!("favorite content eligibility denied: {error}");
+                return true;
+            }
+        };
+        context.is_some_and(|context| {
             context
                 .messages
                 .iter()
@@ -217,7 +230,7 @@ impl Node {
             )
         } else {
             let conv = conversation(&source.target).ok_or_else(|| invalid("invalid channel"))?;
-            if !self.list_channels().iter().any(|c| c.id == conv) {
+            if !self.list_channels()?.iter().any(|c| c.id == conv) {
                 return Err(invalid("unknown channel"));
             }
             (conv, None)
@@ -227,7 +240,7 @@ impl Node {
                 conv,
                 account,
                 crate::node::queries::HistorySelection::Selected(&selected_ids),
-            )
+            )?
             .map(|c| c.messages)
             .unwrap_or_default();
         let selected: BTreeSet<_> = source.message_ids.iter().cloned().collect();
@@ -282,7 +295,7 @@ impl Node {
         }
         source.message_ids = messages.iter().map(|m| m.id.clone()).collect();
         let source_label = if source.kind == "channel" {
-            self.list_channels()
+            self.list_channels()?
                 .into_iter()
                 .find(|c| hex::encode(c.id.as_bytes()) == source.target)
                 .map(|c| c.name)

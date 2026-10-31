@@ -162,6 +162,161 @@ and WKWebView decoding still require platform evidence.
 
 ### Coordinated state owners
 
+`core/eventlog/repository/` owns physical event counts and record-cost estimates,
+including their append and removal updates, conversation retirement authority,
+and bounded graph reclamation. Its admission gate preserves validation and
+counter errors before reserving new growth or allocating a stored-event encoding.
+`core/postoffice/storage/` owns relay first-arrival time, touch, role readiness,
+monotonic expiry visibility, capacity backpressure and persistent drain work on
+the same profile connection. Relay transactions reuse repository admission and
+physical charge rather than maintaining parallel counters. Indexed role pending
+state changes with repository retirement, and matching arrival removal shares
+its finalization transaction. Policy-bearing reads qualify current eligibility;
+physical diagnostics alone cannot qualify custody. Runtime and paced worker
+adoption remain separate. See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
+
+`core/storage/profile/participant.rs` owns participant control metadata, explicit
+source locators and recoverable account-adoption intent on the shared connection.
+Its `participant/event_ownership.rs` owner commits account-qualified event ordinal
+ranges and a monotonic captured-owner generation with adoption; receive schedulers
+derive indexed namespace selectors from those exact ranges rather than inferring
+ownership from conversation IDs or replacing an older account's pending work.
+`core/node/delivery_runtime.rs` remains the account-adoption decision owner and
+coordinates its existing delivery journal with that intent.
+`core/storage/profile/participant_events.rs` owns independent event-source
+publication, its downgrade barrier, authenticated import and retryable cleanup.
+`core/eventlog/persist.rs` selects the profile-backed repository for production
+Nodes; `persist/legacy.rs` retains the explicit standalone compatibility owner.
+`core/node/privacy_sync/network.rs` applies participant authorization to finite
+repository network pages. `core/eventlog/repository/selection.rs` owns disposable
+SQL authorization IDs, causal closure, and bounded retirement cleanup.
+`core/node/privacy_sync/principal/` and `principal.rs` own current principal state
+and resumable preparation; historical IDs, departures and ancestry stay on disk.
+`core/node/session.rs` releases the store lock and yields between preparation
+turns, including exact Durable-Have requests. Ready views use scalar source/proof
+checks. `core/node/channel/graph/preparing.rs` owns suspended graph decisions and
+historical predicate cursors for the existing channel reducer; unresolved answers
+cannot publish authority. `checkpoint/causal/query.rs` composes budgeted ancestry
+and reducer steps into a leased result, while `join_history/indexed/preparation.rs`
+retains the existing canonical, strict-causal and future ownership-loss rules.
+These query owners share the repository ancestry implementation and its incremental
+retirement; callers must resume Pending work without synchronously draining it.
+Canonical preparation reports the caller's shared row, edge and byte budget
+across ordering, generation cleanup, legacy cuts and reducer decisions.
+The checkpoint's `history_read_ready` gate covers both current signed authority
+and the first attempt of admitted recalls; plaintext consumers must check it
+before hydration. Unknown-target retries become blocking again on their exact
+persisted wake, without requiring a history scan.
+`core/node/channel/checkpoint/` owns indexed current membership, canonical authority,
+receiver checkpoints, exact processing evidence, activity pages and pending retries.
+`checkpoint/presentation.rs` and its preparation module own the last validated
+current display and resumable policy/departure selectors. `checkpoint/work.rs`
+queues current channel identities for the existing recovery loop, preserving
+pre-open expiry provenance with a scalar open epoch and committed-event cutoff.
+One failing channel retains its own retry deadline and does not block other
+channels. Startup restores validated current metadata and the active sending epoch;
+new signed controls resume after account adoption rather than draining in open.
+Fresh authority and recall-readiness checks remain separate from display state.
+The checkpoint cleanup owner retires disposable facts in bounded turns after
+logical channel retirement, even when no later read revisits the channel.
+Consumed receiver/evidence/receipt state is preserved.
+`join_history/indexed/continuation.rs` suspends the existing offer, first-valid
+selection, lifetime and release checks at selected database/authority operations.
+Each normal retry advances one bounded operation through the shared owner, causal
+or ancestry query APIs. The existing recovery loop resumes pending work; no task,
+connection lock or plaintext queue is retained between turns. Active receive and
+send stacks are capped by the existing retry limits and keep only protocol-capped
+encrypted snapshots and current membership. The durable release cursor advances
+only with the existing transcript/effect transaction; restart resumes its same
+uncommitted candidate. Completed unchanged sender work uses its scalar control
+stamp. Explicit local invitation creation still performs synchronous causal checks
+for its at-most-ten selected snapshot rows before the journal transaction; it is
+not covered by the normal retry latency bound. Directory preparation is a separate
+consumer boundary. Other participant domains retain their
+legacy owners until their own cutovers. `core/node/runtime_startup.rs` composes
+startup inputs and completion through `runtime_work.rs`; blocking captures and
+undelivered results remain admitted until their resources are destroyed.
+The desktop startup permit retains replacement serialization, and backup consumes
+the retired owner only after matching its host local-user label and physical
+profile root. Core does not derive desktop authority from account keys or paths.
+
+`core/node/transcript_repository/` owns indexed transcript headers, bodies,
+metadata counters and independent source publication on the shared profile
+connection. `account_file_repository.rs` and `file_message_identity/indexed.rs`
+reuse that publication owner for signed file proofs and exact logical-file
+bindings, with fixed headers, bounded owned payload reads and persisted revisions.
+`filebook/indexed.rs` owns validated file eligibility metadata and
+exact processed facts tied to existing FILES ordinals; its account namespace,
+resumable import and persisted revision use the same connection. Production Node
+uses this owner directly. `filebook/scopes.rs` owns source 9 sent fanout references;
+`filebook/work.rs` owns metadata-only download discovery, fair bounded admission and
+revision-qualified completion. `filebook/receiving.rs` owns metadata-only manifest
+discovery and fair retry admission, retaining oversized rows until an adequate
+budget is supplied and using exact file processing evidence for completion.
+Discovery qualifies each commit through the participant-owned account intervals
+before inserting pending work; selection applies its account index before LIMIT.
+Captured adoption generations fence old handles even after returning to an account.
+`attachment_consent/indexed.rs` owns account-local receive preferences, exact offer
+decisions and their durable ordering/generation under source 17. Its selected
+policy reads feed the existing file eligibility and download owners; signed
+remote controls remain the separate `file_consent_store.rs` contract.
+These modules own neither a second payload journal nor a permission
+rule; network disclosure reuses the existing exact parent authorization.
+`sent_store.rs`, `received_store.rs` and the indexed owner in
+`account_suppression.rs` expose owned lookups, bounded pages and exact local
+deletion markers. Their constructors require validated participant authority;
+production Node history, recovery, recall, and account-sync consumers use these
+indexed stores. Media bytes retain their independent encryption/lifetime owner. `eventlog/repository/order/combined.rs` extends the existing causal
+order owner with disk ranks for signed events and isolated archive roots. Its
+`combined/incremental.rs` input checkpoints preserve a proven append-only prefix;
+visibility changes, expired deadlines, late roots and changed winning selectors
+rebuild that derived order before publication. FileBook's current offer revisions
+and `file_message_identity/indexed/acceptance.rs` accepted binding keys supply
+bounded metadata deltas; neither keeps a second historical change journal.
+`eventlog/repository/receiving.rs` owns resumable metadata discovery and bounded,
+fair retry selection; exact transcript evidence survives body erasure and commits
+with body/effect installation. These derived selectors do not replace the delivery
+journal. Account-route selectors retain the first envelope per conversation and
+advance transactionally when its row is erased.
+See [storage ownership and budgets](ARCHITECTURE.md#storage-replay-and-query-budgets).
+
+`core/node/opaque_receive_cache.rs` owns optional disk-backed mailbox hints on
+that same profile connection. Its independent source publication streams legacy
+mappings once; warm open reads metadata only. Active mailbox sync rechecks exact
+inner-event retention before using durable hints, while session-only progress is
+fenced by a fresh run identifier. ID sets exist only for the bounded active wire
+exchange. Corrupt or foreign hint sources remain preserved and unavailable; hints
+never establish admission, delivery, or deletion authority.
+
+`core/node/reaction_store/indexed.rs` owns the exact locally authored reaction
+projection. Its independently published source is keyed by the full account
+public key, preserving the legacy per-account path across adoption. The common
+publication state machine keeps unscoped history identities unchanged; only its
+registry selector varies. Node warm open reads no authored reaction payloads;
+conversation and target pages admit keys and bytes before bodies. Unsigned action
+clocks and remove-wins ties are unchanged. Bulk physical cleanup uses bounded
+transactions and evaluates external predicates outside the SQL mutex. Incoming
+reaction aggregation belongs to the selected-query owner below; the
+account-document startup owner has a separate lifetime and validation boundary.
+
+`core/node/reactions/selected.rs` owns selected-target reaction preparation and
+summary pages. Its SQL projection reduces the latest authenticated action per
+principal into counts and a local-author flag; it does not materialize author
+lists. Requests bind the account generation, selected targets, proofs, channel
+control generation, deletion visibility and relevant source revisions. A pending
+response is empty and includes its continuation. Key/byte admission precedes
+retained-body reads and summary-string allocation; unchanged completed queries
+reuse the persisted result, and ordinary message tails preserve the reaction
+source token. `reactions/selected/preparation.rs` retains one source-bound
+checkpoint query and its Ready fact lease. Discovery, causal work and body reads
+use separate turns; target pages in the same channel share raw decode progress.
+Unfinished or stale authority never advances the selected event's decode cursor.
+The checkpoint's exact revision fence remains conservative under continuous
+same-channel appends. The native host requests summary pages only for displayed
+targets; core production APIs expose the same selected demand boundary. Legacy
+collecting reducers remain test-only references for principal semantics. This
+query contract does not change the account-document startup owner.
+
 Protected text and image messages extend `core/node/message.rs`, `file/manifest.rs`,
 `files.rs`, `queries.rs` and `search.rs`: the authenticated body owns its protection mode, while ordinary
 projections omit the content. The explicit exact-message content lookup is for
@@ -340,6 +495,20 @@ retired language metadata is never republished or restored as filtering state.
 The existing signed payload and encrypted record formats remain the same.
 `core/node/account_profile_data.rs` and `account_profile_io.rs` own the
 canonical account nickname, biography, avatar and immutable creation metadata.
+The `account_profile_data/indexed.rs`, `profile_store/indexed.rs` and
+`trust_card/indexed.rs` owners keep their distinct current-value admission rules
+and store payloads on the shared encrypted participant connection. Each source
+uses the independent history publisher and legacy-writer barrier. Warm owner
+construction reads metadata only; current pages admit at most 16 keys and 1 MiB
+before loading bodies, and selected lookups propagate storage errors. Signed
+account profiles preserve clear-avatar tie ordering and immutable creation dates;
+frozen trust cards keep the first accepted equal revision. Existing signed-owner
+account and wire-byte quotas remain unchanged. Node authenticates cold sources before publication and opens these indexes after
+participant authority completes. Accepted signed values atomically mark their
+current row for avatar projection; an exact change-revision acknowledgement clears
+that marker only after projection succeeds. Startup resumes bounded pending keys,
+so an unrelated successful write cannot hide failed work and unchanged warm opens
+do not scan peer payloads. Own publication retains only the current local avatar.
 Nickname-only edits preserve other profile fields and use the same revision ordering. `src-tauri/src/runtime_bootstrap.rs` projects accepted own
 account nicknames into local credentials, live presence and frontend state under
 exact session/installation authority. Its runtime-owned producer retires with the
@@ -648,8 +817,8 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   authenticated replay can recover earlier noncausal file ordering. Local clock
   and author-sequence allocation return errors on exhaustion. Public `prepare`
   now returns `Result`; SDK callers must handle it despite unchanged wire formats.
-- Archived channel summaries and admission use `ChannelBook::projected_metadata`
-  and its signed control reducer. Key distribution/decryption remains separate;
+- Archived channel summaries and admission use the indexed channel checkpoint's
+  current metadata and its signed control reducer. Key distribution/decryption remains separate;
   archives share membership epochs, leaves, acceptance, ownership, rename and
   terminal dissolution rules with the metadata projection.
 - Peer-avatar journals reclaim obsolete versions using encrypted record-log
@@ -734,6 +903,18 @@ durable clear tombstones. It reuses channel authority and causal ownership
 validation; private account documents never grant authority over shared group
 content. Group sync capability gating and event-log retention preserve this
 contract across replay, offline recovery and accepted-member bootstrap.
+Its `group_metadata/indexed.rs` child owns selected publication/release facts and
+resumable cursors in the existing encrypted profile database. It reuses
+`join_history/indexed.rs` for canonical and causal owner checks. The last 20 valid
+announcement publications are selected before decryption; an unavailable key
+cannot pull an older publication into that window. Recipient release lookups
+match both device keys. Incomplete queries expose `query_pending`, separately
+from a validated current publication awaiting its content key. Its local
+`indexed/preparation.rs` retains bounded caller continuations for existing owner,
+ancestry and causal queries; it introduces no parallel authorization reducer.
+Unfinished active slots are retained under capacity backpressure, while completed
+plaintext summaries use the existing bounded cache. The channel cleanup owner
+can retire the index with a counted caller-supplied row allowance.
 
 `src-tauri/src/chat_commands/channel_metadata.rs` owns exact owner/account/runtime
 admission for reads and edits. Channel summaries project validated current content
@@ -1038,6 +1219,13 @@ metadata persisted with the account key. Pairing and recovery preserve it withou
 inferring missing dates. `node/account_profile_data.rs` owns signed bounded
 ordinary profile data and current-profile persistence; `node/account_profile_io.rs`
 owns admitted edits, authenticated reception and legacy compatibility.
+`node/profile_receive_work.rs` owns account-scoped exact receive evidence and
+retry scheduling on the profile's encrypted SQL connection. Discovery advances
+through at most 128 committed event headers; each retry pass selects 16 fixed
+metadata rows before loading one signed body at a time. Unknown devices and
+disabled sibling-profile synchronization remain pending. Current-profile writes
+finish before processed evidence is committed, so a crash or storage failure
+retries idempotently. No historical profile-ID set is rebuilt in memory.
 Send preparation enters host authority before acquiring the delivery journal.
 Desktop biography saves reply after durable local acceptance while admitted fanout
 continues independently. The ordinary nickname and bio edit share the publication
@@ -1109,6 +1297,11 @@ exports when the control revision changes. Group authority and local deletion
 remain with their existing owners.
 
 `channel_custody.rs` owns locally observed exact-event possession and retractions;
+its indexed child keeps those exact positive and negative observations in the
+leased profile database, with selected-event reads and 32-row keyset migration
+pages. It shares the history-source publisher and legacy-writer barrier rather
+than retaining the custody journal in memory. Auxiliary source identities 16–18
+use a separate registry without rewriting the installed transcript-source schema.
 `account_documents/custody.rs` owns their account-private versioned publication
 and sibling projection. It reuses certified account sessions and document digests,
 without adding a group transport or claiming recipient delivery. Channel authority

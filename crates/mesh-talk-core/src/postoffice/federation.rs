@@ -22,6 +22,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
+mod indexed;
+pub use indexed::{IndexedRelayEndpoint, IndexedRelayError, IndexedRelayTrust};
+
 const REQUEST_V4: &[u8] = b"MTFI4Q";
 const PRESENCE_ORIGIN_FRAME: &[u8] = b"MTFP3D";
 const REQUEST: &[u8] = b"MTFI1Q";
@@ -61,14 +64,51 @@ impl FederationStore {
 }
 
 impl SyncStore for FederationStore {
-    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> bool {
+    fn requires_channel_v5(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .requires_channel_v5(conversation)
+    }
+    fn requires_channel_v2(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .requires_channel_v2(conversation)
+    }
+
+    fn requires_channel_v3(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .requires_channel_v3(conversation)
+    }
+
+    fn requires_channel_v4(&self, conversation: &ConversationId) -> Result<bool, LogError> {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .requires_channel_v4(conversation)
+    }
+
+    fn fingerprint_and_len(
+        &self,
+        conversation: &ConversationId,
+    ) -> Result<([u8; 32], usize), LogError> {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .fingerprint_and_len(conversation)
+    }
+
+    fn durable_have(&self, conversation: &ConversationId, id: &EventId) -> Result<bool, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
             .durable_have(conversation, id)
     }
 
-    fn event_ids(&self, conversation: &ConversationId) -> Vec<EventId> {
+    fn event_ids(&self, conversation: &ConversationId) -> Result<Vec<EventId>, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
@@ -79,20 +119,32 @@ impl SyncStore for FederationStore {
         &self,
         conversation: &ConversationId,
         have: &HashSet<EventId>,
-    ) -> Vec<Event> {
+    ) -> Result<Vec<Event>, LogError> {
         self.store
             .lock()
             .expect("post office lock not poisoned")
             .events_excluding(conversation, have)
     }
 
+    fn events_excluding_bounded(
+        &self,
+        conversation: &ConversationId,
+        have: &HashSet<EventId>,
+        event_budget: usize,
+        max_frames: usize,
+    ) -> Result<Vec<Event>, LogError> {
+        self.store
+            .lock()
+            .expect("post office lock not poisoned")
+            .events_excluding_bounded(conversation, have, event_budget, max_frames)
+    }
+
     fn ingest(&mut self, event: Event) -> Result<AppendOutcome, LogError> {
         let mut office = self.store.lock().expect("post office lock not poisoned");
         if office.opaque_only && !crate::postoffice::opaque::envelope_shape(&event) {
-            return Err(LogError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "post office requires an opaque envelope",
-            )));
+            return Err(LogError::AdmissionRejected(
+                "post office requires an opaque envelope".into(),
+            ));
         }
         let origin = self.arrivals.get(&event.conversation_id).copied();
         let now = SystemTime::now();
@@ -129,6 +181,12 @@ impl FederationDirectory {
         Self(Arc::new(Mutex::new(BridgeDirectory::with_gateway(gateway))))
     }
 
+    pub fn set_office_public(&self, public: PublicIdentity) {
+        self.0
+            .lock()
+            .expect("directory lock not poisoned")
+            .set_office_public(public);
+    }
     pub fn set_office_name(&self, name: &str) {
         self.0
             .lock()
@@ -741,6 +799,139 @@ mod tests {
     use super::*;
     use crate::{discovery::Announce, identity::account::Account};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn bounded_federation_exports_reuse_the_mailbox_page() {
+        use crate::eventlog::EventKind;
+        let dir = tempfile::tempdir().unwrap();
+        let mut office = PostOffice::open(
+            &dir.path().join("relay.log"),
+            "pw",
+            DeviceIdentity::generate(),
+        )
+        .unwrap();
+        let author = DeviceIdentity::generate();
+        let conversation = ConversationId::new([1; 32]);
+        let mut expected = Vec::new();
+        for seq in 1..=16 {
+            let event = Event::new(
+                &author,
+                conversation,
+                seq,
+                vec![],
+                seq,
+                0,
+                EventKind::Message,
+                vec![7; 32 * 1024],
+            );
+            expected.push(event.id);
+            office.accept(event).unwrap();
+        }
+        let store = Arc::new(Mutex::new(office));
+        let session = FederationStore::new(&store, vec![]);
+        let have = HashSet::from([expected.remove(0)]);
+        for max_frames in [0, 1, 2, 4] {
+            let page = session
+                .events_excluding_bounded(&conversation, &have, MAX_PLAINTEXT, max_frames)
+                .unwrap();
+            assert_eq!(
+                page.iter().map(|event| event.id).collect::<Vec<_>>(),
+                expected[..max_frames]
+            );
+        }
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .log
+                .sync_metadata_observations(&conversation)
+                .1,
+            0,
+            "federation pages must not export every retained ciphertext first"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_federation_probes_reuse_metadata_over_loopback() {
+        use crate::eventlog::{EventKind, store::EventLog};
+        use crate::node::session::{Served, request_round, serve_one};
+        use crate::postoffice::opaque::RelayMailbox;
+        use tokio::net::TcpStream;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let dir = tempfile::tempdir().unwrap();
+            let identity = DeviceIdentity::generate();
+            let sender = DeviceIdentity::generate();
+            let recipient = DeviceIdentity::generate();
+            let mailbox = RelayMailbox::federated(&sender, &recipient.public()).unwrap();
+            let event = mailbox
+                .wrap(&Event::new(
+                    &sender,
+                    ConversationId::new([1; 32]),
+                    1,
+                    vec![],
+                    1,
+                    0,
+                    EventKind::Message,
+                    vec![7; 32 * 1024],
+                ))
+                .unwrap();
+            let expected = (crate::eventlog::sync::fingerprint(vec![event.id]), 1);
+            let (ed, x) = identity.secret_bytes();
+            let store = Arc::new(Mutex::new(
+                PostOffice::open(
+                    &dir.path().join("relay.log"),
+                    "pw",
+                    DeviceIdentity::from_secret_bytes(ed, x),
+                )
+                .unwrap(),
+            ));
+            store.lock().unwrap().accept(event.clone()).unwrap();
+            let mut log = EventLog::default();
+            log.append(event).unwrap();
+            let requester = Mutex::new(log);
+            let session = Mutex::new(FederationStore::new(&store, vec![]));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let public = identity.public();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut channel = SecureChannel::accept(stream, &identity).await.unwrap();
+                let mut probes = 0;
+                while let Served::Handled(_) = serve_one(&mut channel, &session).await.unwrap() {
+                    probes += 1;
+                }
+                probes
+            });
+            let stream = TcpStream::connect(address).await.unwrap();
+            let mut channel = SecureChannel::connect(stream, &sender, Some(&public))
+                .await
+                .unwrap();
+            for _ in 0..8 {
+                let report = request_round(&mut channel, &requester, mailbox.id())
+                    .await
+                    .unwrap();
+                assert_eq!(report.applied, 0);
+            }
+            drop(channel);
+            assert_eq!(
+                server.await.unwrap(),
+                8,
+                "idle sessions send only fingerprint probes"
+            );
+            assert_eq!(
+                store
+                    .lock()
+                    .unwrap()
+                    .log
+                    .sync_metadata_observations(&mailbox.id()),
+                (Some(expected), 0),
+                "federation must reuse mailbox metadata without exporting ciphertext",
+            );
+        })
+        .await
+        .expect("idle federation probes must complete");
+    }
 
     #[tokio::test]
     async fn signed_origin_negotiation_preserves_deployed_v3_presence_layout() {

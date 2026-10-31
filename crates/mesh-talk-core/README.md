@@ -80,6 +80,46 @@ let node = Node::open_with_account(
 The crate is async and built on Tokio. `NodeRuntime` starts discovery, the accept
 loop, and delivery tasks when a host runs the node.
 
+Custom `eventlog::SyncStore` implementations return `Result<_, LogError>` from
+storage reads, including capability, fingerprint, consent, custody and event export
+queries. Reconciliation constructors and handlers also return `Result`; propagate
+local storage failures rather than replacing them with empty history or a negative
+lookup. Network sessions expose these failures as `SessionError::Store` with their
+source chain. Use `LogError::AdmissionRejected` for explicit incoming-event policy
+denials; ordinary I/O errors abort the exchange. A failed batch may have committed
+a prefix, so retries must retain content-addressed duplicate handling. Event IDs
+and wire serialization are unchanged. See the [protocol guide](../../docs/ARCHITECTURE.md)
+for reconciliation and durability contracts.
+
+Individual durable lookups, `PersistentEventLog::get` and `authored_event`, return
+`Result<Option<Event>, LogError>`. A successful event owns its complete signed
+bytes and can outlive the log or its mutex guard; `Ok(None)` means absence, while
+`Err` means the lookup failed. Propagate failure before selecting a fallback proof,
+authorizing a transfer or reclaiming media. The explicit in-memory `EventLog`
+retains its borrowed lookup API. This ownership boundary alone does not replace
+the existing resident history indexes or startup replay with demand loading.
+
+Affected `Node` history and search methods, protected-content queries, attachment
+consent and save-readiness queries, and channel custody counts also return
+`Result` values. `attachment_consent_status` exposes `LogError`; the other listed
+node queries use `NodeError`. Matching `NodeRuntime` history/search methods propagate
+these failures. Use `?` before consuming their existing successful values;
+absence or a zero count must not stand in for a failed read. Typed node/runtime
+errors retain their sources. Host IPC keeps its successful JSON payloads and
+reports read failures through its existing error channel. Boolean Favorites
+eligibility remains a conservative boundary: it logs a failed canonical read
+and denies capture/export eligibility without claiming the content is absent.
+An outgoing request already durably accepted into the delivery journal remains
+accepted if subsequent projection/recovery reads fail. Its supervisor logs the
+failure and retains queued work for retry; acceptance does not assert a send or
+recipient delivery. Query failures still use the error channel above.
+
+Exhaustive `LogError` matches must also handle indexed-read failures:
+`StaleCursor`, `InvalidPageBudget`, `PageBudgetTooSmall`,
+`RepositoryCounterExhausted` and `IncompatibleEventSchema`. These are local read
+or repository-state errors, not invalid incoming events. Raw Lamport pagination
+does not provide causal ordering; use the ordering contract of the selected API.
+
 ## CLI: `mesh-talk-node`
 
 A headless node ships with the crate as a reference consumer:

@@ -10,8 +10,10 @@ use mesh_talk_core::eventlog::EventId;
 use serde::Serialize;
 
 mod group_operations;
+mod reactions;
 mod search;
 pub use group_operations::*;
+pub use reactions::*;
 pub use search::*;
 
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
@@ -37,6 +39,8 @@ pub struct NodeIdentity {
     account_id: String,
     history_revision: u64,
     supports_push_state: bool,
+    supports_bounded_delivery: bool,
+    runtime_id: Option<String>,
 }
 
 /// Atomically observes Session + runtime identity, including installation authority.
@@ -56,6 +60,8 @@ pub async fn owner_node_identity(
                 display_name: runtime.display_name(),
                 history_revision: runtime.account_history_revision(),
                 supports_push_state: true,
+                supports_bounded_delivery: runtime.handle().bounded_delivery(),
+                runtime_id: node.installed_runtime_id(admission.lease())?,
             })
         })
         .await
@@ -432,7 +438,7 @@ pub async fn owner_account_history<R: tauri::Runtime>(
     let history = admission
         .with_runtime(|runtime| {
             Ok(runtime
-                .account_history(&account, limit.min(500))
+                .account_history(&account, limit.min(500))?
                 .into_iter()
                 .map(HistoryItem::from)
                 .collect())
@@ -728,6 +734,7 @@ mod tests {
                     super::owner_cancel_account_group_operation,
                     super::owner_search_recent,
                     super::owner_search_context,
+                    super::owner_reaction_summaries,
                     super::owner_reveal_message,
                     super::owner_reveal_image,
                     crate::message_favorites::owner_list_message_favorites,
@@ -1224,6 +1231,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .list_channels()
+                .unwrap()
                 .len(),
             count
         );
@@ -2513,6 +2521,60 @@ mod tests {
     }
 
     #[test]
+    fn registered_reaction_summaries_are_selected_bounded_and_account_owned() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let id = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({"owner":"alice","account":account,"text":"selected reaction"}),
+            )
+            .unwrap();
+        fixture
+            .invoke(
+                "react_account",
+                serde_json::json!({"account":account,"target":id,"emoji":"👍","remove":false}),
+            )
+            .unwrap();
+        let mut request = serde_json::json!({"owner":"alice","kind":"account","target":account,"targets":[id],"cursor":null});
+        let mut completed = None;
+        for _ in 0..128 {
+            let response = fixture
+                .invoke("owner_reaction_summaries", request.clone())
+                .unwrap();
+            assert!(serde_json::to_vec(&response).unwrap().len() <= 1024 * 1024);
+            if response["pending"] == false {
+                completed = Some(response);
+                break;
+            }
+            assert_eq!(response["items"], serde_json::json!([]));
+            assert!(response["next"].is_string());
+            request["cursor"] = response["next"].clone();
+        }
+        let response = completed.expect("finite selected reaction projection completes");
+        assert_eq!(
+            response["items"],
+            serde_json::json!([{"target":id,"emoji":"👍","count":1,"from_me":true}])
+        );
+        assert_eq!(response["next"], serde_json::Value::Null);
+        request["owner"] = serde_json::json!("bob");
+        assert_eq!(
+            fixture
+                .invoke("owner_reaction_summaries", request.clone())
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+        request["owner"] = serde_json::json!("alice");
+        request["targets"] = serde_json::json!(vec![id; 65]);
+        assert_eq!(
+            fixture
+                .invoke("owner_reaction_summaries", request)
+                .unwrap_err()["kind"],
+            "invalid-input"
+        );
+    }
+
+    #[test]
     fn registered_search_validates_inputs_and_explicit_owner() {
         let fixture = Fixture::new();
         for kind in ["account", "channel", "legacy-device"] {
@@ -3091,6 +3153,10 @@ mod tests {
         for change in ["relogin", "logout", "lock"] {
             for (command, body) in [
                 (
+                    "owner_reaction_summaries",
+                    serde_json::json!({"owner":"alice","kind":"account","target":"01".repeat(16),"targets":["01".repeat(32)],"cursor":null}),
+                ),
+                (
                     "owner_search_recent",
                     serde_json::json!({"owner":"alice","query":"secret"}),
                 ),
@@ -3192,7 +3258,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            rt.history(&legacy_device.public(), 10)[0].id
+            rt.history(&legacy_device.public(), 10).unwrap()[0].id
         });
         let status = fixture.invoke("owner_delivery_statuses", serde_json::json!({"owner":"alice", "account":legacy_account.account_id(), "ids":[hex::encode(legacy_id.as_bytes())]})).unwrap();
         assert_eq!(status, serde_json::json!([]));
@@ -3261,6 +3327,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .account_history(remote.account_id(), 10)
+                    .unwrap()
                     .is_empty()
                 {
                     tokio::task::yield_now().await;
@@ -3561,6 +3628,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .account_history(&account, 10)
+                .unwrap()
                 .len(),
             3
         );
@@ -3599,6 +3667,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .account_history(&account, 10)
+                .unwrap()
                 .is_empty()
         );
     }
@@ -3766,7 +3835,8 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .handle()
-                .channel_history_policy(channel_id),
+                .channel_history_policy(channel_id)
+                .unwrap(),
             mesh_talk_core::channel::HistoryPolicy::LastTenWithinThreeDays
         );
     }
@@ -3981,6 +4051,7 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .list_channels()
+                        .unwrap()
                         .is_empty()
                 );
             }
@@ -4572,32 +4643,36 @@ mod tests {
         };
         let before = metadata();
         let policy = node.privacy_snapshot();
-        // Discovery may publish our signed profile while this probe waits. Check
-        // every other event kind without mistaking those independent public
-        // profile writes for work accepted from the rejected owner command.
+        // This fresh fixture has accepted no non-profile work. Inspect signed
+        // event IDs through the supported archive boundary after logout has
+        // retired runtime producers, while retaining this Node's profile lease.
         let event_ids = || {
-            let snapshot = tempfile::tempdir().unwrap();
-            let path = snapshot.path().join("messages.log");
-            std::fs::copy(directory.join("messages.log"), &path).unwrap();
-            let log = mesh_talk_core::eventlog::persist::PersistentEventLog::open(
-                &path,
-                "password-owner",
-            )
-            .unwrap();
+            use mesh_talk_core::recovery::{
+                archive,
+                key::RecoveryKey,
+                snapshot::{SnapshotRecordV1, read_snapshot},
+            };
+            let key = RecoveryKey::generate();
+            let mut encrypted = Vec::new();
+            node.write_encrypted_recovery_archive(&mut encrypted, &key, 0)
+                .unwrap();
+            let mut plaintext = Vec::new();
+            archive::read_archive(encrypted.as_slice(), &mut plaintext, key.as_bytes()).unwrap();
             let mut profiles = 0;
-            let other = log
-                .all_event_ids()
-                .into_iter()
-                .filter(|id| {
-                    let profile = log.get(id).unwrap().kind
-                        == mesh_talk_core::eventlog::event::EventKind::Profile;
-                    profiles += usize::from(profile);
-                    !profile
-                })
-                .collect::<std::collections::BTreeSet<_>>();
+            let mut other = std::collections::BTreeSet::new();
+            read_snapshot(plaintext.as_slice(), |record| {
+                if let SnapshotRecordV1::SignedEvent { event } = record {
+                    if event.kind == mesh_talk_core::eventlog::EventKind::Profile {
+                        profiles += 1;
+                    } else {
+                        other.insert(event.id);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
             (other, profiles)
         };
-        let (before_log, before_profiles) = event_ids();
         let work = || {
             [
                 "sent.log",
@@ -4721,9 +4796,9 @@ mod tests {
         let metadata_unchanged = metadata() == before;
         let policy_unchanged = node.privacy_snapshot() == policy;
         let (after_log, after_profiles) = event_ids();
-        let non_profile_log_unchanged = after_log == before_log;
+        let non_profile_log_unchanged = after_log.is_empty();
         let staged = staged.load(Ordering::SeqCst);
-        let history_empty = node.account_history(&account, 10).is_empty();
+        let history_empty = node.account_history(&account, 10).unwrap().is_empty();
         let work_unchanged = work() == before_work;
         drop(node);
         // The registered logout child has completed its real retirement barrier.
@@ -4742,10 +4817,10 @@ mod tests {
         ))
         .unwrap();
         let reopened_policy = reopened.handle().privacy_snapshot();
-        let reopened_empty = reopened.account_history(&account, 10).is_empty();
+        let reopened_empty = reopened.account_history(&account, 10).unwrap().is_empty();
         tauri::async_runtime::block_on(reopened.stop());
         eprintln!(
-            "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, non_profile_log_unchanged={non_profile_log_unchanged}, profiles_before={before_profiles}, profiles_after={after_profiles}"
+            "{command}: initial_authorized={authorized}, logout_published={published}, same_uuid_replaced={replaced}, metadata_unchanged={metadata_unchanged}, policy_unchanged={policy_unchanged}, staged_callbacks={staged}, non_profile_log_unchanged={non_profile_log_unchanged}, profiles_after={after_profiles}"
         );
         assert!(authorized && published && logged_out && replaced);
         assert_eq!(
@@ -4853,7 +4928,7 @@ mod tests {
             let mut guard = fixture.node.0.write().await;
             let old = guard.take().unwrap();
             assert!(
-                old.account_history(&account, 10).is_empty(),
+                old.account_history(&account, 10).unwrap().is_empty(),
                 "changed owner must reject the staged card before WAL acceptance"
             );
             drop(guard);

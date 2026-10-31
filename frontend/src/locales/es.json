@@ -382,7 +382,13 @@
     "reEdit": "Reeditar",
     "mentionedYou": "Te mencionó",
     "reactionAdd": "Añadir reacción {{emoji}}",
-    "reactionRemove": "Quitar tu reacción {{emoji}}"
+    "reactionRemove": "Quitar tu reacción {{emoji}}",
+    "reactionsTitle": "Reacciones",
+    "reactionsDescription": "Recuentos de este mensaje. Selecciona una reacción para añadir o quitar la tuya.",
+    "reactionsEmpty": "Sin reacciones",
+    "reactionsStart": "Volver al inicio",
+    "reactionsNext": "Página siguiente",
+    "reactionsMore": "Más reacciones"
   },
   "transfer": {
     "preparing": "Preparando archivo…",
@@ -521,6 +527,12 @@
     "changeFolder": "Cambiar",
     "sectionChat": "Historial de chat",
     "retention": "Conservar historial",
+    "storageRefresh": "Actualizar",
+    "storageUsage": "Datos guardados",
+    "storageUsageDesc": "Archivos del perfil en este dispositivo, incluidos el historial, los índices y los ajustes. Se excluyen las subcarpetas.",
+    "storageReview": "Los datos guardados superan 1 GiB. Revisa la retención del historial o crea una copia de seguridad. Cambiar la retención puede no reducir de inmediato el uso del disco.",
+    "storageAtLeast": "Al menos {{size}}",
+    "storageUnavailable": "El uso del almacenamiento no está disponible",
     "retentionDesc": "Borra automáticamente de este dispositivo los mensajes más antiguos que esto.",
     "retentionForever": "Para siempre",
     "retentionDays": "{{count}} días",

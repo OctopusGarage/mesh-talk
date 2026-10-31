@@ -127,7 +127,23 @@ fn create_backup_offline(
     auth_password: &str,
     record_status: bool,
     proof: &crate::app_lock::SensitiveAction,
+    retired: Option<mesh_talk_core::node::RetiredNode>,
 ) -> Result<BackupCreated, CommandError> {
+    authority
+        .current(|_| ())
+        .map_err(CommandError::Authorization)?;
+    proof.checked(|| Ok(()))?;
+    if let Some(retired) = &retired {
+        let expected_root = fs::canonicalize(profile)
+            .map_err(|_| CommandError::Authorization("Backup profile is unavailable".into()))?;
+        if retired.host_account_id() != authority.lease.owner()
+            || retired.profile_root() != expected_root
+        {
+            return Err(CommandError::Authorization(
+                "Retired backup storage belongs to another local profile".into(),
+            ));
+        }
+    }
     let parent = destination
         .parent()
         .filter(|path| path.is_dir())
@@ -141,7 +157,16 @@ fn create_backup_offline(
     }
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .map_err(|_| CommandError::Io("Could not create backup file".into()))?;
-    let node = Node::open_recovery_profile(profile, password).map_err(backup_error)?;
+    let reopened = if retired.is_none() {
+        Some(Node::open_recovery_profile(profile, password).map_err(backup_error)?)
+    } else {
+        None
+    };
+    let node = retired
+        .as_ref()
+        .map(|retired| retired.node())
+        .or(reopened.as_deref())
+        .ok_or_else(|| CommandError::Internal("Backup storage owner missing".into()))?;
     node.write_encrypted_recovery_archive(temp.as_file_mut(), key, now_ms())
         .map_err(backup_error)?;
     temp.as_file_mut()
@@ -292,15 +317,16 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
     let authority = RuntimeAuthority::request(session.clone(), lease.clone(), node.clone())
         .map_err(CommandError::Authorization)?;
     let child = tokio::spawn(async move {
-        let permit = authority
+        let mut permit = authority
             .begin()
             .await
             .map_err(CommandError::Authorization)?;
         let root = data_root(&node);
         let profile = root.join("accounts").join(lease.owner());
         let authority_for_work = authority.clone();
+        let retired = permit.take_retired();
         let output = tokio::task::spawn_blocking(move || {
-            create_backup_offline(
+            let result = create_backup_offline(
                 &profile,
                 &password,
                 Path::new(&destination),
@@ -311,10 +337,13 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
                 &auth_password,
                 record_status,
                 &proof,
-            )
+                retired,
+            );
+            (permit, result)
         })
         .await
         .map_err(|_| CommandError::Internal("Backup worker stopped".into()));
+        let (permit, output) = output?;
         drop(permit);
         if authority.current(|_| ()).is_ok() {
             let restart_password = session
@@ -322,7 +351,7 @@ pub(crate) async fn create_backup_with_status<R: tauri::Runtime>(
                 .map_err(CommandError::Authorization)?;
             spawn_node_runtime(app_handle, lease, restart_password, node, session);
         }
-        output?
+        output
     });
     child
         .await
@@ -552,7 +581,9 @@ fn restore_offline(
             "Recovered account identity did not match".into(),
         ));
     }
-    drop(installed);
+    installed
+        .close_profile()
+        .map_err(|_| CommandError::Io("Could not close restored profile".into()))?;
     let reopened = Node::open_recovery_profile(&staged_profile, password).map_err(backup_error)?;
     if reopened.account_id() != preview.account_id {
         return Err(CommandError::Crypto(
@@ -560,7 +591,9 @@ fn restore_offline(
         ));
     }
     let device_id = reopened.user_id();
-    drop(reopened);
+    reopened
+        .close_profile()
+        .map_err(|_| CommandError::Io("Could not close restored profile".into()))?;
     auth.authenticate_user(username, password).map_err(|_| {
         CommandError::Auth("Restored local credentials could not be verified".into())
     })?;
@@ -733,6 +766,159 @@ mod tests {
             .expect("restoration retains the supplied key for later manual backups");
         assert!(setup.confirmed);
         assert_eq!(setup.recovery_key, key.display());
+    }
+
+    #[tokio::test]
+    async fn backup_rejects_retired_other_local_profile_before_any_archive_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = Arc::new(IdentityManager::new(FileManager::new(
+            directory.path().to_owned(),
+        )));
+        let app = AppState::new(crate::services::auth_service::AuthService::new(manager));
+        let user = |id: &str| crate::services::user::User {
+            user_id: id.into(),
+            account_login_name: None,
+            name: id.into(),
+            display_name: id.into(),
+            address: "fixture".into(),
+            created_at: 0,
+            last_seen: 0,
+            is_online: true,
+        };
+        let node = NodeState::empty();
+        let lease_a = app
+            .session()
+            .publish("token-a".into(), user("local-a"), "pw".into());
+        let authority_a =
+            RuntimeAuthority::request(app.session().clone(), lease_a, node.clone()).unwrap();
+        let permit_a = authority_a.begin().await.unwrap();
+        let runtime = mesh_talk_core::node::NodeRuntime::start(
+            directory.path(),
+            "local-a",
+            "A",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        runtime
+            .handle()
+            .enqueue_to_account(
+                runtime.account_id(),
+                b"previous local user's private history",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(permit_a.install(runtime).await);
+        let profile_b = directory.path().join("accounts/local-b");
+        {
+            let _owner =
+                mesh_talk_core::storage::profile::ProfileStorageLease::acquire(&profile_b).unwrap();
+            // Equal mesh account does not transfer another local installation's
+            // private history or suppression to a different signed-in owner.
+            let account = mesh_talk_core::identity::account_keystore::load(
+                &directory.path().join("accounts/local-a/account.keystore"),
+                "pw",
+            )
+            .unwrap();
+            mesh_talk_core::identity::account_keystore::save(
+                &profile_b.join("account.keystore"),
+                "pw",
+                &account,
+            )
+            .unwrap();
+        }
+        let lease_b = app
+            .session()
+            .publish("token-b".into(), user("local-b"), "pw".into());
+        let authority_b =
+            RuntimeAuthority::request(app.session().clone(), lease_b.clone(), node.clone())
+                .unwrap();
+        let mut permit_b = authority_b.begin().await.unwrap();
+        let retired_a = permit_b.take_retired().unwrap();
+        app.app_lock().set_identity_verifier(|| Ok(()));
+        let proof =
+            crate::app_lock::SensitiveAction::verify(&app, &lease_b, None, "backup fixture")
+                .await
+                .unwrap();
+        let output = directory.path().join("output");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("sentinel"), b"untouched destination").unwrap();
+        let destination = output.join("must-not-exist.mtbackup");
+        let result = create_backup_offline(
+            &profile_b,
+            "pw",
+            &destination,
+            directory.path(),
+            &authority_b,
+            &RecoveryKey::generate(),
+            "local-b",
+            "pw",
+            false,
+            &proof,
+            Some(retired_a),
+        );
+        assert!(
+            matches!(result, Err(CommandError::Authorization(_))),
+            "backup accepted another local profile"
+        );
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read_dir(&output).unwrap().count(),
+            1,
+            "backup created temporary output before owner validation"
+        );
+        assert_eq!(
+            fs::read(output.join("sentinel")).unwrap(),
+            b"untouched destination"
+        );
+        let runtime_b = mesh_talk_core::node::NodeRuntime::start(
+            directory.path(),
+            "local-b",
+            "B",
+            "pw",
+            0,
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert!(permit_b.install(runtime_b).await);
+        let exact =
+            RuntimeAuthority::request(app.session().clone(), lease_b, node.clone()).unwrap();
+        let mut exact_permit = exact.begin().await.unwrap();
+        let exact_retired = exact_permit.take_retired().unwrap();
+        let valid_destination = output.join("valid-local-b.mtbackup");
+        let created = create_backup_offline(
+            &profile_b,
+            "pw",
+            &valid_destination,
+            directory.path(),
+            &exact,
+            &RecoveryKey::generate(),
+            "local-b",
+            "pw",
+            false,
+            &proof,
+            Some(exact_retired),
+        )
+        .unwrap();
+        assert_eq!(
+            created.preview.messages, 0,
+            "equal-account installation inherited another local user's private history"
+        );
+        assert!(valid_destination.is_file());
+        assert!(!destination.exists());
+        drop(exact_permit);
     }
 
     #[test]

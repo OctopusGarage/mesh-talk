@@ -54,6 +54,7 @@ impl HiddenContactsState {
         let mut snapshot = self.load(owner)?;
         let accounts: std::collections::BTreeSet<_> = node
             .known_account_ids()
+            .map_err(|error| error.to_string())?
             .into_iter()
             .chain(node.personal_account_ids())
             .chain(snapshot.deleted.iter().cloned())

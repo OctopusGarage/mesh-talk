@@ -401,8 +401,13 @@ impl Node {
             if !visited.insert(id) {
                 continue;
             }
-            let Some(row) = log.get(&id).filter(|row| row.conversation_id == group) else {
-                continue;
+            let row = match log.get(&id) {
+                Ok(Some(row)) if row.conversation_id == group => row,
+                Ok(_) => continue,
+                Err(error) => {
+                    log::debug!("personal channel ancestry unavailable: {error}");
+                    return false;
+                }
             };
             if anchors.contains(&id) {
                 return true;
@@ -1685,7 +1690,7 @@ mod tests {
                 .hidden,
             "pending intent must never erase or hide the conversation"
         );
-        assert!(!member.history(group, 10).is_empty());
+        assert!(!member.history(group, 10).unwrap().is_empty());
         for _ in 0..8 {
             member.maintain_account_group_operation_effects();
             member.retry_conversation_personal_cleanup().unwrap();
@@ -1698,7 +1703,7 @@ mod tests {
                 .phase,
             AccountGroupOperationPhase::Committed
         );
-        assert!(member.history(group, 10).is_empty());
+        assert!(member.history(group, 10).unwrap().is_empty());
         assert!(
             member
                 .conversation_personal_state(&DocumentConversation::Channel(hex::encode(
@@ -1719,6 +1724,6 @@ mod tests {
                 )))
                 .hidden
         );
-        assert!(reopened.history(group, 10).is_empty());
+        assert!(reopened.history(group, 10).unwrap().is_empty());
     }
 }

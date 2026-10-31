@@ -72,10 +72,10 @@ async fn owner_fixture(modern: bool) -> (tempfile::TempDir, Account, Arc<Node>, 
     let sibling = node(&dir.path().join("inherited"), &account);
     link(&owner, &sibling);
     link(&sibling, &owner);
-    for event in owner.log.lock().unwrap().events(&group) {
-        install(&sibling, event);
+    for event in owner.log.lock().unwrap().events(&group).unwrap() {
+        install(&sibling, &event);
     }
-    let projection = sibling.account_group_projection(group);
+    let projection = sibling.account_group_projection(group).unwrap();
     let authority = projection.authority.current_event().unwrap();
     let grant = projection
         .authority
@@ -107,7 +107,7 @@ async fn owner_fixture(modern: bool) -> (tempfile::TempDir, Account, Arc<Node>, 
     sibling.process_channel(group);
     assert_ne!(sibling.channel_owner(group), sibling.user_id());
     assert!(
-        sibling.channel_can_manage(group),
+        sibling.channel_can_manage(group).unwrap(),
         "real modern account inheritance is a fixture prerequisite"
     );
     (dir, account, sibling, group)
@@ -144,9 +144,9 @@ async fn assert_local_control(
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == event_kind)
-        .cloned()
         .collect();
     assert_eq!(effects.len(), 1);
     assert!(effects[0].verify_integrity() && effects[0].verify_signature());
@@ -157,7 +157,7 @@ async fn assert_local_control(
     assert_eq!(status.committed_events, vec![effects[0].id]);
     match &operation {
         AccountGroupOperation::SetHistoryPolicy { policy } => {
-            assert_eq!(owner.channel_history_policy(group), *policy)
+            assert_eq!(owner.channel_history_policy(group).unwrap(), *policy)
         }
         AccountGroupOperation::Dissolve => assert!(
             owner
@@ -184,6 +184,7 @@ async fn assert_local_control(
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == event_kind)
             .count(),
@@ -250,6 +251,7 @@ async fn assert_reference_controls(modern: bool) {
         assert!(
             owner
                 .account_group_projection(group)
+                .unwrap()
                 .authority
                 .current_event()
                 .is_some()
@@ -389,7 +391,7 @@ async fn assert_reference_controls(modern: bool) {
         // A modern sibling may acquire the real canonical control history while
         // this test runs. In that case its account grant can legitimately make
         // it the next local executor; a private role observation alone cannot.
-        let projection = executor.account_group_projection(group);
+        let projection = executor.account_group_projection(group).unwrap();
         let canonical_source = Node::public_account_group_source(
             group,
             &projection,
@@ -418,9 +420,9 @@ async fn assert_reference_controls(modern: bool) {
         .unwrap_or_else(|_| {
             let requester = reference.account_group_operation_status(&account.account_id(), id).unwrap().map(|status| status.phase);
             let source = executor.account_group_operation_status(&account.account_id(), id).unwrap().map(|status| status.phase);
-            let source_projection = executor.operation_projection(group);
+            let source_projection = executor.operation_projection(group).unwrap();
             let source_heads = (source_projection.requests.len(), source_projection.results.len());
-            let effects = executor.log.lock().unwrap().events(&group).into_iter().filter(|event| event.kind == kind).count();
+            let effects = executor.log.lock().unwrap().events(&group).unwrap().into_iter().filter(|event| event.kind == kind).count();
             let remote_key = crate::node::AccountDocumentKey::GroupOperation {
                 channel: hex::encode(group.as_bytes()), source_device: executor.user_id(),
             };
@@ -435,7 +437,7 @@ async fn assert_reference_controls(modern: bool) {
             let current_binding = remote_frame.as_ref().map(|frame| reference.account_group_binding_current(&frame.proof));
             let remote_result = remote_frame.as_ref().and_then(|frame| frame.projection.results.iter().find(|result| result.reference.id == id));
             let remote_result_phase = remote_result.map(|result| result.status.phase.clone());
-            let pending_reference = reference.operation_projection(group).requests.into_iter().find(|request| request.reference.id == id).map(|request| request.reference);
+            let pending_reference = reference.operation_projection(group).unwrap().requests.into_iter().find(|request| request.reference.id == id).map(|request| request.reference);
             let reference_match = remote_result.zip(pending_reference.as_ref()).map(|(result, pending)| {
                 serde_json::to_vec(&result.reference).unwrap() == serde_json::to_vec(pending).unwrap()
             });
@@ -462,15 +464,15 @@ async fn assert_reference_controls(modern: bool) {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == kind)
-            .cloned()
             .collect();
         assert_eq!(
             effects.len(),
             1,
             "modern={modern}, kind={kind:?}, status={status:?}, actual_policy={:?}",
-            owner.channel_history_policy(group)
+            owner.channel_history_policy(group).unwrap()
         );
         assert!(effects[0].verify_integrity() && effects[0].verify_signature());
         assert_eq!(
@@ -654,6 +656,7 @@ async fn assert_simple_noop_preserves_the_public_log(modern: bool) {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .map(|event| event.id)
         .collect();
@@ -662,7 +665,7 @@ async fn assert_simple_noop_preserves_the_public_log(modern: bool) {
             name: format!("  {name}  "),
         },
         AccountGroupOperation::SetHistoryPolicy {
-            policy: owner.channel_history_policy(group),
+            policy: owner.channel_history_policy(group).unwrap(),
         },
     ] {
         let id = owner
@@ -691,6 +694,7 @@ async fn assert_simple_noop_preserves_the_public_log(modern: bool) {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .map(|event| event.id)
             .collect();
@@ -736,7 +740,7 @@ async fn an_awaiting_control_cannot_use_transferred_owner_authority() {
         .await
         .unwrap();
     assert!(
-        !owner.channel_can_manage(group),
+        !owner.channel_can_manage(group).unwrap(),
         "real public ownership transfer must be a prerequisite"
     );
     let before: Vec<_> = owner
@@ -744,6 +748,7 @@ async fn an_awaiting_control_cannot_use_transferred_owner_authority() {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .map(|event| event.id)
         .collect();
@@ -764,6 +769,7 @@ async fn an_awaiting_control_cannot_use_transferred_owner_authority() {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .map(|event| event.id)
         .collect();
@@ -920,9 +926,9 @@ async fn consecutive_account_controls_progress_while_public_fanout_is_stalled() 
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == EventKind::ChannelRename)
-        .cloned()
         .collect();
     assert_eq!(effects.len(), 2);
     for (id, name) in [
@@ -948,6 +954,7 @@ async fn consecutive_account_controls_progress_while_public_fanout_is_stalled() 
     assert!(
         owner
             .account_group_projection(group)
+            .unwrap()
             .authority
             .current_event()
             .is_none(),

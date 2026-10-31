@@ -8,7 +8,7 @@ use crate::{
     node::{Node, NodeError},
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 pub(super) fn rank(role: AccountGroupRole) -> u8 {
     match role {
@@ -18,98 +18,105 @@ pub(super) fn rank(role: AccountGroupRole) -> u8 {
         _ => 0,
     }
 }
+fn present(
+    log: &PersistentEventLog,
+    group: ConversationId,
+    id: EventId,
+) -> Result<bool, crate::eventlog::LogError> {
+    Ok(log.event_conversation(&id)? == Some(group))
+}
+fn all_present(
+    log: &PersistentEventLog,
+    group: ConversationId,
+    ids: impl IntoIterator<Item = EventId>,
+) -> Result<bool, crate::eventlog::LogError> {
+    for id in ids {
+        if !present(log, group, id)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 fn view_contains(
     log: &PersistentEventLog,
     group: ConversationId,
     stamp: ([u8; 32], usize),
     access: &SourceAccess,
-) -> bool {
-    (access.fingerprint == stamp.0 && access.event_count == stamp.1 as u64)
-        || access.complete_frontier
-            && access.frontier.iter().all(|id| {
-                log.get(id)
-                    .is_some_and(|event| event.conversation_id == group)
-            })
+) -> Result<bool, crate::eventlog::LogError> {
+    Ok(
+        (access.fingerprint == stamp.0 && access.event_count == stamp.1 as u64)
+            || access.complete_frontier
+                && all_present(log, group, access.frontier.iter().copied())?,
+    )
 }
 fn local_receipt_contains(
     log: &PersistentEventLog,
     group: ConversationId,
     access: &SourceAccess,
-) -> bool {
-    !access.local_frontier.is_empty()
-        && access.local_frontier.iter().all(|id| {
-            log.get(id)
-                .is_some_and(|event| event.conversation_id == group)
-        })
+) -> Result<bool, crate::eventlog::LogError> {
+    Ok(!access.local_frontier.is_empty()
+        && all_present(log, group, access.local_frontier.iter().copied())?)
 }
-fn evaluated(log: &PersistentEventLog, group: ConversationId, access: &SourceAccess) -> bool {
-    let present = |id: EventId| {
-        log.get(&id)
-            .is_some_and(|event| event.conversation_id == group)
-    };
-    let considered = |source: &AccountGroupSource| {
-        present(source.lifetime.membership)
-            && source.lifetime.acceptance.is_none_or(present)
-            && source.authority.authority.is_none_or(present)
-    };
-    // Rejected competing decisions were evaluated too. Missing decisions were not.
-    considered(&access.source)
-        && access.ownership.is_none_or(present)
-        && access
-            .observation
-            .sources
-            .iter()
-            .all(|bound| considered(&bound.source))
-}
-fn authorization_view(
+fn evaluated(
     log: &PersistentEventLog,
     group: ConversationId,
-) -> (Vec<EventId>, ([u8; 32], usize)) {
-    authorization_view_at(log, group, None)
-}
-fn authorization_view_at(
-    log: &PersistentEventLog,
-    group: ConversationId,
-    scope: Option<&HashSet<EventId>>,
-) -> (Vec<EventId>, ([u8; 32], usize)) {
-    let relevant: HashSet<_> = log
-        .events(&group)
-        .into_iter()
-        // The validated log can contain rejected competing controls which are
-        // parents of a later applied decision. The reducer's authorized index
-        // is not a complete record of its state transitions.
-        .filter(|event| {
-            scope.is_none_or(|scope| scope.contains(&event.id))
-                && super::wire::authorization_control(event.kind)
-        })
-        .map(|event| event.id)
-        .collect();
-    let mut ids: Vec<_> = relevant.iter().copied().collect();
-    ids.sort();
-    let mut digest = Sha256::new();
-    digest.update(b"mesh-talk-group-authorization-view-v1");
-    for id in &ids {
-        digest.update(id.as_bytes());
-    }
-    let stamp = (digest.finalize().into(), ids.len());
-    let mut ancestors = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut pending: Vec<_> = ids
-        .iter()
-        .filter_map(|id| log.get(id))
-        .flat_map(|event| event.parents.iter().copied())
-        .collect();
-    while let Some(id) = pending.pop() {
-        if relevant.contains(&id) {
-            ancestors.insert(id);
-        } else if visited.insert(id)
-            && let Some(event) = log.get(&id)
-        {
-            pending.extend(event.parents.iter().copied());
+    access: &SourceAccess,
+) -> Result<bool, crate::eventlog::LogError> {
+    let sources = std::iter::once(&access.source)
+        .chain(access.observation.sources.iter().map(|bound| &bound.source));
+    for source in sources {
+        if !all_present(
+            log,
+            group,
+            std::iter::once(source.lifetime.membership)
+                .chain(source.lifetime.acceptance)
+                .chain(source.authority.authority),
+        )? {
+            return Ok(false);
         }
     }
-    ids.retain(|id| !ancestors.contains(id));
-    (ids, stamp)
+    all_present(log, group, access.ownership)
+}
+fn scope_contains(
+    scope: Option<&crate::node::channel::ChannelMembershipProjection>,
+    ids: &[EventId],
+) -> Result<bool, crate::eventlog::LogError> {
+    if let Some(scope) = scope {
+        for id in ids {
+            if !scope.contains_event(*id)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+#[path = "access/view.rs"]
+mod raw_view;
+pub(in crate::node) use raw_view::{DirectoryView, RawViewCache};
+type RawAuthorizationView = (Vec<EventId>, ([u8; 32], usize));
+impl Node {
+    pub(in crate::node) fn directory_observation(
+        &self,
+        log: &PersistentEventLog,
+        group: ConversationId,
+    ) -> Result<DirectoryView, crate::eventlog::LogError> {
+        raw_view::directory_view(self, log, group)
+    }
+}
+fn authorization_view(
+    node: &Node,
+    log: &PersistentEventLog,
+    group: ConversationId,
+) -> Result<RawAuthorizationView, crate::eventlog::LogError> {
+    raw_view::read(node, log, group, None)
+}
+fn authorization_view_at(
+    node: &Node,
+    log: &PersistentEventLog,
+    group: ConversationId,
+    scope: Option<&crate::node::channel::ChannelMembershipProjection>,
+) -> Result<RawAuthorizationView, crate::eventlog::LogError> {
+    raw_view::read(node, log, group, scope)
 }
 
 /// Immutable identity inputs captured before acquiring the public event log.
@@ -138,106 +145,92 @@ impl GroupProofSnapshot {
 /// Reconstruct only the exact signed leave's original causal membership cut;
 /// no prior private head and no account-wide grant is manufactured.
 fn departed_legacy_source(
+    node: &Node,
     group: ConversationId,
     log: &PersistentEventLog,
     projection: &crate::node::channel::ChannelMembershipProjection,
     own: &crate::identity::device::PublicIdentity,
     proof: &crate::discovery::Announce,
     proofs: &GroupProofSnapshot,
-) -> Option<(AccountGroupSource, EventId)> {
-    let state = projection.state.as_ref()?;
+) -> Result<Option<(AccountGroupSource, EventId)>, crate::eventlog::LogError> {
+    let Some(state) = projection.state.as_ref() else {
+        return Ok(None);
+    };
     if (projection.authority.current_event().is_some()
         && projection
             .authority
-            .omitted_legacy_departure(own, proof)
+            .try_omitted_legacy_departure(own, proof)?
             .is_none())
         || state.members().contains(own)
         || !proofs.binding_current(proof)
         || proof.public() != *own
     {
-        return None;
+        return Ok(None);
     }
-    let departure = projection
-        .departures
-        .iter()
-        .filter(|(device, _)| *device == own.user_id())
-        .filter_map(|(_, id)| log.get(id))
-        .filter(|event| {
-            event.conversation_id == group
-                && event.author.ed25519_pub() == &own.ed25519_pub
-                && event.kind == EventKind::ChannelLeave
-                && event.ciphertext.is_empty()
-                && projection.authorized.contains(&event.id)
-                && event.verify_signature()
-                && event.verify_integrity()
-        })
-        .max_by_key(|event| (event.lamport, event.id))?;
-    let mut pending = departure.parents.clone();
-    let mut ancestors = BTreeMap::new();
-    while let Some(id) = pending.pop() {
-        if ancestors.contains_key(&id) {
-            continue;
-        }
-        let parent = log.get(&id)?;
-        if parent.conversation_id != group || parent.id == departure.id {
-            return None;
-        }
-        pending.extend(parent.parents.iter().copied());
-        ancestors.insert(id, parent);
+    let Some(departure_id) =
+        projection.latest_authorized_event(EventKind::ChannelLeave, Some(&own.ed25519_pub))?
+    else {
+        return Ok(None);
+    };
+    let Some(departure) = log.get(&departure_id)? else {
+        return Ok(None);
+    };
+    if departure.conversation_id != group
+        || departure.author.ed25519_pub() != &own.ed25519_pub
+        || departure.kind != EventKind::ChannelLeave
+        || !departure.ciphertext.is_empty()
+        || !departure.verify_signature()
+        || !departure.verify_integrity()
+    {
+        return Ok(None);
     }
-    let original = crate::node::channel::ChannelBook::project_membership(
-        group,
-        &ancestors.values().copied().collect::<Vec<_>>(),
-    );
-    let mut source = Node::public_account_group_source(group, &original, own, proof)?;
+    let Some(original) =
+        node.channel_checkpoints
+            .causal_projection(log.repository()?, group, departure.id)?
+    else {
+        return Ok(None);
+    };
+    let Some(mut source) = Node::public_account_group_source(group, &original, own, proof) else {
+        return Ok(None);
+    };
     if source.role != AccountGroupRole::Member
         || source.authority.authority.is_some()
         || source.lifetime.member != *own
     {
-        return None;
+        return Ok(None);
     }
     source.role = AccountGroupRole::Left;
     source.authority.epoch = state.epoch();
-    Some((source, departure.id))
+    Ok(Some((source, departure.id)))
 }
 
 /// Recover only terminal cleanup provenance from an authorized dissolution's
 /// dependency-closed parent cut. This never grants current group authority.
 fn dissolved_account_sources(
+    node: &Node,
     group: ConversationId,
     log: &PersistentEventLog,
     projection: &crate::node::channel::ChannelMembershipProjection,
     proofs: &GroupProofSnapshot,
     own_proof: &crate::discovery::Announce,
-) -> Vec<AccountGroupSource> {
+) -> Result<Vec<AccountGroupSource>, crate::eventlog::LogError> {
     let Some(state) = projection
         .state
         .as_ref()
         .filter(|state| state.is_dissolved())
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let Some(dissolution) = log.events(&group).into_iter().find(|event| {
-        event.kind == EventKind::ChannelDissolve && projection.authorized.contains(&event.id)
-    }) else {
-        return Vec::new();
+    let Some(dissolution) = projection.latest_authorized_event(EventKind::ChannelDissolve, None)?
+    else {
+        return Ok(Vec::new());
     };
-    let mut pending = dissolution.parents.clone();
-    let mut ancestors = BTreeMap::new();
-    while let Some(id) = pending.pop() {
-        if ancestors.contains_key(&id) {
-            continue;
-        }
-        let Some(event) = log.get(&id).filter(|event| event.conversation_id == group) else {
-            return Vec::new();
-        };
-        pending.extend(event.parents.iter().copied());
-        ancestors.insert(id, event);
-    }
-    let original = crate::node::channel::ChannelBook::project_membership(
-        group,
-        &ancestors.values().copied().collect::<Vec<_>>(),
-    );
+    let Some(original) =
+        node.channel_checkpoints
+            .causal_projection(log.repository()?, group, dissolution)?
+    else {
+        return Ok(Vec::new());
+    };
     let mut sources = BTreeMap::new();
     for proof in proofs.current.values().chain(std::iter::once(own_proof)) {
         if !proofs.binding_current(proof) {
@@ -258,7 +251,7 @@ fn dissolved_account_sources(
             sources.insert(source.device.user_id(), source);
         }
     }
-    sources.into_values().collect()
+    Ok(sources.into_values().collect())
 }
 
 /// Recover a terminal modern account observation from validated public grant and
@@ -271,11 +264,15 @@ fn revoked_account_source(
     own: &crate::identity::device::PublicIdentity,
     proof: &crate::discovery::Announce,
     proofs: &GroupProofSnapshot,
-) -> Option<(AccountGroupSource, EventId)> {
+) -> Result<Option<(AccountGroupSource, EventId)>, crate::eventlog::LogError> {
     use crate::node::channel_account_authority::{AccountAuthorityControl, AccountGrant};
     type RevokedGrantCandidate = ((u64, EventId, [u8; 16]), AccountGrant);
-    let state = projection.state.as_ref()?;
-    projection.authority.current_event()?;
+    let Some(state) = projection.state.as_ref() else {
+        return Ok(None);
+    };
+    if projection.authority.current_event().is_none() {
+        return Ok(None);
+    }
     if state.id() != group
         || proof.public() != *own
         || !proofs.binding_current(proof)
@@ -284,45 +281,60 @@ fn revoked_account_source(
             .account_grant(&proofs.account_public)
             .is_some()
     {
-        return None;
+        return Ok(None);
     }
-    let revoked: HashSet<_> = projection
-        .authority
-        .revoked()
-        .into_iter()
-        .filter(|id| id.account_pub == proofs.account_public)
-        .collect();
-    let revocation = projection
-        .authority
-        .explicit_revocation_events(&proofs.account_public)
-        .into_iter()
-        .filter_map(|id| log.get(&id))
-        .filter(|event| event.conversation_id == group && projection.authorized.contains(&event.id))
-        .max_by_key(|event| (event.lamport, event.id))?;
+    let mut revocation: Option<crate::eventlog::Event> = None;
     let mut previous: Option<RevokedGrantCandidate> = None;
-    for event in log.events(&group) {
-        if event.kind != EventKind::ChannelAccountAuthority
-            || !projection.authorized.contains(&event.id)
-        {
-            continue;
-        }
-        let Some(control) = AccountAuthorityControl::decode(&event.ciphertext) else {
-            continue;
-        };
-        for grant in control.grants {
-            let Some(id) = grant.id().filter(|id| revoked.contains(id)) else {
+    let mut after = None;
+    loop {
+        let page = projection
+            .authority
+            .revocation_page(&proofs.account_public, after.as_deref())?;
+        for (id, revoked_at) in page.grants {
+            if let Some(event) = log.get(&revoked_at)?
+                && event.conversation_id == group
+                && projection.is_authorized(event.id)?
+                && revocation
+                    .as_ref()
+                    .is_none_or(|old| (event.lamport, event.id) > (old.lamport, old.id))
+            {
+                revocation = Some(event);
+            }
+            // A grant incarnation is immutable. Its exact original control
+            // retains the same binding without materializing other grants.
+            let Some(origin) = projection.authority.try_grant_origin(id)? else {
                 continue;
             };
-            let Some(membership) = log.get(&grant.membership_event).filter(|event| {
-                event.conversation_id == group
-                    && event.kind == EventKind::MembershipChange
-                    && projection.authorized.contains(&event.id)
-            }) else {
+            let Some(event) = log.get(&origin)? else {
                 continue;
             };
-            if grant
-                .acceptance_event
-                .is_some_and(|id| !projection.authorized.contains(&id) || log.get(&id).is_none())
+            if event.conversation_id != group
+                || event.kind != EventKind::ChannelAccountAuthority
+                || !projection.is_authorized(event.id)?
+            {
+                continue;
+            }
+            let Some(control) = AccountAuthorityControl::decode(&event.ciphertext) else {
+                continue;
+            };
+            let Some(grant) = control
+                .grants
+                .into_iter()
+                .find(|grant| grant.id() == Some(id))
+            else {
+                continue;
+            };
+            let Some(membership) = log.get(&grant.membership_event)? else {
+                continue;
+            };
+            if membership.conversation_id != group
+                || membership.kind != EventKind::MembershipChange
+                || !projection.is_authorized(membership.id)?
+            {
+                continue;
+            }
+            if let Some(accepted) = grant.acceptance_event
+                && (!projection.is_authorized(accepted)? || !log.has(&accepted)?)
             {
                 continue;
             }
@@ -331,9 +343,18 @@ fn revoked_account_source(
                 previous = Some((key, grant));
             }
         }
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
     }
-    let (_, grant) = previous?;
-    Some((
+    let Some(revocation) = revocation else {
+        return Ok(None);
+    };
+    let Some((_, grant)) = previous else {
+        return Ok(None);
+    };
+    Ok(Some((
         AccountGroupSource {
             device: own.clone(),
             role: if state.is_dissolved() {
@@ -353,7 +374,7 @@ fn revoked_account_source(
             execution: AccountGroupExecution::Local,
         },
         revocation.id,
-    ))
+    )))
 }
 
 impl Node {
@@ -445,8 +466,7 @@ impl Node {
         candidates.extend(proofs.current.values().cloned());
         candidates.push(own);
         let log = self.log.lock().expect("log mutex");
-        let projection =
-            crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+        let projection = self.account_group_projection_with_log(&log, group)?;
         let state = projection
             .state
             .as_ref()
@@ -456,11 +476,15 @@ impl Node {
                 "legacy departure format changed".into(),
             ));
         }
-        let (_, stamp) = authorization_view(&log, group);
-        if heads
-            .iter()
-            .any(|head| !view_contains(&log, group, stamp, &head.access))
-        {
+        let (_, stamp) = authorization_view(self, &log, group)?;
+        let mut missing = false;
+        for head in &heads {
+            if !view_contains(&log, group, stamp, &head.access)? {
+                missing = true;
+                break;
+            }
+        }
+        if missing {
             return Err(NodeError::Channel(
                 "legacy physical member ancestry is reconciling".into(),
             ));
@@ -558,8 +582,7 @@ impl Node {
         let own_head = heads.iter().find(|head| head.proof.public() == own);
         let (local, projection, known) = {
             let log = self.log.lock().expect("log mutex");
-            let projection =
-                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+            let projection = self.account_group_projection_with_log(&log, group)?;
             if projection
                 .state
                 .as_ref()
@@ -567,19 +590,19 @@ impl Node {
             {
                 access.role = AccountGroupRole::Dissolved;
                 access.sources =
-                    dissolved_account_sources(group, &log, &projection, &proofs, &own_proof);
+                    dissolved_account_sources(self, group, &log, &projection, &proofs, &own_proof)?;
                 return Ok(access);
             }
-            let (_, stamp) = authorization_view(&log, group);
-            let known: Vec<_> = heads
-                .iter()
-                .map(|head| {
-                    (view_contains(&log, group, stamp, &head.access)
+            let (_, stamp) = authorization_view(self, &log, group)?;
+            let mut known = Vec::with_capacity(heads.len());
+            for head in &heads {
+                known.push(
+                    (view_contains(&log, group, stamp, &head.access)?
                         || head.proof.public() == own
-                            && local_receipt_contains(&log, group, &head.access))
-                        && evaluated(&log, group, &head.access)
-                })
-                .collect();
+                            && local_receipt_contains(&log, group, &head.access)?)
+                        && evaluated(&log, group, &head.access)?,
+                );
+            }
             if heads.iter().zip(&known).any(|(head, known)| {
                 head.proof.public() == own && !head.access.complete_frontier && !*known
             }) {
@@ -597,7 +620,7 @@ impl Node {
                     own_head.map(|head| &head.access),
                     &heads,
                     &proofs,
-                )
+                )?
             };
             (local, projection, known)
         };
@@ -817,18 +840,18 @@ impl Node {
         &self,
         group: ConversationId,
         head: &GroupControlHead,
-    ) -> bool {
+    ) -> Result<bool, NodeError> {
         let log = self.log.lock().expect("log mutex");
-        let (_, stamp) = authorization_view(&log, group);
-        view_contains(&log, group, stamp, &head.access)
+        let (_, stamp) = authorization_view(self, &log, group)?;
+        Ok(view_contains(&log, group, stamp, &head.access)?
             || head.proof.public() == self.identity.public()
-                && local_receipt_contains(&log, group, &head.access)
+                && local_receipt_contains(&log, group, &head.access)?)
     }
     pub(in crate::node) fn account_group_local_observation(
         &self,
         group: ConversationId,
         prior: Option<&SourceAccess>,
-    ) -> Option<SourceAccess> {
+    ) -> Result<Option<SourceAccess>, NodeError> {
         let proofs = self.account_group_proof_snapshot();
         let heads: Vec<_> = self
             .group_control_heads(group)
@@ -836,8 +859,7 @@ impl Node {
             .filter(|head| proofs.binding_current(&head.proof))
             .collect();
         let log = self.log.lock().expect("log mutex");
-        let projection =
-            crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+        let projection = self.account_group_projection_with_log(&log, group)?;
         self.account_group_snapshot(group, &log, &projection, prior, &heads, &proofs)
     }
     fn account_group_snapshot(
@@ -848,14 +870,17 @@ impl Node {
         prior: Option<&SourceAccess>,
         heads: &[GroupControlHead],
         proofs: &GroupProofSnapshot,
-    ) -> Option<SourceAccess> {
+    ) -> Result<Option<SourceAccess>, NodeError> {
         let own = self.own_group_proof();
         let basis = projection
             .authority
-            .legacy_closing_basis(&own.public(), &own);
+            .try_legacy_closing_basis(&own.public(), &own)?;
         let initial_owner = basis
             .iter()
-            .filter_map(|id| log.get(id))
+            .map(|id| log.get(id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .find_map(|event| {
                 (event.kind == EventKind::ChannelAccountAuthority)
                     .then(|| {
@@ -866,38 +891,24 @@ impl Node {
                     .flatten()
             })
             .map(|control| control.owner_account);
-        if !basis.is_empty() && initial_owner != Some(proofs.account_public) {
-            let mut ancestors = HashSet::new();
-            let mut pending = basis;
-            let mut complete = true;
-            while let Some(id) = pending.pop() {
-                if !ancestors.insert(id) {
-                    continue;
-                }
-                let Some(event) = log.get(&id).filter(|event| event.conversation_id == group)
-                else {
-                    complete = false;
-                    break;
-                };
-                pending.extend(event.parents.iter().copied());
-            }
-            if complete {
-                let events: Vec<_> = log
-                    .events(&group)
-                    .into_iter()
-                    .filter(|event| ancestors.contains(&event.id))
-                    .collect();
-                let closed = crate::node::channel::ChannelBook::project_membership(group, &events);
-                return self.account_group_snapshot_inner(
-                    group,
-                    log,
-                    &closed,
-                    None,
-                    heads,
-                    proofs,
-                    Some(&ancestors),
-                );
-            }
+        if !basis.is_empty()
+            && initial_owner != Some(proofs.account_public)
+            && all_present(log, group, basis.iter().copied())?
+            && let Some(closed) = self.channel_checkpoints.causal_projection_basis(
+                log.repository()?,
+                group,
+                &basis,
+            )?
+        {
+            return self.account_group_snapshot_inner(
+                group,
+                log,
+                &closed,
+                None,
+                heads,
+                proofs,
+                Some(&closed),
+            );
         }
         self.account_group_snapshot_inner(group, log, projection, prior, heads, proofs, None)
     }
@@ -910,20 +921,28 @@ impl Node {
         prior: Option<&SourceAccess>,
         heads: &[GroupControlHead],
         proofs: &GroupProofSnapshot,
-        scope: Option<&HashSet<EventId>>,
-    ) -> Option<SourceAccess> {
-        let state = projection.state.as_ref()?;
+        scope: Option<&crate::node::channel::ChannelMembershipProjection>,
+    ) -> Result<Option<SourceAccess>, NodeError> {
+        let Some(state) = projection.state.as_ref() else {
+            return Ok(None);
+        };
         let own = self.identity.public();
         let own_proof = self.own_group_proof();
-        let revoked = revoked_account_source(group, log, projection, &own, &own_proof, proofs)
-            .or_else(|| departed_legacy_source(group, log, projection, &own, &own_proof, proofs))
+        let retired = projection
+            .authority
+            .try_legacy_retired_source(&own, &own_proof)?;
+        let revoked =
+            match revoked_account_source(group, log, projection, &own, &own_proof, proofs)? {
+                Some(value) => Some(value),
+                None => {
+                    departed_legacy_source(self, group, log, projection, &own, &own_proof, proofs)?
+                }
+            }
             .or_else(|| {
                 if !proofs.binding_current(&own_proof) {
                     return None;
                 }
-                let (_, original, departure) = projection
-                    .authority
-                    .legacy_retired_source(&own, &own_proof)?;
+                let (_, original, departure) = retired?;
                 Some((
                     AccountGroupSource {
                         device: own.clone(),
@@ -960,7 +979,10 @@ impl Node {
                     epoch: state.epoch(),
                 };
                 Some(source)
-            })?;
+            });
+        let Some(source) = source else {
+            return Ok(None);
+        };
         let owner = state
             .members()
             .iter()
@@ -1078,26 +1100,32 @@ impl Node {
         ids.extend(projection.ownership);
         if !state.is_dissolved() {
             ids.extend(revoked.as_ref().map(|(_, event)| *event));
-            ids.extend(projection.authority.legacy_closing_basis(&own, &own_proof));
+            ids.extend(
+                projection
+                    .authority
+                    .try_legacy_closing_basis(&own, &own_proof)?,
+            );
         }
         if state.is_dissolved() {
-            ids.extend(
-                log.events(&group)
-                    .into_iter()
-                    .find(|event| {
-                        event.kind == EventKind::ChannelDissolve
-                            && projection.authorized.contains(&event.id)
-                    })
-                    .map(|event| event.id),
-            );
+            ids.extend(projection.latest_authorized_event(EventKind::ChannelDissolve, None)?);
         }
         ids.sort();
         ids.dedup();
-        let controls = ids.iter().filter_map(|id| log.get(id).cloned()).collect();
-        let (local_frontier, (fingerprint, count)) = authorization_view_at(log, group, scope);
+        let controls = ids
+            .iter()
+            .map(|id| log.get(id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let (mut local_frontier, (fingerprint, count)) =
+            authorization_view_at(self, log, group, scope)?;
         let mut frontier = local_frontier.clone();
         let complete_frontier = frontier.len() <= MAX_ACCESS_FRONTIER;
         frontier.truncate(MAX_ACCESS_FRONTIER);
+        if !complete_frontier {
+            local_frontier.clear();
+        }
         let mut result = SourceAccess {
             source,
             owner_proof,
@@ -1125,11 +1153,10 @@ impl Node {
             .collect();
         for head in heads {
             if head.proof.public() != own
-                && scope
-                    .is_none_or(|scope| head.access.frontier.iter().all(|id| scope.contains(id)))
+                && scope_contains(scope, &head.access.frontier)?
                 && !result.compatible(&head.access)
-                && view_contains(log, group, (fingerprint, count), &head.access)
-                && evaluated(log, group, &head.access)
+                && view_contains(log, group, (fingerprint, count), &head.access)?
+                && evaluated(log, group, &head.access)?
             {
                 acknowledgements.insert(head.proof.user_id.clone(), head.reference());
             }
@@ -1141,6 +1168,368 @@ impl Node {
         {
             result.make_unavailable();
         }
-        Some(result)
+        Ok(Some(result))
+    }
+}
+
+#[cfg(test)]
+mod raw_view_tests {
+    use super::*;
+    use crate::{discovery::Roster, eventlog::Event, identity::device::DeviceIdentity};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn raw_authorization_cache_rechecks_noncontrol_reordering() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &dir.path().join("events.log"),
+            &dir.path().join("sent.log"),
+            "pw",
+        )
+        .unwrap();
+        let group = crate::channel::new_channel_id();
+        let first = Event::new(
+            &node.identity,
+            group,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let missing = Event::new(
+            &node.identity,
+            group,
+            2,
+            vec![first.id],
+            2,
+            2,
+            EventKind::Message,
+            vec![8; 2048],
+        );
+        let last = Event::new(
+            &node.identity,
+            group,
+            3,
+            vec![],
+            3,
+            3,
+            EventKind::ChannelLeave,
+            vec![],
+        );
+        let mut log = node.log.lock().unwrap();
+        log.append(first.clone()).unwrap();
+        log.append(last.clone()).unwrap();
+        let (mut frontier, stamp) = authorization_view(&node, &log, group).unwrap();
+        let mut expected = vec![first.id, last.id];
+        expected.sort();
+        frontier.sort();
+        assert_eq!(frontier, expected);
+        let cold = raw_view::cold_reads();
+        let bodies = log.repository().unwrap().body_read_counts();
+        log.append(missing).unwrap();
+        let (frontier, updated_stamp) = authorization_view(&node, &log, group).unwrap();
+        let mut frontier = frontier;
+        frontier.sort();
+        assert_eq!(
+            frontier, expected,
+            "a late ordinary branch preserves these independent controls"
+        );
+        assert_eq!(
+            updated_stamp, stamp,
+            "the exact signed control set is unchanged"
+        );
+        assert_eq!(
+            raw_view::cold_reads(),
+            cold + 1,
+            "an invalidated causal generation cannot reuse its frontier"
+        );
+        assert_eq!(log.repository().unwrap().body_read_counts(), bodies);
+    }
+
+    #[tokio::test]
+    async fn raw_authorization_view_does_not_decode_retained_message_history() {
+        for count in [128_u64, 512] {
+            let dir = tempfile::tempdir().unwrap();
+            let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+            let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+            let (file, _) = tokio::sync::mpsc::unbounded_channel();
+            let node = Node::open(
+                DeviceIdentity::generate(),
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                channel,
+                file,
+                &dir.path().join("events.log"),
+                &dir.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap();
+            let group = crate::channel::new_channel_id();
+            let mut log = node.log.lock().unwrap();
+            let mut parent = Vec::new();
+            let mut controls = Vec::new();
+            for sequence in 1..=count {
+                let control = sequence % 31 == 0;
+                let event = Event::new(
+                    &node.identity,
+                    group,
+                    sequence,
+                    parent,
+                    sequence,
+                    sequence,
+                    if control {
+                        EventKind::ChannelLeave
+                    } else {
+                        EventKind::Message
+                    },
+                    if control { Vec::new() } else { vec![7; 2048] },
+                );
+                parent = vec![event.id];
+                if control {
+                    controls.push(event.id);
+                }
+                log.append(event).unwrap();
+            }
+            // Rejected, concurrent controls still belong to the raw view.
+            let rejected = Event::new(
+                &node.identity,
+                group,
+                count + 1,
+                vec![],
+                count + 1,
+                count + 1,
+                EventKind::ChannelLeave,
+                vec![1],
+            );
+            let last = *controls.last().unwrap();
+            controls.push(rejected.id);
+            log.append(rejected.clone()).unwrap();
+            let before = log.repository().unwrap().body_read_counts();
+            let (mut frontier, (stamp, actual_count)) =
+                authorization_view(&node, &log, group).unwrap();
+            assert_eq!(
+                log.repository().unwrap().body_read_counts(),
+                before,
+                "raw authorization metadata must not decode {count} retained messages"
+            );
+            controls.sort();
+            let mut digest = Sha256::new();
+            digest.update(b"mesh-talk-group-authorization-view-v1");
+            for id in &controls {
+                digest.update(id.as_bytes());
+            }
+            assert_eq!(stamp, <[u8; 32]>::from(digest.finalize()));
+            assert_eq!(actual_count, controls.len());
+            frontier.sort();
+            let mut expected = vec![last, rejected.id];
+            expected.sort();
+            assert_eq!(frontier, expected);
+            let scope = node
+                .channel_checkpoints
+                .causal_projection(log.repository().unwrap(), group, parent[0])
+                .unwrap()
+                .unwrap();
+            let before = log.repository().unwrap().body_read_counts();
+            let (scoped_frontier, (scoped_stamp, scoped_count)) =
+                authorization_view_at(&node, &log, group, Some(&scope)).unwrap();
+            assert_eq!(log.repository().unwrap().body_read_counts(), before);
+            assert_eq!(scoped_frontier, vec![last]);
+            let mut digest = Sha256::new();
+            digest.update(b"mesh-talk-group-authorization-view-v1");
+            for id in controls.iter().filter(|id| **id != rejected.id) {
+                digest.update(id.as_bytes());
+            }
+            assert_eq!(scoped_stamp, <[u8; 32]>::from(digest.finalize()));
+            assert_eq!(scoped_count, controls.len() - 1);
+            let before = raw_view::cold_reads();
+            let tail = Event::new(
+                &node.identity,
+                group,
+                count + 2,
+                parent,
+                count + 2,
+                count + 2,
+                EventKind::Message,
+                vec![4; 2048],
+            );
+            log.append(tail).unwrap();
+            let observation = authorization_view(&node, &log, group).unwrap();
+            assert_eq!(observation.1, (stamp, actual_count));
+            assert_eq!(
+                raw_view::cold_reads(),
+                before,
+                "an ordinary safe message tail must not rescan the raw control graph"
+            );
+        }
+    }
+    fn directory_test_node() -> (tempfile::TempDir, Arc<Node>) {
+        let directory = tempfile::tempdir().unwrap();
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (channel, _) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let node = Node::open(
+            DeviceIdentity::generate(),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            channel,
+            file,
+            &directory.path().join("events"),
+            &directory.path().join("sent"),
+            "pw",
+        )
+        .unwrap();
+        (directory, node)
+    }
+    fn finish_directory(
+        node: &Node,
+        log: &PersistentEventLog,
+        group: ConversationId,
+    ) -> DirectoryView {
+        for _ in 0..4096 {
+            let repository = log.repository().unwrap();
+            let before = repository.ancestry_vertex_reads();
+            let outcome = node.directory_observation(log, group);
+            assert!(
+                repository.ancestry_vertex_reads() - before <= 128,
+                "one directory turn drained the ancestry graph"
+            );
+            match outcome {
+                Ok(view) => return view,
+                Err(crate::eventlog::LogError::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(crate::eventlog::LogError::StaleCursor) => {}
+                Err(error) => panic!("directory preparation failed: {error}"),
+            }
+        }
+        panic!("bounded directory preparation failed to complete")
+    }
+    #[test]
+    fn directory_selector_preserves_hex_digest_raw_rejections_and_authorization_cache() {
+        let (_directory, node) = directory_test_node();
+        let group = crate::channel::new_channel_id();
+        let mut log = node.log.lock().unwrap();
+        let mut parent = Vec::new();
+        let mut selected = Vec::new();
+        for sequence in 1..=601 {
+            let kind = match sequence {
+                1 => EventKind::ChannelLeave,
+                301 => EventKind::ChannelRename,
+                601 => EventKind::ChannelHistoryPolicy,
+                _ => EventKind::Message,
+            };
+            let event = Event::new(
+                &node.identity,
+                group,
+                sequence,
+                parent,
+                sequence,
+                sequence,
+                kind,
+                vec![7; 2048],
+            );
+            parent = vec![event.id];
+            if sequence == 1 || sequence == 301 || sequence == 601 {
+                selected.push(event.id);
+            }
+            log.append(event).unwrap();
+        }
+        let authorization = authorization_view(&node, &log, group).unwrap();
+        let before = log.repository().unwrap().body_read_counts();
+        assert!(matches!(
+            node.directory_observation(&log, group),
+            Err(crate::eventlog::LogError::Io(_))
+        ));
+        // A changed source must discard its partial digest and include the raw
+        // rejected control, even though canonical membership will ignore it.
+        let rejected = Event::new(
+            &node.identity,
+            group,
+            602,
+            vec![selected[0]],
+            602,
+            602,
+            EventKind::ChannelRename,
+            vec![255],
+        );
+        log.append(rejected.clone()).unwrap();
+        selected.push(rejected.id);
+        let view = finish_directory(&node, &log, group);
+        let mut expected = Sha256::new();
+        expected.update(b"mesh-talk-group-directory-v1");
+        selected.sort();
+        for event in &selected {
+            expected.update(event.to_hex().as_bytes());
+        }
+        assert_eq!(view.fingerprint, <[u8; 32]>::from(expected.finalize()));
+        assert_eq!(view.count, 4);
+        assert_eq!(
+            view.controls,
+            selected.iter().map(EventId::to_hex).collect::<Vec<_>>()
+        );
+        let mut frontier = vec![parent[0], rejected.id];
+        frontier.sort();
+        assert_eq!(view.frontier, frontier);
+        assert_eq!(
+            authorization_view(&node, &log, group).unwrap(),
+            authorization,
+            "directory observations contaminated the authorization cache"
+        );
+        assert_eq!(log.repository().unwrap().body_read_counts(), before);
+        let before = log.repository().unwrap().ancestry_vertex_reads();
+        assert_eq!(
+            node.directory_observation(&log, group).unwrap().fingerprint,
+            view.fingerprint
+        );
+        assert_eq!(
+            log.repository().unwrap().ancestry_vertex_reads(),
+            before,
+            "warm view walked history"
+        );
+    }
+    #[test]
+    fn directory_preparation_capacity_advances_abandoned_calls_without_eviction() {
+        let (_directory, node) = directory_test_node();
+        let mut log = node.log.lock().unwrap();
+        let mut groups = Vec::new();
+        for sequence in 1..=65 {
+            let group = crate::channel::new_channel_id();
+            log.append(Event::new(
+                &node.identity,
+                group,
+                sequence,
+                vec![],
+                sequence,
+                sequence,
+                EventKind::ChannelRename,
+                vec![1],
+            ))
+            .unwrap();
+            groups.push(group);
+        }
+        for group in groups.iter().take(64) {
+            assert!(matches!(
+                node.directory_observation(&log, *group),
+                Err(crate::eventlog::LogError::Io(_))
+            ));
+        }
+        let view = finish_directory(&node, &log, groups[64]);
+        assert_eq!(
+            view.count, 1,
+            "new requests were starved by abandoned preparations"
+        );
+        assert_eq!(view.frontier.len(), 1);
+        for group in groups.iter().take(64) {
+            assert_eq!(finish_directory(&node, &log, *group).count, 1);
+        }
     }
 }

@@ -105,7 +105,7 @@ async fn command(node: &NodeRuntime, line: &str) -> Result<(), Box<dyn std::erro
             node.send_to_account(target, &payload, None).await?;
         }
         "history" => {
-            for entry in node.account_history(argument()?, 100) {
+            for entry in node.account_history(argument()?, 100)? {
                 emit(format!(
                     "entry {} {}",
                     hex::encode(entry.id.as_bytes()),
@@ -159,7 +159,7 @@ async fn command(node: &NodeRuntime, line: &str) -> Result<(), Box<dyn std::erro
         "file-ready" => emit(format!(
             "file-ready {}",
             node.handle()
-                .file_ready_to_save(ConversationId::new(id_bytes(argument()?)?))
+                .file_ready_to_save(ConversationId::new(id_bytes(argument()?)?))?
         )),
         "save-file" => {
             let file = ConversationId::new(id_bytes(argument()?)?);

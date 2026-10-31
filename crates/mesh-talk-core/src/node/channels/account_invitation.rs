@@ -210,7 +210,7 @@ impl Node {
             return Err(NodeError::InvalidInput("invalid target account".into()));
         }
         if let Some(grant) = self
-            .account_group_projection(group)
+            .account_group_projection(group)?
             .authority
             .grants()
             .into_iter()
@@ -233,8 +233,8 @@ impl Node {
             .verified_account_invitation_target(target_account_id)
             .await?;
         let _policy = self.privacy.gate.read().await;
-        let policy = self.channel_history_policy(group);
-        let selected = self.select_join_history(group, policy, super::super::node::now_millis());
+        let policy = self.channel_history_policy(group)?;
+        let selected = self.select_join_history(group, policy, super::super::node::now_millis())?;
         let history = self.prepare_invitation_history(group, &target.public(), selected, policy)?;
         let mut incarnation = [0; 16];
         rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut incarnation);

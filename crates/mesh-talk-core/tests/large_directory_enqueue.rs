@@ -4,10 +4,15 @@
 use mesh_talk_core::{
     discovery::{Announce, Roster},
     dm,
-    eventlog::{EventKind, PersistentEventLog},
+    eventlog::EventKind,
     file::{AnyManifest, FileKind, decode_manifest},
     identity::{account::Account, device::DeviceIdentity},
     node::Node,
+    recovery::{
+        archive,
+        key::RecoveryKey,
+        snapshot::{self, SnapshotRecordV1},
+    },
 };
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -61,16 +66,50 @@ async fn large_directory_enqueue_uses_compact_manifest_instead_of_frame_error() 
         .unwrap();
     let registered_chunks = alice
         .file_progress(file_conv)
+        .unwrap()
         .expect("enqueued file must be registered")
         .total;
     assert!(registered_chunks > 2_000);
-    // Stop the writer before reading its exact accepted event. Reopening Node
+    // This fixture has no runtime workers. Stream the existing persisted source
+    // through the production backup reader before closing it; reopening Node
     // could repair a missing event and mask an enqueue persistence regression.
-    drop(alice);
-    let log = PersistentEventLog::open(&log_path, "pw").unwrap();
-    let event = log
-        .get(&event_id)
-        .expect("enqueued manifest must be durable");
+    // The extra disk pass stays in this separately run large-disk scenario.
+    let key = RecoveryKey::generate();
+    let archive_path = dir.path().join("accepted-event.mtbackup");
+    alice
+        .write_encrypted_recovery_archive(
+            std::fs::File::create(&archive_path).unwrap(),
+            &key,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        )
+        .unwrap();
+    alice.close_profile().unwrap();
+    let plaintext = dir.path().join("accepted-event.snapshot");
+    archive::read_archive(
+        std::fs::File::open(archive_path).unwrap(),
+        std::fs::File::create(&plaintext).unwrap(),
+        key.as_bytes(),
+    )
+    .unwrap();
+    let mut selected = None;
+    snapshot::read_snapshot(std::fs::File::open(plaintext).unwrap(), |record| {
+        if let SnapshotRecordV1::SignedEvent { event } = record
+            && event.id == event_id
+        {
+            assert!(
+                selected.is_none(),
+                "accepted manifest identity must be unique"
+            );
+            selected = Some(event);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let event = selected.expect("enqueued manifest must be durably exportable without replay");
+    assert!(event.verify_integrity() && event.verify_signature());
     assert_eq!(event.kind, EventKind::FileManifest);
     let plaintext = dm::open(&bob, &alice_public.x25519_pub, &event.ciphertext).unwrap();
     let Some(AnyManifest::V4(manifest)) = decode_manifest(&plaintext) else {

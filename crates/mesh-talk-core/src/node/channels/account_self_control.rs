@@ -128,7 +128,7 @@ impl Node {
         let (transaction, recipients, id) = {
             let log = self.log.lock().expect("log mutex");
             let projection =
-                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group)?);
             let PreparedAccountSelfControl {
                 event,
                 witness,
@@ -153,7 +153,7 @@ impl Node {
         drop(delivery);
         self.process_channel(group);
         if !self
-            .account_group_projection(group)
+            .account_group_projection(group)?
             .authorized
             .contains(&id)
         {
@@ -352,7 +352,7 @@ impl Node {
         let (transaction, recipients, event_id) = {
             let log = self.log.lock().expect("log mutex");
             let projection =
-                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group)?);
             let prepared =
                 self.prepare_legacy_member_leave_locked(group, &log, &projection, own)?;
             let event_id = prepared.event.id;
@@ -372,7 +372,7 @@ impl Node {
         drop(delivery);
         self.process_channel(group);
         if !self
-            .account_group_projection(group)
+            .account_group_projection(group)?
             .authorized
             .contains(&event_id)
         {
@@ -678,9 +678,9 @@ pub(in crate::node) mod tests {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .filter(|event| event.kind == input.event_kind())
-                .cloned()
                 .collect::<Vec<_>>();
             assert_eq!(effects.len(), 1);
             assert!(
@@ -701,13 +701,14 @@ pub(in crate::node) mod tests {
                     .lock()
                     .unwrap()
                     .events(&group)
+                    .unwrap()
                     .into_iter()
                     .filter(|event| event.kind == input.event_kind())
                     .map(|event| event.id)
                     .collect::<Vec<_>>(),
                 vec![effects[0].id]
             );
-            let projection = node.account_group_projection(group);
+            let projection = node.account_group_projection(group).unwrap();
             assert_eq!(projection.authority.is_member(&own.public(), &own), pending);
         }
     }
@@ -736,6 +737,7 @@ pub(in crate::node) mod tests {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .any(|event| event.kind == EventKind::ChannelLeave)
         );
@@ -770,8 +772,10 @@ pub(in crate::node) mod tests {
         let other_proof = Announce::new_with_account(&impostor, &node.account, "other device", 1);
         {
             let log = node.log.lock().unwrap();
-            let projection =
-                crate::node::channel::ChannelBook::project_membership(group, &log.events(&group));
+            let projection = crate::node::channel::ChannelBook::project_membership(
+                group,
+                &log.events(&group).unwrap(),
+            );
             assert!(
                 node.prepare_legacy_member_leave_locked(group, &log, &projection, &other_proof)
                     .is_err()
@@ -805,9 +809,9 @@ pub(in crate::node) mod tests {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == EventKind::ChannelLeave)
-            .cloned()
             .collect::<Vec<_>>();
         assert_eq!(events.len(), 1);
         assert!(
@@ -883,9 +887,9 @@ pub(in crate::node) mod tests {
             .lock()
             .unwrap()
             .events(&group)
+            .unwrap()
             .into_iter()
             .filter(|event| event.kind == kind)
-            .cloned()
             .collect();
         assert_eq!(effects.len(), 1);
         assert!(effects[0].ciphertext.is_empty());
@@ -914,6 +918,7 @@ pub(in crate::node) mod tests {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .filter(|event| event.kind == kind)
                 .count(),
@@ -964,9 +969,9 @@ pub(in crate::node) mod tests {
                 .lock()
                 .unwrap()
                 .events(&group)
+                .unwrap()
                 .into_iter()
                 .filter(|event| event.kind == kind)
-                .cloned()
                 .collect();
             assert_eq!(
                 effects.len(),
@@ -1013,6 +1018,7 @@ pub(in crate::node) mod tests {
                     .lock()
                     .unwrap()
                     .events(&group)
+                    .unwrap()
                     .into_iter()
                     .filter(|event| event.kind == kind)
                     .map(|event| event.id)
@@ -1647,13 +1653,14 @@ pub(in crate::node) mod tests {
             .unwrap();
         let archive = archive_source
             .history(group, 100)
+            .unwrap()
             .into_iter()
             .find(|row| row.text == b"unrelated retained archive")
             .unwrap()
             .id;
         if !pending {
             wait_self_control_noise(|| nodes.iter().filter(|(_, node)| node.user_id() != reference.user_id())
-                .all(|(_, node)| node.history(group, 100).iter().any(|row| row.id == archive)),
+                .all(|(_, node)| node.history(group, 100).unwrap().iter().any(|row| row.id == archive)),
                 "the archive marker must be fully retained by physical sources before reference enrollment").await;
         }
         // Keep the original signed Member head through a real account exchange
@@ -1927,7 +1934,7 @@ pub(in crate::node) mod tests {
         let full_source = executor.identity.public();
         let canonical = Node::public_account_group_source(
             group,
-            &executor.account_group_projection(group),
+            &executor.account_group_projection(group).unwrap(),
             &full_source,
             &executor.own_group_proof(),
         )
@@ -1969,10 +1976,9 @@ pub(in crate::node) mod tests {
                     .is_some_and(|status| {
                         status.phase == AccountGroupOperationPhase::Committed
                             && status.committed_events.len() == 1
-                            && status
-                                .committed_events
-                                .iter()
-                                .all(|event| owner.log.lock().unwrap().get(event).is_some())
+                            && status.committed_events.iter().all(|event| {
+                                owner.log.lock().unwrap().get(event).unwrap().is_some()
+                            })
                     })
                     && reference.account_group_access(group).unwrap().role
                         == if accepted_after {
@@ -2011,12 +2017,12 @@ pub(in crate::node) mod tests {
                 let status = node.account_group_operation_status(&shared.account_id(), id).ok().flatten();
                 let phase = status.as_ref().map(|status| &status.phase);
                 let committed_count = status.as_ref().map_or(0, |status| status.committed_events.len());
-                let effects_local = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| node.log.lock().unwrap().get(event).is_some()));
-                let effects_external = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| owner.log.lock().unwrap().get(event).is_some()));
-                let effects = node.log.lock().unwrap().events(&group).into_iter()
+                let effects_local = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| node.log.lock().unwrap().get(event).unwrap().is_some()));
+                let effects_external = status.as_ref().is_some_and(|status| !status.committed_events.is_empty() && status.committed_events.iter().all(|event| owner.log.lock().unwrap().get(event).unwrap().is_some()));
+                let effects = node.log.lock().unwrap().events(&group).unwrap().into_iter()
                     .filter(|event| event.kind == event_kind).count();
                 let role = node.account_group_access(group).map(|access| access.role);
-                let source_role = Node::public_account_group_source(group, &node.account_group_projection(group), &full_source, &executor.own_group_proof()).map(|source| source.role);
+                let source_role = Node::public_account_group_source(group, &node.account_group_projection(group).unwrap(), &full_source, &executor.own_group_proof()).map(|source| source.role);
                 let sync: Vec<_> = node.device_sync_status().into_iter().map(|status|
                     (status.phase, status.document_phase, status.document_requires_upgrade, status.document_error)).collect();
                 format!("node={label} phase={phase:?} role={role:?} source_role={source_role:?} effects={effects} committed_count={committed_count} effects_local={effects_local} effects_external={effects_external} executor={} runtime_closed={} fanout_sequence={:?} sync={sync:?}", node.user_id() == executor.user_id(), node.runtime_work.is_closed(), node.account_group_fanout_sequence(group))
@@ -2077,6 +2083,7 @@ pub(in crate::node) mod tests {
             .unwrap()
             .get(&status.committed_events[0])
             .unwrap()
+            .unwrap()
             .clone();
         assert_eq!(event.kind, event_kind);
         assert!(
@@ -2091,6 +2098,7 @@ pub(in crate::node) mod tests {
                     .lock()
                     .unwrap()
                     .events(&group)
+                    .unwrap()
                     .iter()
                     .all(|event| event.kind != EventKind::ChannelAccept),
                 "explicit decline must never manufacture acceptance before removing the invitation"
@@ -2098,6 +2106,7 @@ pub(in crate::node) mod tests {
             assert!(
                 owner
                     .account_group_projection(group)
+                    .unwrap()
                     .authority
                     .account_grant(&shared.public().ed25519_pub)
                     .is_none()
@@ -2112,6 +2121,7 @@ pub(in crate::node) mod tests {
                         .lock()
                         .unwrap()
                         .events(&group)
+                        .unwrap()
                         .into_iter()
                         .filter(|event| {
                             event.kind == EventKind::Message
@@ -2148,6 +2158,7 @@ pub(in crate::node) mod tests {
         assert_eq!(
             owner
                 .account_group_projection(group)
+                .unwrap()
                 .authority
                 .is_member(&full_source, &executor.own_group_proof()),
             accepted_after
@@ -2161,6 +2172,7 @@ pub(in crate::node) mod tests {
         assert!(
             !reference
                 .history(group, 100)
+                .unwrap()
                 .iter()
                 .any(|row| row.id == archive),
             "explicit self control must not grant optional archive history"

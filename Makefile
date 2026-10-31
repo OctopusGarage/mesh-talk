@@ -70,7 +70,7 @@ test-timing:
 # (--test-threads=1) to avoid discovery-port / CPU contention between the heavy processes.
 e2e:
 	$(MANAGED_BUILD) nice -n 10 cargo test -p mesh-talk-core --test two_node_cli --test persistent_history --test post_office_offline --test channel_and_file_cli --test bridge_cross_lan -- --ignored --test-threads=1
-	$(MANAGED_BUILD) nice -n 10 cargo test -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
+	$(MANAGED_BUILD) nice -n 10 cargo test -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1
 
 eval-smoke:
 	./scripts/ai-eval-smoke.sh

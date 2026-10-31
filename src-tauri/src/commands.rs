@@ -123,6 +123,12 @@ impl From<String> for CommandError {
     }
 }
 
+impl From<mesh_talk_core::eventlog::LogError> for CommandError {
+    fn from(error: mesh_talk_core::eventlog::LogError) -> Self {
+        mesh_talk_core::node::NodeError::Log(error).into()
+    }
+}
+
 /// Map a node operation failure to the finest kind the core can actually distinguish.
 /// Sends, file ops, channel ops and pairing all surface as `NodeError`, so this is the
 /// single place that drives the user-visible failure reason for those paths.
@@ -2536,6 +2542,7 @@ mod tests {
                                     std::io::ErrorKind::PermissionDenied,
                                 ))
                             })
+                            .and_then(std::convert::identity)
                     },
                 )
                 .await
@@ -2648,6 +2655,7 @@ mod tests {
                             std::io::ErrorKind::PermissionDenied,
                         ))
                     })
+                    .and_then(std::convert::identity)
             },
         )
         .await
@@ -2728,6 +2736,7 @@ mod tests {
                             std::io::ErrorKind::PermissionDenied,
                         ))
                     })
+                    .and_then(std::convert::identity)
             },
         )
         .await

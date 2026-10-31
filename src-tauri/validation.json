@@ -446,7 +446,7 @@
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device’s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
@@ -616,7 +616,10 @@
             "chat_commands::state::tests::",
             "session_store::macos::tests::",
             "notification_presentation_queues_without_waiting_for_the_main_thread_session_lock",
-            "notification_presentation_drops_queued_work_after_session_or_runtime_replacement"
+            "notification_presentation_drops_queued_work_after_session_or_runtime_replacement",
+            "notification_presentation_completion_tracks_actual_execution_and_stale_rejection",
+            "notification_presentation_cancellation_releases_queued_payload_before_execution",
+            "notification_presentation_propagates_enqueue_failure"
           ]
         }
       ],
@@ -660,6 +663,10 @@
           {
             "name": "Runtime replacement awaits prior runtime retirement",
             "reference": "docs/ARCHITECTURE.md"
+          },
+          {
+            "name": "Startup serialization outlives canceled construction and actual blocking captures/results; retired profile handles drop before replacement admission opens. Runtime handoffs retain the original non-cryptographic host local-user label.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
             "name": "Stalled network producers allow observations and unrelated sends while blocking runtime retirement",
@@ -811,12 +818,13 @@
       "paths": [
         "src-tauri/src/settings.rs",
         "src-tauri/src/config_store.rs",
+        "src-tauri/src/history_storage.rs",
         "src-tauri/src/settings/"
       ],
       "rust": [
         {
           "package": "mesh-talk",
-          "filters": ["settings::", "config_store::"]
+          "filters": ["settings::", "config_store::", "history_storage::"]
         }
       ],
       "consumers": ["desktop-chat"],
@@ -849,6 +857,10 @@
           {
             "name": "Every archive retains a fresh salt and original key compatibility; verified restoration installs its supplied key with the new local credentials.",
             "reference": "docs/backup-recovery.md#restore-after-losing-a-device"
+          },
+          {
+            "name": "Export reuses joined retired storage and checks both original host local-user label and canonical profile root before any temporary/archive write; equal mesh account identity never authorizes another local profile. Staged restore/enrollment close every handle and the checked SQL connection before relocation.",
+            "reference": "docs/ARCHITECTURE.md#manual-encrypted-backup-and-recovery"
           },
           {
             "name": "Encrypted credential work retains its own serialization through caller cancellation while session and app-lock authority cover only capture, atomic publication/deletion and final plaintext release.",
@@ -1307,6 +1319,72 @@
       "escalation": [
         "Require source-to-target V4 native relogin, collision and stale-session evidence. Packaged native saved-login authorization must be observed separately from mocks."
       ]
+    },
+    {
+      "id": "desktop-bounded-reception",
+      "paths": [
+        "src-tauri/src/chat_commands/account.rs",
+        "src-tauri/src/reception_host.rs",
+        "src-tauri/src/reception_host/",
+        "src-tauri/src/events.rs",
+        "src-tauri/src/runtime_bootstrap.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "reception_host::",
+            "events::notification_policy_tests::",
+            "runtime_bootstrap::tests::"
+          ]
+        }
+      ],
+      "consumers": ["frontend-chat", "frontend-bounded-reception"],
+      "capability": {
+        "summary": "Bound the actual native-to-WebView reception boundary with one scoped wake and one acknowledged demand page.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Runtime, local user, account and device authority fence every page and ACK; current state/progress use the same coalesced wake.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Notifications begin at launch high-water and coalesce a bounded live window independently of durable unread processing.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Verify actual native IPC stalls, WebView reload, storage failure, app lock and runtime/account replacement; pure gate tests do not establish packaged native memory bounds."
+      ]
+    },
+    {
+      "id": "desktop-selected-reaction-summaries",
+      "paths": [
+        "src-tauri/src/owner_commands/reactions.rs",
+        "frontend/src/store/conversationReactions.ts",
+        "frontend/src/features/chat/ReactionSummaryDialog.tsx"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "owner_commands::reactions::tests::",
+            "owner_commands::tests::registered_reaction_summaries_are_selected_bounded_and_account_owned",
+            "owner_commands::tests::registered_search_rejects_queued_replaced_owner_and_app_lock"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Serve bounded reaction counts for selected visible targets under the captured desktop runtime owner.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Account and runtime replacement reject stale query publication; selected pages preserve certified ownership without materializing author lists.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
     }
   ],
   "prScenarios": [

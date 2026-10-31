@@ -485,8 +485,7 @@ impl DocumentSyncCursor {
             && self.personal_upgrade
             && self.scope.mask() & (1 << AccountDocumentDomain::GroupControl as usize) != 0)
             || self.requires_upgrade
-                && ((policy.history || policy.appearance) && !self.control_upgrade
-                    || policy.history && self.control_upgrade)
+                && (policy.history || policy.appearance && !self.control_upgrade)
             || self.custody_upgrade && policy.history && self.scope.mask() & 64 != 0
             || self.inventory_upgrade && self.scope.mask() & 128 != 0
             || self.group_upgrade

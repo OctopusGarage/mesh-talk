@@ -634,3 +634,7 @@ impl Node {
         Ok(result)
     }
 }
+
+pub(in crate::node) use store::MAX_LOCAL_FRONTIER;
+
+pub(in crate::node) use inventory::MAX_DIRECTORY_IDS;

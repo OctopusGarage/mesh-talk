@@ -464,6 +464,17 @@ impl Node {
         }
         // Serialize durable enrollment with privacy changes. A second request
         // authenticated before the transition cannot enroll under a stale guard.
+        let profile = if access.is_some() {
+            match self.account_profile(&self.account_id()) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    eprintln!("[pairing] profile read failed: {error}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let transition = self.privacy.gate.write().await;
         if !channel.io_admitted() {
             return;
@@ -543,7 +554,7 @@ impl Node {
                 account: resp,
                 access,
                 created_at_ms: self.account.created_at_ms(),
-                profile: self.account_profile(&self.account_id()),
+                profile,
             }
             .send(channel)
             .await
@@ -564,7 +575,7 @@ impl Node {
         if selected.unwrap_or(true) && offered.history {
             let mut total_bytes = 0usize;
             let Ok(records) = self
-                .account_blocking(|node| Ok(node.export_account_backfill()))
+                .account_blocking(|node| node.export_account_backfill())
                 .await
             else {
                 return;
@@ -592,93 +603,100 @@ impl Node {
     /// [`BackfillRecord`]s — for handing to a freshly-linked device. Only entries that
     /// are account `DmEnvelope`s are included (device DMs / channels are skipped). Sent
     /// entries are attributed to our own account; received to the recorded sender.
-    pub(in crate::node) fn export_account_backfill(&self) -> Vec<BackfillRecord> {
-        let my_account = self.account.account_id();
+    pub(in crate::node) fn export_account_backfill(
+        &self,
+    ) -> Result<Vec<BackfillRecord>, NodeError> {
+        let own = self.account_id();
         let mut out = Vec::new();
-        let mut total_bytes = 0usize;
-        // Fixed-width bincode fields plus MTBF1; compute before cloning plaintext.
-        let mut selected = 0usize;
-        let mut remaining = |from_len: usize, plaintext_len: usize| {
-            let encoded_len = 5usize + 32 + 8 + from_len + 8 + 8 + plaintext_len + 32;
-            if selected >= MAX_PAIRING_BACKFILL_RECORDS
-                || total_bytes.saturating_add(encoded_len) > MAX_PAIRING_BACKFILL_BYTES
-            {
-                return false;
-            }
-            total_bytes += encoded_len;
-            selected += 1;
-            true
-        };
-        {
-            let sentlog = self.sentlog.lock().expect("sentlog mutex not poisoned");
-            for conv in sentlog.conversations() {
-                for e in sentlog.entries_ref(&conv) {
-                    if let Some(env) = DmEnvelope::decode(&e.plaintext) {
-                        if self.recipient_expired(&env.body, EventId::new(env.msg_id), e.wall_clock)
-                        {
-                            continue;
-                        }
-                        if env.route.sender_account != my_account
-                            || *super::conversation::account_conversation_id(
-                                &my_account,
-                                &env.route.recipient_account,
-                            )
-                            .as_bytes()
-                                != *conv.as_bytes()
-                        {
-                            continue;
-                        }
-                        if !remaining(my_account.len(), e.plaintext.len()) {
-                            return out;
-                        }
-                        out.push(BackfillRecord {
-                            conv: *conv.as_bytes(),
-                            from: my_account.clone(),
-                            wall_clock: e.wall_clock,
-                            plaintext: e.plaintext.clone(),
-                            event_id: env.msg_id,
-                        });
-                    }
+        let mut bytes = 0usize;
+        for kind in [
+            super::transcript_repository::SENT,
+            super::transcript_repository::RECEIVED,
+        ] {
+            let mut cursor = None;
+            loop {
+                let page = if kind == super::transcript_repository::SENT {
+                    self.sentlog.lock().expect("sent mutex").header_scan_page(
+                        None,
+                        cursor,
+                        super::transcript_repository::TranscriptPageLimit::default(),
+                    )?
+                } else {
+                    self.received
+                        .lock()
+                        .expect("received mutex")
+                        .header_scan_page(
+                            None,
+                            cursor,
+                            super::transcript_repository::TranscriptPageLimit::default(),
+                        )?
+                };
+                if page.rows.is_empty() {
+                    break;
                 }
-            }
-        }
-        {
-            let received = self.received.lock().expect("received mutex not poisoned");
-            for conv in received.conversations() {
-                for e in received.entries_ref(&conv) {
-                    if let Some(envelope) = DmEnvelope::decode(&e.plaintext) {
-                        if self.recipient_expired(&envelope.body, e.event_id, e.wall_clock) {
-                            continue;
-                        }
-                        let other = if envelope.route.sender_account == my_account {
-                            &envelope.route.recipient_account
-                        } else if envelope.route.recipient_account == my_account {
-                            &envelope.route.sender_account
+                for header in page.rows {
+                    cursor = Some(header.ordinal);
+                    if header.logical_id.is_none() {
+                        continue;
+                    }
+                    let cost = 93usize.saturating_add(header.body_bytes).saturating_add(32);
+                    if out.len() >= MAX_PAIRING_BACKFILL_RECORDS
+                        || bytes.saturating_add(cost) > MAX_PAIRING_BACKFILL_BYTES
+                    {
+                        return Ok(out);
+                    }
+                    let (from, wall_clock, plaintext) =
+                        if kind == super::transcript_repository::SENT {
+                            let Some(row) = self
+                                .sentlog
+                                .lock()
+                                .expect("sent mutex")
+                                .row_by_ordinal(header.ordinal)?
+                            else {
+                                continue;
+                            };
+                            (own.clone(), row.wall_clock, row.plaintext)
                         } else {
-                            continue;
+                            let Some(row) = self
+                                .received
+                                .lock()
+                                .expect("received mutex")
+                                .row_by_ordinal(header.ordinal)?
+                            else {
+                                continue;
+                            };
+                            (row.from, row.wall_clock, row.plaintext)
                         };
-                        if envelope.route.sender_account != e.from
-                            || *super::conversation::account_conversation_id(&my_account, other)
-                                .as_bytes()
-                                != *conv.as_bytes()
-                        {
-                            continue;
-                        }
-                        if !remaining(e.from.len(), e.plaintext.len()) {
-                            return out;
-                        }
-                        out.push(BackfillRecord {
-                            conv: *conv.as_bytes(),
-                            from: e.from.clone(),
-                            wall_clock: e.wall_clock,
-                            plaintext: e.plaintext.clone(),
-                            event_id: envelope.msg_id,
-                        });
+                    let Some(env) = DmEnvelope::decode_ref(&plaintext) else {
+                        continue;
+                    };
+                    let other = if env.route.sender_account == own {
+                        env.route.recipient_account
+                    } else if env.route.recipient_account == own {
+                        env.route.sender_account
+                    } else {
+                        continue;
+                    };
+                    if env.route.sender_account != from
+                        || super::conversation::account_conversation_id(&own, other)
+                            != header.conversation
+                        || self.recipient_expired(env.body, EventId::new(env.msg_id), wall_clock)
+                    {
+                        continue;
                     }
+                    let event_id = env.msg_id;
+                    bytes += cost;
+                    out.push(BackfillRecord {
+                        conv: *header.conversation.as_bytes(),
+                        from,
+                        wall_clock,
+                        plaintext,
+                        event_id,
+                    });
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     /// Import backfilled account history into our received store (used by a freshly
@@ -717,7 +735,7 @@ impl Node {
             if self.recipient_expired(&envelope.body, EventId::new(r.event_id), r.wall_clock) {
                 continue;
             }
-            if self.private_dm_message_recalled(other, EventId::new(r.event_id), &r.from) {
+            if self.private_dm_message_recalled(other, EventId::new(r.event_id), &r.from)? {
                 continue;
             }
             let conversation = ConversationId::new(r.conv);
@@ -725,28 +743,24 @@ impl Node {
                 .account_suppression
                 .lock()
                 .expect("account suppression mutex not poisoned")
-                .contains(conversation, EventId::new(envelope.msg_id))
+                .contains(conversation, EventId::new(envelope.msg_id))?
             {
                 continue;
             }
-            let already_sent = self
+            if self
                 .sentlog
                 .lock()
-                .expect("sentlog mutex not poisoned")
-                .entries_ref(&conversation)
-                .iter()
-                .any(|entry| {
-                    DmEnvelope::decode(&entry.plaintext)
-                        .is_some_and(|existing| existing.msg_id == envelope.msg_id)
-                });
-            if already_sent {
+                .expect("sent mutex")
+                .account_entry(&conversation, envelope.msg_id)?
+                .is_some()
+            {
                 continue;
             }
-            let mut received = self.received.lock().expect("received mutex not poisoned");
-            if received.entries_ref(&conversation).iter().any(|entry| {
-                DmEnvelope::decode(&entry.plaintext)
-                    .is_some_and(|existing| existing.msg_id == envelope.msg_id)
-            }) {
+            let mut received = self.received.lock().expect("received mutex");
+            if received
+                .account_entry(&conversation, EventId::new(envelope.msg_id))?
+                .is_some()
+            {
                 continue;
             }
             received

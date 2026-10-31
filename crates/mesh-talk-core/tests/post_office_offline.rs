@@ -210,13 +210,13 @@ fn offline_dm_delivered_via_post_office() {
                 PersistentEventLog::open(&relay_log, "pw"),
             )
         {
-            replicated = sender.all_event_ids().into_iter().find_map(|id| {
-                let event = sender.get(&id)?;
+            replicated = sender.all_event_ids().unwrap().into_iter().find_map(|id| {
+                let event = sender.get(&id).unwrap()?;
                 if event.kind != EventKind::Message || event.author.user_id() != alice_uid {
                     return None;
                 }
-                let outer = mailbox.wrap(event).ok()?;
-                (relay.has(&outer.id) && !relay.has(&id)).then_some(outer.id)
+                let outer = mailbox.wrap(&event).ok()?;
+                (relay.has(&outer.id).unwrap() && !relay.has(&id).unwrap()).then_some(outer.id)
             });
         }
         if replicated.is_some() {
@@ -246,17 +246,17 @@ fn offline_dm_delivered_via_post_office() {
             PersistentEventLog::open(&relay_log, "pw"),
         ) {
             assert_eq!(
-                relay.conversation_len(&group),
+                relay.conversation_len(&group).unwrap(),
                 0,
                 "channel ID stays private"
             );
-            replicated_group = sender.all_event_ids().into_iter().find_map(|id| {
-                let event = sender.get(&id)?;
+            replicated_group = sender.all_event_ids().unwrap().into_iter().find_map(|id| {
+                let event = sender.get(&id).unwrap()?;
                 if event.conversation_id != group || event.kind != EventKind::Message {
                     return None;
                 }
-                let outer = mailbox.wrap(event).ok()?;
-                relay.has(&outer.id).then_some(outer.id)
+                let outer = mailbox.wrap(&event).ok()?;
+                relay.has(&outer.id).unwrap().then_some(outer.id)
             });
         }
         if replicated_group.is_some() {
@@ -293,6 +293,6 @@ fn offline_dm_delivered_via_post_office() {
     drop(bob);
     drop(po);
     let retained = PersistentEventLog::open(&relay_log, "pw").expect("reopen stopped relay store");
-    assert!(retained.has(&replicated));
-    assert!(retained.has(&replicated_group));
+    assert!(retained.has(&replicated).unwrap());
+    assert!(retained.has(&replicated_group).unwrap());
 }

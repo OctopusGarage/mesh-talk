@@ -257,7 +257,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         reference.account_group_access(group_b).unwrap().role,
         AccountGroupRole::Owner
     );
-    assert!(!reference.channel_can_manage(group_b));
+    assert!(!reference.channel_can_manage(group_b).unwrap());
 
     let release = Arc::new(Semaphore::new(0));
     let _release = ReleaseQueuedReads(release.clone());
@@ -949,6 +949,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         .lock()
         .unwrap()
         .get(&result.committed_events[0])
+        .unwrap()
         .unwrap()
         .clone();
     assert!(event.verify_integrity() && event.verify_signature());

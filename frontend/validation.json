@@ -524,13 +524,34 @@
       "id": "frontend-history",
       "paths": [
         "frontend/src/store/conversationHistory.ts",
-        "frontend/src/store/conversationHistory.test.ts"
+        "frontend/src/store/conversationHistory.test.ts",
+        "frontend/src/store/conversationReactions.ts",
+        "frontend/src/store/conversationReactions.test.ts",
+        "frontend/src/features/chat/ReactionSummaryDialog.tsx",
+        "frontend/e2e/reaction-summaries.spec.ts"
       ],
       "frontend": [
         "src/store/conversationHistory.test.ts",
-        "src/lib/readDeadline.test.ts"
+        "src/lib/readDeadline.test.ts",
+        "src/store/conversationReactions.test.ts",
+        "src/store/chat.test.ts",
+        "src/features/chat/MessageBubble.test.ts"
       ],
-      "consumers": ["frontend-chat"]
+      "consumers": ["frontend-chat"],
+      "capability": {
+        "summary": "Select and reconcile owner-scoped history while coalescing automatic invalidations into bounded native read bundles.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "One running automatic bundle and one pending invalidation wait for all original native reads; explicit archive expansion preserves its baseline policy",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Selected reaction queries share one physical native read, retain a bounded summary prefix, and preserve history/read progress while projections are pending.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
     },
     {
       "id": "frontend-outgoing",
@@ -1698,9 +1719,13 @@
         "frontend/src/features/chat/settings/model.test.ts",
         "frontend/src/lib/settingsTranslations.test.ts",
         "frontend/e2e/helpers/settings.ts",
-        "frontend/e2e/settings-categories.spec.ts"
+        "frontend/e2e/settings-categories.spec.ts",
+        "frontend/src/features/chat/settings/HistoryStorageSummary.tsx",
+        "frontend/src/features/chat/settings/HistoryStorageSummary.test.ts",
+        "frontend/e2e/history-storage.spec.ts"
       ],
       "frontend": [
+        "src/features/chat/settings/HistoryStorageSummary.test.ts",
         "src/features/chat/settings/model.test.ts",
         "src/features/chat/settings/useSettingsController.test.ts",
         "src/features/chat/settingsDialogSession.test.ts",
@@ -1823,11 +1848,11 @@
         "src/features/chat/MembersDialog.test.ts"
       ],
       "capability": {
-        "summary": "Remove personal chats and optional history across linked devices without changing other accounts’ membership or copies.",
+        "summary": "Remove personal chats and optional history across linked devices without changing other accounts\u2019 membership or copies.",
         "guide": "docs/help/topics/history.md#delete-a-chat-or-its-history",
         "invariants": [
           {
-            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account’s data.",
+            "name": "Leave cleanup preserves its original choice and waits for exact private cleanup confirmation after public commitment; failed or stale deletion retains the current account\u2019s data.",
             "reference": "docs/help/topics/history.md#delete-a-chat-or-its-history"
           },
           {
@@ -2026,6 +2051,10 @@
           },
           {
             "name": "An image selection drag ending on the backdrop does not close the preview; explicit backdrop clicks, Close and Escape remain available.",
+            "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
+          },
+          {
+            "name": "Only the ordinary enlarged Mac image opts into native selection and context menus; recognized text copy uses current-session admission and the existing confirmation/clear policy. Protected images remain excluded.",
             "reference": "docs/help/topics/send-files.md#copy-text-from-an-image"
           }
         ]
@@ -2256,6 +2285,46 @@
       },
       "escalation": [
         "Run frontend/e2e/forwarding.spec.ts for selection, exact target confirmation, partial retries, pending review and draft preservation. Native account-group admission and encrypted loopback evidence remain required; browser IPC substitutes do not certify linked-device execution."
+      ]
+    },
+    {
+      "id": "frontend-bounded-reception",
+      "paths": [
+        "frontend/src/lib/api/contacts.ts",
+        "frontend/src/store/avatars.ts",
+        "frontend/src/store/avatars.test.ts",
+        "frontend/src/store/receptionDelivery.ts",
+        "frontend/src/store/receptionDelivery.test.ts",
+        "frontend/src/lib/receptionSnapshot.ts",
+        "frontend/src/lib/receptionSnapshot.test.ts",
+        "frontend/src/lib/api/reception.ts",
+        "frontend/src/store/chat.ts",
+        "frontend/src/store/chat.test.ts",
+        "frontend/src/lib/events.ts"
+      ],
+      "frontend": [
+        "src/store/avatars.test.ts",
+        "src/store/receptionDelivery.test.ts",
+        "src/lib/receptionSnapshot.test.ts",
+        "src/store/chat.test.ts",
+        "src/store/reception.test.ts"
+      ],
+      "capability": {
+        "summary": "Consume durable reception work through one scoped demand page and atomically persist existing unread state before acknowledgement.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "A stalled renderer retains one pull and one dirty wake; exact runtime/account/device scope rejects replaced replies.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Cursor and unread/mention/batch state persist atomically before ACK; quota failures retry without replaying applied effects.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      },
+      "escalation": [
+        "Exercise actual Tauri IPC with a stalled renderer, renderer reload, app lock and runtime/account replacement; mocked IPC does not certify the native queue boundary."
       ]
     }
   ],
@@ -2913,6 +2982,19 @@
         "frontend/e2e/forwarding.spec.ts"
       ],
       "browser": ["e2e/forwarding.spec.ts"],
+      "native": ["host"]
+    },
+    {
+      "id": "frontend-selected-reactions-acceptance",
+      "paths": [
+        "frontend/src/store/conversationReactions.ts",
+        "frontend/src/features/chat/ReactionSummaryDialog.tsx",
+        "frontend/src/features/chat/MessageBubble.tsx",
+        "frontend/src/lib/api/chat.ts",
+        "frontend/e2e/reaction-summaries.spec.ts",
+        "src-tauri/src/owner_commands/reactions.rs"
+      ],
+      "browser": ["e2e/reaction-summaries.spec.ts", "e2e/chat.spec.ts"],
       "native": ["host"]
     }
   ]

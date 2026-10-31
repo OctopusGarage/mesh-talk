@@ -74,7 +74,7 @@ impl Node {
             });
         }
         if let Some(reply_to) = request.reply_to
-            && !self.integration_reply_retained(&request.destination, reply_to)
+            && !self.integration_reply_retained(&request.destination, reply_to)?
         {
             return Err(NodeError::InvalidInput(
                 "reply target is not retained within the most recent 500 records per destination history".into(),
@@ -116,7 +116,7 @@ impl Node {
         &self,
         destination: &MessageDestination,
         reply_to: EventId,
-    ) -> bool {
+    ) -> Result<bool, NodeError> {
         const RECENT_RECORDS: usize = 500;
         let conversation = match destination {
             MessageDestination::Account(account) => {
@@ -129,65 +129,79 @@ impl Node {
                 .log
                 .lock()
                 .expect("log lock")
-                .get(&reply_to)
+                .repository()?
+                .header(&reply_to)?
                 .filter(|event| {
-                    event.conversation_id == conversation
-                        && event.author.user_id() == self.user_id()
+                    event.conversation == conversation && event.author.user_id() == self.user_id()
                 })
                 .map(|event| event.seq),
             MessageDestination::Account(_) => None,
         };
-        let sent = self.sentlog.lock().expect("sent lock");
-        let own_retained = sent
-            .entries_ref(&conversation)
-            .iter()
-            .rev()
-            .take(RECENT_RECORDS)
-            .any(|entry| match destination {
-                MessageDestination::Account(_) => DmEnvelope::decode(&entry.plaintext)
-                    .is_some_and(|envelope| EventId::new(envelope.msg_id) == reply_to),
-                MessageDestination::Channel(_) => Some(entry.seq) == channel_seq,
-            });
-        drop(sent);
-        if own_retained {
-            return true;
+        for kind in [1, 2, 3] {
+            let mut before = None;
+            let mut remaining = RECENT_RECORDS;
+            while remaining > 0 {
+                let limit = super::transcript_repository::TranscriptPageLimit::new(
+                    remaining.min(128),
+                    8 * 1024 * 1024,
+                )?;
+                let page = match kind {
+                    1 => self
+                        .sentlog
+                        .lock()
+                        .expect("sent mutex")
+                        .header_reverse_scan_page(&conversation, before, limit)?,
+                    2 => self
+                        .received
+                        .lock()
+                        .expect("received mutex")
+                        .header_reverse_scan_page(&conversation, before, limit)?,
+                    _ => self
+                        .received_files
+                        .lock()
+                        .expect("files mutex")
+                        .header_reverse_scan_page(&conversation, before, limit)?,
+                };
+                remaining -= page.rows.len();
+                for header in page.rows {
+                    let matches = if kind == 1 {
+                        match destination {
+                            MessageDestination::Account(_) => header.logical_id == Some(reply_to),
+                            MessageDestination::Channel(_) => Some(header.sequence) == channel_seq,
+                        }
+                    } else {
+                        let original =
+                            EventId::new(header.key.as_slice().try_into().map_err(|_| {
+                                crate::eventlog::LogError::CorruptFile(
+                                    "invalid reply identity".into(),
+                                )
+                            })?);
+                        let id =
+                            if kind == 2 && matches!(destination, MessageDestination::Account(_)) {
+                                header.logical_id.unwrap_or(original)
+                            } else {
+                                original
+                            };
+                        id == reply_to
+                            && !header.deadline.is_some_and(|deadline| {
+                                self.recipient_metadata_expired(
+                                    deadline,
+                                    original,
+                                    header.wall_clock,
+                                )
+                            })
+                    };
+                    if matches {
+                        return Ok(true);
+                    }
+                }
+                let Some(next) = page.next else {
+                    break;
+                };
+                before = Some(next);
+            }
         }
-        let received = self.received.lock().expect("received lock");
-        let incoming_retained = received
-            .entries_ref(&conversation)
-            .iter()
-            .rev()
-            .take(RECENT_RECORDS)
-            .any(|entry| {
-                let envelope = matches!(destination, MessageDestination::Account(_))
-                    .then(|| DmEnvelope::decode(&entry.plaintext))
-                    .flatten();
-                let id = envelope
-                    .as_ref()
-                    .map_or(entry.event_id, |envelope| EventId::new(envelope.msg_id));
-                let plaintext = envelope
-                    .as_ref()
-                    .map_or(entry.plaintext.as_slice(), |envelope| {
-                        envelope.body.as_slice()
-                    });
-                id == reply_to
-                    && !self.recipient_expired(plaintext, entry.event_id, entry.wall_clock)
-            });
-        drop(received);
-        if incoming_retained {
-            return true;
-        }
-        self.received_files
-            .lock()
-            .expect("file history lock")
-            .entries_ref(&conversation)
-            .iter()
-            .rev()
-            .take(RECENT_RECORDS)
-            .any(|entry| {
-                entry.event_id == reply_to
-                    && !self.recipient_expired(&entry.plaintext, entry.event_id, entry.wall_clock)
-            })
+        Ok(false)
     }
 
     pub fn message_request_status(
@@ -227,7 +241,13 @@ impl Node {
             MessageDestination::Channel(channel) => {
                 let ready = {
                     let mut store = self.delivery.lock().expect("delivery lock");
-                    self.recover_delivery(&mut store).is_ok()
+                    match self.recover_delivery(&mut store) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            log::warn!("accepted channel delivery recovery deferred: {error}");
+                            false
+                        }
+                    }
                 };
                 if !ready {
                     return;
@@ -371,7 +391,7 @@ impl Node {
             let state = book
                 .state(&channel)
                 .ok_or_else(|| NodeError::Channel("unknown channel".into()))?;
-            if !self.channel_identity_is_current(state)
+            if !self.channel_identity_is_current(state)?
                 || state.pending_invite()
                 || state.is_dissolved()
             {
@@ -398,9 +418,11 @@ impl Node {
             NodeError::Authorization("authorization did not execute acceptance".into())
         })?;
         let mut store = self.delivery.lock().expect("delivery lock");
-        if self.recover_delivery(&mut store).is_err() {
-            log::warn!("accepted channel message awaits local recovery");
+        if let Err(error) = self.recover_delivery(&mut store) {
+            log::warn!("accepted channel message awaits local recovery: {error}");
         }
+        drop(store);
+        self.process_channel(channel);
         self.delivery_notify.notify_one();
         Ok(id)
     }
@@ -514,8 +536,8 @@ mod tests {
             before_senders,
         );
         let log = node.log.lock().unwrap();
-        assert_eq!(log.heads(&channel), vec![genesis.id]);
-        assert_eq!(log.events(&channel).len(), 1);
+        assert_eq!(log.heads(&channel).unwrap(), vec![genesis.id]);
+        assert_eq!(log.events(&channel).unwrap().len(), 1);
         assert_eq!(log.prepare(&channel).unwrap().1, u64::MAX);
     }
 }

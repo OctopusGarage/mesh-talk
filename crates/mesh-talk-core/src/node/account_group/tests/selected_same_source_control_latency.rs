@@ -2500,9 +2500,9 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == EventKind::ChannelRename)
-        .cloned()
         .collect::<Vec<_>>();
     release.close();
     resumed_release.close();
@@ -2695,7 +2695,14 @@ async fn run_same_source_receipt(scenario: SameSourceScenario) {
             .unwrap_or_else(|_| panic!("a new selected executor must overtake A's held paired background within its unchanged eight seconds: {b_failure_snapshot:?}; paid_boundary={paid_boundary_evidence:?}; held_tasks={held_abort_counts:?}"));
         assert_eq!(events.len(), 1);
         let other = other.as_ref().unwrap();
-        let event = other.log.lock().unwrap().get(&events[0]).unwrap().clone();
+        let event = other
+            .log
+            .lock()
+            .unwrap()
+            .get(&events[0])
+            .unwrap()
+            .unwrap()
+            .clone();
         assert!(event.verify_integrity() && event.verify_signature());
         assert_eq!(
             event.author.ed25519_pub(),

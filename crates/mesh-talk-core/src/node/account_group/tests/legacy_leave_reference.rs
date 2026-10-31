@@ -89,9 +89,9 @@ async fn reference_only_legacy_account_leave_uses_original_source_over_noise_wit
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == EventKind::ChannelLeave)
-        .cloned()
         .collect::<Vec<_>>();
     assert_eq!(leaves.len(), 1);
     assert_eq!(

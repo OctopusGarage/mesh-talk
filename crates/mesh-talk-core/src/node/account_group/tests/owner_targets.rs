@@ -51,6 +51,7 @@ async fn account_invitation_runs_in_existing_data_workers_and_reuses_its_origina
     let group = fixture.group;
     let old_grant = owner
         .account_group_projection(group)
+        .unwrap()
         .authority
         .account_grant(&target.account.public().ed25519_pub)
         .unwrap()
@@ -94,14 +95,19 @@ async fn account_invitation_runs_in_existing_data_workers_and_reuses_its_origina
     .expect("the existing data worker must commit the exact original invitation");
     assert!(status.primary_event.is_none());
     assert_eq!(status.committed_events.len(), 2);
-    let projection = owner.account_group_projection(group);
+    let projection = owner.account_group_projection(group).unwrap();
     let grant = projection
         .authority
         .account_grant(&target.account.public().ed25519_pub)
         .unwrap();
     assert!(grant.pending);
     assert_ne!(grant.id(), Some(old_grant));
-    let snapshot = owner.log.lock().unwrap().fingerprint_and_len(&group);
+    let snapshot = owner
+        .log
+        .lock()
+        .unwrap()
+        .fingerprint_and_len(&group)
+        .unwrap();
     assert_eq!(
         owner
             .submit_account_group_operation(&account, id, group, operation)
@@ -109,7 +115,12 @@ async fn account_invitation_runs_in_existing_data_workers_and_reuses_its_origina
         status
     );
     assert_eq!(
-        owner.log.lock().unwrap().fingerprint_and_len(&group),
+        owner
+            .log
+            .lock()
+            .unwrap()
+            .fingerprint_and_len(&group)
+            .unwrap(),
         snapshot
     );
 }
@@ -132,6 +143,7 @@ async fn retired_source_cannot_allocate_an_admitted_account_control() {
         .unwrap();
     let request = owner
         .operation_projection(fixture.group)
+        .unwrap()
         .requests
         .into_iter()
         .find(|request| request.reference.id == id)
@@ -141,7 +153,8 @@ async fn retired_source_cannot_allocate_an_admitted_account_control() {
         .log
         .lock()
         .unwrap()
-        .fingerprint_and_len(&fixture.group);
+        .fingerprint_and_len(&fixture.group)
+        .unwrap();
     owner.runtime_work.close();
     owner.maintain_account_group_operation_effects();
     assert_eq!(
@@ -149,7 +162,8 @@ async fn retired_source_cannot_allocate_an_admitted_account_control() {
             .log
             .lock()
             .unwrap()
-            .fingerprint_and_len(&fixture.group),
+            .fingerprint_and_len(&fixture.group)
+            .unwrap(),
         before,
         "retirement must close effect allocation after asynchronous source preparation"
     );
@@ -181,6 +195,7 @@ async fn unchanged_source_admission_preserves_original_journal_revision() {
         .unwrap();
     let request = owner
         .operation_projection(fixture.group)
+        .unwrap()
         .requests
         .into_iter()
         .find(|request| request.reference.id == id)
@@ -276,6 +291,7 @@ async fn fixture_with_owner_sibling(modern: bool, sibling: bool) -> Fixture {
             owner.maintain_account_channels(&mut work).await;
             if owner
                 .account_group_projection(group)
+                .unwrap()
                 .authority
                 .current_event()
                 .is_some()
@@ -283,7 +299,7 @@ async fn fixture_with_owner_sibling(modern: bool, sibling: bool) -> Fixture {
                 break;
             }
         }
-        let projection = owner.account_group_projection(group);
+        let projection = owner.account_group_projection(group).unwrap();
         assert!(
             projection.authority.current_event().is_some(),
             "real capability migration prerequisite"
@@ -320,14 +336,14 @@ fn relevant_events(owner: &Node, group: ConversationId, kind: EventKind) -> Vec<
         .lock()
         .unwrap()
         .events(&group)
+        .unwrap()
         .into_iter()
         .filter(|event| event.kind == kind)
-        .cloned()
         .collect()
 }
 
 fn accepted(owner: &Node, group: ConversationId) -> Vec<PublicIdentity> {
-    let projection = owner.account_group_projection(group);
+    let projection = owner.account_group_projection(group).unwrap();
     let state = projection
         .state
         .as_ref()
@@ -426,7 +442,7 @@ async fn remove_account(modern: bool) {
     let owner = &fixture.nodes[0];
     let target = &fixture.nodes[1];
     let group = fixture.group;
-    let before = owner.account_group_projection(group);
+    let before = owner.account_group_projection(group).unwrap();
     let before_epoch = before.state.as_ref().unwrap().epoch();
     let target_pub = target.account.public().ed25519_pub;
     let other_grants: Vec<_> = before
@@ -447,7 +463,7 @@ async fn remove_account(modern: bool) {
         EventKind::MembershipChange
     };
     let (status, effect, baseline) = commit(owner, group, operation.clone(), kind).await;
-    let after = owner.account_group_projection(group);
+    let after = owner.account_group_projection(group).unwrap();
     let members = accepted(owner, group);
     assert_eq!(members.len(), 2);
     assert!(members.contains(&owner.identity.public()));
@@ -475,7 +491,7 @@ async fn transfer_ownership(modern: bool) {
     let owner = &fixture.nodes[0];
     let target = &fixture.nodes[1];
     let group = fixture.group;
-    let before = owner.account_group_projection(group);
+    let before = owner.account_group_projection(group).unwrap();
     let before_epoch = before.state.as_ref().unwrap().epoch();
     let members = accepted(owner, group);
     let candidates: Vec<_> = members
@@ -503,7 +519,7 @@ async fn transfer_ownership(modern: bool) {
         EventKind::ChannelOwnerTransfer
     };
     let (status, effect, baseline) = commit(owner, group, operation.clone(), kind).await;
-    let after = owner.account_group_projection(group);
+    let after = owner.account_group_projection(group).unwrap();
     assert_eq!(accepted(owner, group), members);
     assert_eq!(after.state.as_ref().unwrap().epoch(), before_epoch);
     assert_eq!(
@@ -598,14 +614,18 @@ async fn private_ahead_owner_fixture() -> Fixture {
     let b = &fixture.nodes[4];
     let group = fixture.group;
     public_group_from(b, a, fixture.addresses[0], group).await;
-    assert!(b.channel_can_manage(group));
+    assert!(b.channel_can_manage(group).unwrap());
     a.publish_account_group_access(&mut None);
     b.publish_account_group_access(&mut None);
     private_control_from(a, b).await;
     private_control_from(b, a).await;
     // The same-account sibling has the genuine current public authority, while
     // the requester deliberately retains its prior public cut.
-    let old_authority = a.account_group_projection(group).authority.current_event();
+    let old_authority = a
+        .account_group_projection(group)
+        .unwrap()
+        .authority
+        .current_event();
     {
         let _membership = b.channel_membership_commit.lock().unwrap();
         assert!(matches!(
@@ -614,12 +634,19 @@ async fn private_ahead_owner_fixture() -> Fixture {
             crate::node::channel_account_controls::AccountChannelMutation::Changed(_)
         ));
     }
-    let new_authority = b.account_group_projection(group).authority.current_event();
+    let new_authority = b
+        .account_group_projection(group)
+        .unwrap()
+        .authority
+        .current_event();
     assert_ne!(new_authority, old_authority);
     b.publish_account_group_access(&mut None);
     private_control_from(a, b).await;
     assert_eq!(
-        a.account_group_projection(group).authority.current_event(),
+        a.account_group_projection(group)
+            .unwrap()
+            .authority
+            .current_event(),
         old_authority,
         "the private observation must precede its public authority event"
     );
@@ -695,6 +722,7 @@ async fn ready_remote_owner_overtakes_a_reconciling_local_owner() {
     public_group_from(a, b, fixture.addresses[4], group).await;
     assert!(
         a.account_group_projection(group)
+            .unwrap()
             .authority
             .account_grant(&fixture.nodes[1].account.public().ed25519_pub)
             .is_none()
@@ -754,6 +782,7 @@ async fn reconciling_local_owner_without_a_ready_peer_retains_the_original_inten
     assert_eq!(completed.committed_events.len(), 1);
     assert!(
         a.account_group_projection(fixture.group)
+            .unwrap()
             .authority
             .account_grant(&fixture.nodes[1].account.public().ed25519_pub)
             .is_none()

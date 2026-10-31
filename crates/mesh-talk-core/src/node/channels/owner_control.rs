@@ -356,7 +356,7 @@ impl Node {
             .map_err(NodeError::Log)?;
         let prepared = {
             let log = self.log.lock().expect("log mutex");
-            let projection = ChannelBook::project_membership(channel, &log.events(&channel));
+            let projection = ChannelBook::project_membership(channel, &log.events(&channel)?);
             let prepared =
                 self.prepare_owner_control(channel, &log, &projection, input, &proofs)?;
             log.sync().map_err(NodeError::Log)?;
@@ -377,7 +377,7 @@ impl Node {
             .map_err(NodeError::Log)?;
         drop(delivery);
         self.process_channel(channel);
-        let projection = self.account_group_projection(channel);
+        let projection = self.account_group_projection(channel)?;
         if !projection.authorized.contains(&id) {
             return Err(NodeError::Channel(
                 "channel owner control was not admitted".into(),
@@ -469,7 +469,7 @@ impl Node {
             projection,
             input,
             &witness,
-            super::super::join_history::policy(&log.events(&group)),
+            super::super::join_history::policy(&log.events(&group)?.iter().collect::<Vec<_>>()),
         )?
         else {
             return Ok(None);

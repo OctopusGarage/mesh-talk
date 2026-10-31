@@ -1,3 +1,12 @@
+import {
+  reception as receptionApi,
+  type HostReception,
+} from "@/lib/api/reception";
+import { createReceptionDelivery } from "./receptionDelivery";
+import {
+  loadReceptionSnapshot,
+  saveReceptionSnapshot,
+} from "@/lib/receptionSnapshot";
 import type { PersonalConversationState } from "@/lib/types";
 import { useDrafts } from "./drafts";
 import { usePacks } from "./packs";
@@ -46,6 +55,7 @@ import {
   applyChatCallSignal,
   applyChatFileProgress,
   applyChatProfile,
+  finishChatAvatarIdentity,
   resetChatFileAvailability,
   resetChatFiles,
   stopChatCalls,
@@ -72,6 +82,7 @@ import {
   type ConversationHistoryState,
   emptyConversationHistory,
   reloadConversation,
+  requestConversationReload,
   revealConversationIdentity,
   scanConversationHistory,
 } from "./conversationHistory";
@@ -93,6 +104,8 @@ import type {
   FileReceivedEvent,
   PeerInfo,
   ReactionInfo,
+  ReceptionCursor,
+  ReceptionScope,
 } from "@/lib/types";
 
 import type {
@@ -147,16 +160,28 @@ function applyVerifiedIdentity(
     account_id: string;
     device_id: string;
     history_revision?: number;
+    supports_bounded_delivery?: boolean;
+    runtime_id?: string;
   },
   ready: boolean,
 ) {
   const owner = identity.owner;
   const acct = identity.account_id;
-  const persistedUnread = loadUnread(owner, acct);
-  const persistedPendingUnread = loadPendingUnread(owner, acct);
+  const committed =
+    identity.supports_bounded_delivery && identity.runtime_id
+      ? loadReceptionSnapshot({
+          owner,
+          account_id: acct,
+          device_id: identity.device_id,
+          runtime_id: identity.runtime_id,
+        })
+      : null;
+  const persistedUnread = committed?.unread ?? loadUnread(owner, acct);
+  const persistedPendingUnread =
+    committed?.pendingUnknownUnread ?? loadPendingUnread(owner, acct);
   const persistedReception = emptyReception(
-    loadReceptionLedger(owner, acct),
-    loadUnreadOverflow(owner, acct),
+    committed?.ledger ?? loadReceptionLedger(owner, acct),
+    committed?.overflowUnread ?? loadUnreadOverflow(owner, acct),
   );
   set((state) => {
     const sameScope = state.unreadOwner === owner && state.myAccountId === acct;
@@ -193,7 +218,10 @@ function applyVerifiedIdentity(
             ...reception,
             accountSeen: reception.accountSeen,
             historyBaselines: Object.keys(persistedReception.ledger),
-            historyFullBaselines: loadFullHistoryBaselines(owner, acct),
+            historyFullBaselines:
+              committed?.historyFullBaselines ??
+              loadFullHistoryBaselines(owner, acct),
+            ...(committed ? { reception: committed.reception } : {}),
           }
         : {}),
       identityEpoch: invalidateScope
@@ -205,6 +233,9 @@ function applyVerifiedIdentity(
       unread,
       pendingUnknownUnread,
       unreadOwner: owner,
+      deliveryRuntime: identity.supports_bounded_delivery
+        ? (identity.runtime_id ?? null)
+        : null,
       ready,
       bootFailed: false,
     };
@@ -273,7 +304,11 @@ async function pollUntilReady(
       applyVerifiedIdentity(set, identity, true);
       const acct = identity.account_id;
       setPushStateSupport(identity.supports_push_state ? owner : null);
-      syncChatAvatarIdentity(acct, () => !isCancelled());
+      syncChatAvatarIdentity(
+        acct,
+        () => !isCancelled(),
+        !!identity.supports_bounded_delivery,
+      );
       // Identity completes boot. Roster/history hydration owns its separate
       // bounded lane and must not extend the startup deadline or hold bootBusy.
       void get().refreshRoster();
@@ -365,12 +400,12 @@ function deletedChatState(state: ChatState, key: string): Partial<ChatState> {
 
 // --- per-conversation API dispatch ----------------------------------------
 
-/** Native account ownership is authoritative; older hosts retain their existing identifier convention. */
+/** Native account ownership is authoritative, including certified sibling devices. */
 export function reactionFromMe(
   reaction: ReactionInfo,
-  selfId: string,
+  _selfId?: string,
 ): boolean {
-  return reaction.from_me ?? reaction.who.includes(selfId);
+  return reaction.from_me;
 }
 /** Whether this conversation is a channel (drives the `is_channel` flag on the lifecycle
  * commands; 1:1 chats are account-addressed). */
@@ -382,6 +417,7 @@ export interface ChatState
   bootRequest: number;
   /** Native startup ticket; distinct from the frontend run and account identity. */
   startupId: string | null;
+  deliveryRuntime: string | null;
   rosterRequest: number;
   favoritesRequest: number;
   ready: boolean;
@@ -462,7 +498,11 @@ export interface ChatState
     onAccepted?: () => void,
   ) => Promise<"refused" | "failed" | "accepted">;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
-  toggleReaction: (target: string, emoji: string) => Promise<void>;
+  toggleReaction: (
+    target: string,
+    emoji: string,
+    remove?: boolean,
+  ) => Promise<void>;
   /** Delete one message from this device only (local). */
   deleteMessage: (target: string) => Promise<void>;
   /** Recall (unsend) one of my own messages within the 2-minute window. */
@@ -510,6 +550,7 @@ function emptySessionData() {
     bootBusy: false,
     bootRequest: 0,
     startupId: null,
+    deliveryRuntime: null,
     statusBusy: false,
     groupOperations: {},
     groupOperationIssue: undefined,
@@ -664,7 +705,9 @@ async function refreshRosterSnapshot(
       return;
     if (
       identity.device_id !== get().myId ||
-      identity.account_id !== get().myAccountId
+      identity.account_id !== get().myAccountId ||
+      (identity.runtime_id !== undefined &&
+        identity.runtime_id !== get().deliveryRuntime)
     ) {
       // Runtime/account replacement can happen without a host logout. Invalidate
       // old in-flight conversation work; the run's owned ticker performs fresh boot.
@@ -1020,6 +1063,163 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         set({ bootFailed: true });
     })();
 
+    let delivery: ReturnType<
+      typeof createReceptionDelivery<HostReception>
+    > | null = null;
+    let deliveryRuntime: string | null = null;
+    let receiptCursor: ReceptionCursor | null = null;
+    let receiptScope: ReceptionScope | null = null;
+    let receiptPending = false;
+    const snapshot = (cursor: ReceptionCursor) => {
+      const state = get();
+      return {
+        cursor,
+        ledger: state.ledger,
+        overflowUnread: state.overflowUnread,
+        unread: state.unread,
+        pendingUnknownUnread: state.pendingUnknownUnread,
+        historyFullBaselines: state.historyFullBaselines,
+        reception: state.reception,
+      };
+    };
+    const failReception = (error: unknown) => {
+      const message = `Couldn't save received messages: ${errorMessage(error)}`;
+      if (lease.current() && get().error !== message) set({ error: message });
+    };
+    const synchronizeDelivery = () => {
+      const state = get();
+      const runtime = state.ready ? state.deliveryRuntime : null;
+      if (runtime === deliveryRuntime) return;
+      delivery?.stop();
+      delivery = null;
+      deliveryRuntime = runtime;
+      receiptCursor = null;
+      receiptScope = null;
+      receiptPending = false;
+      if (!runtime || !lease.current() || !lease.owner) return;
+      const scope: ReceptionScope = {
+        owner: lease.owner,
+        account_id: state.myAccountId,
+        device_id: state.myId,
+        runtime_id: runtime,
+      };
+      try {
+        receiptCursor = loadReceptionSnapshot(scope)?.cursor ?? null;
+        receiptScope = scope;
+        let firstPull = true;
+        let avatarIdentityLoaded = false;
+        delivery = createReceptionDelivery({
+          scope,
+          cursor: receiptCursor,
+          current: () =>
+            lease.current() &&
+            get().ready &&
+            get().deliveryRuntime === runtime &&
+            get().myAccountId === scope.account_id &&
+            get().myId === scope.device_id,
+          pull: async (after, through) => {
+            try {
+              const page = await receptionApi.pull(
+                scope,
+                after,
+                through,
+                firstPull,
+              );
+              firstPull = false;
+              return page;
+            } catch (error) {
+              // The host may have reserved a page whose IPC reply was lost.
+              // No page was applied, so replace that reservation on retry.
+              firstPull = true;
+              throw error;
+            }
+          },
+          apply: (page) => {
+            receiptPending = true;
+            if (receiptCursor === null) {
+              // Establish recovery state before the first effects can touch
+              // older per-field persistence, including legacy rows without IDs.
+              saveReceptionSnapshot(scope, snapshot(page.after));
+              receiptCursor = page.after;
+            }
+            for (const receipt of page.receipts) {
+              switch (receipt.kind) {
+                case "dm":
+                  get_handleDm(set, get, receipt.event);
+                  break;
+                case "channel":
+                  get_handleChannel(set, get, receipt.event);
+                  break;
+                case "file":
+                  get_handleFile(set, get, receipt.event);
+                  break;
+                case "profile":
+                  applyChatProfile(receipt.event);
+                  break;
+                case "call":
+                  applyChatCallSignal(receipt.event);
+                  break;
+                case "progress":
+                  applyChatFileProgress(receipt.event);
+                  break;
+                case "state":
+                  void get().refreshRoster();
+                  void get().refreshChannels();
+                  void get().refreshStatuses(undefined, true);
+                  notifySyncInvalidation({ owner: scope.owner, kind: "state" });
+                  break;
+              }
+            }
+            if (page.complete && !avatarIdentityLoaded) {
+              avatarIdentityLoaded = true;
+              finishChatAvatarIdentity(
+                () =>
+                  lease.current() &&
+                  get().deliveryRuntime === runtime &&
+                  get().myAccountId === scope.account_id &&
+                  get().myId === scope.device_id,
+              );
+            }
+          },
+          persist: (cursor) => {
+            saveReceptionSnapshot(scope, snapshot(cursor));
+            receiptCursor = cursor;
+            receiptPending = false;
+          },
+          acknowledge: (page) => receptionApi.acknowledge(scope, page),
+          failed: failReception,
+        });
+        void delivery.wake();
+      } catch (error) {
+        failReception(error);
+      }
+    };
+    const stopReceptionObservation = useChat.subscribe((state, previous) => {
+      synchronizeDelivery();
+      if (
+        receiptScope &&
+        receiptCursor &&
+        !receiptPending &&
+        lease.current() &&
+        (state.ledger !== previous.ledger ||
+          state.overflowUnread !== previous.overflowUnread ||
+          state.unread !== previous.unread ||
+          state.pendingUnknownUnread !== previous.pendingUnknownUnread ||
+          state.historyFullBaselines !== previous.historyFullBaselines ||
+          state.reception !== previous.reception)
+      ) {
+        try {
+          saveReceptionSnapshot(receiptScope, snapshot(receiptCursor));
+        } catch (error) {
+          failReception(error);
+        }
+      }
+    });
+    const wakeReception = () => {
+      synchronizeDelivery();
+      void delivery?.wake();
+    };
+    synchronizeDelivery();
     const expiryWallStart = Date.now();
     const expiryMonotonicStart = performance.now();
     const expire = () => {
@@ -1044,14 +1244,24 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         notifyIncomingFileDismissed(file.fileConv);
     };
     const expiry = setInterval(expire, 1000);
+    const resumeReception = () => {
+      if (
+        typeof document === "undefined" ||
+        document.visibilityState !== "hidden"
+      )
+        wakeReception();
+    };
     const flushReceipts = () => flushReceptionPersistence();
-    if (typeof window !== "undefined")
+    if (typeof window !== "undefined") {
       window.addEventListener("pagehide", flushReceipts);
-    if (typeof document !== "undefined")
+      window.addEventListener("focus", expire);
+      window.addEventListener("focus", resumeReception);
+    }
+    if (typeof document !== "undefined") {
       document.addEventListener?.("visibilitychange", flushReceipts);
-    if (typeof window !== "undefined") window.addEventListener("focus", expire);
-    if (typeof document !== "undefined")
       document.addEventListener?.("visibilitychange", expire);
+      document.addEventListener?.("visibilitychange", resumeReception);
+    }
 
     let rosterBusy = false;
     let rosterDirty = false;
@@ -1081,6 +1291,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         const now = performance.now();
         if (!supportsPushState(lease.owner) || now >= nextRosterFallback) {
           nextRosterFallback = now + 30000;
+          wakeReception();
           void refreshRoster();
         }
         if (!supportsPushState(lease.owner) || now >= nextStatusFallback) {
@@ -1104,6 +1315,16 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     }, 2000);
 
     const unlisten = subscribeNodeEvents({
+      onReceptionWake: (scope) => {
+        if (
+          lease.current() &&
+          scope.owner === lease.owner &&
+          scope.account_id === get().myAccountId &&
+          scope.device_id === get().myId &&
+          scope.runtime_id === get().deliveryRuntime
+        )
+          wakeReception();
+      },
       onStateChanged: (e) => {
         const state = get();
         if (
@@ -1135,7 +1356,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           return;
         // Outgoing delegated sends do not count as inbound notifications. Fetch
         // their content through the same guarded history path as ordinary sends.
-        void state.reload();
+        void requestConversationReload(rawSet, get);
       },
 
       onDm: (e) => {
@@ -1188,6 +1409,8 @@ export const useChat = create<ChatState>((rawSet, get) => ({
 
     return () => {
       cancelled = true;
+      delivery?.stop();
+      stopReceptionObservation();
       flushReceptionPersistence();
       if (typeof window !== "undefined")
         window.removeEventListener("pagehide", flushReceipts);
@@ -1195,10 +1418,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
         document.removeEventListener?.("visibilitychange", flushReceipts);
       clearInterval(roster);
       clearInterval(expiry);
-      if (typeof window !== "undefined")
+      if (typeof window !== "undefined") {
         window.removeEventListener("focus", expire);
-      if (typeof document !== "undefined")
+        window.removeEventListener("focus", resumeReception);
+      }
+      if (typeof document !== "undefined") {
         document.removeEventListener?.("visibilitychange", expire);
+        document.removeEventListener?.("visibilitychange", resumeReception);
+      }
       unlisten();
       if (get().runEpoch === lease.run) {
         stopChatCalls();
@@ -1588,7 +1815,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     });
   },
 
-  toggleReaction: async (target, emoji) => {
+  toggleReaction: async (target, emoji, remove) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
@@ -1596,7 +1823,6 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!c) return;
     const key = convKey(c);
     // Native channel ownership includes certified siblings, even when they are offline.
-    // Older hosts use account IDs for DMs and physical device IDs for channels.
     const selfId = c.kind === "account" ? get().myAccountId : get().myId;
     const mine = (get().reactions[key] ?? []).find(
       (r) =>
@@ -1608,14 +1834,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           kind: "react",
           target,
           emoji,
-          remove: Boolean(mine),
+          remove: remove ?? Boolean(mine),
         });
         if (outcome.kind === "not_admitted") throw outcome.error;
         if (outcome.kind === "capacity")
           throw new Error("Too many pending group actions.");
         return;
       }
-      await chat.reactAccount(c.id, target, emoji, Boolean(mine));
+      await chat.reactAccount(c.id, target, emoji, remove ?? Boolean(mine));
       // Only reload if still on this conversation (matches send/sendFile).
       if (lease.current() && get().active && convKey(get().active!) === key)
         await get().reload();
@@ -1961,7 +2187,7 @@ function get_handleDm(set: Set, get: Get, e: DmReceivedEvent) {
     // Compatibility for event providers predating logical DM identities.
     bump(set, key, isActive && isConversationVisible());
   }
-  if (isActive) void get().reload();
+  if (isActive) void requestConversationReload(set, get);
 }
 
 function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
@@ -2002,7 +2228,7 @@ function get_handleChannel(set: Set, get: Get, e: ChannelMessageEvent) {
       ),
     );
   } else if (!e.own_device) bump(set, key, isActive && isConversationVisible());
-  if (isActive) void get().reload();
+  if (isActive) void requestConversationReload(set, get);
 }
 
 function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
@@ -2070,7 +2296,7 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
   }
   const isActive = get().active !== null && convKey(get().active!) === key;
   if (!e.event_id && !own) bump(set, key, isActive && isConversationVisible());
-  if (isActive && !knownIdentity) void get().reload();
+  if (isActive && !knownIdentity) void requestConversationReload(set, get);
 }
 
 useChat.subscribe((state, previous) => {

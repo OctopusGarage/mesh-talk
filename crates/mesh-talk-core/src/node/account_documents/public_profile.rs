@@ -20,22 +20,27 @@ impl Node {
     /// Republish the bounded canonical signed store without creating new public
     /// signatures, importing private overrides, or borrowing a sibling's head.
     pub(in crate::node) fn publish_public_profile_documents(&self) -> Result<(), NodeError> {
-        let accounts = self
-            .profiles
-            .lock()
-            .expect("profiles mutex not poisoned")
-            .account_ids();
-        for account in accounts {
-            if let Err(error) = self.publish_public_profile_document(&account) {
-                log::debug!("contact profile publication deferred: {error}");
+        let mut after = None;
+        loop {
+            let accounts = self
+                .profiles
+                .lock()
+                .expect("profiles mutex")
+                .names_page(after.as_deref())?;
+            if accounts.is_empty() {
+                break;
+            }
+            for (account, _) in accounts {
+                after = Some(account.clone());
+                if let Err(error) = self.publish_public_profile_document(&account) {
+                    log::debug!("contact profile publication deferred: {error}");
+                }
             }
         }
         Ok(())
     }
 
-    /// Periodic repair touches at most sixteen current profiles, with no cloned
-    /// avatar snapshot. Advance even after an error so one exhausted key cannot
-    /// starve other contacts; the next sweep retries every deferred publication.
+    /// Repair at most sixteen selected profiles per turn, without avatar snapshots.
     pub(in crate::node) fn publish_public_profile_documents_page(
         &self,
         after: &mut Option<String>,
@@ -43,17 +48,21 @@ impl Node {
         let accounts = self
             .profiles
             .lock()
-            .expect("profiles mutex not poisoned")
-            .account_ids();
-        let start = after
-            .as_ref()
-            .map_or(0, |cursor| accounts.partition_point(|id| id <= cursor));
-        let end = (start + 16).min(accounts.len());
-        for account in &accounts[start..end] {
-            *after = Some(account.clone());
-            self.publish_public_profile_document(account)?;
+            .expect("profiles mutex")
+            .names_page(after.as_deref())?;
+        if accounts.is_empty() {
+            *after = None;
+            return Ok(());
         }
-        if end == accounts.len() {
+        // names_page selects up to 128 headers without body or byte-budget
+        // truncation. A seventeenth header therefore keeps this cursor open;
+        // exactly sixteen remaining headers completes the pass.
+        let exhausted = accounts.len() <= 16;
+        for (account, _) in accounts.into_iter().take(16) {
+            *after = Some(account.clone());
+            self.publish_public_profile_document(&account)?;
+        }
+        if exhausted {
             *after = None;
         }
         Ok(())
@@ -72,7 +81,7 @@ impl Node {
         let changed = {
             // Projection releases document locks before entering the profile owner.
             let profiles = self.profiles.lock().expect("profiles mutex not poisoned");
-            let Some(profile) = profiles.get(account) else {
+            let Some(profile) = profiles.get(account)? else {
                 return Ok(());
             };
             let mut documents = self.account_documents.lock().expect("documents mutex");
@@ -262,6 +271,39 @@ mod tests {
     }
 
     #[test]
+    fn periodic_publication_finishes_an_exact_sixteen_profile_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Account::generate();
+        let node = super::super::tests::node(dir.path(), &owner);
+        for _ in 0..16 {
+            let foreign = Account::generate();
+            node.profiles
+                .lock()
+                .unwrap()
+                .record(foreign_profile(&foreign, 10, Some(b"photo")))
+                .unwrap();
+        }
+        let mut after = None;
+        node.publish_public_profile_documents_page(&mut after)
+            .unwrap();
+        assert!(after.is_none(), "a full final page completes the pass");
+        let complete = node
+            .account_documents(AccountDocumentDomain::PublicProfile, None, 64)
+            .unwrap();
+        assert_eq!(complete.items.len(), 16);
+        node.publish_public_profile_documents_page(&mut after)
+            .unwrap();
+        assert!(after.is_none());
+        assert_eq!(
+            node.account_documents(AccountDocumentDomain::PublicProfile, None, 64)
+                .unwrap()
+                .items,
+            complete.items,
+            "starting the next pass must preserve existing signed document heads"
+        );
+    }
+
+    #[test]
     fn sibling_snapshot_preserves_foreign_signature_clear_and_restart_without_overrides() {
         let dir = tempfile::tempdir().unwrap();
         let owner = Account::generate();
@@ -292,13 +334,16 @@ mod tests {
         copy_documents(&source, &receiver);
         receiver.project_public_profile_documents().unwrap();
         assert_eq!(
-            receiver.account_profile(&foreign.account_id()),
+            receiver.account_profile(&foreign.account_id()).unwrap(),
             Some(photo.clone())
         );
-        assert_eq!(receiver.peer_avatar(&foreign.account_id()), photo.avatar);
+        assert_eq!(
+            receiver.peer_avatar(&foreign.account_id()).unwrap(),
+            photo.avatar
+        );
         for profile in &others {
             assert_eq!(
-                receiver.account_profile(&profile.account_id()),
+                receiver.account_profile(&profile.account_id()).unwrap(),
                 Some(profile.clone())
             );
         }
@@ -322,10 +367,10 @@ mod tests {
         copy_documents(&stale, &receiver);
         receiver.project_public_profile_documents().unwrap();
         assert_eq!(
-            receiver.account_profile(&foreign.account_id()),
+            receiver.account_profile(&foreign.account_id()).unwrap(),
             Some(clear.clone())
         );
-        assert_eq!(receiver.peer_avatar(&foreign.account_id()), None);
+        assert_eq!(receiver.peer_avatar(&foreign.account_id()).unwrap(), None);
         let (device_ed25519, device_x25519) = receiver.identity.secret_bytes();
         drop(receiver);
         let reopened = {
@@ -350,10 +395,13 @@ mod tests {
         };
         reopened.project_public_profile_documents().unwrap();
         reopened.project_public_profile_documents().unwrap();
-        assert_eq!(reopened.account_profile(&foreign.account_id()), Some(clear));
+        assert_eq!(
+            reopened.account_profile(&foreign.account_id()).unwrap(),
+            Some(clear)
+        );
         for profile in others {
             assert_eq!(
-                reopened.account_profile(&profile.account_id()),
+                reopened.account_profile(&profile.account_id()).unwrap(),
                 Some(profile)
             );
         }
@@ -369,7 +417,12 @@ mod tests {
         source
             .receive_account_profile(&foreign_profile(&source.account, 10, Some(b"own")))
             .unwrap();
-        assert!(source.account_profile(&source.account_id()).is_some());
+        assert!(
+            source
+                .account_profile(&source.account_id())
+                .unwrap()
+                .is_some()
+        );
         let profile = foreign_profile(&foreign, 10, Some(b"contact"));
         source.receive_account_profile(&profile).unwrap();
         source.publish_public_profile_documents().unwrap();
@@ -386,7 +439,12 @@ mod tests {
             .set_device_sync_category(SyncCategory::Profile, false)
             .unwrap();
         receiver.project_public_profile_documents().unwrap();
-        assert!(receiver.account_profile(&foreign.account_id()).is_none());
+        assert!(
+            receiver
+                .account_profile(&foreign.account_id())
+                .unwrap()
+                .is_none()
+        );
         // All sources may now be offline; the category setter must project its
         // already retained signed snapshot without an explicit repair call.
         drop(source);
@@ -394,7 +452,7 @@ mod tests {
             .set_device_sync_category(SyncCategory::Profile, true)
             .unwrap();
         assert_eq!(
-            receiver.account_profile(&foreign.account_id()),
+            receiver.account_profile(&foreign.account_id()).unwrap(),
             Some(profile)
         );
     }

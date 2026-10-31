@@ -12,6 +12,99 @@ use mesh_talk_core::dm;
 use mesh_talk_core::identity::device::DeviceIdentity;
 use mesh_talk_core::node::{DmRatchet, RatchetSessions};
 
+/// Authenticated TCP carries signed channel records; AEAD failure must not burn
+/// either a fresh position or an older skipped key shared by text and manifests.
+#[tokio::test]
+async fn signed_channel_text_and_manifest_retry_over_noise_loopback() {
+    use mesh_talk_core::channel::{ChannelMeta, ChannelState, new_channel_id};
+    use mesh_talk_core::eventlog::{Event, EventKind};
+    use mesh_talk_core::file::FileManifest;
+    use mesh_talk_core::transport::SecureChannel;
+    use tokio::net::{TcpListener, TcpStream};
+
+    let alice = DeviceIdentity::generate();
+    let bob = DeviceIdentity::generate();
+    let channel = new_channel_id();
+    let meta = ChannelMeta {
+        name: "crypto boundary".into(),
+        members: vec![alice.public(), bob.public()],
+        epoch: 7,
+        owner: alice.user_id(),
+    };
+    let mut sender = ChannelState::from_meta(channel, meta.clone());
+    sender.set_identity(alice.user_id());
+    let mut receiver = ChannelState::from_meta(channel, meta);
+    receiver.set_identity(bob.user_id());
+    receiver.record_sender_chain(alice.user_id(), 7, &sender.my_sender_distribution());
+    let manifest = FileManifest {
+        name: "delayed.txt".into(),
+        size: 3,
+        mime: "text/plain".into(),
+        checksum: [7; 32],
+        file_key: [9; 32],
+        file_conv: new_channel_id(),
+        chunk_count: 1,
+    };
+    let text = sender.seal_sender_message(b"delayed text").unwrap();
+    let file = sender.seal_sender_message(&manifest.encode()).unwrap();
+    let latest = sender.seal_sender_message(b"latest text").unwrap();
+    let mut forged_latest = latest.clone();
+    *forged_latest.last_mut().unwrap() ^= 1;
+    let mut forged_file = file.clone();
+    *forged_file.last_mut().unwrap() ^= 1;
+    let frames = [
+        (EventKind::Message, forged_latest),
+        (EventKind::Message, latest),
+        (EventKind::FileManifest, forged_file),
+        (EventKind::FileManifest, file),
+        (EventKind::Message, text),
+    ];
+    let expected_author = alice.user_id();
+    let peer = bob.public();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let receiving = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut transport = SecureChannel::accept(stream, &bob).await.unwrap();
+        assert_eq!(transport.peer_identity().user_id(), expected_author);
+        for index in 0..5 {
+            let event: Event = bincode::deserialize(&transport.recv().await.unwrap()).unwrap();
+            assert!(event.verify_integrity() && event.verify_signature());
+            assert_eq!(event.conversation_id, channel);
+            assert_eq!(event.author.user_id(), expected_author);
+            let plaintext =
+                receiver.open_sender_message(&event.author.user_id(), &event.ciphertext);
+            match index {
+                0 | 2 => assert!(plaintext.is_none()),
+                1 => assert_eq!(plaintext.unwrap(), b"latest text"),
+                3 => {
+                    assert_eq!(event.kind, EventKind::FileManifest);
+                    assert_eq!(FileManifest::decode(&plaintext.unwrap()).unwrap(), manifest);
+                }
+                4 => assert_eq!(plaintext.unwrap(), b"delayed text"),
+                _ => unreachable!(),
+            }
+        }
+    });
+    let sending = async {
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut transport = SecureChannel::connect(stream, &alice, Some(&peer))
+            .await
+            .unwrap();
+        for (index, (kind, wire)) in frames.into_iter().enumerate() {
+            let event = Event::new(&alice, channel, index as u64, vec![], 0, 0, kind, wire);
+            transport
+                .send(&bincode::serialize(&event).unwrap())
+                .await
+                .unwrap();
+        }
+        receiving.await.unwrap();
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), sending)
+        .await
+        .unwrap();
+}
+
 fn manager(dir: &std::path::Path, name: &str) -> DmRatchet {
     DmRatchet::new(RatchetSessions::open(&dir.join(name), "test-password").unwrap())
 }
