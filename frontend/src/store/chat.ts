@@ -401,12 +401,12 @@ function deletedChatState(state: ChatState, key: string): Partial<ChatState> {
 
 // --- per-conversation API dispatch ----------------------------------------
 
-/** Native account ownership is authoritative; older hosts retain their existing identifier convention. */
+/** Native account ownership is authoritative, including certified sibling devices. */
 export function reactionFromMe(
   reaction: ReactionInfo,
-  selfId: string,
+  _selfId?: string,
 ): boolean {
-  return reaction.from_me ?? reaction.who.includes(selfId);
+  return reaction.from_me;
 }
 /** Whether this conversation is a channel (drives the `is_channel` flag on the lifecycle
  * commands; 1:1 chats are account-addressed). */
@@ -499,7 +499,11 @@ export interface ChatState
     onAccepted?: () => void,
   ) => Promise<"refused" | "failed" | "accepted">;
   saveFile: (fileConv: string, dest: string) => Promise<void>;
-  toggleReaction: (target: string, emoji: string) => Promise<void>;
+  toggleReaction: (
+    target: string,
+    emoji: string,
+    remove?: boolean,
+  ) => Promise<void>;
   /** Delete one message from this device only (local). */
   deleteMessage: (target: string) => Promise<void>;
   /** Recall (unsend) one of my own messages within the 2-minute window. */
@@ -1804,7 +1808,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     });
   },
 
-  toggleReaction: async (target, emoji) => {
+  toggleReaction: async (target, emoji, remove) => {
     const lease = captureChat(get);
     const set = guardedSet(rawSet, lease.current);
     if (!lease.current()) return;
@@ -1812,7 +1816,6 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     if (!c) return;
     const key = convKey(c);
     // Native channel ownership includes certified siblings, even when they are offline.
-    // Older hosts use account IDs for DMs and physical device IDs for channels.
     const selfId = c.kind === "account" ? get().myAccountId : get().myId;
     const mine = (get().reactions[key] ?? []).find(
       (r) =>
@@ -1824,14 +1827,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
           kind: "react",
           target,
           emoji,
-          remove: Boolean(mine),
+          remove: remove ?? Boolean(mine),
         });
         if (outcome.kind === "not_admitted") throw outcome.error;
         if (outcome.kind === "capacity")
           throw new Error("Too many pending group actions.");
         return;
       }
-      await chat.reactAccount(c.id, target, emoji, Boolean(mine));
+      await chat.reactAccount(c.id, target, emoji, remove ?? Boolean(mine));
       // Only reload if still on this conversation (matches send/sendFile).
       if (lease.current() && get().active && convKey(get().active!) === key)
         await get().reload();

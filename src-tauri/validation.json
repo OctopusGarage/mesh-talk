@@ -446,7 +446,7 @@
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device’s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
@@ -1335,6 +1335,34 @@
       "escalation": [
         "Verify actual native IPC stalls, WebView reload, storage failure, app lock and runtime/account replacement; pure gate tests do not establish packaged native memory bounds."
       ]
+    },
+    {
+      "id": "desktop-selected-reaction-summaries",
+      "paths": [
+        "src-tauri/src/owner_commands/reactions.rs",
+        "frontend/src/store/conversationReactions.ts",
+        "frontend/src/features/chat/ReactionSummaryDialog.tsx"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "owner_commands::reactions::tests::",
+            "owner_commands::tests::registered_reaction_summaries_are_selected_bounded_and_account_owned",
+            "owner_commands::tests::registered_search_rejects_queued_replaced_owner_and_app_lock"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Serve bounded reaction counts for selected visible targets under the captured desktop runtime owner.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Account and runtime replacement reject stale query publication; selected pages preserve certified ownership without materializing author lists.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
     }
   ],
   "prScenarios": [
