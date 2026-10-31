@@ -26,7 +26,7 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, ...props }, ref) => {
+>(({ className, children, onCloseAutoFocus, ...props }, ref) => {
   const { t } = useTranslation();
   return (
     <DialogPortal>
@@ -38,6 +38,24 @@ const DialogContent = React.forwardRef<
           className,
         )}
         {...props}
+        onCloseAutoFocus={(event) => {
+          onCloseAutoFocus?.(event);
+          if (event.defaultPrevented) return;
+          const closing = event.target;
+          if (!(closing instanceof Element)) return;
+          const ownerDocument = closing.ownerDocument;
+          const active = ownerDocument.activeElement;
+          // Radix restores focus after unmount. A newer interaction may have
+          // already focused another surface while that callback was queued.
+          if (
+            active?.isConnected &&
+            active !== ownerDocument.body &&
+            active !== ownerDocument.documentElement &&
+            !active.hasAttribute("data-radix-focus-guard") &&
+            !closing.contains(active)
+          )
+            event.preventDefault();
+        }}
       >
         {children}
         <DialogPrimitive.Close className="absolute right-1 top-1 flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground">

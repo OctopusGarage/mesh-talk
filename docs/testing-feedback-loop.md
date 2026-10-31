@@ -141,6 +141,14 @@ real reverse Control response to verify this setup boundary, then retain the
 original operation deadlines, matching-retry and byte assertions. Deliberate
 capability-refusal scenarios must preserve their missing-capability state.
 
+Dialog-to-menu regressions distinguish fixture state from actual focus ownership.
+Hold the real deferred close-focus callback, remove the old dialog, open the next
+menu through a real click, and release the callback. The new menu must retain its
+focus and open state. Waiting for an animation alone would hide this production
+handoff bug. Preserve ordinary/nested close restoration and custom handlers;
+[the shared dialog owner](module-boundaries.md#dialog-focus-ownership) defines the
+contract. Observe expanded/open menu attributes in navigation helpers.
+
 ## Validation stages and agent responsibilities
 
 Validation depth and business capability are separate dimensions. Use the same

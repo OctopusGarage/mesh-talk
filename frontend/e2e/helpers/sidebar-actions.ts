@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 export async function openSidebarMenuAction(
   page: Page,
@@ -8,8 +8,11 @@ export async function openSidebarMenuAction(
     | "sidebar-nav-help"
     | "sidebar-lock",
 ) {
-  const item = page.getByTestId(id);
-  if (!(await item.isVisible()))
-    await page.getByTestId("sidebar-overflow").click();
-  await item.click();
+  const trigger = page.getByTestId("sidebar-overflow");
+  if ((await trigger.getAttribute("aria-expanded")) !== "true")
+    await trigger.click();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  const menu = page.getByTestId("sidebar-overflow-menu");
+  await expect(menu).toHaveAttribute("data-state", "open");
+  await menu.getByTestId(id).click();
 }
