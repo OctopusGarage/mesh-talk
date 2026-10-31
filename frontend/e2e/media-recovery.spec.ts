@@ -1,6 +1,9 @@
 import { test, expect } from "./helpers/portable-evidence";
 import { enterChat, BOB } from "./helpers/session";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 type Diagnostic = {
   available: boolean;
   calls: Array<{ cmd: string; available: boolean; rejected: boolean }>;
@@ -139,7 +142,7 @@ test("received media recovers when bytes become available with stable fileConv",
   await page.getByTestId(`conversation-row-${BOB.account}`).click();
   await expect(page.getByTestId("conversation-header")).toBeVisible();
   await expect(
-    page.getByRole("progressbar", { name: "Receiving file…" }),
+    page.getByRole("progressbar", { name: "Receiving image" }),
   ).toHaveAttribute("aria-valuenow", "50");
   const messageRow = page.locator(
     '[data-message-id="early-media-stable-message"]',

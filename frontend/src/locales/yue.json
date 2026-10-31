@@ -382,7 +382,13 @@
     "reEdit": "重新編輯",
     "mentionedYou": "提及咗你",
     "reactionAdd": "加入 {{emoji}} 表情回應",
-    "reactionRemove": "移除你嘅 {{emoji}} 表情回應"
+    "reactionRemove": "移除你嘅 {{emoji}} 表情回應",
+    "reactionsTitle": "回應",
+    "reactionsDescription": "呢個訊息嘅回應數量。揀一個回應可以加上或者移除自己嘅回應。",
+    "reactionsEmpty": "未有回應",
+    "reactionsStart": "由頭睇",
+    "reactionsNext": "下一頁",
+    "reactionsMore": "更多回應"
   },
   "transfer": {
     "preparing": "準備緊檔案…",
@@ -396,7 +402,13 @@
     "waiting": "等緊檔案…",
     "receivingProgress": "收緊檔案：{{percent}}%",
     "sending": "正在傳送檔案…",
-    "saving": "正在儲存檔案…"
+    "saving": "正在儲存檔案…",
+    "imageWaiting": "等緊圖片",
+    "imageReceiving": "接收緊圖片",
+    "imageReceivingProgress": "接收緊圖片 · {{percent}}%",
+    "imagePreparing": "準備緊圖片",
+    "imageDetails": "相片 · {{size}}",
+    "image": "相片"
   },
   "composer": {
     "expireAfterSend": "傳送後到期",

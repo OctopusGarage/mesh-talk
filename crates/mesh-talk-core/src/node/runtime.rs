@@ -1531,30 +1531,6 @@ impl NodeRuntime {
         self.node.account_reaction_summaries(peer, targets, cursor)
     }
 
-    /// Aggregated reactions in the DM with `peer`.
-    pub fn reactions_dm(
-        &self,
-        peer: &PublicIdentity,
-    ) -> Result<Vec<crate::node::reaction::ReactionView>, NodeError> {
-        self.node.reactions_dm(peer)
-    }
-
-    /// Aggregated reactions in a channel.
-    pub fn channel_reactions(
-        &self,
-        channel: crate::eventlog::event::ConversationId,
-    ) -> Result<Vec<crate::node::reaction::ReactionView>, NodeError> {
-        self.node.reactions(channel)
-    }
-
-    /// Aggregated reactions in the account conversation with `peer_account_id`.
-    pub fn account_reactions(
-        &self,
-        peer_account_id: &str,
-    ) -> Result<Vec<crate::node::reaction::ReactionView>, NodeError> {
-        self.node.account_reactions(peer_account_id)
-    }
-
     /// A cloned handle to the underlying node, so an IPC command can snapshot it
     /// and release the `NodeState` lock before an async send.
     pub fn handle(&self) -> Arc<Node> {

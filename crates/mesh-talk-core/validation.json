@@ -26,11 +26,13 @@
         "crates/mesh-talk-core/src/node/channels/account_invitation.rs",
         "crates/mesh-talk-core/src/node/delivery_store/group_invitation.rs",
         "crates/mesh-talk-core/src/node/channel_account_controls.rs",
+        "crates/mesh-talk-core/src/node/channel_account_maintenance.rs",
         "crates/mesh-talk-core/src/node/outgoing_message.rs",
         "crates/mesh-talk-core/src/node/message_actions.rs",
         "crates/mesh-talk-core/src/node/reaction_store.rs",
         "crates/mesh-talk-core/src/node/reactions.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/delivery_store/group_file.rs",
         "crates/mesh-talk-core/src/node/channels/account_self_control.rs",
         "crates/mesh-talk-core/src/node/delivery_store/group_self_control.rs",
@@ -41,6 +43,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
+            "control_task_lifetime_scope_restores_outer_witness_after_panic",
             "local_cancel_ack_during_remote_commit_rolls_forward_without_action_required",
             "owner_decision_rejects_stale_rejoined_lifetime_with_current_acceptance",
             "owner_decision_rejects_matching_lifetime_with_false_role_or_wrong_proof",
@@ -97,6 +100,8 @@
             "node::channel::tests::modern_owner_or_unregistered_leave_never_creates_a_departure_route",
             "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route",
             "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
+            "selected_source_cold_capability_setup_precedes_role_page_budget",
+            "account_fixture_health_snapshot_precedes_real_peer_shutdown",
             "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
             "incoming_request_overtakes_a_naturally_hinted_control_and_repays_its_background_turn",
             "incoming_wake_yields_one_natural_turn_but_protects_replacement_and_resume",
@@ -119,7 +124,13 @@
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
             "newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page",
             "control_checkpoint_preserves_comparison_start_across_partial_pages_and_rollback",
-            "control_checkpoint_refresh_clears_start_only_after_comparison_completion"
+            "control_checkpoint_refresh_clears_start_only_after_comparison_completion",
+            "group_publication_reaches_pending_groups_behind_terminal_history",
+            "group_publication_lanes_reach_every_retained_group_independently",
+            "new_account_group_preflight_has_one_deadline_and_creates_no_partial_group",
+            "new_group_invites_one_account_and_starts_with_account_owner_authority",
+            "new_account_group_rejects_a_route_whose_authenticated_account_changed",
+            "queued_recovery_observes_retirement_before_its_deadline_between_periodic_checks"
           ]
         }
       ],
@@ -154,6 +165,10 @@
           {
             "name": "Modern self controls bind the original account intent to its exact grant incarnation and saved causal view; valid departure retains only the original source retry route and projects Left over stale sibling membership observations.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          },
+          {
+            "name": "Reference self-control evidence asserts the actual admitted remote executor while holding requester-side public membership recovery; real private readiness, original action deadlines and recovery cleanup remain required.",
+            "reference": "docs/testing-feedback-loop.md#maintaining-standards-across-requirements"
           },
           {
             "name": "Group access and source observations capture privacy and identity state before the event-log mutex; log-held projection never reacquires privacy, roster or host-session locks.",
@@ -202,6 +217,14 @@
           {
             "name": "Initial pair priority pays one foreground page and at most one original resume page; only validated completions spend credit and follow-ups never renew it. After payment, fresh authenticated incoming work overtakes remaining background pages without losing either checkpoint or changing local-operation priority, worker limits or exchange deadlines.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Normal and legacy operation publishers each select at most 128 groups, combining recent heads with an independent stable-key rotation through retained groups; cursors advance before document writes without changing durable journal state. Retained terminal history cannot starve older pending groups, while existing document capacity still bounds successful publication.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "New account-group invitation verification has one twenty-second deadline across the complete selected account set before host authorization or durable group creation; expiry creates no partial group and never skips a required target or relaxes its authenticated account binding.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           }
         ]
       },
@@ -273,7 +296,8 @@
         "crates/mesh-talk-core/src/node/channels.rs",
         "crates/mesh-talk-core/src/node/account_documents/custody.rs",
         "crates/mesh-talk-core/src/node/node_tests.rs",
-        "crates/mesh-talk-core/src/node/media_store.rs"
+        "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/node/media_store/**"
       ],
       "rust": [
         {
@@ -421,7 +445,12 @@
             "account_worker_retries_local_authentication_contention_without_a_false_sync_error",
             "offline_dm_delivered_via_post_office_over_loopback",
             "signed_own_account_sdk_presence_reuses_five_typed_document_pages",
-            "stalled_recovery_peer_does_not_delay_healthy_replica"
+            "stalled_recovery_peer_does_not_delay_healthy_replica",
+            "liveness_dial_deadline_includes_admission_and_releases_policy_writer",
+            "liveness_control_dial_deadline_includes_admission_and_releases_policy_writer",
+            "liveness_control_dial_cancellation_releases_authentication_and_socket_owners",
+            "only_remote_dial_timeout_allows_wake_recovery",
+            "account_history_capacity_backoff_retains_demand_without_periodic_repair"
           ]
         }
       ],
@@ -456,6 +485,14 @@
           {
             "name": "Completed negotiated Account sessions from SDK siblings without in-band announcements reuse only under exact full identity, current own-account presence, durable sibling certification and consistent configured proofs; generic Sync reuse never confers Account protocol authority.",
             "reference": "docs/network-design-reference.md#session-reuse-contract"
+          },
+          {
+            "name": "Ordinary and Control dials share one twenty-second deadline across privacy/authentication admission, TCP capacity and all candidate routes; cancellation releases the disclosure gate, authentication lease and sockets. Aggregate admission/dial expiry stays distinct from a remote Noise timeout and cannot authorize Wake recovery.",
+            "reference": "docs/network-design-reference.md#session-reuse-contract"
+          },
+          {
+            "name": "Capacity-deferred history retains its peer and cursors through the existing five-second backoff; the queued deadline wakes the available history worker without periodic repair, premature retry or a busy loop.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
       },
@@ -531,6 +568,7 @@
     {
       "id": "core-account-file-availability",
       "paths": [
+        "crates/mesh-talk-core/src/node/account_sync.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/account_sync_wire.rs"
@@ -540,7 +578,9 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_sync::selection_tests::",
-            "node::account_sync_wire::"
+            "node::account_sync_wire::",
+            "account_sync_attachment_preparation_releases_commit_guards_and_rechecks_changes",
+            "account_sync_attachment_selection_does_not_park_document_scheduler"
           ]
         }
       ],
@@ -550,6 +590,14 @@
         "invariants": [
           {
             "name": "Typed availability requires exact certified account admission, preserves legacy wire layouts and never treats corrupt bytes or transport closure as a missing copy",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Attachment preparation runs in admitted blocking work without retaining commit, delivery or policy guards; final guarded publication rechecks runtime admission, the exact policy revision, personal removal and recall controls, and the live manifest/card. Concurrent deletion, policy ABA or retirement cannot publish prepared bytes; final rename and fsync remain inside the commit boundary.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Missing-attachment selection belongs to the existing history worker, so a stalled local scan cannot park the parent document scheduler; tracked blocking admission, worker counts and final policy/certified-sibling rechecks remain unchanged.",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ]
@@ -1505,7 +1553,7 @@
         }
       ],
       "escalation": [
-        "Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
+        "Profile publication changes require publishing_profile_projects_newer_sibling_profile_pulled_in_same_round, proving durable import and immediate authenticated projection without a reverse connection. Profile wire/admission/recovery changes also require affected delivery/recovery consumers and restart/loopback evidence; choose additional owners explicitly."
       ],
       "consumers": [
         "desktop-chat",
@@ -1643,6 +1691,10 @@
           {
             "name": "Healthy relay receiving keeps its own cadence while a valid slow alternative retains bounded progress; unrelated roster churn cannot cancel eligible work, current policy/network changes retire owned requests, and mailbox switches retain a dedicated receive-worker wake for prompt cancellation and resumption",
             "reference": "docs/network-design-reference.md#session-reuse-contract"
+          },
+          {
+            "name": "Sibling history wakes during active pulls retain a bounded immediate follow-up instead of waiting for periodic retry or reporting premature completion. Optional favorites failures preserve that refresh and unfinished history pages; without pending history work, failure does not create an immediate retry loop.",
+            "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           }
         ],
         "guide": "docs/ARCHITECTURE.md"
@@ -1791,7 +1843,10 @@
             "reference": "specifications/deployment_guide.md#data-directory-ownership"
           }
         ]
-      }
+      },
+      "excludePaths": [
+        "crates/mesh-talk-core/tests/large_directory_enqueue.rs"
+      ]
     },
     {
       "id": "core-file-consent-tests",
@@ -1875,6 +1930,7 @@
         "crates/mesh-talk-core/src/node/files.rs",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
+        "crates/mesh-talk-core/src/node/media_store/**",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
@@ -1935,7 +1991,8 @@
         "crates/mesh-talk-core/src/node/session.rs",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/eventlog/sync.rs",
-        "crates/mesh-talk-core/src/node/delivery_runtime.rs"
+        "crates/mesh-talk-core/src/node/delivery_runtime.rs",
+        "crates/mesh-talk-core/src/node/files.rs"
       ],
       "rust": [
         {
@@ -1947,6 +2004,8 @@
             "node::files::",
             "node::recall::",
             "node::file_completion::",
+            "node::delivery_runtime_tests::failed_media_completion_metadata_keeps_durable_bytes_pending",
+            "node::delivery_runtime_tests::untracked_channel_media_local_export_verifies_retained_row_and_managed_bytes",
             "node::session::tests::"
           ]
         }
@@ -1958,6 +2017,10 @@
         "summary": "Deliver immutable encrypted sticker media without requiring recipient pack installation and reuse verified transfer bytes only within the same conversation and deadline.",
         "guide": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery",
         "invariants": [
+          {
+            "name": "Completed local group or own media retires recovery without repeated decoding or recipient receipts; failed bound completion metadata and missing media remain retryable",
+            "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
+          },
           {
             "name": "Pack installation and message media retention are independent; exact image identity is the authenticated attachment checksum",
             "reference": "docs/CUSTOMIZATION_PACKS.md#sticker-message-delivery"
@@ -2082,7 +2145,10 @@
             "authenticated_preferred_route_keeps_last_slot_ahead_of_known_stalled_route",
             "fresh_one_off_routes_lead_and_signed_ports_supersede_cached_ports",
             "reachable_route_is_not_blocked_by_stalled_former_lan_handshake",
-            "alternate_route_reclaims_idle_sessions_before_waiting_on_stale_route"
+            "alternate_route_reclaims_idle_sessions_before_waiting_on_stale_route",
+            "liveness_dial_deadline_includes_admission_and_releases_policy_writer",
+            "liveness_control_dial_deadline_includes_admission_and_releases_policy_writer",
+            "liveness_control_dial_cancellation_releases_authentication_and_socket_owners"
           ]
         }
       ],
@@ -2136,7 +2202,8 @@
             "optional_identity_request_rejection_preserves_reusable_account_capability",
             "identity_capability_cooldown_is_bounded_and_independent_of_account_sessions",
             "file_identity_repair_bounds_each_history_scan_and_advances_past_legacy_rows",
-            "federated_file_consent_and_complete_bytes_need_no_direct_client_route"
+            "federated_file_consent_and_complete_bytes_need_no_direct_client_route",
+            "node::account_sync::selection_tests::local_delete_allows_sibling_channel_export_and_blocking_work_retirement"
           ]
         }
       ],
@@ -2220,6 +2287,7 @@
         "crates/mesh-talk-core/src/node/group_file_delivery_tests.rs",
         "crates/mesh-talk-core/src/node/file_consent.rs",
         "crates/mesh-talk-core/src/node/file_consent_store.rs",
+        "crates/mesh-talk-core/src/node/file_consent_store/**",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/delivery_store.rs",
@@ -2598,7 +2666,37 @@
         ]
       },
       "escalation": [
-        "Modern-channel causal preparation still requires the shared resumable checkpoint boundary; native/frontend adoption and removal of legacy collecting views require their own consumer checks before an end-to-end bounded-reaction claim."
+        "Modern-channel causal preparation resumes through the shared checkpoint with a finite work budget and retains Ready authority until a later source-fenced hydration turn. Its exact same-channel revision fence remains conservative under continuous appends. Native/frontend changes must retain selected-target request bounds, pending empty pages, owner fencing and explicit continuation; test-only collecting reducers remain semantic references."
+      ]
+    },
+    {
+      "id": "core-large-directory-enqueue",
+      "paths": [
+        "crates/mesh-talk-core/tests/large_directory_enqueue.rs",
+        "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/file/manifest.rs",
+        "crates/mesh-talk-core/src/file/directory.rs"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk-core",
+          "filters": [
+            "node::delivery_runtime_tests::large_manifest_uses_compact_wire_format_before_staging_chunks"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Stage a real 110 MiB directory and persist its exact enqueued compact V4 manifest without exceeding the event frame limit.",
+        "guide": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding",
+        "invariants": [
+          {
+            "name": "The returned event ID resolves in the persisted event log after the writer stops; recipient decryption yields V4 with the matching file conversation, directory name/MIME and more than 2,000 chunks.",
+            "reference": "docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding"
+          }
+        ]
+      },
+      "escalation": [
+        "Run cargo test --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 separately, then validate the saved stdout/stderr with scripts/evals/backend-runner.mjs --validate-large-folder. The real 110 MiB fixture is explicit backend acceptance, not an ordinary affected-suite test; it proves enqueue/staging and persisted compact-manifest identity, not recipient transfer."
       ]
     }
   ]

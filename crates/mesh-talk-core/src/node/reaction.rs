@@ -4,6 +4,7 @@
 use crate::eventlog::event::EventId;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 /// The plaintext payload of a `React` event: which message, which emoji, and whether
@@ -33,6 +34,7 @@ impl ReactionPayload {
 
 /// Aggregated reactions for one `(target message, emoji)`: the set of author user-ids
 /// that currently react. The UI derives count + whether the local user is among them.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionView {
     pub target: String, // hex EventId
@@ -48,6 +50,7 @@ pub struct ReactionView {
 /// `(lamport, id)` order) or was merged in from our own out-of-band record. Input is
 /// `(author_user_id, wall_clock_ms, payload)`; output is sorted by `(target, emoji)`,
 /// each `who` sorted by author.
+#[cfg(test)]
 pub fn aggregate(reactions: &[(String, u64, ReactionPayload)]) -> Vec<ReactionView> {
     // (target hex, emoji, author) -> (latest wall_clock, currently-reacting?)
     let mut latest: BTreeMap<(String, String, String), (u64, bool)> = BTreeMap::new();

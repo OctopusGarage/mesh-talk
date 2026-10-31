@@ -19,6 +19,8 @@ mod message_actions;
 #[path = "tests/message_action_reference.rs"]
 mod message_action_reference;
 
+pub(in crate::node) use selected_same_source_control_latency::ControlTestPages;
+
 // Cold authenticated fixture arrival is established before operation admission.
 // Keep its existing 30-second owner budget separate from the held 8-second
 // operation/progress assertions; this helper does not drive additional traffic.
@@ -26,6 +28,64 @@ async fn cold_account_setup<T>(
     future: impl std::future::Future<Output = T>,
 ) -> Result<T, tokio::time::error::Elapsed> {
     tokio::time::timeout(std::time::Duration::from_secs(30), future).await
+}
+
+fn has_account_group_operation_support(
+    node: &Node,
+    peer: &Node,
+    kind: Option<AccountGroupOperationKind>,
+) -> bool {
+    node.group_operation_versions
+        .lock()
+        .unwrap()
+        .get(&peer.user_id())
+        .is_some_and(|support| {
+            support.public == peer.identity.public()
+                && kind.is_none_or(|kind| support.kinds & kind.capability_bit() != 0)
+        })
+}
+
+// Callers include explicit setup work, if any, and this observation in the same
+// cold budget. This observer neither starts producers nor drives extra requests.
+async fn observe_account_fixture_condition(mut ready: impl FnMut() -> bool) {
+    while !ready() {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+fn cold_account_control_setup(
+    readiness: impl std::future::Future<Output = ()>,
+    role_pages: impl std::future::Future<Output = ()>,
+) -> impl std::future::Future<Output = ()> {
+    // Box before constructing the returned future: callers must not retain both
+    // large protocol states inline even while neither future has been polled.
+    let readiness = Box::pin(readiness);
+    let role_pages = Box::pin(role_pages);
+    async move {
+        cold_account_setup(readiness)
+            .await
+            .expect("real capabilities and required cold state must precede role-page bootstrap");
+        role_pages.await;
+    }
+}
+
+// Keep cleanup completion separate from the health evidence it can invalidate.
+async fn capture_account_sync_before_cleanup(
+    node: &Node,
+    cleanup: impl std::future::Future<Output = ()>,
+) -> Vec<crate::node::DeviceSyncStatus> {
+    let snapshot = node.device_sync_status();
+    cleanup.await;
+    snapshot
+}
+
+fn assert_no_account_document_errors(snapshot: &[crate::node::DeviceSyncStatus]) {
+    assert!(
+        snapshot
+            .iter()
+            .all(|status| status.document_error.is_none()),
+        "owned preemption must not produce a document error"
+    );
 }
 
 fn node(path: &Path, account: &Account) -> Arc<Node> {
@@ -661,6 +721,59 @@ async fn new_account_group_rejects_a_route_whose_authenticated_account_changed()
     );
     assert!(owner.list_channels().unwrap().is_empty());
     server.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_account_group_preflight_has_one_deadline_and_creates_no_partial_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = node(dir.path(), &Account::generate());
+    let invited = Account::generate();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    for _ in 0..6 {
+        owner.roster.lock().unwrap().update(
+            &Announce::new_with_account(
+                &DeviceIdentity::generate(),
+                &invited,
+                "Pending account verification",
+                address.port(),
+            ),
+            address.ip(),
+            &owner.user_id(),
+        );
+    }
+    // Hold real asynchronous dial admission. Every route would otherwise get
+    // a fresh five-second query timeout, multiplying the caller's lifetime.
+    let _policy = owner.privacy.gate.write().await;
+    let committed = std::cell::Cell::new(false);
+    let result = tokio::time::timeout(
+        crate::node::route_timing::MAX_AUTHENTICATION_DEADLINE + std::time::Duration::from_secs(1),
+        owner.create_account_channel_invited_if(
+            "Must not create a partial group",
+            vec![invited.account_id()],
+            |commit| {
+                committed.set(true);
+                commit()
+            },
+        ),
+    )
+    .await
+    .expect("all target verification must share one authentication deadline");
+    assert!(matches!(result, Err(crate::node::NodeError::Channel(_))));
+    assert!(
+        !committed.get(),
+        "expired verification must not enter host admission"
+    );
+    assert!(owner.list_channels().unwrap().is_empty());
+    assert!(
+        owner
+            .log
+            .lock()
+            .unwrap()
+            .conversations()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

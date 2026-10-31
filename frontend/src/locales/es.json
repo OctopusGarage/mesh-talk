@@ -382,7 +382,13 @@
     "reEdit": "Reeditar",
     "mentionedYou": "Te mencionó",
     "reactionAdd": "Añadir reacción {{emoji}}",
-    "reactionRemove": "Quitar tu reacción {{emoji}}"
+    "reactionRemove": "Quitar tu reacción {{emoji}}",
+    "reactionsTitle": "Reacciones",
+    "reactionsDescription": "Recuentos de este mensaje. Selecciona una reacción para añadir o quitar la tuya.",
+    "reactionsEmpty": "Sin reacciones",
+    "reactionsStart": "Volver al inicio",
+    "reactionsNext": "Página siguiente",
+    "reactionsMore": "Más reacciones"
   },
   "transfer": {
     "preparing": "Preparando archivo…",
@@ -396,7 +402,13 @@
     "waiting": "Esperando archivo…",
     "receivingProgress": "Recibiendo archivo: {{percent}}%",
     "sending": "Enviando archivo…",
-    "saving": "Guardando archivo…"
+    "saving": "Guardando archivo…",
+    "imageWaiting": "Esperando imagen",
+    "imageReceiving": "Recibiendo imagen",
+    "imageReceivingProgress": "Recibiendo imagen · {{percent}}%",
+    "imagePreparing": "Preparando imagen",
+    "imageDetails": "Foto · {{size}}",
+    "image": "Foto"
   },
   "composer": {
     "expireAfterSend": "Caducar tras enviar",

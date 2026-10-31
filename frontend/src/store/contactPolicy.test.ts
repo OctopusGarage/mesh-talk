@@ -17,6 +17,30 @@ const snapshot = (owner = "alice", hidden = true) => ({
   contacts: hidden ? [{ account_id: "bob", name: "Bob" }] : [],
 });
 describe("account-scoped contact visibility", () => {
+  it("exposes a stalled policy read for retry and ignores its late snapshot", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    invoke.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const pending = useContactPolicy.getState().load("alice");
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(useContactPolicy.getState().loading).toBe(false);
+      expect(useContactPolicy.getState().error).toBe("load");
+      invoke.mockResolvedValue(snapshot("alice", false));
+      await useContactPolicy.getState().load("alice");
+      finish(snapshot());
+      await pending;
+      expect(useContactPolicy.getState().contacts).toEqual({});
+    } finally {
+      finish(snapshot());
+      await pending;
+      vi.useRealTimers();
+    }
+  });
   it("forwards the captured full account when reopening a contact", async () => {
     invoke.mockResolvedValue(snapshot());
     await useContactPolicy.getState().load("alice");

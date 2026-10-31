@@ -238,6 +238,36 @@ it("replaces a reserved native page after losing a later pull response", async (
   }
 });
 
+it("finishes identity boot while a background coverage read remains pending", async () => {
+  vi.useFakeTimers();
+  let finish!: (rows: unknown[]) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: 1,
+      });
+    if (command === "owner_account_history")
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(true);
+    expect(useChat.getState().historyScanBusy).toBe(true);
+    expect(useChat.getState().bootBusy).toBe(false);
+  } finally {
+    stop();
+    finish?.([]);
+    vi.useRealTimers();
+  }
+});
+
 it("coalesces roster invalidations and preserves readiness after an older failure", async () => {
   let reject!: (e: Error) => void;
   let count = 0;
@@ -833,6 +863,7 @@ const reset = () =>
     active: null,
     messages: {},
     reactions: {},
+    reactionRemainder: {},
     unread: {},
     members: [],
     incomingFiles: [],
@@ -2076,19 +2107,17 @@ describe("send", () => {
 });
 
 describe("toggleReaction", () => {
-  // For an ACCOUNT conversation, reaction `who` is keyed by ACCOUNT id (myAccountId),
-  // NOT the device id — the self-check must use myAccountId or the reaction can never be
-  // toggled off (regression: account reactions were compared against the device myId).
+  // Certified account ownership is supplied with each selected summary.
   beforeEach(() => {
     invoke.mockResolvedValue([]);
     useChat.setState({
       active: { kind: "account", id: "a1", name: "A" },
       reactions: {
-        "account:a1": [{ target: "t1", emoji: "👍", who: ["myacct"] }],
+        "account:a1": [{ target: "t1", emoji: "👍", count: 1, from_me: true }],
       },
     });
   });
-  it("removes my own account reaction (who keyed by account id)", async () => {
+  it("removes my own account reaction from the certified summary", async () => {
     await useChat.getState().toggleReaction("t1", "👍");
     expect(invoke).toHaveBeenCalledWith("react_account", {
       account: "a1",
@@ -2107,9 +2136,9 @@ describe("toggleReaction", () => {
     });
   });
   it.each([
-    { from_me: true, who: ["offline-sibling"], remove: true },
-    { from_me: false, who: ["me"], remove: false },
-    { who: ["me"], remove: true },
+    { from_me: true, count: 1, remove: true },
+    { from_me: false, count: 1, remove: false },
+    { from_me: true, count: 100000, remove: true },
   ])(
     "submits channel reaction ownership through durable account control: %j",
     async ({ remove, ...reaction }) => {
@@ -3957,8 +3986,8 @@ it("removes expired sender and recipient bubbles from cached conversations while
       },
       reactions: {
         "account:friend": [
-          { target: "expiring", emoji: "👍", who: ["friend"] },
-          { target: "retained", emoji: "👍", who: ["friend"] },
+          { target: "expiring", emoji: "👍", count: 1, from_me: false },
+          { target: "retained", emoji: "👍", count: 1, from_me: false },
         ],
       },
     });
@@ -4139,6 +4168,44 @@ it("does not refetch group members on each unchanged roster tick", async () => {
     ),
   ).toBe(false);
 });
+it.each(["favorites", "members"] as const)(
+  "releases %s projection reads after their deadline",
+  async (lane) => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    invoke.mockImplementation((command: string) =>
+      command === (lane === "favorites" ? "get_favorites" : "channel_members")
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : Promise.resolve([]),
+    );
+    const completed = vi.fn();
+    const pending = (
+      lane === "favorites"
+        ? useChat.getState().loadFavorites()
+        : useChat.getState().open({ kind: "channel", id: "team", name: "Team" })
+    ).then(completed);
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(completed).toHaveBeenCalledOnce();
+      const favorites = useChat.getState().favorites;
+      finish(
+        lane === "favorites"
+          ? [{ id: "late", pinned: true, custom_alias: null }]
+          : { owner: "late", members: [] },
+      );
+      await pending;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().favorites).toBe(favorites);
+      expect(useChat.getState().channelOwner).not.toBe("late");
+    } finally {
+      finish([]);
+      await pending;
+      vi.useRealTimers();
+    }
+  },
+);
 
 it.each([false, true])(
   "does not replace pushed member details with an older open request (unchanged members: %s)",
@@ -5026,8 +5093,7 @@ it.each(["onDm", "onChannelMessage", "onFile", "onIntegrationMessageAccepted"])(
       const key = `${kind}:target`;
       const historyCommand =
         kind === "account" ? "owner_account_history" : "channel_history";
-      const reactionCommand =
-        kind === "account" ? "account_reactions" : "channel_reactions";
+      const reactionCommand = "owner_reaction_summaries";
       useChat.setState({
         active: { kind, id: "target", name: "Target" },
         cacheOrder: [key],
@@ -5071,7 +5137,7 @@ it.each(["onDm", "onChannelMessage", "onFile", "onIntegrationMessageAccepted"])(
       expect(finishes).toHaveLength(1);
       expect(
         invoke.mock.calls.filter(([command]) => command === reactionCommand),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
       finishes[0]([]);
       await vi.waitFor(() => expect(finishes).toHaveLength(2));
       finishes[1]([
@@ -5089,7 +5155,7 @@ it.each(["onDm", "onChannelMessage", "onFile", "onIntegrationMessageAccepted"])(
       expect(finishes).toHaveLength(2);
       expect(
         invoke.mock.calls.filter(([command]) => command === reactionCommand),
-      ).toHaveLength(2);
+      ).toHaveLength(1);
     } finally {
       stop();
       finishes.forEach((finish) => finish([]));
@@ -5097,7 +5163,7 @@ it.each(["onDm", "onChannelMessage", "onFile", "onIntegrationMessageAccepted"])(
   },
 );
 
-it("keeps roster refresh progressing while automatic history waits for a stalled native reaction", async () => {
+it("keeps history and roster progressing while a reaction read remains physically stalled", async () => {
   vi.useFakeTimers();
   let stop: (() => void) | undefined;
   let finishReaction: (() => void) | undefined;
@@ -5127,9 +5193,20 @@ it("keeps roster refresh progressing while automatic history waits for a stalled
       return Promise.resolve([
         { account_id: "friend", device_count: 1, names: [peerName] },
       ]);
-    if (command === "account_reactions" && stallReactions)
+    if (command === "owner_account_history")
+      return Promise.resolve([
+        {
+          id: "01".repeat(32),
+          from_me: false,
+          who: "peer",
+          text: "Visible",
+          wall_clock: 1,
+        },
+      ]);
+    if (command === "owner_reaction_summaries" && stallReactions)
       return new Promise((resolve) => {
-        finishReaction = () => resolve([]);
+        finishReaction = () =>
+          resolve({ items: [], next: null, pending: false });
       });
     return Promise.resolve([]);
   });
@@ -5149,7 +5226,10 @@ it("keeps roster refresh progressing while automatic history waits for a stalled
     });
     await vi.advanceTimersByTimeAsync(10_001);
     expect(useChat.getState().loading).toBe(false);
-    expect(useChat.getState().historyError).toBe("account:friend");
+    expect(useChat.getState().historyError).toBe(null);
+    expect(useChat.getState().messages["account:friend"][0].text).toBe(
+      "Visible",
+    );
     revision = 2;
     let firstSettled = false;
     void useChat
@@ -5181,9 +5261,11 @@ it("keeps roster refresh progressing while automatic history waits for a stalled
     await vi.advanceTimersByTimeAsync(10_001);
     expect(firstSettled).toBe(true);
     expect(nextSettled).toBe(true);
-    expect(useChat.getState().historyRevision).toBe(1);
+    expect(useChat.getState().historyRevision).toBe(2);
     expect(
-      invoke.mock.calls.filter(([command]) => command === "account_reactions"),
+      invoke.mock.calls.filter(
+        ([command]) => command === "owner_reaction_summaries",
+      ),
     ).toHaveLength(1);
   } finally {
     stop?.();
@@ -5586,21 +5668,24 @@ describe("account group message controls", () => {
       reload.mockRestore();
     },
   );
-  it("uses explicit native ownership before legacy identifiers", () => {
+  it("uses certified ownership independently of the physical device identifier", () => {
     expect(
       reactionFromMe(
-        { target: "t", emoji: "👍", who: ["sibling"], from_me: true },
+        { target: "t", emoji: "👍", count: 2, from_me: true },
         "me",
       ),
     ).toBe(true);
     expect(
       reactionFromMe(
-        { target: "t", emoji: "👍", who: ["me"], from_me: false },
+        { target: "t", emoji: "👍", count: 2, from_me: false },
         "me",
       ),
     ).toBe(false);
     expect(
-      reactionFromMe({ target: "t", emoji: "👍", who: ["me"] }, "me"),
+      reactionFromMe(
+        { target: "t", emoji: "👍", count: 100000, from_me: true },
+        "me",
+      ),
     ).toBe(true);
   });
 });
@@ -6135,5 +6220,83 @@ it("allows explicit clearing during a node outage after account ownership was ve
     expect(useChat.getState().pendingUnknownUnread).toEqual({});
   } finally {
     vi.unstubAllGlobals();
+  }
+});
+
+it("requests reaction summaries only for the bounded displayed message targets", async () => {
+  const ids = Array.from({ length: 130 }, (_, index) =>
+    index.toString(16).padStart(64, "0"),
+  );
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_account_history")
+      return Promise.resolve(
+        ids.map((id) => ({
+          id,
+          from_me: false,
+          who: "peer",
+          text: "visible",
+          wall_clock: 1,
+          reply_to: null,
+        })),
+      );
+    if (command === "owner_reaction_summaries")
+      return Promise.resolve({ items: [], next: null, pending: false });
+    return Promise.resolve([]);
+  });
+  await useChat.getState().open({ kind: "account", id: "a1", name: "A" });
+  await vi.waitFor(() => {
+    const requests = invoke.mock.calls.filter(
+      ([command]) => command === "owner_reaction_summaries",
+    );
+    expect(requests.length).toBe(3);
+    expect(requests.flatMap(([, args]) => args.targets).sort()).toEqual(ids);
+    expect(
+      requests.every(
+        ([, args]) => args.targets.length <= 64 && args.owner === "host",
+      ),
+    ).toBe(true);
+  });
+  expect(
+    invoke.mock.calls.some(([command]) => command === "account_reactions"),
+  ).toBe(false);
+});
+
+it("does not hold visible history behind a pending reaction projection", async () => {
+  let release!: (value: unknown) => void;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_account_history")
+      return Promise.resolve([
+        {
+          id: "01".repeat(32),
+          from_me: false,
+          who: "peer",
+          text: "visible",
+          wall_clock: 1,
+          reply_to: null,
+        },
+      ]);
+    if (
+      command === "owner_reaction_summaries" ||
+      command === "account_reactions"
+    )
+      return pending;
+    return Promise.resolve([]);
+  });
+  const opening = useChat
+    .getState()
+    .open({ kind: "account", id: "a1", name: "A" });
+  try {
+    await vi.waitFor(() => {
+      expect(useChat.getState().messages["account:a1"]?.[0]?.text).toBe(
+        "visible",
+      );
+      expect(useChat.getState().loading).toBe(false);
+    });
+  } finally {
+    release({ items: [], next: null, pending: false });
+    await opening;
   }
 });

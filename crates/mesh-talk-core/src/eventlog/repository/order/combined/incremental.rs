@@ -6,9 +6,48 @@ const INPUT_SCHEMA: &str = "
 CREATE TABLE history_order_inputs(job BLOB PRIMARY KEY CHECK(length(job)=16),stable BLOB NOT NULL CHECK(length(stable)<=4096),sent_after INTEGER NOT NULL CHECK(sent_after>=0),received_after INTEGER NOT NULL CHECK(received_after>=0),files_after INTEGER NOT NULL CHECK(files_after>=0),maximum_clock BLOB NOT NULL CHECK(length(maximum_clock)=8),maximum_id BLOB NOT NULL CHECK(length(maximum_id)=32),event_after INTEGER NOT NULL CHECK(event_after>=-1),sent_sequence BLOB NOT NULL CHECK(length(sent_sequence)=8)) WITHOUT ROWID;
 ";
 
+const STAMP_MAGIC: &[u8; 8] = b"MTHIST01";
+
+#[derive(Clone, Copy)]
+pub(crate) struct HistoryInputStamp<'a> {
+    pub visibility: &'a [u8],
+    pub file_offers: u64,
+    pub file_identities: u64,
+}
+
+impl HistoryInputStamp<'_> {
+    fn encode(self) -> Result<Vec<u8>, LogError> {
+        if self.visibility.len() > 4096 - STAMP_MAGIC.len() - 16 {
+            return Err(LogError::InvalidPageBudget);
+        }
+        let mut bytes = STAMP_MAGIC.to_vec();
+        bytes.extend(self.file_offers.to_be_bytes());
+        bytes.extend(self.file_identities.to_be_bytes());
+        bytes.extend(self.visibility);
+        Ok(bytes)
+    }
+    fn decode(bytes: &[u8]) -> Result<Option<HistoryInputStamp<'_>>, LogError> {
+        if !bytes.starts_with(STAMP_MAGIC) {
+            return Ok(None);
+        }
+        if bytes.len() < STAMP_MAGIC.len() + 16 {
+            return Err(corrupt("truncated history input stamp"));
+        }
+        Ok(Some(HistoryInputStamp {
+            visibility: &bytes[24..],
+            file_offers: u64::from_be_bytes(bytes[8..16].try_into().expect("checked stamp width")),
+            file_identities: u64::from_be_bytes(
+                bytes[16..24].try_into().expect("checked stamp width"),
+            ),
+        }))
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct HistoryAppendPrefix {
     pub after: [i64; 3],
+    pub file_offers: u64,
+    pub file_identities: u64,
     maximum: (u64, EventId),
     signed_rank: i64,
 }
@@ -32,12 +71,12 @@ impl EventRepository {
         &self,
         conversation: &ConversationId,
         token: &[u8],
-        stable: &[u8],
+        stamp: HistoryInputStamp<'_>,
         now: u64,
         signed: Option<OrderGeneration>,
         legacy_author: Option<Author>,
     ) -> Result<Option<(HistoryGeneration, HistoryAppendPrefix)>, LogError> {
-        if token.len() > 4096 || stable.len() > 4096 {
+        if token.len() > 4096 || stamp.visibility.len() > 4096 - 24 {
             return Err(LogError::InvalidPageBudget);
         }
         self.database.transaction(|c| {
@@ -52,11 +91,12 @@ impl EventRepository {
             let old_signed: Option<Vec<u8>> = row.get(5)?;
             let signed_rank: i64 = row.get(6)?;
             let old_stable: Vec<u8> = row.get(7)?;
-            let prefix = HistoryAppendPrefix {after:[row.get(8)?,row.get(9)?,row.get(10)?],maximum:(u64::from_be_bytes(blob(row,11)?),EventId::new(blob(row,12)?)),signed_rank};
+            let Some(old_stamp) = HistoryInputStamp::decode(&old_stable)? else { return Ok(None); };
+            let prefix = HistoryAppendPrefix {file_offers:old_stamp.file_offers,file_identities:old_stamp.file_identities,after:[row.get(8)?,row.get(9)?,row.get(10)?],maximum:(u64::from_be_bytes(blob(row,11)?),EventId::new(blob(row,12)?)),signed_rank};
             let event_after: i64 = row.get(13)?;
             let sent_sequence = blob::<8>(row,14)?;
             let deadline = deadline.as_deref().map(|v|v.try_into().map(u64::from_be_bytes).map_err(|_|corrupt("invalid history deadline"))).transpose()?;
-            if !ready || old_stable != stable || deadline.is_some_and(|d|d<=now) || old_signed.as_deref()!=signed.as_ref().map(|s|s.job.as_slice()) { return Ok(None); }
+            if !ready || old_stamp.visibility != stamp.visibility || old_stamp.file_offers > stamp.file_offers || old_stamp.file_identities > stamp.file_identities || deadline.is_some_and(|d|d<=now) || old_signed.as_deref()!=signed.as_ref().map(|s|s.job.as_slice()) { return Ok(None); }
             drop(rows); drop(statement);
             if previous == token { return Ok(Some((HistoryGeneration {job,ready:true,count},prefix))); }
             // A newly arrived original may identify an old sent row or replace
@@ -104,10 +144,11 @@ impl EventRepository {
         &self,
         conversation: &ConversationId,
         job: [u8; 16],
-        stable: &[u8],
+        stamp: HistoryInputStamp<'_>,
         after: [i64; 3],
         sent_sequence: u64,
     ) -> Result<(), LogError> {
+        let stable = stamp.encode()?;
         self.database.transaction(|c| {
             let candidate:Option<(Vec<u8>,Vec<u8>)>=c.query_row("SELECT clock,id FROM history_order_candidates WHERE job=?1 ORDER BY clock DESC,id DESC LIMIT 1",[job.as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             let signed:Option<(Vec<u8>,Vec<u8>)>=c.query_row("SELECT wall_clock,id FROM retained_events WHERE domain=?1 AND conversation=?2 ORDER BY wall_clock DESC,id DESC LIMIT 1",params![self.domain.0.as_slice(),conversation.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;

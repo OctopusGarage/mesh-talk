@@ -465,6 +465,7 @@ impl IndexedReactionStore {
             )
         })
     }
+    #[cfg(test)]
     pub(in crate::node) fn channel_page(
         &self,
         conversation: ConversationId,

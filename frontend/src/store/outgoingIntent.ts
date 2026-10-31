@@ -526,6 +526,27 @@ export async function dispatchIntent(
             });
             return linked && lease.current();
           },
+          onNotAdmitted(error) {
+            if (!lease.current()) return;
+            const owned = get().intents[clientId];
+            if (!owned || owned.message.id) return;
+            const rejected = { ...owned, operationId: undefined };
+            guarded((state) => ({
+              intents: { ...state.intents, [clientId]: rejected },
+            }));
+            if (!lease.current() || get().intents[clientId] !== rejected)
+              return;
+            // The earlier unconfirmed outcome already transferred the draft to
+            // this intent. Retain its payload as the sole retry owner.
+            if (payload.kind === "file")
+              useTransfers.getState().clear(clientId);
+            update({
+              ...message,
+              pending: false,
+              failed: true,
+              failReason: sendFailReason(error),
+            });
+          },
           invoke: (owner, account, id) =>
             original.kind === "text"
               ? chat.submitAccountGroupText(

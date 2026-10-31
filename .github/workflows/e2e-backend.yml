@@ -27,14 +27,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
+# Linux backend evidence is produced once by the instrumented CI workspace job.
 jobs:
   backend-platform:
     name: Backend core (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022, macos-latest]
+        os: [windows-2022, macos-26-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
@@ -52,6 +55,8 @@ jobs:
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Configure hosted macOS multicast route
         if: runner.os == 'macOS'
@@ -69,8 +74,12 @@ jobs:
 
       # Stage a real 110 MiB folder on its own. Running it beside the unit suite
       # can starve time-sensitive socket tests, especially under ASan.
-      - name: Run large-folder transfer regression
-        run: cargo test -p mesh-talk-core --lib large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --ignored --test-threads=1
+      - name: Run large-folder enqueue regression
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p mesh-talk-core --test large_directory_enqueue large_directory_enqueue_uses_compact_manifest_instead_of_frame_error -- --exact --ignored --test-threads=1 2>&1 | tee "$RUNNER_TEMP/backend-eval-results/large-folder.log"
+          node scripts/evals/backend-runner.mjs --validate-large-folder "$RUNNER_TEMP/backend-eval-results/large-folder.log"
 
       - name: Preserve backend evaluation evidence
         if: always()
@@ -83,18 +92,3 @@ jobs:
 
   native-core:
     uses: ./.github/workflows/hidden-contacts-native.yml
-
-  backend-e2e:
-    # Preserve the existing protected check while requiring every platform.
-    name: Multi-process E2E
-    needs: [backend-platform, native-core]
-    if: always()
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Require complete successful platform matrix
-        env:
-          RESULT: ${{ needs.backend-platform.result }}
-          NATIVE_RESULT: ${{ needs.native-core.result }}
-        run: |
-          test "$RESULT" = success
-          test "$NATIVE_RESULT" = success

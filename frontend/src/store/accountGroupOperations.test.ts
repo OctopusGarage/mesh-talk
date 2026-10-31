@@ -100,6 +100,180 @@ it("retains accepted pending work without claiming a committed effect", async ()
   expect(f.tickets.get(id)?.status?.committed_events).toEqual([]);
   expect(f.terminal).not.toHaveBeenCalled();
 });
+it("bounds ID allocation without submitting an ID returned after the read deadline", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  const mint = deferred<string>();
+  const invoke = vi.fn(async () => status({ kind: "accepted" }));
+  f.commands.mint.mockReturnValueOnce(mint.promise);
+  const completed = vi.fn();
+  const submitting = f.coordinator
+    .submit({ group, kind: "rename", invoke })
+    .then(completed);
+  try {
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(completed).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "not_admitted" }),
+    );
+    mint.resolve(id);
+    await submitting;
+    expect(invoke).not.toHaveBeenCalled();
+    expect(f.tickets.size).toBe(0);
+  } finally {
+    mint.resolve(id);
+    await submitting;
+    vi.useRealTimers();
+  }
+});
+
+it.each(["committed", "rejected"] as const)(
+  "returns an observed %s result while the original invocation remains outstanding",
+  async (phase) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const reply = deferred<AccountGroupOperationStatus>();
+    const invoke = vi.fn(() => reply.promise);
+    const completed = vi.fn();
+    const submitting = f.coordinator
+      .submit({ group, kind: "rename", invoke })
+      .then(completed);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      f.commands.status.mockResolvedValue(
+        status(
+          phase === "committed"
+            ? { kind: "committed" }
+            : { kind: "rejected", reason: "not_authorized" },
+        ),
+      );
+      await f.coordinator.refresh();
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(completed).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: phase, id }),
+      );
+      expect(f.coordinator.isInvoking(account, id)).toBe(true);
+      expect((await f.coordinator.resume(id, invoke)).kind).toBe(phase);
+      expect(invoke).toHaveBeenCalledOnce();
+    } finally {
+      reply.resolve(status({ kind: "accepted" }));
+      await submitting;
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+    }
+    expect(f.coordinator.isInvoking(account, id)).toBe(false);
+    expect(f.tickets.get(id)?.status?.phase.kind).toBe(phase);
+  },
+);
+
+it("exposes a stalled invocation as unconfirmed without permitting a second native submission", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  const reply = deferred<AccountGroupOperationStatus>();
+  const invoke = vi.fn(() => reply.promise);
+  const completed = vi.fn();
+  const submitting = f.coordinator
+    .submit({ group, kind: "rename", invoke })
+    .then(completed);
+  try {
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(completed).toHaveBeenCalledWith({ kind: "unconfirmed", id });
+    expect(f.tickets.get(id)?.stage).toBe("unconfirmed");
+    expect(f.coordinator.isInvoking(account, id)).toBe(true);
+    expect((await f.coordinator.resume(id, invoke)).kind).toBe("unconfirmed");
+    expect(invoke).toHaveBeenCalledOnce();
+  } finally {
+    reply.resolve(status({ kind: "committed" }));
+    await submitting;
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+  }
+  expect(f.coordinator.isInvoking(account, id)).toBe(false);
+  expect(f.tickets.get(id)?.status?.phase.kind).toBe("committed");
+});
+it("publishes a definite late admission failure after the observer has returned", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  let reject!: (error: unknown) => void;
+  const reply = new Promise<AccountGroupOperationStatus>((_resolve, fail) => {
+    reject = fail;
+  });
+  const notAdmitted = vi.fn();
+  const submitted = f.coordinator.submit({
+    group,
+    kind: "rename",
+    invoke: () => reply,
+    onNotAdmitted: notAdmitted,
+  });
+  const error = { kind: "authorization", message: "app locked" };
+  try {
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(await submitted).toEqual({ kind: "unconfirmed", id });
+    reject(error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.tickets.get(id)?.admissionFailure).toEqual({ error });
+    expect(notAdmitted).toHaveBeenCalledWith(error);
+    const retry = vi.fn();
+    expect(await f.coordinator.resume(id, retry)).toEqual({
+      kind: "not_admitted",
+      id,
+      error,
+    });
+    expect(retry).not.toHaveBeenCalled();
+    await f.coordinator.refresh();
+    expect(f.commands.status).not.toHaveBeenCalled();
+    expect(f.coordinator.isInvoking(account, id)).toBe(false);
+  } finally {
+    reject(error);
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+  }
+});
+it.each(["committed", "rejected"] as const)(
+  "applies a late %s result after observation timeout only to its original session",
+  async (phase) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const original = deferred<AccountGroupOperationStatus>();
+    const result =
+      phase === "committed"
+        ? status({ kind: "committed" })
+        : status({ kind: "rejected", reason: "not_authorized" });
+    const submitted = f.coordinator.submit({
+      group,
+      kind: "rename",
+      invoke: () => original.promise,
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(await submitted).toEqual({ kind: "unconfirmed", id });
+      original.resolve(result);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.tickets.get(id)?.status).toEqual(result);
+      expect(f.terminal).toHaveBeenCalledWith(result);
+
+      const retired = fixture();
+      const late = deferred<AccountGroupOperationStatus>();
+      const old = retired.coordinator.submit({
+        group,
+        kind: "rename",
+        invoke: () => late.promise,
+      });
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(await old).toEqual({ kind: "unconfirmed", id });
+      retired.retire();
+      retired.tickets.clear();
+      late.resolve(result);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(retired.tickets.size).toBe(0);
+      expect(retired.terminal).not.toHaveBeenCalled();
+      expect(retired.coordinator.isInvoking(account, id)).toBe(false);
+    } finally {
+      original.resolve(result);
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+    }
+  },
+);
 it("retains the same minted ID after uncertain IPC and resumes that intent", async () => {
   const f = fixture();
   const invoke = vi
@@ -470,12 +644,16 @@ it("links reserved message ownership before the first mutation and stops if link
 it("reissues cancellation once a long submission admits and again during refresh", async () => {
   const f = fixture();
   const pending = deferred<AccountGroupOperationStatus>();
+  const entered = deferred<void>();
   const submission = f.coordinator.submit({
     group,
     kind: "rename",
-    invoke: () => pending.promise,
+    invoke: () => {
+      entered.resolve();
+      return pending.promise;
+    },
   });
-  await Promise.resolve();
+  await entered.promise;
   f.commands.cancel.mockRejectedValueOnce(new Error("not admitted yet"));
   expect((await f.coordinator.cancel(id)).kind).toBe("unconfirmed");
   pending.resolve(status({ kind: "accepted" }));

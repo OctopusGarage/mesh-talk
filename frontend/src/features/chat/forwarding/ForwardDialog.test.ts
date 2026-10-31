@@ -110,6 +110,76 @@ async function click(label: string) {
   expect(button, `button ${label} must be available`).toBeDefined();
   await act(async () => button!.click());
 }
+it.each([false, true])(
+  "ends a stalled source inspection without enabling uninspected forwarding (resume=%s)",
+  async (resume) => {
+    let finish!: (value: { messages: { id: string; text: string }[] }) => void;
+    const stalled = new Promise((resolve) => {
+      finish = resolve;
+    });
+    if (resume) fixture.list.mockResolvedValue([batch()]);
+    else fixture.inspect.mockReturnValueOnce(stalled);
+    await render();
+    if (resume) {
+      fixture.inspect.mockReturnValueOnce(stalled);
+      await click("Review 1");
+    }
+    try {
+      await act(async () => vi.advanceTimersByTimeAsync(10_001));
+      expect(host.querySelector('[role="alert"]')?.textContent ?? "").toMatch(
+        /timed out/i,
+      );
+      expect(host.textContent).not.toContain("Loading");
+      if (!resume) {
+        await act(async () =>
+          host
+            .querySelector<HTMLInputElement>('input[type="checkbox"]')!
+            .click(),
+        );
+        const send = [...host.querySelectorAll("button")].find((button) =>
+          button.textContent?.includes("Confirm and send"),
+        );
+        expect(send?.disabled).toBe(true);
+      }
+      await act(async () =>
+        finish({ messages: [{ id: "source", text: "Late private preview" }] }),
+      );
+      expect(host.textContent).not.toContain("Late private preview");
+      expect(fixture.send).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => finish({ messages: [] }));
+    }
+  },
+);
+
+it("shows observed commitment while the original send call remains outstanding", async () => {
+  let finish!: (result: ForwardResult) => void;
+  fixture.send.mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  await render();
+  await act(async () =>
+    host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(),
+  );
+  await click("Confirm and send");
+  const sent = fixture.send.mock.calls[0][1];
+  const committed = batch("accepted");
+  committed.request = sent;
+  committed.result.operation_id = sent.operation_id;
+  committed.result.items[0].target = sent.destinations[0];
+  try {
+    fixture.list.mockResolvedValue([committed]);
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(host.textContent).toContain("Accepted for delivery");
+    expect(host.textContent).not.toContain("Preparing and accepting messages");
+    expect(fixture.send).toHaveBeenCalledOnce();
+    expect(accepted).toHaveBeenCalledWith(committed.result);
+  } finally {
+    await act(async () => finish(committed.result));
+  }
+});
 
 it.each(["member", "owner"] as const)(
   "offers a certified reference-only %s target while excluding inactive account roles",

@@ -1112,23 +1112,14 @@ impl Node {
         }
         Ok(projection)
     }
-    pub(in crate::node) fn operation_groups(&self) -> Vec<[u8; 32]> {
-        let journal = self
-            .group_operations
+    pub(in crate::node) fn operation_publication_groups(
+        &self,
+        legacy_leave: bool,
+    ) -> Vec<[u8; 32]> {
+        self.group_operations
             .lock()
-            .expect("group operation journal mutex");
-        let mut groups = std::collections::BTreeMap::<[u8; 32], u64>::new();
-        for entry in journal.entries.values() {
-            let seq = groups.entry(*entry.reference.group.as_bytes()).or_default();
-            *seq = (*seq).max(entry.sequence);
-        }
-        for lookup in journal.lookups.values() {
-            let seq = groups.entry(*lookup.group.as_bytes()).or_default();
-            *seq = (*seq).max(lookup.sequence);
-        }
-        let mut groups: Vec<_> = groups.into_iter().collect();
-        groups.sort_by_key(|(group, seq)| (std::cmp::Reverse(*seq), *group));
-        groups.into_iter().map(|(group, _)| group).collect()
+            .expect("group operation journal mutex")
+            .take_publication_groups(legacy_leave)
     }
     pub(in crate::node) fn operation_query_nonce(&self, id: AccountGroupOperationId) -> [u8; 16] {
         let queries = self

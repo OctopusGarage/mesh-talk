@@ -214,7 +214,10 @@ async function execute(command, { cwd, env, logPath, signal, createLogStream = c
 export async function runStage({ root, cwd = root, name, command, env = process.env, artifacts = [], context = {}, resource, profile = "all", inputs, fresh = false, signal, createLogStream, log = message => console.log(`[validation:${name}] ${message}`) }) {
   if (!/^[\w:.-]+$/u.test(name) || !command?.length) throw Error("A stage needs a safe name and command");
   if (!["all", "shared"].includes(profile)) throw Error("Unknown validation environment profile");
-  env = { ...env, VITEST_MAX_WORKERS: env.VITEST_MAX_WORKERS || "2", RUST_TEST_THREADS: env.RUST_TEST_THREADS || "1" };
+  // Cargo owns the repository's Rust thread budget. Preserve caller overrides
+  // (including serial sanitizer/Windows runs) without injecting a competing
+  // default into aggregate stages and every Cargo child they launch.
+  env = { ...env, VITEST_MAX_WORKERS: env.VITEST_MAX_WORKERS || "2" };
   root = path.resolve(root); cwd = path.resolve(cwd);
   const started = Date.now();
   let initial;
@@ -290,7 +293,7 @@ export async function runStage({ root, cwd = root, name, command, env = process.
     await mkdir(path.dirname(logPath), { recursive: true });
     const queuedMs = Date.now() - started;
     log(`started after ${Math.round(queuedMs / 1000)}s queue; log ${logPath}`);
-    const timer = setInterval(() => log(`running for ${Math.round((Date.now() - started) / 1000)}s; log ${logPath}`), 30_000);
+    const timer = setInterval(() => log(`running for ${Math.round((Date.now() - started - queuedMs) / 1000)}s; log ${logPath}`), 30_000);
     let result;
     try { result = await execute(command, { cwd, env, logPath, signal, createLogStream }); }
     finally { clearInterval(timer); }

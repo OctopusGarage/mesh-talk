@@ -240,6 +240,7 @@ impl Node {
             },
         )
     }
+    #[cfg(test)]
     fn private_control_entries(
         &self,
         domain: AccountDocumentDomain,
@@ -265,6 +266,7 @@ impl Node {
         }
         out
     }
+    #[cfg(test)]
     pub(in crate::node) fn private_account_reactions(
         &self,
         peer: &str,

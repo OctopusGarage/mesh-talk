@@ -1,4 +1,5 @@
 import { createSettingSaveQueue } from "./settingSaveQueue";
+import { readWithDeadline } from "@/lib/readDeadline";
 
 /** Owns ordered writes and guards state publication across account/view changes. */
 export function createSettingsDialogSession(setBusy: (busy: boolean) => void) {
@@ -34,7 +35,7 @@ export function createSettingsDialogSession(setBusy: (busy: boolean) => void) {
       await queue.whenIdle();
       if (!isCurrent(request)) return;
       try {
-        const value = await read();
+        const value = await readWithDeadline(read);
         if (isCurrent(request)) apply(value);
       } catch (error) {
         if (isCurrent(request)) onError(error);

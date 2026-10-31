@@ -312,7 +312,7 @@ async fn ordinary_group_file_crosses_federation_after_consent_and_client_restart
                 .lock()
                 .unwrap()
                 .received_control(manifest)
-                .cloned()
+                .unwrap()
                 .expect("verified group completion must return through federation");
         assert!(
             super::file_consent::Decision::open(&control)
@@ -373,7 +373,7 @@ async fn expired_group_file_cannot_export_chunks_after_prior_recipient_approval(
                 .lock()
                 .unwrap()
                 .received_control(manifest)
-                .cloned()
+                .unwrap()
                 .expect("the sender must first durably receive the exact approval");
         assert_eq!(
             super::file_consent::Decision::open(&approved)
@@ -458,6 +458,7 @@ async fn malformed_and_other_group_consent_cannot_authorize_group_file_chunks() 
                 .lock()
                 .unwrap()
                 .received_control(manifest)
+                .unwrap()
                 .is_none()
         );
         let mut correct = decision;
@@ -481,6 +482,7 @@ async fn malformed_and_other_group_consent_cannot_authorize_group_file_chunks() 
                 .lock()
                 .unwrap()
                 .received_control(manifest)
+                .unwrap()
                 .is_none()
         );
         f.transfer_tick().await;
@@ -672,7 +674,7 @@ async fn offline_group_file_is_deposited_before_consent_and_received_after_sende
             f.a.file_consent
                 .lock()
                 .unwrap()
-                .received_control(manifest)
+                .received_control(manifest).unwrap()
                 .is_none(),
             "offline ciphertext custody cannot depend on a recipient control"
         );

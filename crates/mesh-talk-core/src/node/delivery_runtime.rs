@@ -313,8 +313,15 @@ impl FileDeliveryScheduler {
         self.relay_cooldowns.retain(|(key, until, consent)| {
             *until > std::time::Instant::now()
                 && (!*consent
-                    || node.outgoing_file_consent_status(key.0, key.1)
-                        != Some(crate::eventlog::sync::FileConsentStatus::Accepted))
+                    || match node.outgoing_file_consent_status(key.0, key.1) {
+                        Ok(status) => {
+                            status != Some(crate::eventlog::sync::FileConsentStatus::Accepted)
+                        }
+                        Err(error) => {
+                            log::warn!("file consent retry observation failed: {error}");
+                            true
+                        }
+                    })
         });
         node.prune_outgoing_file_acks();
         FileScan {
@@ -1385,21 +1392,23 @@ impl Node {
             .outgoing_file_acks
             .lock()
             .expect("outgoing file progress lock not poisoned");
-        let consent = if recipients.iter().any(|destination| {
-            destination.active
-                && self.outgoing_file_consent_status(id, destination.binding.event_id)
-                    == Some(crate::eventlog::sync::FileConsentStatus::Declined)
-        }) {
-            Some(super::ReceiveDecision::Declined)
-        } else if recipients.iter().any(|destination| {
-            destination.active
-                && self.outgoing_file_consent_status(id, destination.binding.event_id)
-                    == Some(crate::eventlog::sync::FileConsentStatus::Pending)
-        }) {
-            Some(super::ReceiveDecision::Pending)
-        } else {
-            None
-        };
+        let mut consent = None;
+        for destination in recipients.iter().filter(|destination| destination.active) {
+            match self.outgoing_file_consent_status(id, destination.binding.event_id) {
+                Ok(Some(crate::eventlog::sync::FileConsentStatus::Declined)) => {
+                    consent = Some(super::ReceiveDecision::Declined);
+                    break;
+                }
+                Ok(Some(crate::eventlog::sync::FileConsentStatus::Pending)) => {
+                    consent = Some(super::ReceiveDecision::Pending)
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!("file progress consent observation failed: {error}");
+                    return None;
+                }
+            }
+        }
         let total = card.chunk_count.saturating_mul(recipients.len() as u32);
         let done = recipients.iter().fold(0u32, |sum, destination| {
             let confirmed = if destination.active {
@@ -2766,8 +2775,13 @@ impl Node {
         destination: &super::delivery_store::FileDestination,
     ) -> bool {
         self.file_destination_current(file, destination)
-            && self.outgoing_file_consent_status(file.id, destination.binding.event_id)
-                != Some(crate::eventlog::sync::FileConsentStatus::Declined)
+            && match self.outgoing_file_consent_status(file.id, destination.binding.event_id) {
+                Ok(status) => status != Some(crate::eventlog::sync::FileConsentStatus::Declined),
+                Err(error) => {
+                    log::warn!("file custody deferred after consent read failure: {error}");
+                    false
+                }
+            }
     }
 
     pub(in crate::node) async fn retry_file_step(
@@ -2782,9 +2796,16 @@ impl Node {
             transfers.remove(&key);
             return false;
         }
-        if self.recipient_completed_file(file, destination) {
-            transfers.remove(&key);
-            return true;
+        match self.recipient_completed_file(file, destination) {
+            Ok(true) => {
+                transfers.remove(&key);
+                return true;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("file completion observation deferred: {error}");
+                return false;
+            }
         }
         if !transfers.contains_key(&key) {
             if transfers.len() == MAX_FILE_TRANSFERS {
@@ -3329,8 +3350,13 @@ impl Node {
         if !current() {
             return false;
         }
-        if self.recipient_completed_file(file, destination) {
-            return true;
+        match self.recipient_completed_file(file, destination) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("file completion observation deferred: {error}");
+                return false;
+            }
         }
         let manifest_conv =
             super::conversation::dm_conversation_id(&self.identity.public(), &binding.device);
@@ -3886,41 +3912,110 @@ mod diagnostic_tests {
             .enqueue_file_to_account(&b.account_id(), &path, crate::file::FileKind::File)
             .await
             .unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let server_node = b.clone();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            if let Ok(channel) = server_node.privacy_accept(stream).await {
-                server_node.serve_connection(channel).await;
-            }
+        let mut server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server TCP accept");
+            accepted_tx.send(()).expect("accepted TCP observer");
+            release_rx.await.expect("handshake release");
+            let channel = server_node
+                .privacy_accept(stream)
+                .await
+                .expect("server authenticated handshake");
+            server_node.serve_connection(channel).await;
         });
         let card = a.delivery.lock().unwrap().file_card(id).unwrap().clone();
         let destination = card.destinations[0].clone();
         let mut scheduler = super::FileDeliveryScheduler::default();
         scheduler.admit(&a, vec![(card, destination)], None);
         let mut diagnostics = super::DeliveryDiagnosticThrottle::default();
-        let complete = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                scheduler.advance(&a);
-                if let Some(result) = scheduler.workers.join_next().await {
-                    scheduler.finish(&a, result, &mut diagnostics);
-                }
-                if a.outgoing_file_progress(id)
-                    .is_some_and(|progress| progress.delivered)
-                {
-                    break;
-                }
-                if scheduler.workers.is_empty() && scheduler.transfers.is_empty() {
-                    tokio::task::yield_now().await;
-                }
+        let dial_deadline = tokio::time::Instant::now() + super::FILE_EXCHANGE_TIMEOUT;
+        scheduler.advance(&a);
+        tokio::select! {
+            result = scheduler.workers.join_next() => panic!(
+                "Dial worker completed before TCP acceptance: {:?}",
+                result.map(|result| result.map(|(_, _, complete)| complete))
+            ),
+            result = &mut server => panic!("server exited before TCP acceptance: {result:?}"),
+            accepted = tokio::time::timeout_at(dial_deadline, accepted_rx) => {
+                accepted.expect("Dial TCP acceptance exceeded file exchange deadline")
+                    .expect("server dropped TCP acceptance signal");
             }
-        })
-        .await;
+        }
+        // Prove the scheduler retains a valid slow handshake independently of
+        // the later durable manifest, consent and chunk exchanges.
+        tokio::select! {
+            biased;
+            result = scheduler.workers.join_next() => panic!(
+                "Dial worker completed during held 600ms handshake: {:?}",
+                result.map(|result| result.map(|(_, _, complete)| complete))
+            ),
+            result = &mut server => panic!("server exited during held handshake: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(600)) => {}
+        }
+        release_tx
+            .send(())
+            .expect("server awaiting handshake release");
+        let result = tokio::select! {
+            result = &mut server => panic!("server exited during Dial: {result:?}"),
+            result = tokio::time::timeout_at(dial_deadline, scheduler.workers.join_next()) => {
+                result.expect("Dial exceeded original file exchange deadline")
+                    .expect("Dial worker missing").expect("Dial worker panicked")
+            }
+        };
+        scheduler.finish(&a, Ok(result), &mut diagnostics);
+        // Each phase gets one existing exchange budget, shared by all of its
+        // turns. Fixed phase order rejects redials and bounds total work.
+        for phase in [
+            super::FilePhase::Manifest,
+            super::FilePhase::ManifestCustody,
+            super::FilePhase::Consent,
+            super::FilePhase::InitialCustody,
+            super::FilePhase::Chunks,
+            super::FilePhase::FinalCustody,
+        ] {
+            let current = scheduler
+                .transfers
+                .values()
+                .next()
+                .unwrap_or_else(|| panic!("transfer missing before {phase:?}"));
+            assert_eq!(
+                std::mem::discriminant(&current.phase),
+                std::mem::discriminant(&phase),
+                "unexpected phase before {phase:?}: {:?}",
+                current.phase
+            );
+            let deadline = tokio::time::Instant::now() + super::FILE_EXCHANGE_TIMEOUT;
+            tokio::time::timeout_at(deadline, async {
+                loop {
+                    scheduler.advance(&a);
+                    let result = tokio::select! {
+                        // Final custody can release the socket in the same poll
+                        // that completes this worker, allowing a normal server EOF.
+                        biased;
+                        result = scheduler.workers.join_next() => result
+                            .unwrap_or_else(|| panic!("worker missing during {phase:?}"))
+                            .unwrap_or_else(|error| panic!("worker panicked during {phase:?}: {error}")),
+                        result = &mut server => panic!("server exited during {phase:?}: {result:?}"),
+                    };
+                    scheduler.finish(&a, Ok(result), &mut diagnostics);
+                    if scheduler.transfers.values().next().is_none_or(|transfer| {
+                        std::mem::discriminant(&transfer.phase) != std::mem::discriminant(&phase)
+                    }) {
+                        break;
+                    }
+                }
+            }).await.unwrap_or_else(|_| panic!("{phase:?} exceeded file exchange deadline"));
+        }
         server.abort();
-        let _ = server.await;
+        if let Err(error) = server.await {
+            assert!(error.is_cancelled(), "server panicked: {error}");
+        }
         assert!(
-            complete.is_ok(),
-            "scheduler fairness must not reject a healthy 600ms handshake"
+            a.outgoing_file_progress(id)
+                .is_some_and(|progress| progress.delivered),
+            "completed ordered exchanges must confirm delivery"
         );
         assert_eq!(b.read_file(file).unwrap(), b"valid slow route");
     }

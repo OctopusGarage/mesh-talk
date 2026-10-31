@@ -507,22 +507,35 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
     child.stderr.on("data", chunk => output += chunk);
     const exited = new Promise(resolve => child.once("exit", code => resolve(code)));
     t.after(() => child.kill("SIGKILL"));
-    let ready = false;
-    for (let tries = 0; tries < 150; tries++) {
-      try { await access(path.join(f.root, "target/fast-static-ran")); ready = true; break; }
-      catch { await delay(50); }
-    }
-    assert(ready, `cheap formatting waited for the heavy lock: ${output}`);
+    // Readiness is an ordering condition, not a startup benchmark. The test's
+    // existing 20s watchdog bounds every wait; a dead child cannot become ready.
+    const waitUntil = async (condition, description) => {
+      while (true) {
+        t.signal.throwIfAborted();
+        assert(child.exitCode === null && child.signalCode === null,
+          `${description}: child exited before readiness: ${output}`);
+        if (await condition()) return;
+        const result = await Promise.race([
+          delay(50, undefined, { signal: t.signal }).then(() => null),
+          exited.then(code => ({ code })),
+        ]);
+        assert.equal(result, null,
+          `${description}: child exited before readiness: ${output}`);
+      }
+    };
+    const markerExists = async name => {
+      try { await access(path.join(f.root, "target", name)); return true; }
+      catch (error) { if (error.code === "ENOENT") return false; throw error; }
+    };
+    await waitUntil(() => markerExists("fast-static-ran"),
+      "cheap formatting waited for the heavy lock");
     // Wait until the complete fast phase passed, so this tests the queued handoff.
     if (managed) {
-      let waiting = false;
-      for (let tries = 0; tries < 150; tries++) {
-        try { await access(path.join(f.root, "target/managed-wrapper-entered")); waiting = true; break; }
-        catch { await delay(50); }
-      }
-      assert(waiting, output);
+      await waitUntil(() => markerExists("managed-wrapper-entered"),
+        "managed wrapper did not enter the queued handoff");
     } else {
-      for (let tries = 0; tries < 150 && !output.includes("waiting for another validation stage"); tries++) await delay(50);
+      await waitUntil(() => output.includes("waiting for another validation stage"),
+        "heavy stage did not wait for the resource lock");
       assert.match(output, /waiting for another validation stage/);
     }
     await assert.rejects(access(path.join(f.root, "target/heavy-command-ran")));

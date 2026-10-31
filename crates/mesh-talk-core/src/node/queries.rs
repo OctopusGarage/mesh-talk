@@ -85,7 +85,7 @@ impl Node {
         use super::transcript_repository::{FILES, RECEIVED, SENT, TranscriptPageLimit};
         use crate::eventlog::repository::order::{
             CausalOrder, OrderReadiness, OrderWorkBudget,
-            combined::{HistoryAppendPrefix, HistorySelector},
+            combined::{HistoryAppendPrefix, HistoryInputStamp, HistorySelector},
         };
         use std::collections::{HashMap, HashSet};
         let selected_ids: Vec<EventId>;
@@ -164,7 +164,7 @@ impl Node {
         token.extend(self.identity.public().ed25519_pub);
         token.push(u8::from(account.is_some()));
         token.push(u8::from(is_channel));
-        token.extend(b"file-history-eligibility-v2");
+        token.extend(b"file-history-eligibility-v3");
         let file_eligible = |ordinal| {
             if account.is_none() {
                 file_book.historical_eligible_ordinal(ordinal)
@@ -177,18 +177,19 @@ impl Node {
         } else {
             file_book.revision()?
         };
+        let (file_offers, file_deletions) = file_book.historical_revisions()?;
+        let file_identities = identities.revision()?;
         let mut stable = token.clone();
         for revision in [
             sent.rewrite_revision(),
             received.rewrite_revision(),
             files.rewrite_revision(),
-            file_revision,
+            file_deletions,
             recovered
                 .as_ref()
                 .map(|r| r.revision())
                 .transpose()?
                 .unwrap_or(0),
-            identities.revision()?,
             suppression.len()? as u64,
             repository.destructive_policy_revision()? as u64,
         ] {
@@ -204,7 +205,7 @@ impl Node {
                 .map(|r| r.revision())
                 .transpose()?
                 .unwrap_or(0),
-            identities.revision()?,
+            file_identities,
             suppression.len()? as u64,
             repository
                 .metadata(&conversation)?
@@ -231,14 +232,35 @@ impl Node {
         } else {
             None
         };
+        let stamp = HistoryInputStamp {
+            visibility: &stable,
+            file_offers,
+            file_identities,
+        };
         let append = repository.history_append_generation(
             &conversation,
             &token,
-            &stable,
+            stamp,
             now,
             signed,
             (account.is_none() && !is_channel).then_some(author),
         )?;
+        let append = match append {
+            Some((generation, prefix))
+                if !generation.ready
+                    && file_prefix_changed(
+                        conversation,
+                        prefix,
+                        stamp,
+                        &files,
+                        &identities,
+                        &file_book,
+                    )? =>
+            {
+                None
+            }
+            other => other,
+        };
         let (mut generation, mut prefix): (_, Option<HistoryAppendPrefix>) = match append {
             Some((generation, prefix)) => (generation, Some(prefix)),
             None => (
@@ -460,7 +482,7 @@ impl Node {
             repository.history_finish_inputs(
                 &conversation,
                 generation.job,
-                &stable,
+                stamp,
                 scanned,
                 sent.maximum_sequence(&conversation)?,
             )?;
@@ -771,4 +793,55 @@ pub(in crate::node) fn decode_account_entry(plaintext: &[u8]) -> (EventId, Messa
         Some(env) => (EventId::new(env.msg_id), MessageBody::decode(&env.body)),
         None => (EventId::new([0u8; 32]), MessageBody::decode(plaintext)),
     }
+}
+
+/// Append-only authority can change an old row even when transcript bytes stay
+/// unchanged. Inspect only accepted facts since the saved input watermark.
+fn file_prefix_changed(
+    conversation: ConversationId,
+    prefix: crate::eventlog::repository::order::combined::HistoryAppendPrefix,
+    stamp: crate::eventlog::repository::order::combined::HistoryInputStamp<'_>,
+    files: &super::received_store::ReceivedStore,
+    identities: &super::file_message_identity::IndexedFileMessageIdentities,
+    book: &super::filebook::indexed::IndexedFileBook,
+) -> Result<bool, crate::eventlog::LogError> {
+    let mut after = prefix.file_offers;
+    'offers: while after < stamp.file_offers {
+        let page = book.historical_offers_after(after, 128)?;
+        if page.is_empty() {
+            break;
+        }
+        for offer in page {
+            if offer.revision > stamp.file_offers {
+                break 'offers;
+            }
+            after = offer.revision;
+            if offer.ordinal <= prefix.after[2]
+                && files
+                    .header_by_ordinal(offer.ordinal)?
+                    .is_some_and(|header| header.conversation == conversation)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    let mut after = prefix.file_identities;
+    while after < stamp.file_identities {
+        let page = identities.accepted_page(conversation, after, stamp.file_identities, 128)?;
+        if page.is_empty() {
+            break;
+        }
+        for binding in page {
+            after = binding.revision;
+            for alias in identities.accepted_aliases(conversation, binding.logical)? {
+                if files
+                    .ordinal_for_event(conversation, alias)?
+                    .is_some_and(|ordinal| ordinal <= prefix.after[2])
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }

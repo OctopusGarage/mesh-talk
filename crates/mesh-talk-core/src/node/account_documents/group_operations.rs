@@ -157,9 +157,8 @@ impl Node {
     }
     pub(in crate::node) fn publish_account_group_operations(&self) {
         let groups: Vec<_> = self
-            .operation_groups()
+            .operation_publication_groups(false)
             .into_iter()
-            .take(128)
             .map(crate::eventlog::ConversationId::new)
             .collect();
         self.publish_account_group_operation_groups(&groups);

@@ -408,3 +408,142 @@ fn selected_reaction_summary_pages_seek_and_reject_oversize_before_output() {
         "a fabricated cursor cannot hydrate an oversize key"
     );
 }
+
+#[tokio::test]
+async fn selected_reaction_causal_preparation_yields_before_historical_facts_expand() {
+    let (directory, node, _peer, _) = selected_fixture();
+    let channel = node
+        .create_account_channel_invited_if("bounded causal reactions", vec![], |commit| commit())
+        .await
+        .unwrap();
+    let count = 601usize;
+    for _ in 0..count {
+        node.append_event(channel, EventKind::Message, vec![19; 4096])
+            .unwrap();
+    }
+    let target = EventId::new([237; 32]);
+    let payload = ReactionPayload {
+        target,
+        emoji: "bounded".into(),
+        remove: false,
+    };
+    let sealed = crate::node::channel::SealedPayload::seal(
+        &node.identity,
+        &[node.identity.public()],
+        &payload.encode(),
+    )
+    .unwrap();
+    node.append_event(channel, EventKind::React, sealed.encode())
+        .unwrap();
+    // Prepare the canonical source before measuring the selected causal query.
+    // This isolates its work from ordinary channel discovery and admission.
+    for turn in 0..(count + 32) * 16 {
+        if matches!(
+            node.channel_checkpoints.source_binding(channel),
+            Ok(Some(_))
+        ) {
+            break;
+        }
+        let log = node.log.lock().unwrap();
+        node.channel_checkpoints
+            .project_step(log.repository().unwrap(), &node.identity, channel)
+            .unwrap();
+        assert!(
+            turn + 1 < (count + 32) * 16,
+            "canonical fixture did not settle"
+        );
+    }
+    assert!(
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .raw_kind_revisions(channel)
+            .unwrap()
+            .unwrap()[EventKind::ChannelAccountAuthority as usize]
+            >= 0
+    );
+    let facts = || {
+        node.storage
+            .database()
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT COUNT(*) FROM channel_event_authority", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                )
+            })
+            .unwrap()
+    };
+    let bodies = || {
+        node.log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts()
+            .0
+    };
+    let targets = [target, EventId::new([236; 32])];
+    let mut cursors = [None, None];
+    let mut completed = [None, None];
+    // Multiple displayed target chunks must share causal preparation rather
+    // than cancelling it whenever the next target-scoped page requests a turn.
+    for turn in 0..(count + 32) * 24 {
+        let slot = turn % 2;
+        if completed[slot].is_some() {
+            continue;
+        }
+        let before = facts();
+        let body_before = bodies();
+        let page = node
+            .reaction_summaries(channel, &[targets[slot]], cursors[slot].as_deref())
+            .unwrap();
+        let installed = facts() - before;
+        assert!(
+            installed <= 64,
+            "one selected request installed {installed} historical authority facts"
+        );
+        assert!(
+            bodies() - body_before <= 64,
+            "one selected request exceeded its body budget"
+        );
+        if !page.pending {
+            completed[slot] = Some(page);
+            if completed.iter().all(Option::is_some) {
+                break;
+            }
+            continue;
+        }
+        assert!(page.items.is_empty());
+        assert!(page.next.is_some());
+        cursors[slot] = page.next;
+    }
+    assert!(
+        completed[1]
+            .as_ref()
+            .expect("other selected target must settle")
+            .items
+            .is_empty()
+    );
+    let complete = completed[0]
+        .take()
+        .expect("finite selected causal preparation must finish");
+    assert_eq!(complete.items.len(), 1);
+    assert_eq!(complete.items[0].count, 1);
+    assert!(complete.items[0].from_me);
+    assert_eq!(complete.items[0].emoji, "bounded");
+    let before = bodies();
+    assert_eq!(
+        node.reaction_summaries(channel, &[target], None).unwrap(),
+        complete
+    );
+    assert_eq!(
+        bodies(),
+        before,
+        "warm selected reactions do not revisit historical bodies"
+    );
+    drop(node);
+    drop(directory);
+}

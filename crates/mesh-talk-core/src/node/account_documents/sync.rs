@@ -54,6 +54,15 @@ pub(in crate::node) fn seed_legacy_control_page_for_test(
     node: &Node,
     group: crate::eventlog::ConversationId,
 ) -> AccountDocumentKey {
+    seed_legacy_control_page_revision_for_test(node, group, 1)
+}
+
+#[cfg(test)]
+pub(in crate::node) fn seed_legacy_control_page_revision_for_test(
+    node: &Node,
+    group: crate::eventlog::ConversationId,
+    revision: u64,
+) -> AccountDocumentKey {
     use crate::node::account_group::operations::legacy_wire::{
         LegacyOperationFrame, LegacyOperationProjection,
     };
@@ -62,9 +71,16 @@ pub(in crate::node) fn seed_legacy_control_page_for_test(
         source_device: node.user_id(),
     };
     let bytes =
-        LegacyOperationFrame::new(node, group, 1, LegacyOperationProjection::default()).encode();
-    let meta =
-        AccountDocumentMeta::new(&node.account, node.user_id(), key.clone(), 1, &bytes, false);
+        LegacyOperationFrame::new(node, group, revision, LegacyOperationProjection::default())
+            .encode();
+    let meta = AccountDocumentMeta::new(
+        &node.account,
+        node.user_id(),
+        key.clone(),
+        revision,
+        &bytes,
+        false,
+    );
     node.account_documents
         .lock()
         .unwrap()

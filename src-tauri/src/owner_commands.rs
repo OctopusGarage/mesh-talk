@@ -10,8 +10,10 @@ use mesh_talk_core::eventlog::EventId;
 use serde::Serialize;
 
 mod group_operations;
+mod reactions;
 mod search;
 pub use group_operations::*;
+pub use reactions::*;
 pub use search::*;
 
 fn parse_id(input: &str) -> Result<EventId, CommandError> {
@@ -732,6 +734,7 @@ mod tests {
                     super::owner_cancel_account_group_operation,
                     super::owner_search_recent,
                     super::owner_search_context,
+                    super::owner_reaction_summaries,
                     super::owner_reveal_message,
                     super::owner_reveal_image,
                     crate::message_favorites::owner_list_message_favorites,
@@ -808,6 +811,31 @@ mod tests {
             body: serde_json::Value,
         ) -> Result<serde_json::Value, serde_json::Value> {
             invoke(&self.webview, command, body)
+        }
+
+        // Search limits need a realistic signed/persisted corpus, not hundreds
+        // of repeated IPC admissions and best-effort network flushes. Keep the
+        // registered send/search wiring in the calling tests with one IPC send.
+        fn seed_channel_search_corpus(
+            &self,
+            channel: &serde_json::Value,
+            text: &str,
+            count: usize,
+        ) {
+            let channel =
+                crate::chat_commands::parse_channel_id(channel.as_str().unwrap()).unwrap();
+            let handle = self.node.0.blocking_read().as_ref().unwrap().handle();
+            for _ in 0..count {
+                handle
+                    .enqueue_channel_message_reply_expiring_if(
+                        channel,
+                        text.as_bytes(),
+                        None,
+                        None,
+                        |commit| commit(),
+                    )
+                    .unwrap();
+            }
         }
 
         fn offline_peer(&self) -> String {
@@ -2493,6 +2521,60 @@ mod tests {
     }
 
     #[test]
+    fn registered_reaction_summaries_are_selected_bounded_and_account_owned() {
+        let fixture = Fixture::new();
+        let account = fixture.offline_peer();
+        let id = fixture
+            .invoke(
+                "owner_enqueue_text",
+                serde_json::json!({"owner":"alice","account":account,"text":"selected reaction"}),
+            )
+            .unwrap();
+        fixture
+            .invoke(
+                "react_account",
+                serde_json::json!({"account":account,"target":id,"emoji":"👍","remove":false}),
+            )
+            .unwrap();
+        let mut request = serde_json::json!({"owner":"alice","kind":"account","target":account,"targets":[id],"cursor":null});
+        let mut completed = None;
+        for _ in 0..128 {
+            let response = fixture
+                .invoke("owner_reaction_summaries", request.clone())
+                .unwrap();
+            assert!(serde_json::to_vec(&response).unwrap().len() <= 1024 * 1024);
+            if response["pending"] == false {
+                completed = Some(response);
+                break;
+            }
+            assert_eq!(response["items"], serde_json::json!([]));
+            assert!(response["next"].is_string());
+            request["cursor"] = response["next"].clone();
+        }
+        let response = completed.expect("finite selected reaction projection completes");
+        assert_eq!(
+            response["items"],
+            serde_json::json!([{"target":id,"emoji":"👍","count":1,"from_me":true}])
+        );
+        assert_eq!(response["next"], serde_json::Value::Null);
+        request["owner"] = serde_json::json!("bob");
+        assert_eq!(
+            fixture
+                .invoke("owner_reaction_summaries", request.clone())
+                .unwrap_err()["kind"],
+            "authorization"
+        );
+        request["owner"] = serde_json::json!("alice");
+        request["targets"] = serde_json::json!(vec![id; 65]);
+        assert_eq!(
+            fixture
+                .invoke("owner_reaction_summaries", request)
+                .unwrap_err()["kind"],
+            "invalid-input"
+        );
+    }
+
+    #[test]
     fn registered_search_validates_inputs_and_explicit_owner() {
         let fixture = Fixture::new();
         for kind in ["account", "channel", "legacy-device"] {
@@ -2582,17 +2664,14 @@ mod tests {
             )
             .unwrap();
         phase("create", 0);
-        for index in 0..201 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":"cap token"}),
-                )
-                .unwrap();
-            if matches!(index + 1, 1 | 50 | 100 | 150 | 201) {
-                phase("small_send", index + 1);
-            }
-        }
+        fixture
+            .invoke(
+                "send_channel_message",
+                serde_json::json!({"channelId":channel,"text":"cap token"}),
+            )
+            .unwrap();
+        phase("registered_send", 1);
+        fixture.seed_channel_search_corpus(&channel, "cap token", 200);
         phase("search1_begin", 201);
         let results = fixture
             .invoke(
@@ -2605,17 +2684,7 @@ mod tests {
         assert_eq!(results["coverage"]["truncated"], true);
         let text = "oversize token ".to_owned() + &"x".repeat(60_000);
         phase("large_sends_begin", 201);
-        for index in 0..20 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":text}),
-                )
-                .unwrap();
-            if (index + 1) % 5 == 0 {
-                phase("large_send", 201 + index + 1);
-            }
-        }
+        fixture.seed_channel_search_corpus(&channel, &text, 20);
         phase("search2_begin", 221);
         let results = fixture
             .invoke(
@@ -2650,14 +2719,7 @@ mod tests {
             )
             .unwrap();
         let text = "byte cap token ".to_owned() + &"x".repeat(60_000);
-        for _ in 0..20 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":text}),
-                )
-                .unwrap();
-        }
+        fixture.seed_channel_search_corpus(&channel, &text, 20);
         let results = fixture
             .invoke(
                 "owner_search_recent",
@@ -3090,6 +3152,10 @@ mod tests {
         let fixture = Fixture::new();
         for change in ["relogin", "logout", "lock"] {
             for (command, body) in [
+                (
+                    "owner_reaction_summaries",
+                    serde_json::json!({"owner":"alice","kind":"account","target":"01".repeat(16),"targets":["01".repeat(32)],"cursor":null}),
+                ),
                 (
                     "owner_search_recent",
                     serde_json::json!({"owner":"alice","query":"secret"}),

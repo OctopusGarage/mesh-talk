@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { contactPolicy } from "@/lib/api";
 import type { HiddenContact, HiddenContactsSnapshot } from "@/lib/types";
 import { currentRuntimeAccountId } from "./ownership";
+import { readWithDeadline } from "@/lib/readDeadline";
 
 interface ContactPolicyState {
   owner: string | null;
@@ -58,7 +59,10 @@ export const useContactPolicy = create<ContactPolicyState>((set, get) => ({
     const sameOwner = get().owner === owner;
     set({ ...(sameOwner ? {} : empty()), owner, loading: true, error: null });
     try {
-      const contacts = contactsFrom(await contactPolicy.get(owner), owner);
+      const contacts = contactsFrom(
+        await readWithDeadline(() => contactPolicy.get(owner)),
+        owner,
+      );
       if (request === generation)
         set({ contacts, loaded: true, loading: false });
     } catch {

@@ -1,0 +1,122 @@
+name: Full Chromium shards
+
+on:
+  workflow_call:
+    inputs:
+      operating_systems:
+        type: string
+        required: true
+        description: JSON array of hosted runner labels
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Full UI regression (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.operating_systems) }}
+        shard: [1, 2, 3, 4]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+      # Fresh browser contexts repeatedly load Vite's module graph. Windows'
+      # default 16K outbound ports can exhaust before TIME_WAIT sockets expire,
+      # leaving unrelated tests with ERR_NO_BUFFER_SPACE and a blank login page.
+      # Keep the server's port 5173 outside this disposable runner's client pool.
+      - name: Reserve Windows browser connection capacity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 set dynamicport tcp start=10000 num=55535
+          if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
+          netsh int ipv4 show dynamicport tcp
+      # One browser per runner preserves the existing resource budget. Spread
+      # tests across machines rather than competing with Vite on one runner.
+      - name: Run UI E2E
+        id: ui
+        run: npx playwright test --workers=1 --retries=0 --shard=${{ matrix.shard }}/4 --reporter=list,blob,json
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: full-results.json
+          EVAL_SOURCE_SHA: ${{ github.sha }}
+          MESH_TALK_E2E_COVERAGE: ${{ runner.os == 'Linux' && '1' || '0' }}
+      - name: Validate portable evidence from this full-suite shard
+        run: node ../scripts/evals/chromium-evidence.mjs extract full-results.json eval-results/chromium-shard
+        env:
+          CHROMIUM_SHARD: ${{ matrix.shard }}
+      - name: Upload portable shard evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: chromium-portable-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: frontend/eval-results/chromium-shard/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+      - name: Diagnose Windows browser connection failures
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 show dynamicport tcp
+          Get-NetTCPConnection | Group-Object State | Select-Object Count, Name | Format-Table
+      - name: Record Linux coverage identity
+        if: runner.os == 'Linux'
+        run: >-
+          node --input-type=module -e
+          'import { writeFileSync } from "node:fs";
+          writeFileSync("coverage/shard.json", JSON.stringify({ sourceSha: process.env.SOURCE_SHA, shard: Number(process.env.SHARD), total: 4 }));'
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SHARD: ${{ matrix.shard }}
+      - name: Upload Linux coverage parts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-coverage-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            frontend/coverage/shard.json
+            frontend/coverage/e2e-parts/*.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload UI evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-ui-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          # Blobs contain the screenshot/trace attachments used to rebuild reports.
+          compression-level: 0
+          path: |
+            frontend/blob-report/
+            frontend/full-results.json
+          if-no-files-found: error
+          retention-days: 7
+      # Preserve partial attachments when interruption prevents a complete blob.
+      - name: Preserve raw attachments after unsuccessful UI execution
+        if: always() && steps.ui.outcome != 'success' && hashFiles('frontend/test-results/**') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-failure-attachments-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: frontend/test-results/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7

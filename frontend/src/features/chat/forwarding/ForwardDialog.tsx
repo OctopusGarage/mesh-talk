@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { useChat, displayName } from "@/store/chat";
 import { captureRuntimeOwner } from "@/store/ownership";
 import { errorMessage } from "@/lib/error";
+import { readWithDeadline } from "@/lib/readDeadline";
 import {
   messageForwarding,
   type ForwardRequest,
@@ -41,6 +42,7 @@ export function ForwardDialog({
   const [targets, setTargets] = useState<ForwardTarget[]>([]);
   const [mode, setMode] = useState<ForwardRequest["mode"]>("individual");
   const [preview, setPreview] = useState<FavoriteMessage[] | null>(null);
+  const [inspecting, setInspecting] = useState(true);
   const [error, setError] = useState<string | null>(null),
     [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ForwardResult | null>(null),
@@ -56,8 +58,9 @@ export function ForwardDialog({
     const lease = captureRuntimeOwner();
     const inspectionId = ++inspection.current;
     if (!runtime.current() || !lease.owner || !lease.current()) return;
-    void messageForwarding
-      .inspect(lease.owner, source)
+    setPreview(null);
+    setInspecting(true);
+    void readWithDeadline(() => messageForwarding.inspect(lease.owner!, source))
       .then((value) => {
         if (
           alive.current &&
@@ -67,7 +70,20 @@ export function ForwardDialog({
           setPreview(value.messages);
       })
       .catch((e) => {
-        if (alive.current && lease.current()) setError(errorMessage(e));
+        if (
+          alive.current &&
+          lease.current() &&
+          inspection.current === inspectionId
+        )
+          setError(errorMessage(e));
+      })
+      .finally(() => {
+        if (
+          alive.current &&
+          lease.current() &&
+          inspection.current === inspectionId
+        )
+          setInspecting(false);
       });
     return () => {
       alive.current = false;
@@ -214,9 +230,9 @@ export function ForwardDialog({
                 {message.file?.name || message.text || message.sticker}
               </p>
             ))
-          ) : (
+          ) : inspecting ? (
             <p role="status">{t("common.loading")}</p>
-          )}
+          ) : null}
         </div>
         {!request ? (
           <>
@@ -354,11 +370,16 @@ export function ForwardDialog({
                       setResult(batch.result);
                       const inspectionId = ++inspection.current;
                       setPreview(null);
+                      setInspecting(true);
                       setError(null);
                       const lease = captureRuntimeOwner();
                       if (lease.owner && lease.current())
-                        void messageForwarding
-                          .inspect(lease.owner, batch.request.source)
+                        void readWithDeadline(() =>
+                          messageForwarding.inspect(
+                            lease.owner!,
+                            batch.request.source,
+                          ),
+                        )
                           .then((value) => {
                             if (
                               alive.current &&
@@ -368,8 +389,20 @@ export function ForwardDialog({
                               setPreview(value.messages);
                           })
                           .catch((e) => {
-                            if (alive.current && lease.current())
+                            if (
+                              alive.current &&
+                              lease.current() &&
+                              inspection.current === inspectionId
+                            )
                               setError(errorMessage(e));
+                          })
+                          .finally(() => {
+                            if (
+                              alive.current &&
+                              lease.current() &&
+                              inspection.current === inspectionId
+                            )
+                              setInspecting(false);
                           });
                     }}
                   >
@@ -386,7 +419,7 @@ export function ForwardDialog({
         ) : (
           <>
             <div role="status" className="text-sm">
-              {busy
+              {busy && !result
                 ? t("messageForwarding.sending")
                 : t("messageForwarding.summary", {
                     accepted:

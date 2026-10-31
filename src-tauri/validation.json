@@ -446,7 +446,7 @@
         "guide": "docs/help/topics/history.md#keep-an-unfinished-message",
         "invariants": [
           {
-            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device\u2019s draft",
+            "name": "Idle saves submit only changed conversations; stale account/session writers cannot overwrite another device’s draft",
             "reference": "docs/module-boundaries.md#coordinated-state-owners"
           },
           {
@@ -682,6 +682,10 @@
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
+            "name": "Inbound callbacks queue main-thread publication before acquiring exact-session and runtime authority, preventing native-window rendezvous from inverting the session lock.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
             "name": "Inbound DM, channel and file presentation queues before acquiring desktop-session authority; UI-thread execution revalidates the exact session and runtime without a worker/main-thread focus-query deadlock.",
             "reference": "docs/module-boundaries.md#account-document-projections"
           }
@@ -854,6 +858,10 @@
           {
             "name": "Export reuses joined retired storage and checks both original host local-user label and canonical profile root before any temporary/archive write; equal mesh account identity never authorizes another local profile. Staged restore/enrollment close every handle and the checked SQL connection before relocation.",
             "reference": "docs/ARCHITECTURE.md#manual-encrypted-backup-and-recovery"
+          },
+          {
+            "name": "Encrypted credential work retains its own serialization through caller cancellation while session and app-lock authority cover only capture, atomic publication/deletion and final plaintext release.",
+            "reference": "docs/module-boundaries.md"
           }
         ]
       },
@@ -1198,6 +1206,10 @@
           {
             "name": "X11 helper output is a bounded PNG in a private temporary directory, with bounded execution and cleanup on every result",
             "reference": "specifications/platform_permissions.md#screenshots"
+          },
+          {
+            "name": "Capture owns restoration through IPC cancellation; bounded pixel acquisition attempts restoration on timeout while stale sessions cannot restore or obtain pixels.",
+            "reference": "docs/module-boundaries.md"
           }
         ]
       },
@@ -1248,7 +1260,10 @@
         "src-tauri/src/chat_commands/account.rs",
         "src-tauri/src/linked_account.rs",
         "src-tauri/src/recovery.rs",
-        "src-tauri/src/device_enrollment.rs"
+        "src-tauri/src/device_enrollment.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/session_store.rs",
+        "src-tauri/src/session_store/"
       ],
       "rust": [
         {
@@ -1291,6 +1306,10 @@
           {
             "name": "Signed-out enrollment creates only a device identity until source proof validates; shared credentials and the verified account profile publish together through the recovery journal with login namespace and generation guards",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Shared-login profile publication retains runtime retirement, while native saved-login I/O retains only authentication ordering; cancellation and retirement cannot publish stale metadata or events after runtime, session or app-lock revision changes.",
+            "reference": "docs/ARCHITECTURE.md"
           }
         ]
       },
@@ -1335,6 +1354,34 @@
       "escalation": [
         "Verify actual native IPC stalls, WebView reload, storage failure, app lock and runtime/account replacement; pure gate tests do not establish packaged native memory bounds."
       ]
+    },
+    {
+      "id": "desktop-selected-reaction-summaries",
+      "paths": [
+        "src-tauri/src/owner_commands/reactions.rs",
+        "frontend/src/store/conversationReactions.ts",
+        "frontend/src/features/chat/ReactionSummaryDialog.tsx"
+      ],
+      "rust": [
+        {
+          "package": "mesh-talk",
+          "filters": [
+            "owner_commands::reactions::tests::",
+            "owner_commands::tests::registered_reaction_summaries_are_selected_bounded_and_account_owned",
+            "owner_commands::tests::registered_search_rejects_queued_replaced_owner_and_app_lock"
+          ]
+        }
+      ],
+      "capability": {
+        "summary": "Serve bounded reaction counts for selected visible targets under the captured desktop runtime owner.",
+        "guide": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets",
+        "invariants": [
+          {
+            "name": "Account and runtime replacement reject stale query publication; selected pages preserve certified ownership without materializing author lists.",
+            "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          }
+        ]
+      }
     }
   ],
   "prScenarios": [

@@ -382,7 +382,13 @@
     "reEdit": "다시 편집",
     "mentionedYou": "나를 언급함",
     "reactionAdd": "{{emoji}} 반응 추가",
-    "reactionRemove": "내 {{emoji}} 반응 삭제"
+    "reactionRemove": "내 {{emoji}} 반응 삭제",
+    "reactionsTitle": "반응",
+    "reactionsDescription": "이 메시지의 반응 수입니다. 반응을 선택하여 내 반응을 추가하거나 삭제하세요.",
+    "reactionsEmpty": "반응 없음",
+    "reactionsStart": "처음부터 보기",
+    "reactionsNext": "다음 페이지",
+    "reactionsMore": "반응 더 보기"
   },
   "transfer": {
     "preparing": "파일 준비 중…",
@@ -396,7 +402,13 @@
     "saving": "파일 저장 중…",
     "receiving": "파일 수신 중…",
     "waiting": "파일 대기 중…",
-    "receivingProgress": "파일 수신 중: {{percent}}%"
+    "receivingProgress": "파일 수신 중: {{percent}}%",
+    "imageWaiting": "이미지 대기 중",
+    "imageReceiving": "이미지 수신 중",
+    "imageReceivingProgress": "이미지 수신 중 · {{percent}}%",
+    "imagePreparing": "이미지 준비 중",
+    "imageDetails": "사진 · {{size}}",
+    "image": "사진"
   },
   "composer": {
     "expireAfterSend": "전송 후 만료",

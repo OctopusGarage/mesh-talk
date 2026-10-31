@@ -9,7 +9,6 @@ on:
   push:
     branches: ["main", "dev"]
   pull_request:
-    branches: ["main", "dev"]
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
@@ -27,123 +26,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e:
-    name: Full UI regression (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
-        shard: [1, 2, 3, 4]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup Node.js
-        uses: actions/setup-node@v7.1.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install dependencies
-        run: npm ci
-      - name: Prepare Ubuntu archive source
-        if: runner.os == 'Linux'
-        shell: bash
-        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
-      - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
-      # Fresh browser contexts repeatedly load Vite's module graph. Windows'
-      # default 16K outbound ports can exhaust before TIME_WAIT sockets expire,
-      # leaving unrelated tests with ERR_NO_BUFFER_SPACE and a blank login page.
-      # Keep the server's port 5173 outside this disposable runner's client pool.
-      - name: Reserve Windows browser connection capacity
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          netsh int ipv4 set dynamicport tcp start=10000 num=55535
-          if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
-          netsh int ipv4 show dynamicport tcp
-      # One browser per runner preserves the existing resource budget. Spread
-      # tests across machines rather than competing with Vite on one runner.
-      - name: Run UI E2E
-        run: npx playwright test --workers=1 --retries=0 --shard=${{ matrix.shard }}/4 --reporter=list,blob
-        env:
-          MESH_TALK_E2E_COVERAGE: ${{ runner.os == 'Linux' && '1' || '0' }}
-      - name: Diagnose Windows browser connection failures
-        if: failure() && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          netsh int ipv4 show dynamicport tcp
-          Get-NetTCPConnection | Group-Object State | Select-Object Count, Name | Format-Table
-      - name: Record Linux coverage identity
-        if: runner.os == 'Linux'
-        run: >-
-          node --input-type=module -e
-          'import { writeFileSync } from "node:fs";
-          writeFileSync("coverage/shard.json", JSON.stringify({ sourceSha: process.env.SOURCE_SHA, shard: Number(process.env.SHARD), total: 4 }));'
-        env:
-          SOURCE_SHA: ${{ github.sha }}
-          SHARD: ${{ matrix.shard }}
-      - name: Upload Linux coverage parts
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ui-coverage-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: |
-            frontend/coverage/shard.json
-            frontend/coverage/e2e-parts/*.json
-          if-no-files-found: error
-          retention-days: 7
-      - name: Upload UI evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: playwright-ui-${{ matrix.os }}-${{ matrix.shard }}-${{ github.run_attempt }}
-          compression-level: 0 # Blob ZIPs, traces and screenshots are already compressed.
-          path: |
-            frontend/blob-report/
-            frontend/test-results/
-          if-no-files-found: error
-          retention-days: 7
+  health:
+    uses: ./.github/workflows/check-health.yml
+    secrets: inherit
 
-  unit-coverage:
-    # Both Linux browser variants use the same default-mode unit line map.
-    # Keep this producer in this workflow: no cross-workflow evidence reuse.
-    name: Linux unit coverage for browser line maps
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@v7.1.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - name: Prepare shared coverable line map
-        run: npm run test:coverage
-      - name: Seal unit coverage provenance
-        run: node ../scripts/ci/unit-coverage-artifact.mjs seal coverage/lcov.info ../target/ui-unit-coverage
-      - name: Upload source-pinned unit coverage
-        uses: actions/upload-artifact@v7
-        with:
-          name: ui-unit-coverage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ui-unit-coverage/
-          if-no-files-found: error
-          retention-days: 7
+  linux:
+    uses: ./.github/workflows/ui-shards.yml
+    with:
+      operating_systems: '["ubuntu-24.04"]'
+
+  desktop:
+    # Admit the desktop browser burst after portable unit/static checks finish.
+    needs: health
+    uses: ./.github/workflows/ui-shards.yml
+    with:
+      operating_systems: '["macos-latest","windows-latest"]'
 
   coverage:
     # This existing name is required by branch protection. It now certifies
     # successful shards plus their complete current-source coverage upload.
     name: Full Linux UI regression
-    needs: [e2e, unit-coverage]
+    needs: [linux, health]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -154,8 +57,8 @@ jobs:
       - name: Require all browser shards
         working-directory: .
         env:
-          BASELINE: ${{ needs.e2e.result }}
-          UNIT_COVERAGE: ${{ needs.unit-coverage.result }}
+          BASELINE: ${{ needs.linux.result }}
+          UNIT_COVERAGE: ${{ needs.health.result }}
         run: |
           test "$BASELINE" = success
           test "$UNIT_COVERAGE" = success
@@ -196,14 +99,55 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
+  portable-evidence:
+    name: Chromium portable evidence
+    needs: [linux, desktop]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require all full Chromium shards
+        env:
+          LINUX: ${{ needs.linux.result }}
+          DESKTOP: ${{ needs.desktop.result }}
+        run: |
+          test "$LINUX" = success
+          test "$DESKTOP" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: chromium-portable-*-${{ github.run_attempt }}
+          path: target/chromium-portable
+      - name: Validate every OS and the complete portable inventory
+        shell: bash
+        run: |
+          for entry in ubuntu-24.04:linux macos-latest:darwin windows-latest:win32; do
+            os="${entry%:*}"
+            platform="${entry#*:}"
+            mkdir -p "target/chromium-collected/$platform"
+            for shard in 1 2 3 4; do
+              mv "target/chromium-portable/chromium-portable-$os-$shard-${{ github.run_attempt }}" "target/chromium-collected/$platform/$shard"
+            done
+            node scripts/evals/chromium-evidence.mjs collect "target/chromium-collected/$platform" "$platform"
+          done
+      - name: Preserve validated portable reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: chromium-portable-validated-${{ github.run_attempt }}
+          path: target/chromium-collected/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  # HTML presentation is independent of acceptance; raw traces/blob reports
+  # remain mandatory artifacts on the test shards themselves.
   reports:
-    name: Merged UI report (${{ matrix.os }})
-    needs: e2e
+    name: Merged UI reports
+    needs: [linux, desktop]
     if: always() && !cancelled()
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -219,22 +163,36 @@ jobs:
       - run: npm ci
       - uses: actions/download-artifact@v8
         with:
-          pattern: playwright-ui-${{ matrix.os }}-*-${{ github.run_attempt }}
+          pattern: playwright-ui-*-${{ github.run_attempt }}
           path: target/ui-reports
-          merge-multiple: true
-      # Artifact roots include blob-report/ and test-results/. An explicit
-      # testDir in this config also normalizes Windows/macOS source paths.
-      - run: npx playwright merge-reports --config playwright.config.ts --reporter=html ../target/ui-reports/blob-report
+      - name: Render each OS report from its raw blobs
+        shell: bash
+        run: |
+          status=0
+          for os in ubuntu-24.04 macos-latest windows-latest; do
+            mkdir -p "../target/ui-report-blobs/$os"
+            available=true
+            for artifact in ../target/ui-reports/playwright-ui-"$os"-*-${{ github.run_attempt }}; do
+              cp "$artifact"/blob-report/*.zip "../target/ui-report-blobs/$os/" || available=false
+            done
+            if [ "$available" != true ]; then
+              status=1
+              continue
+            fi
+            PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$os" npx playwright merge-reports --config playwright.config.ts --reporter=html "../target/ui-report-blobs/$os" || status=1
+          done
+          exit "$status"
       - uses: actions/upload-artifact@v7
+        if: always() && hashFiles('frontend/playwright-report/**') != ''
         with:
-          name: merged-ui-${{ matrix.os }}-${{ github.run_attempt }}
+          name: merged-ui-${{ github.run_attempt }}
           path: frontend/playwright-report/
           if-no-files-found: error
           retention-days: 7
 
   packs:
     name: Optional pack UI and asset check
-    needs: unit-coverage
+    needs: health
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -284,9 +242,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, browser: chromium }
-          - { os: windows-2022, browser: chromium }
-          - { os: macos-latest, browser: chromium }
           - { os: macos-latest, browser: webkit }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -306,28 +261,12 @@ jobs:
         shell: bash
         run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
       - run: npx playwright install --with-deps ${{ matrix.browser }}
-      # Portable workflows load the same Vite module graph as the full UI suite.
-      # Preserve its Windows client-port budget here as well; the server's
-      # default portable port (5174) stays outside the disposable client pool.
-      - name: Reserve Windows browser connection capacity
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          netsh int ipv4 set dynamicport tcp start=10000 num=55535
-          if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
-          netsh int ipv4 show dynamicport tcp
       - name: Run real React portable workflows (mocked IPC boundary)
         run: node ../scripts/evals/portable-runner.mjs
         env:
           EVAL_BROWSER: ${{ matrix.browser }}
           EVAL_SOURCE_SHA: ${{ github.sha }}
           EVAL_TIER: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}
-      - name: Diagnose Windows browser connection failures
-        if: (failure() || cancelled()) && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          netsh int ipv4 show dynamicport tcp
-          Get-NetTCPConnection | Group-Object State | Select-Object Count, Name | Format-Table
       - name: Validate scenario evidence and reject partial or skipped execution
         run: node ../scripts/evals/browser-report.mjs eval-results/portable/${{ matrix.browser }}/${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)) && 'extended' || 'core' }}/results.json
         env:
@@ -339,6 +278,60 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: portable-ui-${{ matrix.os }}-${{ matrix.browser }}-${{ github.run_attempt }}
+          path: frontend/eval-results/portable/
+          if-no-files-found: error
+          retention-days: 14
+
+  chromium-extended:
+    name: Extended Chromium portable (${{ matrix.os }})
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Prepare Ubuntu archive source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,RUNNER_OS "$(command -v node)" ../scripts/ci/ubuntu-apt-source.mjs
+      - run: npx playwright install --with-deps chromium
+      - name: Reserve Windows browser connection capacity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 set dynamicport tcp start=10000 num=55535
+          if ($LASTEXITCODE -ne 0) { throw "Failed to expand the Windows TCP client port range" }
+          netsh int ipv4 show dynamicport tcp
+      - name: Run and validate extended Chromium evidence
+        run: |
+          node ../scripts/evals/portable-runner.mjs
+          node ../scripts/evals/browser-report.mjs eval-results/portable/chromium/extended/results.json
+        env:
+          EVAL_BROWSER: chromium
+          EVAL_TIER: extended
+          EVAL_SOURCE_SHA: ${{ github.sha }}
+      - name: Diagnose Windows browser connection failures
+        if: (failure() || cancelled()) && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 show dynamicport tcp
+          Get-NetTCPConnection | Group-Object State | Select-Object Count, Name | Format-Table
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: extended-chromium-${{ matrix.os }}-${{ github.run_attempt }}
           path: frontend/eval-results/portable/
           if-no-files-found: error
           retention-days: 14
@@ -385,27 +378,32 @@ jobs:
 
   ui-gate:
     name: Playwright UI E2E
-    needs: [e2e, coverage, reports, packs, portable, firefox-extended]
+    needs: [linux, desktop, coverage, packs, portable-evidence, portable, chromium-extended, firefox-extended]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - name: Require complete selected UI matrices
         env:
-          BASELINE: ${{ needs.e2e.result }}
+          LINUX: ${{ needs.linux.result }}
+          DESKTOP: ${{ needs.desktop.result }}
           COVERAGE: ${{ needs.coverage.result }}
-          REPORTS: ${{ needs.reports.result }}
           PACKS: ${{ needs.packs.result }}
+          CHROMIUM: ${{ needs.portable-evidence.result }}
           PORTABLE: ${{ needs.portable.result }}
+          EXTENDED_CHROMIUM: ${{ needs.chromium-extended.result }}
           FIREFOX: ${{ needs.firefox-extended.result }}
           EXTENDED: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.extended) }}
         run: |
-          test "$BASELINE" = success
+          test "$LINUX" = success
+          test "$DESKTOP" = success
           test "$COVERAGE" = success
-          test "$REPORTS" = success
           test "$PACKS" = success
+          test "$CHROMIUM" = success
           test "$PORTABLE" = success
           if [ "$EXTENDED" = true ]; then
+            test "$EXTENDED_CHROMIUM" = success
             test "$FIREFOX" = success
           else
+            test "$EXTENDED_CHROMIUM" = skipped
             test "$FIREFOX" = skipped
           fi

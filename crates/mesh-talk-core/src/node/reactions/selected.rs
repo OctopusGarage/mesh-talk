@@ -19,14 +19,10 @@ pub struct ReactionSummaryPage {
     pub pending: bool,
 }
 
+mod preparation;
 mod sources;
 mod store;
-
-/// Serializes selected-query preparation turns so superseded proof work cannot
-/// replace a newer decode projection between its source check and commit. The
-/// shared checkpoint's causal continuations attach at this same runtime seam.
-#[derive(Default)]
-pub(in crate::node) struct ReactionQueryWork;
+pub(in crate::node) use preparation::ReactionQueryWork;
 
 #[derive(serde::Serialize)]
 struct Scope {
@@ -48,19 +44,26 @@ struct Snapshot {
 impl Node {
     /// One turn of a selected-target reaction query. Source pages and output are
     /// bounded; pending pages expose no partial summary. Modern-channel causal
-    /// preparation currently delegates to the existing checkpoint query owner.
+    /// work resumes through the checkpoint owner before selected body hydration.
     pub fn reaction_summaries(
         &self,
         conversation: ConversationId,
         targets: &[EventId],
         cursor: Option<&str>,
     ) -> Result<ReactionSummaryPage, NodeError> {
-        let channel = self
-            .channels
+        let retained_channel = self
+            .log
             .lock()
-            .expect("channels mutex")
-            .state(&conversation)
-            .is_some();
+            .expect("log mutex")
+            .repository()?
+            .has_kind(&conversation, EventKind::MembershipChange)?;
+        let channel = retained_channel
+            || self
+                .channels
+                .lock()
+                .expect("channels mutex")
+                .state(&conversation)
+                .is_some();
         self.selected_reactions(
             Scope {
                 conversation,
@@ -241,7 +244,7 @@ impl Node {
         if targets.is_empty() || targets.len() > 64 {
             return Err(LogError::InvalidPageBudget.into());
         }
-        let _work = self.reaction_queries.lock().expect("reaction query mutex");
+        let mut work = self.reaction_queries.lock().expect("reaction query mutex");
         let owner = self
             .log
             .lock()
@@ -326,6 +329,7 @@ impl Node {
         let snapshot = self.reaction_snapshot(&store, &scope, &targets)?;
         let cursor = cursor.filter(|value| !value.starts_with("p:"));
         let (state, after) = store.begin(snapshot.query, &targets, cursor)?;
+        work.retain_for(&scope, snapshot.decode, state.phase);
         if state.phase == 5 {
             let page = store.summaries(&state, after)?;
             if self.reaction_snapshot(&store, &scope, &targets)?.query != snapshot.query {
@@ -336,23 +340,44 @@ impl Node {
         let own = [self.user_id(), self.account_id()];
         match state.phase {
             0 => {
-                let discovery_scope = scope.peer.is_none().then_some(scope.conversation);
-                let (candidates, progress) =
-                    store.discovery(discovery_scope, snapshot.decode, snapshot.through)?;
-                if let Some(progress) = progress {
-                    let mut rows = Vec::new();
-                    for candidate in &candidates {
-                        if !candidate.cached {
-                            rows.push(self.decode_selected_reaction(
-                                candidate,
-                                scope.channel,
-                                &snapshot.evidence,
-                            )?);
+                if !work.advance(self, &store, &scope, &snapshot)? {
+                    let discovery_scope = scope.peer.is_none().then_some(scope.conversation);
+                    let modern =
+                        scope.channel
+                            && self.log.lock().expect("log mutex").repository()?.has_kind(
+                                &scope.conversation,
+                                EventKind::ChannelAccountAuthority,
+                            )?;
+                    let (candidates, progress) =
+                        store.discovery(discovery_scope, snapshot.decode, snapshot.through)?;
+                    if let Some(progress) = progress {
+                        let mut rows = Vec::new();
+                        let mut completed = None;
+                        let mut pending = false;
+                        for candidate in candidates {
+                            if !candidate.cached {
+                                if modern {
+                                    work.start(self, snapshot.decode, candidate)?;
+                                    pending = true;
+                                    break;
+                                }
+                                rows.push(self.decode_selected_reaction(
+                                    &candidate,
+                                    scope.channel,
+                                    &snapshot.evidence,
+                                    None,
+                                )?);
+                            }
+                            completed = Some(candidate.ordinal);
                         }
+                        if let Some(completed) =
+                            completed.or_else(|| (!pending).then_some(progress))
+                        {
+                            store.decoded(discovery_scope, snapshot.decode, completed, &rows)?;
+                        }
+                    } else {
+                        store.advance(&state, 1, -1, 0, None, &[], &own)?;
                     }
-                    store.decoded(discovery_scope, snapshot.decode, progress, &rows)?;
-                } else {
-                    store.advance(&state, 1, -1, 0, None, &[], &own)?;
                 }
             }
             1 => {

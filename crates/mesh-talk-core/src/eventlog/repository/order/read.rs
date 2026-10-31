@@ -89,6 +89,7 @@ impl EventRepository {
             )
         })
     }
+    #[cfg(test)]
     pub(crate) fn causal_headers_page(
         &self,
         conv: &ConversationId,
@@ -99,6 +100,7 @@ impl EventRepository {
         self.database
             .read(|c| self.causal_page(c, conv, kind, cursor, budget, false, |_, h| Ok(h)))
     }
+    #[cfg(test)]
     pub(crate) fn causal_bodies_page(
         &self,
         conv: &ConversationId,

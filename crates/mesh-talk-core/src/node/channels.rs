@@ -754,6 +754,7 @@ impl Node {
 
     /// Event ids visible to this device after it accepted an invitation.
     /// `None` means this channel has no acceptance cutoff (or is not a channel).
+    #[cfg(test)]
     pub(in crate::node) fn channel_content_gate(
         &self,
         channel: ConversationId,
@@ -835,21 +836,32 @@ impl Node {
         if member_account_ids.len() > 255 {
             return Err(NodeError::Channel("too many invitation targets".into()));
         }
-        let mut bindings = std::collections::BTreeMap::new();
-        for expected_account in member_account_ids {
-            if expected_account == self.account_id() {
-                continue;
-            }
-            let proof = self
-                .verified_account_invitation_target(&expected_account)
-                .await?;
-            let account = proof
-                .account_cert
-                .as_ref()
-                .expect("verified account certificate")
-                .account_ed25519_pub;
-            bindings.insert(account, proof);
-        }
+        // Verification belongs to one caller lifetime, even when selected
+        // accounts advertise many stalled devices. Expiry rejects the complete
+        // selection before host admission or any durable group creation.
+        let mut bindings =
+            tokio::time::timeout(super::route_timing::MAX_AUTHENTICATION_DEADLINE, async {
+                let mut bindings = std::collections::BTreeMap::new();
+                for expected_account in member_account_ids {
+                    if expected_account == self.account_id() {
+                        continue;
+                    }
+                    let proof = self
+                        .verified_account_invitation_target(&expected_account)
+                        .await?;
+                    let account = proof
+                        .account_cert
+                        .as_ref()
+                        .expect("verified account certificate")
+                        .account_ed25519_pub;
+                    bindings.insert(account, proof);
+                }
+                Ok::<_, NodeError>(bindings)
+            })
+            .await
+            .map_err(|_| {
+                NodeError::Channel("account invitation verification timed out".into())
+            })??;
         let own = self.own_group_proof();
         bindings.insert(self.account.public().ed25519_pub, own.clone());
         let authority = AccountAuthorityControl {

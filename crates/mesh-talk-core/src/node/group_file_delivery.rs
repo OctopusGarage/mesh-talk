@@ -317,7 +317,8 @@ impl Node {
             .file_consent
             .lock()
             .expect("file consent lock")
-            .received_control_for(job.manifest, &job.recipient)
+            .received_control_for(job.manifest, &job.recipient)?
+            .as_ref()
             .and_then(Decision::open)
             .is_none_or(|decision| {
                 decision.file == job.file

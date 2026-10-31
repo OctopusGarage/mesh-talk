@@ -84,3 +84,6 @@ impl AccountGroupAccess {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::node) use tests::ControlTestPages;

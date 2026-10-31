@@ -1182,6 +1182,23 @@ impl Node {
         expected: &PublicIdentity,
         priority: super::session_pool::AuthenticationPriority,
     ) -> Result<SecureChannel<TcpStream>, TransportError> {
+        // One caller owns every route attempt and the disclosure lease. Keep
+        // that lease across Noise identity disclosure, but never accumulate a
+        // fresh full deadline for each capacity wait or candidate wave.
+        tokio::time::timeout(
+            super::route_timing::MAX_AUTHENTICATION_DEADLINE,
+            self.privacy_dial_inner(addr, expected, priority),
+        )
+        .await
+        .map_err(|_| TransportError::Noise("dial deadline exceeded".into()))?
+    }
+
+    async fn privacy_dial_inner(
+        &self,
+        addr: std::net::SocketAddr,
+        expected: &PublicIdentity,
+        priority: super::session_pool::AuthenticationPriority,
+    ) -> Result<SecureChannel<TcpStream>, TransportError> {
         #[cfg(test)]
         let mut timing = super::delivery_runtime::TestTiming::new("dial-own-presence");
         let mut addr = addr;

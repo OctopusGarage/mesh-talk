@@ -382,7 +382,13 @@
     "reEdit": "重新编辑",
     "mentionedYou": "提及了你",
     "reactionAdd": "添加 {{emoji}} 表情回应",
-    "reactionRemove": "移除你的 {{emoji}} 表情回应"
+    "reactionRemove": "移除你的 {{emoji}} 表情回应",
+    "reactionsTitle": "回应",
+    "reactionsDescription": "此消息的回应数量。选择回应可添加或移除自己的回应。",
+    "reactionsEmpty": "暂无回应",
+    "reactionsStart": "从头查看",
+    "reactionsNext": "下一页",
+    "reactionsMore": "更多回应"
   },
   "transfer": {
     "preparing": "正在准备文件…",
@@ -396,7 +402,13 @@
     "waiting": "等待文件…",
     "receivingProgress": "正在接收文件：{{percent}}%",
     "sending": "正在发送文件…",
-    "saving": "正在保存文件…"
+    "saving": "正在保存文件…",
+    "imageWaiting": "等待图片",
+    "imageReceiving": "正在接收图片",
+    "imageReceivingProgress": "正在接收图片 · {{percent}}%",
+    "imagePreparing": "正在准备图片",
+    "imageDetails": "照片 · {{size}}",
+    "image": "照片"
   },
   "composer": {
     "expireAfterSend": "发送后到期",

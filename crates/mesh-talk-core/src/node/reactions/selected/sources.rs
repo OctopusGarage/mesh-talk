@@ -104,6 +104,7 @@ impl Node {
         candidate: &store::Candidate,
         channel: bool,
         evidence: &Evidence,
+        causal: Option<&crate::node::channel::ChannelMembershipProjection>,
     ) -> Result<store::Decoded, NodeError> {
         let mut decoded = store::Decoded {
             id: candidate.id,
@@ -136,46 +137,22 @@ impl Node {
             .ok_or(LogError::StaleCursor)?;
         decoded.wall = event.wall_clock;
         if channel {
-            let (causal_source, causal_account) = {
-                let log = self.log.lock().expect("log mutex");
-                let repository = log.repository()?;
-                if repository
-                    .raw_kind_revisions(candidate.conversation)?
-                    .ok_or(LogError::StaleCursor)?
-                    [EventKind::ChannelAccountAuthority as usize]
-                    >= 0
-                {
-                    // This call is replaced by the checkpoint's resumable query at
-                    // the shared causal boundary; no local graph reducer exists.
-                    let projection = self.channel_checkpoints.causal_projection(
-                        repository,
-                        candidate.conversation,
-                        candidate.id,
-                    )?;
-                    let source = projection
+            let causal_source = causal.and_then(|p| p.state.as_ref()).and_then(|state| {
+                state
+                    .members()
+                    .iter()
+                    .find(|member| member.ed25519_pub == *event.author.ed25519_pub())
+                    .cloned()
+            });
+            let causal_account = causal
+                .filter(|p| p.authority.current_event().is_some())
+                .and_then(|p| p.state.as_ref())
+                .and_then(|state| {
+                    causal_source
                         .as_ref()
-                        .and_then(|p| p.state.as_ref())
-                        .and_then(|s| {
-                            s.members()
-                                .iter()
-                                .find(|m| m.ed25519_pub == *event.author.ed25519_pub())
-                                .cloned()
-                        });
-                    let account = projection
-                        .as_ref()
-                        .filter(|p| p.authority.current_event().is_some())
-                        .and_then(|p| p.state.as_ref())
-                        .and_then(|s| {
-                            source
-                                .as_ref()
-                                .and_then(|m| s.member_account_id(&m.user_id()))
-                        })
-                        .map(str::to_owned);
-                    (source, account)
-                } else {
-                    (None, None)
-                }
-            };
+                        .and_then(|member| state.member_account_id(&member.user_id()))
+                })
+                .map(str::to_owned);
             let source = causal_source
                 .or_else(|| {
                     self.channels

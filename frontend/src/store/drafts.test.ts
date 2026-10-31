@@ -3,6 +3,34 @@ import { createDraftStore } from "./drafts";
 
 afterEach(() => vi.useRealTimers());
 
+it("offers retry after initial draft loading stalls and ignores late data after retry and editing", async () => {
+  const { api, store } = fixture();
+  let finish!: (snapshot: {
+    session: string;
+    drafts: Record<string, string>;
+  }) => void;
+  api.load.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const loading = store.getState().start("alice", 1, "account-one");
+  try {
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(store.getState().error).toBe("load");
+    await loading;
+    await store.getState().start("alice", 1, "account-one");
+    store.getState().edit("alice", 1, "account:a", "local after retry");
+    finish({ session: "old", drafts: { "account:a": "stale" } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.getState().texts["account:a"]).toBe("local after retry");
+    expect(store.getState().loaded).toBe(true);
+  } finally {
+    finish?.({ session: "old", drafts: {} });
+  }
+});
+
 it("a refreshed protected policy retires an older media admission capture", async () => {
   const { api, store } = fixture();
   api.load.mockResolvedValueOnce({

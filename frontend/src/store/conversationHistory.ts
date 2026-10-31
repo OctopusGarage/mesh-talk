@@ -4,6 +4,7 @@ import { chat } from "@/lib/api/chat";
 import { readWithDeadline } from "@/lib/readDeadline";
 import type { HistoryItem } from "@/lib/types";
 import { captureChatOwner } from "./ownership";
+import { requestConversationReactions } from "./conversationReactions";
 import {
   emptyReception,
   reconcileHistory,
@@ -124,11 +125,6 @@ function historyFor(c: Conversation, owner: string, limit = HISTORY_LIMIT) {
   return c.kind === "account"
     ? chat.ownerHistory(owner, c.id, limit)
     : chat.channelHistory(c.id, limit);
-}
-function reactionsFor(c: Conversation) {
-  return c.kind === "account"
-    ? chat.accountReactions(c.id)
-    : chat.channelReactions(c.id);
 }
 
 type AutomaticReloadRequest = {
@@ -306,9 +302,8 @@ async function reloadConversationSnapshot(
         );
         return native;
       });
-    const [items, reacts, context] = await Promise.all([
+    const [items, context] = await Promise.all([
       read(() => historyFor(c, lease.owner!, get().historyLimits[key])),
-      read(() => reactionsFor(c)),
       exactTarget
         ? read(() =>
             chat.searchContext(lease.owner!, exactTarget.reference),
@@ -369,14 +364,20 @@ async function reloadConversationSnapshot(
                 !items.some((h) => h.id === intent.message.id)),
           ),
         ),
-        reactions: { ...s.reactions, [key]: reacts },
         ...(s.loadingRequest === loadingRequest
           ? { loading: false, historyError: null }
           : {}),
       };
     });
-    if (current() && get().active && convKey(get().active!) === key)
+    if (current() && get().active && convKey(get().active!) === key) {
+      requestConversationReactions(
+        rawSet,
+        get,
+        c,
+        items.flatMap((item) => (item.id ? [item.id] : [])),
+      );
       await get().refreshStatuses();
+    }
     return current();
   } catch {
     if (
@@ -482,7 +483,9 @@ export async function scanConversationHistory(
           key,
         );
         try {
-          const rows = await historyFor(conversation, lease.owner!, 500);
+          const rows = await readWithDeadline(() =>
+            historyFor(conversation, lease.owner!, 500),
+          );
           if (!current()) return;
           set((state) => ({
             ...snapshotPatch(state, key, rows, {

@@ -32,6 +32,20 @@ test("an identical successful command executes once and retains timing evidence"
   assert.ok(first.elapsedMs >= 0); assert.ok(second.receipt);
 });
 
+test("Cargo owns default test concurrency and explicit caller limits remain authoritative", async t => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.root, ".cargo"));
+  await mkdir(path.join(f.root, "src"));
+  await writeFile(path.join(f.root, ".cargo/config.toml"), '[env]\nRUST_TEST_THREADS = "4"\n');
+  await writeFile(path.join(f.root, "Cargo.toml"), '[package]\nname = "stage-thread-policy"\nversion = "0.1.0"\nedition = "2024"\n');
+  await writeFile(path.join(f.root, "src/lib.rs"), '#[test]\nfn respects_thread_policy() { assert_eq!(std::env::var("RUST_TEST_THREADS").unwrap(), std::env::var("EXPECTED_THREADS").unwrap()); }\n');
+  for (const [limit, expected] of [[undefined, "4"], ["1", "1"]]) {
+    const result = await f.run({ command: ["cargo", "test", "--offline"], fresh: true,
+      env: { RUST_TEST_THREADS: limit, EXPECTED_THREADS: expected, CARGO_TARGET_DIR: path.join(f.root, "target") } });
+    assert.equal(result.code, 0, await readFile(result.logPath, "utf8"));
+  }
+});
+
 test("changed command, relevant environment, base and revision invalidate successful evidence", async t => {
   const f = await fixture(t);
   await f.run();

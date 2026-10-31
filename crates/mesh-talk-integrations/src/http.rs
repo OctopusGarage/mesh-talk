@@ -401,6 +401,18 @@ mod tests {
         task: tokio::task::JoinHandle<Result<(), IntegrationError>>,
     }
 
+    #[test]
+    fn production_http_deadlines_remain_thirty_seconds() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(
+            REQUEST_TIMEOUT + Duration::from_secs(1),
+            Duration::from_secs(31)
+        );
+        let help = catalog(None);
+        assert_eq!(help["limits"]["header_timeout_ms"], 30_000);
+        assert_eq!(help["limits"]["request_timeout_ms"], 30_000);
+    }
+
     async fn fixture() -> Fixture {
         let directory = tempfile::tempdir().unwrap();
         let (dm, _) = tokio::sync::mpsc::unbounded_channel();

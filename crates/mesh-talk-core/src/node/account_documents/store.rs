@@ -195,7 +195,24 @@ fn scope_contains(
 }
 
 impl AccountDocumentStore {
+    #[cfg(test)]
     pub(in crate::node) fn open(
+        dir: &Path,
+        password: &str,
+        account: &[u8; 32],
+    ) -> Result<Self, LogError> {
+        Self::open_inner(None, dir, password, account)
+    }
+    pub(in crate::node) fn open_profile(
+        profile: std::sync::Arc<crate::storage::profile::context::ProfileStorage>,
+        dir: &Path,
+        password: &str,
+        account: &[u8; 32],
+    ) -> Result<Self, LogError> {
+        Self::open_inner(Some(profile), dir, password, account)
+    }
+    fn open_inner(
+        profile: Option<std::sync::Arc<crate::storage::profile::context::ProfileStorage>>,
         dir: &Path,
         password: &str,
         account: &[u8; 32],
@@ -225,31 +242,35 @@ impl AccountDocumentStore {
         }
         // This namespace belongs exclusively to account documents. Other media
         // stores keep their own recovery policy and are never scanned here.
-        match std::fs::read_dir(blob_root.join("media")) {
-            Ok(entries) => {
-                for (i, entry) in entries.enumerate() {
-                    if i >= MAX_MEDIA_ENTRIES {
-                        return Err(corrupt());
-                    }
-                    let entry = entry.map_err(LogError::Io)?;
-                    if entry.file_type().map_err(LogError::Io)?.is_file()
-                        && entry.file_name().to_str().is_some_and(|name| {
-                            name.strip_suffix(".bin.part")
-                                .is_some_and(|stem| hex(stem, 64))
-                        })
-                    {
-                        std::fs::remove_file(entry.path()).map_err(LogError::Io)?;
+        if profile.is_none() {
+            match std::fs::read_dir(blob_root.join("media")) {
+                Ok(entries) => {
+                    for (i, entry) in entries.enumerate() {
+                        if i >= MAX_MEDIA_ENTRIES {
+                            return Err(corrupt());
+                        }
+                        let entry = entry.map_err(LogError::Io)?;
+                        if entry.file_type().map_err(LogError::Io)?.is_file()
+                            && entry.file_name().to_str().is_some_and(|name| {
+                                name.strip_suffix(".bin.part")
+                                    .is_some_and(|stem| hex(stem, 64))
+                            })
+                        {
+                            std::fs::remove_file(entry.path()).map_err(LogError::Io)?;
+                        }
                     }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(LogError::Io(e)),
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(LogError::Io(e)),
         }
-        let media = MediaStore::open(
-            &dir.join(format!("account-document-blobs-{id}")),
-            &scoped,
-            &id,
-        )
+        let indexed = profile.is_some();
+        let media = match profile {
+            Some(profile) => {
+                MediaStore::open_profile(profile, &blob_root, &scoped, &id, Some(MAX_MEDIA_ENTRIES))
+            }
+            None => MediaStore::open(&blob_root, &scoped, &id),
+        }
         .map_err(LogError::Io)?;
         let journal_bytes =
             INDEX_HEADER + rows.iter().map(|r| r.len() + INDEX_FRAME).sum::<usize>();
@@ -350,11 +371,30 @@ impl AccountDocumentStore {
                 store.index_personal_control(doc.meta.clone(), control);
             }
         }
-        store
-            .media
-            .prune_unreferenced(&store.live())
-            .map_err(LogError::Io)?;
+        if indexed {
+            store.media.schedule_gc().map_err(LogError::Io)?;
+        } else {
+            store
+                .media
+                .prune_unreferenced(&store.live())
+                .map_err(LogError::Io)?;
+        }
+
         Ok(store)
+    }
+    pub(in crate::node) fn media_maintenance_pending(&self) -> Result<bool, LogError> {
+        self.media.gc_pending().map_err(LogError::Io)
+    }
+    /// Caller holds this document owner while a bounded physical cleanup turn
+    /// checks its current references and removes orphaned bytes.
+    pub(in crate::node) fn maintain_media(&self) -> Result<(), LogError> {
+        self.media
+            .gc_step(|file| {
+                Ok(self.current.values().any(|meta| {
+                    !meta.tombstone && meta.content_len > 0 && meta.content_hash == *file.as_bytes()
+                }))
+            })
+            .map_err(LogError::Io)
     }
     #[cfg(test)]
     pub(super) fn remove_blob_for_test(&self, hash: [u8; 32]) {

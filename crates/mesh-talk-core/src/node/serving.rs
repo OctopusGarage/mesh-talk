@@ -937,7 +937,7 @@ impl Node {
                             self.files.lock().expect("files lock").finish_download(work)?;
                             return Ok(());
                         }
-                        if self.media.contains(fc) && self.has_verified_file_completion(fc) {
+                        if self.local_media_recovery_complete(fc)? {
                             let progressed = match self.complete_sticker_aliases(fc) {
                                 Ok(progressed) => progressed,
                                 Err(error) => {
@@ -947,6 +947,7 @@ impl Node {
                             };
                             let pending = self.pending_sticker_aliases(fc)?;
                             if !pending {
+                                self.commit_file_completion(fc, &[])?;
                                 self.files.lock().expect("files lock").finish_download(work)?;
                             }
                             if progressed || !pending {
@@ -1059,9 +1060,7 @@ impl Node {
                                 .expect("files lock not poisoned")
                                 .manifest(fc)?
                                 .as_ref().is_some_and(super::media_store::manifest_is_media);
-                            if !managed
-                                || (self.media.contains(fc)
-                                    && self.has_verified_file_completion(fc))
+                            if !managed || self.local_media_recovery_complete(fc)?
                             {
                                 self.files.lock().expect("files lock").finish_download(work)?;
                             } else {

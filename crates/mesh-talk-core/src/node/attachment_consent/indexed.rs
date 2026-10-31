@@ -45,34 +45,6 @@ fn initialize_account_on(c: &Connection, account: &str) -> Result<(), LogError> 
     )?;
     Ok(())
 }
-fn legacy_namespace_on(c: &Connection) -> Result<String, LogError> {
-    let previous: Option<String> = c.query_row(
-        "SELECT bootstrap_previous FROM participant_profile WHERE singleton=1",
-        [],
-        |r| r.get(0),
-    )?;
-    if let Some(previous) = previous {
-        return Ok(previous);
-    }
-    let count: i64 = c.query_row(
-        "SELECT count(*) FROM (SELECT 1 FROM participant_account_namespaces LIMIT 2)",
-        [],
-        |r| r.get(0),
-    )?;
-    if count != 1 {
-        return Err(invalid(
-            "attachment consent ownership is unavailable for this experimental multi-account legacy source; data was preserved",
-        ));
-    }
-    let account = active_on(c)?;
-    let exact:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM participant_account_namespaces WHERE account_id=?1 AND account=?2)",params![account.account_id(),account.ed25519_pub.as_slice()],|r|r.get(0))?;
-    if !exact {
-        return Err(invalid(
-            "attachment policy initial namespace is not authenticated",
-        ));
-    }
-    Ok(account.account_id())
-}
 fn put_on(c: &Connection, account: &str, record: Record) -> Result<(), LogError> {
     if let Record::Contact { account, .. } = &record
         && (account.len() != 32 || !account.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -170,7 +142,10 @@ impl IndexedAttachmentConsent {
                     MAGIC,
                     |record| {
                         if namespace.is_none() {
-                            namespace = Some(legacy_namespace_on(c)?);
+                            namespace = Some(event_ownership::legacy_source_namespace_on(
+                                c,
+                                "attachment consent",
+                            )?);
                         }
                         put_on(
                             c,
