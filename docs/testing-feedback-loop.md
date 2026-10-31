@@ -133,6 +133,17 @@ Keep the existing custody observation budget, real network exchange, offline-hol
 and restart assertions. This setup boundary does not establish a production latency
 guarantee or a dependency between independent mandatory/optional worker lanes.
 
+Keep intentional blob corruption separate from automatic custody propagation.
+A real sibling read during a missing-blob interval can change its protocol retry
+state even after the source repairs the blob. The storage-repair fixture uses a
+real external holder and awaited encrypted delivery/recheck, with no autonomous
+source worker during corruption. It proves unknown rather than zero, repair
+without signed metadata churn and durable readability after reopen. Automatic
+propagation retains its original deadline with the external holder already
+offline, without an explicit pull or prior custody warmup. Controlled fault-path
+evidence does not by itself identify the cause of a historical timeout; matching
+sanitizer execution remains required.
+
 Explicit-file result fixtures establish authenticated File capabilities in both
 directions before admitting their first request. A forward role view does not
 prove that the executor can fetch the sender's prepared assets: document import
@@ -140,6 +151,16 @@ can wake work before its authenticated capability receipt is installed. Hold a
 real reverse Control response to verify this setup boundary, then retain the
 original operation deadlines, matching-retry and byte assertions. Deliberate
 capability-refusal scenarios must preserve their missing-capability state.
+
+Both the initial requester and the fresh result requester finish cold capability
+setup before invoking the unchanged three-second signed-role proof. Running nodes
+observe their existing producers. The fresh requester intentionally has no
+background worker before retry admission, so its cold phase drives the required
+Control exchange and retains the shared owner's cursor, authenticated interruption
+classification and admission backoff. Do not start its worker early: that would
+erase the result-adoption race. A real fresh Control response held beyond the role
+budget must complete through cold setup before the original matching-retry and
+byte assertions. Static phase markers distinguish initial and fresh setup failures.
 
 Dialog-to-menu regressions distinguish fixture state from actual focus ownership.
 Hold the real deferred close-focus callback, remove the old dialog, open the next
@@ -736,7 +757,7 @@ independent checks run concurrently and heavy suites are not repeated by health.
 | `check-health.yml` platform jobs      | Complete frontend units, help and diagnostic/Python regressions on Linux/macOS/Windows; unit coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                                                                 |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
-| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit/Firefox core and scheduled extended scenarios                                                                              |
+| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit/Firefox core and scheduled extended scenarios                                                                 |
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                                                                       |
 
 Health is called by the UI workflow for every PR base and merge candidate, with

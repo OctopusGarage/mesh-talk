@@ -624,32 +624,116 @@ async fn wait_file_fixture_capabilities(source: &Node, origin: &Node) {
     .expect("both exact authenticated File capabilities must precede explicit file admission");
 }
 
-struct ReverseFileBootstrapHold {
+#[derive(Clone, Copy)]
+enum FileControlSetup {
+    Initial,
+    Fresh,
+}
+impl FileControlSetup {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Initial => "initial requester",
+            Self::Fresh => "fresh inbound-only requester",
+        }
+    }
+}
+
+async fn prepare_file_source_control(
+    target: &Arc<Node>,
+    source: &Node,
+    address: std::net::SocketAddr,
+    group: crate::eventlog::ConversationId,
+    setup: FileControlSetup,
+) {
+    eprintln!(
+        "file fixture Control setup: {} cold protocol",
+        setup.label()
+    );
+    super::cold_account_control_setup(
+        async {
+            if matches!(setup, FileControlSetup::Fresh) {
+                // This requester intentionally has no background owner until
+                // after explicit retry. Drive its already-required real Control
+                // exchange here; a passive observation would have no producer.
+                let peer = target.routing_peer(&source.user_id()).unwrap();
+                assert_eq!(peer.public, source.identity.public());
+                let mut cursor =
+                    crate::node::account_documents::sync::DocumentSyncCursor::control();
+                let mut interruptions = 0;
+                loop {
+                    let result = target.pull_account_documents_page(&peer, &mut cursor).await;
+                    let complete = super::message_action_reference::accept_reference_control_page(
+                        target,
+                        source,
+                        &peer,
+                        &cursor,
+                        result,
+                        &mut interruptions,
+                    )
+                    .await;
+                    if complete
+                        && super::has_account_group_operation_support(
+                            target,
+                            source,
+                            Some(AccountGroupOperationKind::File),
+                        )
+                    {
+                        break;
+                    }
+                    // A cold inbound-only node has no owner to drive a later
+                    // pending page. Retain this actual cursor and its deadlines.
+                    if complete {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+            }
+            super::observe_account_fixture_condition(|| {
+                super::has_account_group_operation_support(
+                    target,
+                    source,
+                    Some(AccountGroupOperationKind::File),
+                )
+            })
+            .await;
+        },
+        async {
+            eprintln!(
+                "file fixture Control setup: {} signed role page",
+                setup.label()
+            );
+            pull_group_control(target, source, address, group).await;
+        },
+    )
+    .await;
+    eprintln!("file fixture Control setup: {} complete", setup.label());
+}
+
+struct FileBootstrapHold {
     release: Arc<tokio::sync::Semaphore>,
     arrived: tokio::sync::oneshot::Receiver<()>,
 }
-impl Drop for ReverseFileBootstrapHold {
+impl Drop for FileBootstrapHold {
     fn drop(&mut self) {
         self.release.close();
     }
 }
 
-fn hold_reverse_file_bootstrap(origin: &Node, source: &Node) -> ReverseFileBootstrapHold {
+fn hold_file_bootstrap(server: &Node, requester: &Node) -> FileBootstrapHold {
     use crate::node::{
         account_documents::wire::DocumentRequest, account_sync_wire::AccountHistoryFrame,
     };
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let (arrived, held) = tokio::sync::oneshot::channel();
     let arrived = Arc::new(Mutex::new(Some(arrived)));
-    let exact_source = source.identity.public();
-    *origin.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+    let exact_requester = requester.identity.public();
+    *server.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let release = release.clone();
         move |peer, frame| {
             let release = release.clone();
             let arrived = arrived.clone();
-            let exact_source = exact_source.clone();
+            let exact_requester = exact_requester.clone();
             Box::pin(async move {
-                if peer == exact_source
+                if peer == exact_requester
                     && matches!(frame, AccountHistoryFrame::DocumentsRequest { ref body }
                     if DocumentRequest::decode(body).is_some_and(|request| request.domain == crate::node::AccountDocumentDomain::GroupControl))
                 {
@@ -664,7 +748,7 @@ fn hold_reverse_file_bootstrap(origin: &Node, source: &Node) -> ReverseFileBoots
             })
         }
     }));
-    ReverseFileBootstrapHold {
+    FileBootstrapHold {
         release,
         arrived: held,
     }
@@ -675,6 +759,13 @@ async fn file_fixture_waits_for_reverse_authenticated_file_capability_before_adm
     // Mode 6 retains mode 4's matching-retry race and every original byte/result
     // assertion, with a controlled cold reverse capability bootstrap added.
     file_result_roundtrip(6).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn file_fixture_finishes_inbound_only_cold_protocol_before_role_page_budget() {
+    // Mode 7 keeps the fresh requester stopped through the matching retry gap.
+    // Only its first authenticated source Control response is held past 3s.
+    file_result_roundtrip(7).await;
 }
 
 fn initial_file_result_timeout_stage(
@@ -717,7 +808,7 @@ async fn file_result_roundtrip(mode: u8) {
     let origin = node(&dir.path().join("origin"), &account);
     let external = node(&dir.path().join("external"), &Account::generate());
     // Arm before either background owner can learn the reverse capability.
-    let mut reverse_bootstrap = (mode == 6).then(|| hold_reverse_file_bootstrap(&origin, &source));
+    let mut reverse_bootstrap = (mode == 6).then(|| hold_file_bootstrap(&origin, &source));
     let genesis = Event::new(
         &offline_owner.identity,
         new_channel_id(),
@@ -781,7 +872,14 @@ async fn file_result_roundtrip(mode: u8) {
         tasks.spawn(target.clone().run_accept_loop(listener));
     }
     source.publish_account_group_access(&mut None);
-    pull_group_control(&origin, &source, addresses[0], group).await;
+    prepare_file_source_control(
+        &origin,
+        &source,
+        addresses[0],
+        group,
+        FileControlSetup::Initial,
+    )
+    .await;
     assert_eq!(
         origin.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
@@ -1043,7 +1141,38 @@ async fn file_result_roundtrip(mode: u8) {
     // Document installation wakes account work before the exchange finishes
     // installing its authenticated capability receipt. Establish this fixture
     // prerequisite before starting the worker, rather than racing its retry.
-    pull_group_control(&fresh, &source, addresses[0], group).await;
+    let cold_hold_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if mode == 7 {
+        let mut hold = hold_file_bootstrap(&source, &fresh);
+        let released = cold_hold_released.clone();
+        tasks.spawn(async move {
+            super::cold_account_setup(&mut hold.arrived)
+                .await
+                .expect("the fresh request must reach the real authenticated Control hold")
+                .unwrap();
+            eprintln!("file fixture Control fault: fresh authenticated response held");
+            // Deliberately exceed the unchanged signed-role page's 3s budget.
+            // The cold phase owns this first protocol receipt, not role timing.
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            released.store(true, std::sync::atomic::Ordering::SeqCst);
+            hold.release.close();
+        });
+    }
+    prepare_file_source_control(
+        &fresh,
+        &source,
+        addresses[0],
+        group,
+        FileControlSetup::Fresh,
+    )
+    .await;
+    if mode == 7 {
+        assert!(
+            cold_hold_released.load(std::sync::atomic::Ordering::SeqCst),
+            "the real fresh Control request must remain held beyond the signed-role budget before completing cold setup"
+        );
+        *source.account_session_test_hook.lock().unwrap() = None;
+    }
     assert!(
         fresh.account_group_operation_ready_for(
             &source.identity.public(),
