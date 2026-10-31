@@ -15,9 +15,7 @@ fn queue_runtime_presentation<E>(
     present: impl FnOnce() + Send + 'static,
     enqueue: impl FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), E>,
 ) -> Result<(), E> {
-    enqueue(Box::new(move || {
-        let _ = authority.current(|_| present());
-    }))
+    enqueue(Box::new(authority.queued_current(present)))
 }
 
 #[derive(Clone, Default)]

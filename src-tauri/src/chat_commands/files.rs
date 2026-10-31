@@ -336,32 +336,82 @@ pub fn default_download_dir(app: tauri::AppHandle) -> Option<String> {
 /// Open only the configured download folder (or the OS default) in the file manager.
 /// The renderer cannot choose a different path for this command.
 #[tauri::command]
-pub fn open_download_dir(
+pub async fn open_download_dir(
     app: tauri::AppHandle,
     app_state: tauri::State<'_, crate::state::AppState>,
     settings: tauri::State<'_, crate::settings::SettingsState>,
     owner: String,
 ) -> Result<(), CommandError> {
-    crate::config_store::with_account(&app_state, &owner, "settings.json", |_| {
-        let configured = settings.get_for_owner(&owner)?.download_dir;
-        let dir = if configured.is_empty() {
-            default_download_dir(app)
-                .ok_or_else(|| CommandError::Validation("download folder unavailable".into()))?
-        } else {
-            configured
-        };
+    let lease = app_state
+        .session()
+        .capture()
+        .map_err(CommandError::Authorization)?;
+    if lease.owner() != owner {
+        return Err(CommandError::Authorization("session owner mismatch".into()));
+    }
+    let configured =
+        crate::config_store::with_account_lease(&app_state, &lease, "settings.json", |_| {
+            Ok(settings.get_for_owner(&owner)?.download_dir)
+        })?;
+    let revision = app_state.app_lock().authorization_revision()?;
+    let dir = if configured.is_empty() {
+        default_download_dir(app)
+            .ok_or_else(|| CommandError::Validation("download folder unavailable".into()))?
+    } else {
+        configured
+    };
+    let state = app_state.inner().clone();
+    tokio::task::spawn_blocking(move || {
         let path = std::path::Path::new(&dir);
         if !path.is_dir() {
             return Err(CommandError::Validation(
                 "download folder unavailable".into(),
             ));
         }
-        #[cfg(target_os = "macos")]
-        let opened = tauri_plugin_opener::open_path(path, Some("Finder"));
-        #[cfg(not(target_os = "macos"))]
-        let opened = tauri_plugin_opener::open_path(path, None::<&str>);
-        opened.map_err(|error| CommandError::Service(format!("open download folder: {error}")))
+        // The path API repeats metadata() on Linux/Windows. A network folder
+        // must not block session authority: dispatch the equivalent file URL
+        // after validating the directory outside the guard.
+        #[cfg(not(target_os = "windows"))]
+        let url = tauri::Url::from_file_path(path)
+            .map_err(|_| CommandError::Validation("invalid download folder".into()))?;
+        let child =
+            crate::config_store::with_account_lease(&state, &lease, "settings.json", |_| {
+                state.app_lock().with_unchanged_revision(revision, || {
+                    // ShellExecute may perform another metadata/DDE wait. Starting
+                    // Explorer directly keeps only process creation inside authority.
+                    #[cfg(target_os = "windows")]
+                    {
+                        crate::background_command::command("explorer.exe")
+                            .arg(path)
+                            .spawn()
+                            .map(Some)
+                            .map_err(|error| {
+                                CommandError::Service(format!("open download folder: {error}"))
+                            })
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        #[cfg(target_os = "macos")]
+                        let opened = tauri_plugin_opener::open_url(url.as_str(), Some("Finder"));
+                        #[cfg(not(target_os = "macos"))]
+                        let opened = tauri_plugin_opener::open_url(url.as_str(), None::<&str>);
+                        opened
+                            .map(|()| None::<tokio::process::Child>)
+                            .map_err(|error| {
+                                CommandError::Service(format!("open download folder: {error}"))
+                            })
+                    }
+                })
+            })?;
+        if let Some(mut child) = child {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+        Ok(())
     })
+    .await
+    .map_err(|e| CommandError::Internal(format!("download folder worker failed: {e}")))?
 }
 
 #[tauri::command]
@@ -534,8 +584,8 @@ pub(crate) fn cleanup_pasted_file<R: tauri::Runtime>(app: &tauri::AppHandle<R>, 
 }
 
 #[tauri::command]
-pub fn delete_temp_file<R: tauri::Runtime>(app: tauri::AppHandle<R>, path: String) {
-    cleanup_pasted_file(&app, &path);
+pub async fn delete_temp_file<R: tauri::Runtime>(app: tauri::AppHandle<R>, path: String) {
+    let _ = tokio::task::spawn_blocking(move || cleanup_pasted_file(&app, &path)).await;
 }
 
 pub(crate) fn clean_stale_pasted_files(cache: &std::path::Path) {

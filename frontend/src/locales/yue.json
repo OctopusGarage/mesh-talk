@@ -402,7 +402,13 @@
     "waiting": "等緊檔案…",
     "receivingProgress": "收緊檔案：{{percent}}%",
     "sending": "正在傳送檔案…",
-    "saving": "正在儲存檔案…"
+    "saving": "正在儲存檔案…",
+    "imageWaiting": "等緊圖片",
+    "imageReceiving": "接收緊圖片",
+    "imageReceivingProgress": "接收緊圖片 · {{percent}}%",
+    "imagePreparing": "準備緊圖片",
+    "imageDetails": "相片 · {{size}}",
+    "image": "相片"
   },
   "composer": {
     "expireAfterSend": "傳送後到期",

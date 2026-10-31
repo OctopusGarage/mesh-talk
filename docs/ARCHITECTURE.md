@@ -548,13 +548,38 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   writers on errors and authorizes the synchronous producer launch, installation,
   and each inbound callback against the current lease/ticket. A late rename cannot
   change a replacement session or runtime; startup uses the current matching name.
+  Inbound callbacks queue native notification/event publication onto the main
+  thread before acquiring that authority, then recheck it when the queued action
+  runs. No session guard may span a synchronous native window query from a worker:
+  the main thread also acquires session authority for badges and window actions.
   An IDs-only startup observation may publish the device/account identity after
   the existing keystore unlocks, before durable stores finish opening. The host
   binds it to that exact lease and startup ticket; replacement and failed or
   cancelled startup revoke it. This observation permits account-scoped appearance
   cache hydration only. It does not install a runtime or admit messaging/settings
   commands. Full node identity and readiness still require runtime admission.
-  Successful logout forgets the original login credential before awaiting teardown.
+  Saved-login credential operations run on owned blocking workers without holding
+  the session or app-lock guards across OS provider calls. Authentication
+  serialization remains with the worker, including after caller cancellation, so a
+  late same-user write or cleanup cannot overwrite a replacement login's credential.
+  Legacy credential reads that can migrate native items use the same ordering.
+  Shared-account login reconciliation keeps the runtime guard through local
+  credential-envelope and profile publication, then releases it before native
+  saved-login persistence. Retirement can stop the graceful observer while the
+  credential worker retains authentication ordering. Metadata and profile events
+  recheck the exact runtime instance, session and app-lock revision; an obsolete
+  native write is removed before another authentication operation can proceed.
+  Verified device-linking admission combines its existing sensitive proof with
+  that revision check under one app-lock guard, without recursively locking it.
+  Automatic login rechecks saved-login consent when admitting the loaded secret.
+  Saved-login retry rechecks its exact session and app-lock revision before publishing
+  resume metadata and removes a completed native write if that authority changed.
+  Logout publishes its signed-out state and schedules runtime retirement independently
+  of the credential cleanup worker. Disabling saved login withdraws resume metadata
+  before cleanup and schedules any accompanying live policy changes independently.
+  OS credential APIs cannot be forcibly cancelled;
+  a blocked provider may delay another authentication operation, while session queries,
+  app locking and runtime retirement remain available.
   On macOS, Stay signed in stores a password in the standard OS Keychain so a
   previously unlocked desktop can resume the session on launch. The in-app lock
   uses macOS device-owner authentication, which offers Touch ID or the current
@@ -947,6 +972,11 @@ before removing the row; erasure markers are never evicted to make room.
 All local event allocations and own-author sync backfill first recover accepted
 intents under the delivery lock, so generic reactions/manifests cannot consume
 an immutable intent's reserved sequence. Failed recovery blocks competing writes.
+When a local deletion or account archive snapshot needs both sent-message history
+and recovered sent IDs, it acquires the sent log before the recovered-ID set.
+Archive readers do not take the delivery lock, so writer-only serialization
+cannot substitute for this shared order. Blocking archive work remains part of
+runtime retirement until its worker exits.
 
 `run_accept_loop` also owns the shared recurring delivery worker for desktop,
 CLI and SDK hosts. It wakes on local acceptance and periodically retries missed
@@ -2312,7 +2342,7 @@ existing participants see an ordinary signed account/device author.
   - _Coverage-guided fuzzing_ (`fuzz/`, `fuzz.yml`, weekly + dispatch) of selected public
     untrusted wire and opened-payload decoders; the `decoder_smoke` test is the always-on
     stable complement. See [`fuzz/README.md`](../fuzz/README.md) for the current targets.
-  - _Mutation testing_ (`mutants.yml`, weekly + on PR-diff) — catches weak/missing assertions.
+  - _Mutation testing_ (`mutants.yml`, daily/manual workspace sampling; PR runner contracts) — catches weak/missing assertions. See [execution policy](testing-feedback-loop.md).
   - _Coverage_ (Codecov), _clippy `-D warnings`_, _cargo-deny_, _cargo-machete_, _CodeQL_, _gitleaks_.
   - _Delivery / AI regression smoke_ (`make eval-smoke`) keeps core smoke examples,
     prompt/agent contracts, local hooks, PR validation, and CI wiring from drifting.

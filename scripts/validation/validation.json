@@ -108,7 +108,8 @@
         "scripts/release/delta.mjs",
         "scripts/release/delta_assets.py",
         "scripts/diagnostics/release-delta.test.mjs",
-        "src-tauri/examples/delta-artifact.rs"
+        "src-tauri/examples/delta-artifact.rs",
+        "scripts/ci/required-checks.mjs"
       ],
       "node": [
         "scripts/diagnostics/release-assets.test.mjs",
@@ -124,7 +125,8 @@
         "scripts/diagnostics/version-automation.test.mjs",
         "scripts/diagnostics/release-updater.test.mjs",
         "scripts/diagnostics/release-signing.test.mjs",
-        "scripts/diagnostics/release-delta.test.mjs"
+        "scripts/diagnostics/release-delta.test.mjs",
+        "scripts/diagnostics/required-checks.test.mjs"
       ],
       "escalation": [
         "Release policy is owned by docs/updates.md. Stable publication remains explicit and tag-only; daily/manual main-only Nightly uses immutable vBASE-nightly.RUN.ATTEMPT prereleases, never latest, after exact-source hosted CI. Every desktop and relay platform must pass signatures, provenance, native installer metadata, downloaded draft digest/identity checks and source recheck before publication. Local fixtures do not establish signed hosted-native or actual publication evidence. Version projections require the owning check and standard SemVer source/Nightly/Stable identity tests. Manual draft/maintenance changes require hosted evidence for explicit main-only preparation, unpublished draft-only creation, exact tagged build dispatch and reviewed next-target PR creation; local mocks do not prove those settings and actual preparation/publication requires explicit release intent. Nightly changes require a hosted main workflow run and checking stable latest remains unchanged; stable container publication retains its existing gate.",
@@ -235,7 +237,7 @@
         "scripts/diagnostics/patch-coverage.test.mjs"
       ],
       "escalation": [
-        "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI."
+        "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI. Supervisor Rust thread-policy changes also require full workspace consumers and the real Cargo thread-policy fixture; preserve explicit Windows/sanitizer caller limits."
       ]
     },
     {
@@ -307,6 +309,7 @@
       "id": "ci-verification",
       "paths": [
         "_typos.toml",
+        "scripts/ai-eval-smoke.sh",
         "scripts/check-health.sh",
         "scripts/diagnostics/ci-latency.test.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
@@ -330,18 +333,50 @@
         "scripts/ci/ubuntu-apt-source.mjs",
         "scripts/ci/ubuntu-apt-source.test.mjs",
         "scripts/diagnostics/health-workflow.test.mjs",
-        ".gitleaks.toml"
+        ".gitleaks.toml",
+        ".github/workflows/ai-eval.yml",
+        "scripts/ci/required-checks.mjs",
+        "scripts/ci/migrate-required-checks.mjs",
+        "scripts/diagnostics/required-checks.test.mjs",
+        "scripts/evals/backend-runner.mjs",
+        "scripts/diagnostics/backend-eval-report.test.mjs",
+        "scripts/ci/timing-report.mjs",
+        "scripts/diagnostics/ci-timing-report.test.mjs",
+        "scripts/ci/backend-coverage.test.mjs",
+        ".github/workflows/windows-workspace.yml",
+        "scripts/ci/windows-coverage.mjs",
+        "scripts/diagnostics/windows-coverage.test.mjs",
+        "scripts/ci/windows-coverage-cli.test.mjs",
+        ".github/workflows/ui-shards.yml",
+        "scripts/diagnostics/ui-shard-orchestration.test.mjs",
+        "scripts/diagnostics/playwright-artifacts.test.mjs",
+        "scripts/ci/rust-profile.test.mjs"
       ],
       "node": [
         "scripts/ci/ubuntu-apt-source.test.mjs",
         "scripts/diagnostics/ci-latency.test.mjs",
+        "scripts/test-ai-eval.mjs",
         "scripts/diagnostics/ui-coverage-shards.test.mjs",
         "scripts/diagnostics/merge-queue.test.mjs",
         "scripts/diagnostics/mutants-workflow.test.mjs",
-        "scripts/diagnostics/health-workflow.test.mjs"
+        "scripts/diagnostics/health-workflow.test.mjs",
+        "scripts/diagnostics/required-checks.test.mjs",
+        "scripts/diagnostics/backend-eval-report.test.mjs",
+        "scripts/diagnostics/ci-timing-report.test.mjs",
+        "scripts/ci/backend-coverage.test.mjs",
+        "scripts/diagnostics/windows-coverage.test.mjs",
+        "scripts/ci/windows-coverage-cli.test.mjs",
+        "scripts/diagnostics/ui-shard-orchestration.test.mjs",
+        "scripts/diagnostics/playwright-artifacts.test.mjs",
+        "scripts/ci/rust-profile.test.mjs"
       ],
       "escalation": [
-        "Run actionlint and affected workflow regressions; preserve full mutation sample completion, strict report validation and bounded per-test/per-suite execution. Size the whole-suite budget from the actual workspace inventory and runner variance while retaining per-test hang detection; size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration."
+        "Run actionlint and affected workflow regressions. Mutation runner changes also require scripts/release/run-mutants.test.mjs with the pinned cargo-mutants and cargo-nextest tools; verify both selection preflight and execution. Portable diagnostics and frontend coverage belong to Health; native lint/build/test coverage belongs to CI. PR/merge-group mutation acceptance requires real pinned-runner contract tests; daily/manual deep runs require full sample completion, strict report validation and bounded per-test/per-suite execution. Size the whole-suite budget from actual workspace inventory and runner variance while retaining per-test hang detection; size the overall mutation job from observed selected counts and build/test timings; see docs/testing-feedback-loop.md#ci-ownership-and-browser-sharding. Source-level workflow checks do not replace actual hosted execution or branch-protection configuration.",
+        "Direct check migration requires successful current-source app-bound replacement evidence before editing branch protection; preserve strictness and unrelated checks. Windows archive changes require official pinned-tool archive/list/receipt/coverage proof, all default Cargo targets, exhaustive disjoint partitions, source/run/compiler/config/archive identity, hermetic offline consumers and actual hosted Windows execution. Producer lint, ordinary production builds and doctests remain directly required. Linux CI owns instrumented backend scenario evidence, while macOS/Windows retain their dedicated backend jobs.",
+        "Coverage accumulation changes require scripts/ci/backend-coverage.test.mjs with real cargo-llvm-cov and matching LLVM tools. It must preserve the earlier default workspace report plus later ignored execution; --no-report and --no-clean are mutually exclusive. The owning native CI installs the tools before this regression.",
+        "The Windows archive CLI fixture requires pinned cargo-nextest0.9.148/cargo-llvm-cov0.8.7 and LLVM tools matching rustc. It creates only an isolated local Git fixture and runs both exact partitions from the archive with empty consumers; no real product full suite is replaced by this contract test.",
+        "Reusable browser shards retain exactly four Linux and eight desktop runners with the same execution/artifact steps. Linux coverage may depend on Linux plus Health only, but portable collection and final UI acceptance must reject every missing/failed/cancelled/skipped Linux or desktop result.",
+        "Ordinary CI debug-info changes require scripts/ci/rust-profile.test.mjs with the actual compiler and matching LLVM tools: preserve application stack file/line locations, debug assertions, overflow checks and source-line coverage relative to full debug information. Keep producer/consumer profile inputs consistent and sanitizer, mutation and release settings independently owned. Browser artifact changes require the actual Playwright blob round-trip: passed and failed attachments must reconstruct after raw output removal, while unsuccessful shards retain raw attachments as a fallback."
       ]
     },
     {
@@ -400,13 +435,20 @@
         "frontend/playwright.portable.config.ts",
         "scripts/evals/browser-report.mjs",
         "scripts/evals/portable-runner.mjs",
-        "scripts/diagnostics/browser-eval-report.test.mjs"
+        "scripts/diagnostics/browser-eval-report.test.mjs",
+        "scripts/evals/chromium-evidence.mjs",
+        "scripts/diagnostics/chromium-evidence.test.mjs",
+        "frontend/e2e/helpers/portable-evidence.ts",
+        "scripts/diagnostics/test-fixtures/trace.mjs",
+        "scripts/diagnostics/trace-evidence.test.mjs"
       ],
       "node": [
-        "scripts/diagnostics/browser-eval-report.test.mjs"
+        "scripts/diagnostics/browser-eval-report.test.mjs",
+        "scripts/diagnostics/chromium-evidence.test.mjs",
+        "scripts/diagnostics/trace-evidence.test.mjs"
       ],
       "escalation": [
-        "Portable browser reporting requires exact scenario identities, unique trace and screenshot evidence, and zero skipped or flaky cases from the configured browser matrix. Windows process batches must remain at most 20 scenarios for both configured inventories, whose shard union must match every scenario exactly once; run the actual hosted Windows browser job to validate timing. Diagnostic tests do not establish browser acceptance; see docs/testing-feedback-loop.md."
+        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete authoritative core inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Dedicated WebKit and extended/Firefox acceptance remain separate. Standalone Windows portable-runner batches remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
       ]
     },
     {

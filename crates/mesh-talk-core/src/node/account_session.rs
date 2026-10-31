@@ -115,7 +115,29 @@ async fn send(
         .ok_or_else(|| TransportError::Serialization("invalid account session request".into()))?;
     channel.send(&bytes).await
 }
+#[cfg(test)]
+tokio::task_local! {
+    static CONTROL_TASK_TEST_LIFETIME: std::sync::Weak<()>;
+}
+
+#[cfg(test)]
+pub(in crate::node) fn observed_control_task_lifetime() -> Option<std::sync::Weak<()>> {
+    CONTROL_TASK_TEST_LIFETIME.try_with(Clone::clone).ok()
+}
+
 impl Node {
+    #[cfg(test)]
+    pub(in crate::node) fn trace_control_task(
+        &self,
+        peer: &crate::identity::device::PublicIdentity,
+        event: String,
+        lifetime: std::sync::Weak<()>,
+    ) {
+        CONTROL_TASK_TEST_LIFETIME.sync_scope(lifetime, || {
+            self.trace_account_client(peer, || event);
+        });
+    }
+
     #[cfg(test)]
     pub(in crate::node) fn trace_account_client(
         &self,
@@ -515,6 +537,37 @@ mod timeout_tests {
     use super::*;
 
     #[test]
+    fn control_task_lifetime_scope_restores_outer_witness_after_panic() {
+        assert!(observed_control_task_lifetime().is_none());
+        let outer = Arc::new(());
+        let inner = Arc::new(());
+        CONTROL_TASK_TEST_LIFETIME.sync_scope(Arc::downgrade(&outer), || {
+            assert!(
+                observed_control_task_lifetime()
+                    .unwrap()
+                    .ptr_eq(&Arc::downgrade(&outer))
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                CONTROL_TASK_TEST_LIFETIME.sync_scope(Arc::downgrade(&inner), || {
+                    assert!(
+                        observed_control_task_lifetime()
+                            .unwrap()
+                            .ptr_eq(&Arc::downgrade(&inner))
+                    );
+                    panic!("deliberate synchronous observation panic");
+                });
+            }));
+            assert!(result.is_err());
+            assert!(
+                observed_control_task_lifetime()
+                    .unwrap()
+                    .ptr_eq(&Arc::downgrade(&outer))
+            );
+        });
+        assert!(observed_control_task_lifetime().is_none());
+    }
+
+    #[test]
     fn only_remote_dial_timeout_allows_wake_recovery() {
         assert!(account_dial_timed_out(&transport(TransportError::Noise(
             "dial timed out".into()
@@ -524,6 +577,7 @@ mod timeout_tests {
             NodeError::Authorization("account session requires a certified sibling".into()),
             transport(TransportError::AdmissionDenied),
             transport(TransportError::Noise("TCP connection capacity busy".into())),
+            transport(TransportError::Noise("dial deadline exceeded".into())),
             transport(TransportError::Noise("invalid handshake".into())),
             NodeError::Channel("invalid account document exchange".into()),
         ] {

@@ -121,6 +121,12 @@ impl Node {
             super::transcript_repository::FILES,
             super::transcript_repository::SENT,
         ] {
+            #[cfg(test)]
+            if kind == super::transcript_repository::SENT
+                && let Some(hook) = self.before_sent_delete_hook.lock().unwrap().take()
+            {
+                hook();
+            }
             let mut after = None;
             loop {
                 let page = match kind {

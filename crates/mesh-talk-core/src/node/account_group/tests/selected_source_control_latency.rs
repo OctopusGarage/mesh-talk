@@ -108,39 +108,29 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
         servers.spawn(target.run_accept_loop(listener));
     }
     owner.publish_account_group_access(&mut None);
-    super::message_action_reference::pull_reference_action_control(
-        &reference,
-        &owner,
-        addresses[0],
-        group,
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
+            super::has_account_group_operation_support(
+                &reference,
+                &owner,
+                Some(AccountGroupOperationKind::Rename),
+            ) && super::has_account_group_operation_support(
+                &owner,
+                &reference,
+                Some(AccountGroupOperationKind::Rename),
+            )
+        }),
+        async {
+            super::message_action_reference::pull_reference_action_control(
+                &reference,
+                &owner,
+                addresses[0],
+                group,
+            )
+            .await;
+        },
     )
     .await;
-    super::cold_account_setup(async {
-        loop {
-            let ready = [&owner, &reference].into_iter().all(|node| {
-                let peer = if node.user_id() == owner.user_id() {
-                    &reference
-                } else {
-                    &owner
-                };
-                node.group_operation_versions
-                    .lock()
-                    .unwrap()
-                    .get(&peer.user_id())
-                    .is_some_and(|support| {
-                        support.public == peer.identity.public()
-                            && support.kinds & AccountGroupOperationKind::Rename.capability_bit()
-                                != 0
-                    })
-            });
-            if ready {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("both certified devices must bootstrap real operation support");
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner
@@ -282,15 +272,18 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
             }
         })
         .await;
-    for node in [&owner, &reference, &external, &other] {
-        node.runtime_work.close();
-    }
-    servers.shutdown().await;
-    for node in [&owner, &reference, &external, &other] {
-        tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
-            .await
-            .expect("the released fixture must drain its owned work");
-    }
+    let sync_snapshot = super::capture_account_sync_before_cleanup(&reference, async {
+        for node in [&owner, &reference, &external, &other] {
+            node.runtime_work.close();
+        }
+        servers.shutdown().await;
+        for node in [&owner, &reference, &external, &other] {
+            tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
+                .await
+                .expect("the released fixture must drain its owned work");
+        }
+    })
+    .await;
     assert!(resumed.is_ok(), "the released Inventory page must resume");
     assert!(
         control_resumed.is_ok(),
@@ -300,13 +293,7 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
         preserved_checkpoint,
         "preemption must retain the exact protocol scope, cursor and digests"
     );
-    assert!(
-        reference
-            .device_sync_status()
-            .iter()
-            .all(|status| status.document_error.is_none()),
-        "owned preemption is not a network failure"
-    );
+    super::assert_no_account_document_errors(&sync_snapshot);
     assert!(
         source_while_held
             .as_ref()
@@ -326,4 +313,270 @@ async fn selected_source_receipt_overtakes_another_siblings_held_control_over_no
     assert_eq!(requester.committed_events, vec![effect.id]);
     assert_eq!(source.committed_events, requester.committed_events);
     assert!(reference.channel_members(group).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selected_source_cold_capability_setup_precedes_role_page_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let owner = node(&dir.path().join("owner"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    link(&owner, &reference);
+    link(&reference, &owner);
+    let genesis = Event::new(
+        &owner.identity,
+        new_channel_id(),
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Cold capability fixture".into(),
+            members: vec![owner.identity.public(), DeviceIdentity::generate().public()],
+            epoch: 0,
+            owner: owner.user_id(),
+        }
+        .encode(),
+    );
+    install(&owner, &genesis);
+    let group = genesis.conversation_id;
+    let mut listeners = Vec::new();
+    let mut addresses = Vec::new();
+    for (name, node) in [("owner", &owner), ("reference", &reference)] {
+        node.set_device_sync_category(SyncCategory::History, false)
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        configure(node, &dir.path().join(name), address.port());
+        addresses.push(address);
+        listeners.push((node.clone(), listener));
+    }
+    for (node, peer, address) in [
+        (&reference, &owner, addresses[0]),
+        (&owner, &reference, addresses[1]),
+    ] {
+        node.roster.lock().unwrap().update(
+            &peer.signed_announce("Cold capability fixture", address.port()),
+            address.ip(),
+            &node.user_id(),
+        );
+    }
+    let release = Arc::new(Semaphore::new(0));
+    let _release_on_drop = ReleaseDirectoryOnDrop(release.clone());
+    let (arrived, held) = oneshot::channel();
+    let arrived = Arc::new(Mutex::new(Some(arrived)));
+    *owner.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let release = release.clone();
+        let exact_reference = reference.identity.public();
+        move |peer, frame| {
+            let release = release.clone();
+            let arrived = arrived.clone();
+            let exact_reference = exact_reference.clone();
+            Box::pin(async move {
+                if peer != exact_reference {
+                    return;
+                }
+                let AccountHistoryFrame::DocumentsRequest { body } = frame else {
+                    return;
+                };
+                let request = crate::node::account_documents::wire::DocumentRequest::decode(&body)
+                    .expect("authenticated bootstrap request must decode");
+                if request.domain == AccountDocumentDomain::GroupControl {
+                    if let Some(signal) = arrived.lock().unwrap().take() {
+                        let _ = signal.send(());
+                    }
+                    let _ = release.acquire().await;
+                }
+            })
+        }
+    }));
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn({
+        let release = release.clone();
+        async move {
+            super::cold_account_setup(held)
+                .await
+                .expect("the real first capability request must enter the cold hold")
+                .unwrap();
+            // Exceed the unchanged role-page budget while remaining inside the
+            // cold preparation budget. No operation/preemption fault is added.
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            release.close();
+        }
+    });
+    for (node, listener) in listeners {
+        servers.spawn(node.run_accept_loop(listener));
+    }
+    owner.publish_account_group_access(&mut None);
+    let setup = tokio::spawn({
+        let owner = owner.clone();
+        let reference = reference.clone();
+        let address = addresses[0];
+        async move {
+            super::cold_account_control_setup(
+                super::observe_account_fixture_condition(|| {
+                    super::has_account_group_operation_support(
+                        &reference,
+                        &owner,
+                        Some(AccountGroupOperationKind::Rename),
+                    ) && super::has_account_group_operation_support(
+                        &owner,
+                        &reference,
+                        Some(AccountGroupOperationKind::Rename),
+                    )
+                }),
+                super::message_action_reference::pull_reference_action_control(
+                    &reference, &owner, address, group,
+                ),
+            )
+            .await;
+            assert_eq!(
+                reference.account_group_access(group).unwrap().role,
+                AccountGroupRole::Owner
+            );
+            assert!(reference.channel_members(group).is_empty());
+        }
+    });
+    let completed = setup.await;
+    release.close();
+    *owner.account_session_test_hook.lock().unwrap() = None;
+    for node in [&owner, &reference] {
+        node.runtime_work.close();
+    }
+    servers.shutdown().await;
+    for node in [&owner, &reference] {
+        tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
+            .await
+            .expect("cold bootstrap must drain its owned work on success or failure");
+    }
+    assert!(
+        completed.is_ok(),
+        "cold setup must finish before the exact role-page barrier: {completed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn account_fixture_health_snapshot_precedes_real_peer_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let reference = node(&dir.path().join("reference"), &account);
+    link(&source, &reference);
+    link(&reference, &source);
+    let mut listeners = Vec::new();
+    let mut addresses = Vec::new();
+    for (name, node) in [("source", &source), ("reference", &reference)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        configure(node, &dir.path().join(name), address.port());
+        addresses.push(address);
+        listeners.push(listener);
+    }
+    for (node, peer, address) in [
+        (&reference, &source, addresses[0]),
+        (&source, &reference, addresses[1]),
+    ] {
+        node.roster.lock().unwrap().update(
+            &peer.signed_announce("Shutdown observation fixture", address.port()),
+            address.ip(),
+            &node.user_id(),
+        );
+    }
+    let release = Arc::new(Semaphore::new(0));
+    let _release_on_drop = ReleaseDirectoryOnDrop(release.clone());
+    let (arrived, held) = oneshot::channel();
+    let arrived = Arc::new(Mutex::new(Some(arrived)));
+    *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let release = release.clone();
+        let exact_reference = reference.identity.public();
+        move |peer, frame| {
+            let release = release.clone();
+            let arrived = arrived.clone();
+            let exact_reference = exact_reference.clone();
+            Box::pin(async move {
+                if peer != exact_reference {
+                    return;
+                }
+                let AccountHistoryFrame::DocumentsRequest { body } = frame else {
+                    return;
+                };
+                let request = crate::node::account_documents::wire::DocumentRequest::decode(&body)
+                    .expect("the authenticated request must decode");
+                if request.domain == AccountDocumentDomain::Draft {
+                    if let Some(signal) = arrived.lock().unwrap().take() {
+                        let _ = signal.send(());
+                    }
+                    // SessionReady is already on the real encrypted connection.
+                    // Teardown, not a timer or an injected status, ends this read.
+                    let _ = release.acquire().await;
+                }
+            })
+        }
+    }));
+    let mut servers = tokio::task::JoinSet::new();
+    let source_server = servers.spawn(source.clone().run_accept_loop(listeners.remove(0)));
+    servers.spawn(reference.clone().run_accept_loop(listeners.remove(0)));
+    super::cold_account_setup(async {
+        held.await.unwrap();
+        while !reference
+            .device_sync_status()
+            .iter()
+            .any(|status| status.device_id == source.user_id())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a real acknowledged read must precede the observation");
+    let mut teardown_error = None;
+    let snapshot = super::capture_account_sync_before_cleanup(&reference, async {
+        source.runtime_work.close();
+        source_server.abort();
+        match servers.join_next_with_id().await.unwrap() {
+            Ok((id, ())) => assert_eq!(id, source_server.id()),
+            Err(stopped) => {
+                assert_eq!(stopped.id(), source_server.id());
+                assert!(stopped.is_cancelled());
+            }
+        }
+        teardown_error = Some(
+            super::cold_account_setup(async {
+                loop {
+                    if let Some(status) =
+                        reference.device_sync_status().into_iter().find(|status| {
+                            status.device_id == source.user_id() && status.document_error.is_some()
+                        })
+                    {
+                        break status;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await,
+        );
+        reference.runtime_work.close();
+        servers.shutdown().await;
+        release.close();
+        *source.account_session_test_hook.lock().unwrap() = None;
+        for node in [&source, &reference] {
+            tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
+                .await
+                .expect("the teardown probe must drain admitted work");
+        }
+    })
+    .await;
+    let after = teardown_error
+        .unwrap()
+        .expect("closing the real peer must publish a document failure");
+    assert!(
+        after.document_error.as_deref() == Some("account document exchange interrupted"),
+        "closing the real peer must interrupt its document exchange"
+    );
+    assert!(
+        snapshot
+            .iter()
+            .any(|status| status.device_id == source.user_id())
+    );
+    super::assert_no_account_document_errors(&snapshot);
 }

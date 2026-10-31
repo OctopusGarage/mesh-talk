@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { privacy } from "@/lib/api";
 import type { PrivacySnapshot } from "@/lib/types";
+import { readWithDeadline } from "@/lib/readDeadline";
 
 interface PrivacyState {
   owner: string | null;
@@ -91,7 +92,10 @@ export const usePrivacy = create<PrivacyState>((set, get) => {
         error: null,
       });
       try {
-        const snapshot = validate(await privacy.get(owner), owner);
+        const snapshot = validate(
+          await readWithDeadline(() => privacy.get(owner)),
+          owner,
+        );
         if (request === generation)
           set({ snapshot, loaded: true, loading: false });
       } catch {

@@ -9015,6 +9015,9 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     };
     let before_new_send = linked_plaintext_metadata(&a2_node, old_channel_id);
     let delivery_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    // Keep the last history/favorite phase per device separately: a busy
+    // document lane must not evict evidence of a stalled history worker.
+    let delivery_work = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     let delivery_trace_started = std::time::Instant::now();
     let delivery_trace_omitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for (label, current, peer) in [
@@ -9022,6 +9025,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         ("sibling", &a2_node, a1_node.identity.public()),
     ] {
         let trace = delivery_trace.clone();
+        let work = delivery_work.clone();
         let omitted = delivery_trace_omitted.clone();
         *current.account_client_test_hook.lock().unwrap() =
             Some(Arc::new(move |observed, phase| {
@@ -9030,9 +9034,20 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
                         || phase.starts_with("session_")
                         || phase.starts_with("negotiation_")
                         || phase.starts_with("page_")
+                        || phase.starts_with("history_")
+                        || phase.starts_with("favorite_")
                         || phase.starts_with("wake_"))
                 {
                     return;
+                }
+                if let Some(kind) = ["history_", "favorite_"]
+                    .into_iter()
+                    .find(|prefix| phase.starts_with(prefix))
+                {
+                    work.lock().unwrap().insert(
+                        (label, kind),
+                        (delivery_trace_started.elapsed().as_millis(), phase.clone()),
+                    );
                 }
                 let safe_phase = phase
                     .split_ascii_whitespace()
@@ -9048,6 +9063,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
                                 "deferred=",
                                 "reused=",
                                 "priority=",
+                                "failed=",
                             ]
                             .iter()
                             .any(|prefix| token.starts_with(prefix)))
@@ -9174,14 +9190,12 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             })
             .collect();
         eprintln!(
-            "linked channel delivery metadata elapsed_ms={} original={original:?} observations={observations:?} omitted={} phases={:?}",
+            "linked channel delivery metadata elapsed_ms={} original={original:?} observations={observations:?} work={:?} omitted={} phases={:?}",
             delivery_trace_started.elapsed().as_millis(),
+            delivery_work.lock().unwrap(),
             delivery_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
             delivery_trace.lock().unwrap()
         );
-    }
-    for current in [&a1_node, &a2_node] {
-        *current.account_client_test_hook.lock().unwrap() = None;
     }
     new_channel_delivery.expect("new channel messages still arrive");
     tokio::time::sleep(Duration::from_secs(11)).await;
@@ -9238,7 +9252,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             Some("light".into()),
         )
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let appearance_delivery = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if a2_node
                 .account_preferences(crate::node::SyncCategory::Appearance)
@@ -9250,8 +9264,30 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .expect("appearance preference reaches certified sibling");
+    .await;
+    if appearance_delivery.is_err() {
+        let observations: Vec<_> = [("source", &a1_node), ("sibling", &a2_node)]
+            .into_iter()
+            .map(|(label, current)| {
+                (
+                    label,
+                    current.device_sync_policy_snapshot(),
+                    current.sessions.test_capacity_snapshot(),
+                    current.device_sync_status(),
+                )
+            })
+            .collect();
+        eprintln!(
+            "linked appearance delivery metadata observations={observations:?} work={:?} omitted={} phases={:?}",
+            delivery_work.lock().unwrap(),
+            delivery_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            delivery_trace.lock().unwrap()
+        );
+    }
+    for current in [&a1_node, &a2_node] {
+        *current.account_client_test_hook.lock().unwrap() = None;
+    }
+    appearance_delivery.expect("appearance preference reaches certified sibling");
     a2_node
         .set_device_sync_category(crate::node::SyncCategory::Appearance, false)
         .unwrap();

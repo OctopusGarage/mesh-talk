@@ -360,7 +360,7 @@ async fn apply_cancellable<R: tauri::Runtime>(
     app: AppState,
     node: NodeState,
     admission: RuntimeAdmission,
-    stopping: Option<&mut tokio::sync::oneshot::Receiver<()>>,
+    mut stopping: Option<&mut tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(), CommandError> {
     let (auth, guard) = {
         let acquire = async {
@@ -368,34 +368,77 @@ async fn apply_cancellable<R: tauri::Runtime>(
             let guard = node.0.clone().read_owned().await;
             (auth, guard)
         };
-        if let Some(stopping) = stopping {
+        if let Some(stopping) = stopping.as_deref_mut() {
             tokio::select! { _ = stopping => return Ok(()), guards = acquire => guards }
         } else {
             acquire.await
         }
     };
-    tokio::task::spawn_blocking(move || {
+    let worker = tokio::task::spawn_blocking(move || {
         let _auth = auth;
         let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
-        admission.checked(runtime, || Ok(()))?;
-        let Some(snapshot) = runtime.handle().account_access_snapshot() else { return Ok(()); };
-        if let Some((user, previous_login)) = install(&root, &app, &admission, runtime, &snapshot)? {
-            let password = app.session().matching(admission.lease(), |info| info.account_login_password.clone())
+        let lock_revision = app.app_lock().authorization_revision()?;
+        admission.checked_at_lock_revision(runtime, lock_revision, || Ok(()))?;
+        let Some(snapshot) = runtime.handle().account_access_snapshot() else {
+            return Ok(());
+        };
+        if let Some((user, previous_login)) = install(&root, &app, &admission, runtime, &snapshot)?
+        {
+            let password = app
+                .session()
+                .matching(admission.lease(), |info| {
+                    info.account_login_password.clone()
+                })
                 .map_err(CommandError::Authorization)?;
-            let saved_session = handle.try_state::<crate::settings::SettingsState>().map(|settings| {
-                let status = crate::commands::persist_saved_login(&handle, &settings, &user, &password);
-                if previous_login != user.login_name() { crate::session_store::clear(&previous_login); }
-                status
-            });
-            admission.checked(runtime, || {
-                let _ = handle.emit("account-profile-changed", serde_json::json!({
-                    "user": crate::commands::UserInfo::from(user), "account_id": runtime.account_id(),
-                    "device_id": runtime.user_id(), "saved_session": saved_session }));
+            let account_id = runtime.account_id().to_owned();
+            let device_id = runtime.user_id().to_owned();
+            let installed = std::sync::Arc::downgrade(&runtime.handle());
+            // All runtime/profile writes are complete. An uncancellable OS
+            // credential call owns auth ordering, but must not retain retirement.
+            drop(guard);
+            let authorize = |commit: &mut dyn FnMut() -> Result<(), CommandError>| {
+                let guard = node.0.blocking_read();
+                let runtime = guard.as_ref().ok_or_else(CommandError::not_started)?;
+                if !installed.ptr_eq(&std::sync::Arc::downgrade(&runtime.handle())) {
+                    return Err(CommandError::Authorization(
+                        "Account login runtime replaced".into(),
+                    ));
+                }
+                admission.checked_at_lock_revision(runtime, lock_revision, commit)
+            };
+            let saved_session = handle
+                .try_state::<crate::settings::SettingsState>()
+                .map(|settings| {
+                    let status = crate::commands::persist_saved_login_checked(
+                        &handle, &settings, &user, &password, authorize,
+                    );
+                    if previous_login != user.login_name() {
+                        crate::session_store::clear(&previous_login);
+                    }
+                    status
+                })
+                .transpose()?;
+            authorize(&mut || {
+                let _ = handle.emit(
+                    "account-profile-changed",
+                    serde_json::json!({
+                    "user": crate::commands::UserInfo::from(user.clone()), "account_id": account_id,
+                    "device_id": device_id, "saved_session": saved_session }),
+                );
                 Ok(())
             })?;
         }
         Ok(())
-    }).await.map_err(|_| CommandError::Internal("Account login application interrupted".into()))?
+    });
+    // Dropping a JoinHandle leaves its blocking worker owned. Retirement may
+    // stop this graceful observer once profile writes release the runtime guard;
+    // native credential completion retains auth ordering and rechecks authority.
+    let outcome = if let Some(stopping) = stopping {
+        tokio::select! { _ = stopping => return Ok(()), outcome = worker => outcome }
+    } else {
+        worker.await
+    };
+    outcome.map_err(|_| CommandError::Internal("Account login application interrupted".into()))?
 }
 
 pub(crate) async fn reconcile<R: tauri::Runtime>(
@@ -415,7 +458,8 @@ pub(crate) async fn reconcile<R: tauri::Runtime>(
         let Ok(admission) = RuntimeAdmission::capture_lease(&app, &node, &authority.lease) else {
             continue;
         };
-        // Do not cancel a blocking credential commit midway through runtime retirement.
+        // Profile writes retain retirement; native credential I/O retains auth
+        // ordering independently after the profile commit has finished.
         if let Err(error) = apply_cancellable(
             handle.clone(),
             root.clone(),
@@ -427,6 +471,12 @@ pub(crate) async fn reconcile<R: tauri::Runtime>(
         .await
         {
             log::warn!("Shared account login reconciliation failed: {error}");
+        }
+        if !matches!(
+            stopping.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ) {
+            return;
         }
     }
 }

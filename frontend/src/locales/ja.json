@@ -402,7 +402,13 @@
     "saving": "ファイルを保存中…",
     "receiving": "ファイルを受信中…",
     "waiting": "ファイルを待機中…",
-    "receivingProgress": "ファイルを受信中: {{percent}}%"
+    "receivingProgress": "ファイルを受信中: {{percent}}%",
+    "imageWaiting": "画像を待機中",
+    "imageReceiving": "画像を受信中",
+    "imageReceivingProgress": "画像を受信中 · {{percent}}%",
+    "imagePreparing": "画像を準備中",
+    "imageDetails": "写真 · {{size}}",
+    "image": "写真"
   },
   "composer": {
     "expireAfterSend": "送信後に削除",

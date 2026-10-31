@@ -95,39 +95,29 @@ async fn reference_owner_rename_overtakes_held_mandatory_inventory_over_noise() 
         servers.spawn(target.run_accept_loop(listener));
     }
     owner.publish_account_group_access(&mut None);
-    super::message_action_reference::pull_reference_action_control(
-        &reference,
-        &owner,
-        addresses[0],
-        group,
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
+            super::has_account_group_operation_support(
+                &reference,
+                &owner,
+                Some(AccountGroupOperationKind::Rename),
+            ) && super::has_account_group_operation_support(
+                &owner,
+                &reference,
+                Some(AccountGroupOperationKind::Rename),
+            )
+        }),
+        async {
+            super::message_action_reference::pull_reference_action_control(
+                &reference,
+                &owner,
+                addresses[0],
+                group,
+            )
+            .await;
+        },
     )
     .await;
-    super::cold_account_setup(async {
-        loop {
-            let ready = [&owner, &reference].into_iter().all(|node| {
-                let peer = if node.user_id() == owner.user_id() {
-                    &reference
-                } else {
-                    &owner
-                };
-                node.group_operation_versions
-                    .lock()
-                    .unwrap()
-                    .get(&peer.user_id())
-                    .is_some_and(|support| {
-                        support.public == peer.identity.public()
-                            && support.kinds & AccountGroupOperationKind::Rename.capability_bit()
-                                != 0
-                    })
-            });
-            if ready {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("both certified devices must bootstrap real operation support");
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner

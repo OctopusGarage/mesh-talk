@@ -813,6 +813,31 @@ mod tests {
             invoke(&self.webview, command, body)
         }
 
+        // Search limits need a realistic signed/persisted corpus, not hundreds
+        // of repeated IPC admissions and best-effort network flushes. Keep the
+        // registered send/search wiring in the calling tests with one IPC send.
+        fn seed_channel_search_corpus(
+            &self,
+            channel: &serde_json::Value,
+            text: &str,
+            count: usize,
+        ) {
+            let channel =
+                crate::chat_commands::parse_channel_id(channel.as_str().unwrap()).unwrap();
+            let handle = self.node.0.blocking_read().as_ref().unwrap().handle();
+            for _ in 0..count {
+                handle
+                    .enqueue_channel_message_reply_expiring_if(
+                        channel,
+                        text.as_bytes(),
+                        None,
+                        None,
+                        |commit| commit(),
+                    )
+                    .unwrap();
+            }
+        }
+
         fn offline_peer(&self) -> String {
             use mesh_talk_core::{
                 discovery::Announce,
@@ -2639,17 +2664,14 @@ mod tests {
             )
             .unwrap();
         phase("create", 0);
-        for index in 0..201 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":"cap token"}),
-                )
-                .unwrap();
-            if matches!(index + 1, 1 | 50 | 100 | 150 | 201) {
-                phase("small_send", index + 1);
-            }
-        }
+        fixture
+            .invoke(
+                "send_channel_message",
+                serde_json::json!({"channelId":channel,"text":"cap token"}),
+            )
+            .unwrap();
+        phase("registered_send", 1);
+        fixture.seed_channel_search_corpus(&channel, "cap token", 200);
         phase("search1_begin", 201);
         let results = fixture
             .invoke(
@@ -2662,17 +2684,7 @@ mod tests {
         assert_eq!(results["coverage"]["truncated"], true);
         let text = "oversize token ".to_owned() + &"x".repeat(60_000);
         phase("large_sends_begin", 201);
-        for index in 0..20 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":text}),
-                )
-                .unwrap();
-            if (index + 1) % 5 == 0 {
-                phase("large_send", 201 + index + 1);
-            }
-        }
+        fixture.seed_channel_search_corpus(&channel, &text, 20);
         phase("search2_begin", 221);
         let results = fixture
             .invoke(
@@ -2707,14 +2719,7 @@ mod tests {
             )
             .unwrap();
         let text = "byte cap token ".to_owned() + &"x".repeat(60_000);
-        for _ in 0..20 {
-            fixture
-                .invoke(
-                    "send_channel_message",
-                    serde_json::json!({"channelId":channel,"text":text}),
-                )
-                .unwrap();
-        }
+        fixture.seed_channel_search_corpus(&channel, &text, 20);
         let results = fixture
             .invoke(
                 "owner_search_recent",

@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, path::Path};
 const MAX_ENTRIES: usize = 100_000;
 const MAX_LIVE: usize = 64 * 1024 * 1024;
 const MAX_PENDING: usize = 128;
+const MAX_PUBLICATION_GROUPS: usize = 128;
 const DOMAIN: &[u8] = b"mesh-talk-account-group-operation-request-v1";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -180,6 +181,8 @@ pub(in crate::node) struct OperationJournal {
     sequence: u64,
     // Scheduling progress only; reset on open and never encoded in journal rows.
     source_ready_after: Option<AccountGroupOperationId>,
+    publication_after: Option<[u8; 32]>,
+    legacy_publication_after: Option<[u8; 32]>,
     // Derived from retained source terminal records; never a second job journal.
     fanout_groups: BTreeMap<[u8; 32], u64>,
     fanout_order: BTreeMap<u64, [u8; 32]>,
@@ -195,6 +198,49 @@ fn invalid() -> LogError {
     LogError::CorruptFile("invalid account group operation journal".into())
 }
 impl OperationJournal {
+    /// Retain prompt publication of recent changes while repairing every group.
+    pub(super) fn take_publication_groups(&mut self, legacy_leave: bool) -> Vec<[u8; 32]> {
+        let mut groups = BTreeMap::<[u8; 32], u64>::new();
+        for entry in self.entries.values() {
+            let sequence = groups.entry(*entry.reference.group.as_bytes()).or_default();
+            *sequence = (*sequence).max(entry.sequence);
+        }
+        for lookup in self.lookups.values() {
+            let sequence = groups.entry(*lookup.group.as_bytes()).or_default();
+            *sequence = (*sequence).max(lookup.sequence);
+        }
+        let keys: Vec<_> = groups.keys().copied().collect();
+        let mut recent: Vec<_> = groups.into_iter().collect();
+        recent.sort_by_key(|(group, sequence)| (std::cmp::Reverse(*sequence), *group));
+        if recent.len() <= MAX_PUBLICATION_GROUPS {
+            return recent.into_iter().map(|(group, _)| group).collect();
+        }
+        let mut selected: Vec<_> = recent
+            .into_iter()
+            .take(MAX_PUBLICATION_GROUPS / 2)
+            .map(|(group, _)| group)
+            .collect();
+        // A retained terminal record must not permanently displace an older
+        // request or recovery head. Each lane needs its own stable-key cursor:
+        // sharing one could assign alternating pages to different publishers.
+        let after = if legacy_leave {
+            &mut self.legacy_publication_after
+        } else {
+            &mut self.publication_after
+        };
+        let start = after.map_or(0, |after| keys.partition_point(|key| *key <= after));
+        for offset in 0..MAX_PUBLICATION_GROUPS / 2 {
+            let group = keys[(start + offset) % keys.len()];
+            if !selected.contains(&group) {
+                selected.push(group);
+            }
+            // Advance before publication: a full document store or failed write
+            // must not pin later groups. No document owner is called under here.
+            *after = Some(group);
+        }
+        selected
+    }
+
     /// Select a bounded source execution turn without changing durable status.
     pub(super) fn take_source_ready(
         &mut self,
@@ -534,6 +580,8 @@ impl OperationJournal {
             device,
             sequence: 0,
             source_ready_after: None,
+            publication_after: None,
+            legacy_publication_after: None,
             fanout_groups: BTreeMap::new(),
             fanout_order: BTreeMap::new(),
             fanout_messages: BTreeMap::new(),
@@ -2075,6 +2123,135 @@ mod tests {
                 .iter()
                 .any(|result| result.reference.id == id),
             "a source must republish an old immutable terminal result even while other accepted work is pending"
+        );
+    }
+    #[test]
+    fn group_publication_reaches_pending_groups_behind_terminal_history() {
+        let (_dir, node, _account, template, _) = fixture();
+        let group = template.reference.group;
+        let pending = legacy_entry(&node, group, node.identity.public(), false);
+        let pending_id = pending.reference.id;
+        {
+            let mut journal = node.group_operations.lock().unwrap();
+            journal.put(pending).unwrap();
+            for index in 0u16..128 {
+                let mut bytes = [173; 32];
+                bytes[..2].copy_from_slice(&index.to_be_bytes());
+                let mut terminal = legacy_entry(
+                    &node,
+                    ConversationId::new(bytes),
+                    node.identity.public(),
+                    true,
+                );
+                terminal.status.phase = AccountGroupOperationPhase::Cancelled;
+                for execution in &mut terminal.status.executions {
+                    execution.phase = AccountGroupOperationPhase::Cancelled;
+                }
+                journal.put(terminal).unwrap();
+            }
+        }
+        let key = crate::node::AccountDocumentKey::GroupOperation {
+            channel: hex::encode(group.as_bytes()),
+            source_device: node.user_id(),
+        };
+        // Ordinary status polling wakes publication without rewriting the
+        // immutable operation journal or assigning a newer sequence.
+        for _ in 0..3 {
+            node.account_group_operation_status(&node.account_id(), pending_id)
+                .unwrap();
+            node.publish_account_group_operations();
+        }
+        let document = node.account_document(&key).unwrap().expect(
+            "retained terminal groups must not permanently exclude an older pending request",
+        );
+        let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
+            document.payload(),
+            &node.account.public().ed25519_pub,
+        )
+        .unwrap();
+        assert!(
+            frame
+                .projection
+                .requests
+                .iter()
+                .any(|request| request.reference.id == pending_id)
+        );
+    }
+    #[test]
+    fn group_publication_lanes_reach_every_retained_group_independently() {
+        let (_dir, node, _account, _template, _) = fixture();
+        let groups: Vec<_> = (0u16..129)
+            .map(|index| {
+                let mut bytes = [174; 32];
+                bytes[..2].copy_from_slice(&index.to_be_bytes());
+                ConversationId::new(bytes)
+            })
+            .collect();
+        {
+            let mut journal = node.group_operations.lock().unwrap();
+            for group in &groups {
+                let parent = legacy_entry(&node, *group, node.identity.public(), false);
+                let mut child = legacy_entry(&node, *group, node.identity.public(), false);
+                journal
+                    .put_legacy_child(parent.reference, child.clone())
+                    .unwrap();
+                child.source = true;
+                child.status.phase = AccountGroupOperationPhase::Cancelled;
+                for execution in &mut child.status.executions {
+                    execution.phase = AccountGroupOperationPhase::Cancelled;
+                }
+                journal.put(child).unwrap();
+            }
+        }
+        let before = {
+            let journal = node.group_operations.lock().unwrap();
+            (journal.sequence, journal.records, journal.bytes)
+        };
+        let keys = |group: ConversationId| {
+            [
+                crate::node::AccountDocumentKey::GroupOperation {
+                    channel: hex::encode(group.as_bytes()),
+                    source_device: node.user_id(),
+                },
+                crate::node::AccountDocumentKey::GroupLegacyOperation {
+                    channel: hex::encode(group.as_bytes()),
+                    source_device: node.user_id(),
+                },
+            ]
+        };
+        for turn in 0..3 {
+            node.publish_account_group_operations();
+            node.publish_account_group_legacy_operations();
+            if turn == 0 {
+                let mut published = [0; 2];
+                for group in &groups {
+                    for (lane, key) in keys(*group).into_iter().enumerate() {
+                        published[lane] +=
+                            usize::from(node.account_document(&key).unwrap().is_some());
+                    }
+                }
+                assert!(published.iter().all(|count| *count <= 128));
+                for key in keys(*groups.last().unwrap()) {
+                    assert!(
+                        node.account_document(&key).unwrap().is_some(),
+                        "recently changed heads retain first-turn publication"
+                    );
+                }
+            }
+        }
+        for group in groups {
+            for key in keys(group) {
+                assert!(
+                    node.account_document(&key).unwrap().is_some(),
+                    "each publication lane must eventually repair every retained group: {key:?}"
+                );
+            }
+        }
+        let journal = node.group_operations.lock().unwrap();
+        assert_eq!(
+            (journal.sequence, journal.records, journal.bytes),
+            before,
+            "publication scheduling must not rewrite durable operation status"
         );
     }
     #[test]

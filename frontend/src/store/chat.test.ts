@@ -238,6 +238,36 @@ it("replaces a reserved native page after losing a later pull response", async (
   }
 });
 
+it("finishes identity boot while a background coverage read remains pending", async () => {
+  vi.useFakeTimers();
+  let finish!: (rows: unknown[]) => void;
+  invoke.mockImplementation((command: string) => {
+    if (command === "owner_node_identity")
+      return Promise.resolve({
+        owner: "host",
+        device_id: "me",
+        account_id: "myacct",
+        history_revision: 1,
+      });
+    if (command === "owner_account_history")
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    return Promise.resolve([]);
+  });
+  const stop = useChat.getState().start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useChat.getState().ready).toBe(true);
+    expect(useChat.getState().historyScanBusy).toBe(true);
+    expect(useChat.getState().bootBusy).toBe(false);
+  } finally {
+    stop();
+    finish?.([]);
+    vi.useRealTimers();
+  }
+});
+
 it("coalesces roster invalidations and preserves readiness after an older failure", async () => {
   let reject!: (e: Error) => void;
   let count = 0;
@@ -4138,6 +4168,44 @@ it("does not refetch group members on each unchanged roster tick", async () => {
     ),
   ).toBe(false);
 });
+it.each(["favorites", "members"] as const)(
+  "releases %s projection reads after their deadline",
+  async (lane) => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    invoke.mockImplementation((command: string) =>
+      command === (lane === "favorites" ? "get_favorites" : "channel_members")
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : Promise.resolve([]),
+    );
+    const completed = vi.fn();
+    const pending = (
+      lane === "favorites"
+        ? useChat.getState().loadFavorites()
+        : useChat.getState().open({ kind: "channel", id: "team", name: "Team" })
+    ).then(completed);
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(completed).toHaveBeenCalledOnce();
+      const favorites = useChat.getState().favorites;
+      finish(
+        lane === "favorites"
+          ? [{ id: "late", pinned: true, custom_alias: null }]
+          : { owner: "late", members: [] },
+      );
+      await pending;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(useChat.getState().favorites).toBe(favorites);
+      expect(useChat.getState().channelOwner).not.toBe("late");
+    } finally {
+      finish([]);
+      await pending;
+      vi.useRealTimers();
+    }
+  },
+);
 
 it.each([false, true])(
   "does not replace pushed member details with an older open request (unchanged members: %s)",

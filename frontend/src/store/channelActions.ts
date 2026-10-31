@@ -1,3 +1,4 @@
+import { readWithDeadline } from "@/lib/readDeadline";
 import type {
   AccountGroupControlRequest,
   AccountGroupOperationStatus,
@@ -164,7 +165,7 @@ export function createChannelActions(
         lease.current()
       )
         context.deleteCommittedHistory?.(group);
-      await refreshRoster();
+      await readWithDeadline(refreshRoster);
       if (!lease.current()) return;
       if (status.kind === "rename" && current()) {
         const channel = read().channels.find(
@@ -184,7 +185,9 @@ export function createChannelActions(
           "history_policy",
         ].includes(status.kind)
       ) {
-        const info = await commands.channelMembers(group);
+        const info = await readWithDeadline(() =>
+          commands.channelMembers(group),
+        );
         if (current())
           lease.set({ members: info.members, channelOwner: info.owner });
       }

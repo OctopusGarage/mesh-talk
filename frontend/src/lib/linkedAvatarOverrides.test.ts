@@ -89,3 +89,24 @@ it("retries the same digest after a failed projection read", async () => {
   await vi.advanceTimersByTimeAsync(10_000);
   expect(load).toHaveBeenCalledTimes(2);
 });
+it("retries digest observation after a stalled read and ignores its late response", async () => {
+  let finish!: (page: { items: never[]; next: null; digest: number[] }) => void;
+  vi.mocked(accountDocuments.list).mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const load = useAvatars.getState().load;
+  stop = startLinkedAvatarOverrides("owner");
+  try {
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(accountDocuments.list).toHaveBeenCalledTimes(2);
+    expect(load).toHaveBeenCalledOnce();
+    finish({ items: [], next: null, digest: [2] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(load).toHaveBeenCalledOnce();
+  } finally {
+    finish({ items: [], next: null, digest: [2] });
+    await vi.advanceTimersByTimeAsync(0);
+  }
+});

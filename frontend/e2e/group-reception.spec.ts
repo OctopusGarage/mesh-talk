@@ -39,9 +39,11 @@ async function enterGroup(page: Page, count = 120) {
   ).toBeVisible();
 }
 
-async function receive(page: Page, id: string, index: number, complete = true) {
+type RecoveryDelivery = { id: string; index: number; complete: boolean };
+
+async function receiveBatch(page: Page, deliveries: RecoveryDelivery[]) {
   await page.evaluate(
-    ({ conversation, who, channel, id, index, complete }) => {
+    async ({ conversation, who, channel, deliveries }) => {
       const w = window as unknown as {
         __mockInject: (
           c: string,
@@ -51,31 +53,42 @@ async function receive(page: Page, id: string, index: number, complete = true) {
         ) => void;
         __mockEmit: (event: string, payload: unknown) => void;
       };
-      w.__mockInject(conversation, id, who, { id, index, wall_clock: 1 });
-      w.__mockEmit("channel-message", {
-        channel_id: channel,
-        channel_name: "team",
-        from: who,
-        from_name: "bob",
-        text: id,
-        reply_to: null,
-        event_id: id,
-        authored_at: 1,
-        received_at: Date.now(),
-        arrival_kind: "catch_up",
-        batch_id: "recovery-1",
-        batch_complete: complete,
-      });
+      for (const [position, { id, index, complete }] of deliveries.entries()) {
+        w.__mockInject(conversation, id, who, { id, index, wall_clock: 1 });
+        w.__mockEmit("channel-message", {
+          channel_id: channel,
+          channel_name: "team",
+          from: who,
+          from_name: "bob",
+          text: id,
+          reply_to: null,
+          event_id: id,
+          authored_at: 1,
+          received_at: Date.now(),
+          arrival_kind: "catch_up",
+          batch_id: "recovery-1",
+          batch_complete: complete,
+        });
+        if (position < deliveries.length - 1) {
+          // Let each delivery render before the next event, while avoiding a
+          // controller round trip (and its trace snapshots) for every message.
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          });
+        }
+      }
     },
     {
       conversation: CONVERSATION,
       who: BOB,
       channel: CHANNEL,
-      id,
-      index,
-      complete,
+      deliveries,
     },
   );
+}
+
+async function receive(page: Page, id: string, index: number, complete = true) {
+  await receiveBatch(page, [{ id, index, complete }]);
 }
 
 test("late history preserves reading anchor/focus and stays unread until viewed", async ({
@@ -150,8 +163,14 @@ test("recovery batches remain discoverable alongside live messages without dupli
   });
   await expect(page.getByTestId("jump-to-latest")).toBeVisible();
   await page.getByTestId("composer-input").focus();
-  for (let i = 0; i < 8; i++)
-    await receive(page, `Recovered batch ${i}`, 1, i === 7);
+  await receiveBatch(
+    page,
+    Array.from({ length: 8 }, (_, i) => ({
+      id: `Recovered batch ${i}`,
+      index: 1,
+      complete: i === 7,
+    })),
+  );
   await expect(page.getByTestId("earlier-messages")).toBeVisible();
   await page.evaluate(
     ({ channel, conversation, who }) => {

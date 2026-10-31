@@ -261,6 +261,8 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) untracked_chunk_validations: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
+    pub(in crate::node) before_sent_delete_hook: BlockingTestHook,
+    #[cfg(test)]
     pub(in crate::node) profile_read_hook: BlockingTestHook,
     #[cfg(test)]
     pub(in crate::node) profile_prepare_hook: BlockingTestHook,
@@ -282,6 +284,9 @@ pub struct Node {
     #[cfg(test)]
     pub(in crate::node) account_client_test_hook:
         Mutex<Option<Arc<super::account_session::AccountClientTestHook>>>,
+    #[cfg(test)]
+    pub(in crate::node) account_channel_maintenance_test_hook:
+        Mutex<Option<Arc<super::channel_account_maintenance::AccountChannelMaintenanceTestHook>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
     /// Host preference. Relay selection and every relay dial consult this live flag.
     pub(in crate::node) post_office_enabled: std::sync::atomic::AtomicBool,
@@ -1194,6 +1199,8 @@ impl Node {
             #[cfg(test)]
             untracked_chunk_validations: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
+            before_sent_delete_hook: Mutex::new(None),
+            #[cfg(test)]
             profile_read_hook: Mutex::new(None),
             #[cfg(test)]
             profile_prepare_hook: Mutex::new(None),
@@ -1213,6 +1220,8 @@ impl Node {
             account_session_test_hook: Mutex::new(None),
             #[cfg(test)]
             account_client_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            account_channel_maintenance_test_hook: Mutex::new(None),
             privacy,
             identity,
             account,

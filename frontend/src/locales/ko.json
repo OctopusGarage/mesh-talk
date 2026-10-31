@@ -402,7 +402,13 @@
     "saving": "파일 저장 중…",
     "receiving": "파일 수신 중…",
     "waiting": "파일 대기 중…",
-    "receivingProgress": "파일 수신 중: {{percent}}%"
+    "receivingProgress": "파일 수신 중: {{percent}}%",
+    "imageWaiting": "이미지 대기 중",
+    "imageReceiving": "이미지 수신 중",
+    "imageReceivingProgress": "이미지 수신 중 · {{percent}}%",
+    "imagePreparing": "이미지 준비 중",
+    "imageDetails": "사진 · {{size}}",
+    "image": "사진"
   },
   "composer": {
     "expireAfterSend": "전송 후 만료",

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readWithDeadline } from "@/lib/readDeadline";
 import { draftsApi } from "@/lib/api/drafts";
 import type { DraftChange, DraftVersion } from "@/lib/api/drafts";
 import type { MessageProtection } from "@/lib/types";
@@ -126,7 +127,9 @@ export function createDraftStore(api: Pick<typeof draftsApi, "load" | "save">) {
         const run = epoch;
         set({ owner, generation });
         try {
-          const snapshot = await api.load(owner, currentAccount);
+          const snapshot = await readWithDeadline(() =>
+            api.load(owner, currentAccount),
+          );
           if (epoch !== run) return;
           if (snapshot.account_id && snapshot.account_id !== currentAccount)
             throw new Error("Draft account changed");
@@ -155,7 +158,9 @@ export function createDraftStore(api: Pick<typeof draftsApi, "load" | "save">) {
         const owner = get().owner;
         if (!owner || !get().loaded) return;
         try {
-          const snapshot = await api.load(owner, accountId);
+          const snapshot = await readWithDeadline(() =>
+            api.load(owner, accountId),
+          );
           if (
             epoch !== run ||
             request !== refreshRequest ||

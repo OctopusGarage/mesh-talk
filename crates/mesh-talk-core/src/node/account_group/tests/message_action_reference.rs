@@ -12,6 +12,14 @@ type ActionTrace = Arc<
     )>,
 >;
 
+struct ReleaseActionControlOnDrop(Arc<tokio::sync::Semaphore>);
+
+impl Drop for ReleaseActionControlOnDrop {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 fn record_action_trace(
     trace: &ActionTrace,
     started: std::time::Instant,
@@ -643,33 +651,22 @@ async fn reference_message_action(recall: bool) {
     }
     let external_runtime = external_runtime.expect("the external peer owns its runtime");
     source.publish_account_group_access(&mut None);
-    pull_reference_action_control(&reference, &source, addresses[0], group).await;
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
+            super::has_account_group_operation_support(
+                &reference,
+                &source,
+                Some(AccountGroupOperationKind::Text),
+            ) && super::has_account_group_operation_support(&source, &reference, None)
+        }),
+        pull_reference_action_control(&reference, &source, addresses[0], group),
+    )
+    .await;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
     );
     assert!(reference.channel_members(group).is_empty());
-    wait_action_fixture(
-        || {
-            reference
-                .group_operation_versions
-                .lock()
-                .unwrap()
-                .get(&source.user_id())
-                .is_some_and(|support| {
-                    support.public == source.identity.public()
-                        && support.kinds & AccountGroupOperationKind::Text.capability_bit() != 0
-                })
-                && source
-                    .group_operation_versions
-                    .lock()
-                    .unwrap()
-                    .get(&reference.user_id())
-                    .is_some_and(|support| support.public == reference.identity.public())
-        },
-        "real Noise capability negotiation must precede explicit send admission",
-    )
-    .await;
 
     let send_id = reference
         .new_account_group_operation_id(&account.account_id())
@@ -738,6 +735,61 @@ async fn reference_message_action(recall: bool) {
     );
     assert!(original.verify_integrity() && original.verify_signature());
 
+    // The later sibling is cold even though the original author is ready.
+    // Hold its real authenticated response beyond the role-page budget; this
+    // delay belongs to capability setup, before any Recall is admitted.
+    let sibling_control_release = recall.then(|| Arc::new(tokio::sync::Semaphore::new(0)));
+    let _release_on_drop = sibling_control_release
+        .as_ref()
+        .map(|release| ReleaseActionControlOnDrop(release.clone()));
+    if let Some(release) = &sibling_control_release {
+        let previous = sibling.account_session_test_hook.lock().unwrap().clone();
+        let (arrived, held) = tokio::sync::oneshot::channel();
+        let arrived = Arc::new(Mutex::new(Some(arrived)));
+        let expected_reference = reference.identity.public();
+        *sibling.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let release = release.clone();
+            move |peer, frame| {
+                let previous = previous.clone();
+                let release = release.clone();
+                let arrived = arrived.clone();
+                let expected_reference = expected_reference.clone();
+                Box::pin(async move {
+                    if let Some(previous) = previous {
+                        previous(peer.clone(), frame.clone()).await;
+                    }
+                    if peer != expected_reference {
+                        return;
+                    }
+                    let crate::node::account_sync_wire::AccountHistoryFrame::DocumentsRequest {
+                        body,
+                    } = frame
+                    else {
+                        return;
+                    };
+                    let request =
+                        crate::node::account_documents::wire::DocumentRequest::decode(&body)
+                            .expect("authenticated sibling control request must decode");
+                    if request.domain == AccountDocumentDomain::GroupControl {
+                        if let Some(arrived) = arrived.lock().unwrap().take() {
+                            let _ = arrived.send(());
+                        }
+                        let _ = release.acquire().await;
+                    }
+                })
+            }
+        }));
+        let release = release.clone();
+        tasks.spawn(async move {
+            super::cold_account_setup(held)
+                .await
+                .expect("the later sibling must enter its real cold capability hold")
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            release.close();
+        });
+    }
+
     // Introduce an independently capable same-account physical executor only
     // after A's original provenance is fixed. These are real device certificates
     // and authenticated operation support, with no synthetic membership grants.
@@ -760,12 +812,25 @@ async fn reference_message_action(recall: bool) {
         }
     }
     sibling.publish_account_group_access(&mut None);
-    pull_reference_action_control(&reference, &sibling, addresses[3], group).await;
     let kind = if recall {
         AccountGroupOperationKind::Recall
     } else {
         AccountGroupOperationKind::Reaction
     };
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
+            super::has_account_group_operation_support(&reference, &sibling, Some(kind))
+                && super::has_account_group_operation_support(&sibling, &reference, None)
+        }),
+        pull_reference_action_control(&reference, &sibling, addresses[3], group),
+    )
+    .await;
+    if let Some(release) = &sibling_control_release {
+        assert!(
+            release.is_closed(),
+            "the later sibling must finish cold setup before its role qualifies"
+        );
+    }
     wait_action_fixture(
         || {
             [source.as_ref(), sibling.as_ref()]

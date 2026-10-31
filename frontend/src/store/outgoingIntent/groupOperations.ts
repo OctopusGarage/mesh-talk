@@ -63,8 +63,8 @@ function coordinator(set: Set, get: Get) {
         if (entries.length >= GROUP_OPERATION_TICKET_CAP) {
           const index = entries.findIndex(
             ([id, entry]) =>
-              entry.status &&
-              isGroupOperationComplete(entry.status) &&
+              (entry.admissionFailure ||
+                isGroupOperationComplete(entry.status)) &&
               !current.isInvoking(entry.account_id, id) &&
               !Object.values(state.intents).some(
                 (intent) => intent.operationId === id,

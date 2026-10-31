@@ -402,7 +402,13 @@
     "saving": "Saving file…",
     "receiving": "Receiving file…",
     "waiting": "Waiting for file…",
-    "receivingProgress": "Receiving file: {{percent}}%"
+    "receivingProgress": "Receiving file: {{percent}}%",
+    "imageWaiting": "Waiting for image",
+    "imageReceiving": "Receiving image",
+    "imageReceivingProgress": "Receiving image · {{percent}}%",
+    "imagePreparing": "Preparing image",
+    "imageDetails": "Photo · {{size}}",
+    "image": "Photo"
   },
   "composer": {
     "expireAfterSend": "Expire after send",

@@ -17,6 +17,9 @@ import {
   expectNoHorizontalOverflow,
 } from "./helpers/ui-audit";
 
+// Successful portable scenarios retain evidence in the full Chromium run.
+test.use({ trace: "on" });
+
 test("presence waits for node readiness without showing a startup failure", async ({
   page,
 }) => {

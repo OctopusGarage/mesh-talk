@@ -1436,10 +1436,10 @@ impl Node {
     /// Receive-complete persist for MEDIA: if `file_conv` is a media file (image/video by
     /// name) we hold ALL chunks of but haven't yet copied into the durable media store,
     /// reassemble + verify it (`read_file`) and write the bytes into the store. After this
-    /// the media is durable, so its transient chunks are safe to prune. A no-op for a
-    /// generic attachment (never stored), an incomplete file, or one already stored.
-    /// Returns true iff it newly persisted media. Best-effort — failures are swallowed and
-    /// retried on the next sync tick.
+    /// the media is durable, so its transient chunks follow the existing reclamation
+    /// policy. A no-op for a generic attachment (never stored) or an incomplete file.
+    /// Returns true when it persists media or the completion/reclamation owner reports
+    /// completion. Stored bytes are not rewritten; reclamation remains best-effort.
     pub(in crate::node) fn persist_media_if_complete(&self, file_conv: ConversationId) -> bool {
         // Decide media-vs-attachment by the sender's INTENT (manifest kind); for legacy
         // manifests with no kind, fall back to the filename heuristic. Only media is copied
@@ -1462,7 +1462,14 @@ impl Node {
         if !media {
             return false; // attachment — never written to the media store
         }
-        if self.media.contains(file_conv) && self.has_verified_file_completion(file_conv) {
+        let locally_complete = match self.local_media_recovery_complete(file_conv) {
+            Ok(complete) => complete,
+            Err(error) => {
+                log::warn!("media recovery lookup deferred: {error}");
+                return false;
+            }
+        };
+        if locally_complete {
             if let Err(error) = self.complete_sticker_aliases(file_conv) {
                 log::warn!("sticker completion deferred: {error}");
                 return false;
@@ -1475,7 +1482,12 @@ impl Node {
                 }
             };
             if !pending {
-                return false; // every retained offer is already complete
+                return self
+                    .commit_file_completion(file_conv, &[])
+                    .unwrap_or_else(|error| {
+                        log::warn!("media reclamation deferred: {error}");
+                        false
+                    });
             }
         }
         let candidates = match self.completion_candidates(file_conv) {

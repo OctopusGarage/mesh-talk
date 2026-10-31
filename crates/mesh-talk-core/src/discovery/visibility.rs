@@ -1,5 +1,6 @@
 //! Announcement disclosure control, separate from application admission.
 use super::scope::{self, LanInterface};
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{
@@ -8,6 +9,8 @@ use std::sync::{
 };
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
+
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A shared discovery-only control. Suppression does not block TCP, conceal
 /// already advertised identities, or retract queued/transmitted datagrams.
@@ -68,13 +71,32 @@ impl DiscoveryVisibility {
         Ok(())
     }
 
-    pub(crate) async fn routed_send_guard(&self) -> Option<tokio::sync::RwLockReadGuard<'_, bool>> {
-        let guard = self.public.read().await;
-        if !*guard || self.physical_lan_only() {
-            None
-        } else {
-            Some(guard)
-        }
+    /// Own the visibility lease and its I/O together so a stalled UDP socket
+    /// cannot postpone a privacy change indefinitely. The future is only polled
+    /// after admission, and cancellation drops it before releasing the lease.
+    pub(crate) async fn with_routed_send<T>(
+        &self,
+        send: impl Future<Output = io::Result<T>>,
+    ) -> io::Result<Option<T>> {
+        self.with_send(true, send).await
+    }
+
+    async fn with_send<T>(
+        &self,
+        routed: bool,
+        send: impl Future<Output = io::Result<T>>,
+    ) -> io::Result<Option<T>> {
+        tokio::time::timeout(SEND_TIMEOUT, async {
+            let public = self.public.read().await;
+            if !*public || (routed && self.physical_lan_only()) {
+                return Ok(None);
+            }
+            let result = send.await;
+            drop(public);
+            result.map(Some)
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "discovery send timed out"))?
     }
 
     pub async fn routed_allowed(&self) -> bool {
@@ -124,10 +146,17 @@ impl DiscoveryVisibility {
         bytes: &[u8],
         target: SocketAddr,
     ) -> io::Result<bool> {
-        let public = self.public.read().await;
-        if !*public {
-            return Ok(false);
-        }
+        self.with_send(false, self.send_announce_inner(socket, bytes, target))
+            .await
+            .map(|sent| sent.unwrap_or(false))
+    }
+
+    async fn send_announce_inner(
+        &self,
+        socket: &UdpSocket,
+        bytes: &[u8],
+        target: SocketAddr,
+    ) -> io::Result<bool> {
         if self.physical_lan_only() {
             if target.ip() == std::net::IpAddr::V4(crate::transport::net::DISCOVERY_MULTICAST_GROUP)
             {
@@ -153,7 +182,6 @@ impl DiscoveryVisibility {
             return Ok(true);
         }
         socket.send_to(bytes, target).await?;
-        drop(public);
         Ok(true)
     }
 }
@@ -168,10 +196,60 @@ impl Default for DiscoveryVisibility {
 mod tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn liveness_announce_wait_is_bounded_and_cannot_publish_after_cancellation() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let visibility = DiscoveryVisibility::default();
+        let policy = visibility.public.write().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            visibility.send_announce(&sender, b"identity", receiver.local_addr().unwrap()),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(ref error)) if error.kind() == io::ErrorKind::TimedOut),
+            "announcement did not own a bounded send deadline: {result:?}"
+        );
+        drop(policy);
+        tokio::task::yield_now().await;
+        let mut bytes = [0; 64];
+        assert!(
+            matches!(receiver.try_recv(&mut bytes), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn liveness_stalled_routed_send_releases_visibility_before_policy_change() {
+        let visibility = DiscoveryVisibility::default();
+        // A pending operation represents an OS socket that never becomes writable.
+        // It is polled only after the real visibility owner grants disclosure.
+        let send = visibility.with_routed_send(std::future::pending::<io::Result<()>>());
+        tokio::pin!(send);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut send)
+                .await
+                .is_err()
+        );
+        assert!(visibility.public.try_write().is_err());
+        let disable = visibility.set_public(false);
+        tokio::pin!(disable);
+        let (sent, ()) = tokio::join!(&mut send, &mut disable);
+        assert!(matches!(sent, Err(error) if error.kind() == io::ErrorKind::TimedOut));
+        assert!(!visibility.is_public().await);
+        assert_eq!(
+            visibility
+                .with_routed_send(async { panic!("private discovery polled a send") })
+                .await
+                .unwrap(),
+            None::<()>
+        );
+    }
+
     #[tokio::test]
     async fn physical_scope_does_not_override_invisibility_or_an_active_send() {
         let visibility = DiscoveryVisibility::default();
-        let send = visibility.routed_send_guard().await.unwrap();
+        let send = visibility.public.read().await;
         let change = visibility.set_physical_lan_only(true);
         tokio::pin!(change);
         assert!(

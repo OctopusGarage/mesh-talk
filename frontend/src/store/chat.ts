@@ -31,16 +31,13 @@ import { contactPolicy, favorites as favoritesApi } from "@/lib/api/contacts";
 import { errorMessage } from "@/lib/error";
 import { subscribeNodeEvents } from "@/lib/events";
 import {
-  saveUnread,
-  savePendingUnread,
   loadPendingUnread,
   loadUnread,
+  queueReceptionPersistence,
+  flushReceptionPersistence,
   loadReceptionLedger,
-  saveReceptionLedger,
   loadUnreadOverflow,
-  saveUnreadOverflow,
   loadFullHistoryBaselines,
-  saveFullHistoryBaselines,
 } from "@/lib/unreadStorage";
 import {
   emptyReception,
@@ -312,7 +309,9 @@ async function pollUntilReady(
         () => !isCancelled(),
         !!identity.supports_bounded_delivery,
       );
-      await get().refreshRoster();
+      // Identity completes boot. Roster/history hydration owns its separate
+      // bounded lane and must not extend the startup deadline or hold bootBusy.
+      void get().refreshRoster();
       return true;
     } catch {
       if (superseded()) return false;
@@ -876,7 +875,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
     const request = get().favoritesRequest + 1;
     set({ favoritesRequest: request });
     try {
-      const list = await favoritesApi.get(lease.owner!);
+      const list = await readWithDeadline(() => favoritesApi.get(lease.owner!));
       if (!lease.current() || get().favoritesRequest !== request) return;
       const map: Record<string, FavoriteInfo> = {};
       for (const f of list) map[f.id] = f;
@@ -1252,11 +1251,14 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       )
         wakeReception();
     };
+    const flushReceipts = () => flushReceptionPersistence();
     if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", flushReceipts);
       window.addEventListener("focus", expire);
       window.addEventListener("focus", resumeReception);
     }
     if (typeof document !== "undefined") {
+      document.addEventListener?.("visibilitychange", flushReceipts);
       document.addEventListener?.("visibilitychange", expire);
       document.addEventListener?.("visibilitychange", resumeReception);
     }
@@ -1409,6 +1411,11 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       cancelled = true;
       delivery?.stop();
       stopReceptionObservation();
+      flushReceptionPersistence();
+      if (typeof window !== "undefined")
+        window.removeEventListener("pagehide", flushReceipts);
+      if (typeof document !== "undefined")
+        document.removeEventListener?.("visibilitychange", flushReceipts);
       clearInterval(roster);
       clearInterval(expiry);
       if (typeof window !== "undefined") {
@@ -1559,7 +1566,7 @@ export const useChat = create<ChatState>((rawSet, get) => ({
       try {
         const baseline = get().members;
         const ownerBaseline = get().channelOwner;
-        const info = await chat.channelMembers(c.id);
+        const info = await readWithDeadline(() => chat.channelMembers(c.id));
         if (!lease.current() || get().activeRequest !== request) return;
         // A newer active-view refresh wins; a background avatar-only update
         // from before navigation must not discard this navigation's details.
@@ -2293,40 +2300,31 @@ function get_handleFile(set: Set, get: Get, e: FileReceivedEvent) {
 }
 
 useChat.subscribe((state, previous) => {
-  if (state.unreadOwner && state.myAccountId) {
-    if (state.unread !== previous.unread)
-      saveUnread(state.unreadOwner, state.myAccountId, state.unread);
-    if (state.pendingUnknownUnread !== previous.pendingUnknownUnread)
-      savePendingUnread(
-        state.unreadOwner,
-        state.myAccountId,
-        state.pendingUnknownUnread,
-      );
-  }
   if (
-    state.ledger !== previous.ledger &&
-    state.unreadOwner &&
-    state.myAccountId
+    state.unreadOwner !== previous.unreadOwner ||
+    state.myAccountId !== previous.myAccountId ||
+    state.runEpoch !== previous.runEpoch
   )
-    saveReceptionLedger(state.unreadOwner, state.myAccountId, state.ledger);
+    flushReceptionPersistence();
+  if (!state.unreadOwner || !state.myAccountId) return;
+  queueReceptionPersistence(state.unreadOwner, state.myAccountId, {
+    ...(state.unread !== previous.unread ? { unread: state.unread } : {}),
+    ...(state.pendingUnknownUnread !== previous.pendingUnknownUnread
+      ? { pendingUnknownUnread: state.pendingUnknownUnread }
+      : {}),
+    ...(state.ledger !== previous.ledger ? { ledger: state.ledger } : {}),
+    ...(state.overflowUnread !== previous.overflowUnread
+      ? { overflowUnread: state.overflowUnread }
+      : {}),
+    ...(state.historyFullBaselines !== previous.historyFullBaselines
+      ? { historyFullBaselines: state.historyFullBaselines }
+      : {}),
+  });
+});
+useAuth.subscribe((state, previous) => {
   if (
-    state.overflowUnread !== previous.overflowUnread &&
-    state.unreadOwner &&
-    state.myAccountId
+    state.user?.id !== previous.user?.id ||
+    state.generation !== previous.generation
   )
-    saveUnreadOverflow(
-      state.unreadOwner,
-      state.myAccountId,
-      state.overflowUnread,
-    );
-  if (
-    state.historyFullBaselines !== previous.historyFullBaselines &&
-    state.unreadOwner &&
-    state.myAccountId
-  )
-    saveFullHistoryBaselines(
-      state.unreadOwner,
-      state.myAccountId,
-      state.historyFullBaselines,
-    );
+    flushReceptionPersistence();
 });

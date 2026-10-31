@@ -164,18 +164,34 @@ test("language replacement during expansion cannot clip the translated answer", 
 }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto(`${hosted.url}?lang=en`);
-  // Warm the real dictionary so replacement occurs during the next expansion.
-  await page.locator("#site-language").selectOption("ja");
+  // Dictionary priming is preparation; await the real owner's validation and
+  // cache completion before measuring replacement during the next expansion.
+  const primeLocale = (code: "ja" | "en") =>
+    page.evaluate((locale) => {
+      const owner = (
+        window as unknown as {
+          MeshTalkLocale: { setLocale: (code: string) => Promise<void> };
+        }
+      ).MeshTalkLocale;
+      return owner.setLocale(locale);
+    }, code);
+  await primeLocale("ja");
   await expect(page.locator("html")).toHaveAttribute("lang", "ja");
-  await page.locator("#site-language").selectOption("en");
+  await primeLocale("en");
   await expect(page.locator("html")).toHaveAttribute("lang", "en");
-  await page.evaluate(() => {
-    document.querySelector<HTMLElement>("#faq-offline summary")!.click();
+  const expanding = await page.evaluate(() => {
+    const answer = document.querySelector<HTMLElement>("#faq-offline")!;
+    answer.querySelector<HTMLElement>("summary")!.click();
+    const active = answer
+      .getAnimations()
+      .some((animation) => animation.playState === "running");
     const chooser =
       document.querySelector<HTMLSelectElement>("#site-language")!;
     chooser.value = "ja";
     chooser.dispatchEvent(new Event("change", { bubbles: true }));
+    return active;
   });
+  expect(expanding).toBe(true);
   await expect(page.locator("html")).toHaveAttribute("lang", "ja");
   const answer = page.locator("#faq-offline");
   await expect(answer).toHaveAttribute("open", "");

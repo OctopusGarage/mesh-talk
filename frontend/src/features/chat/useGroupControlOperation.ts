@@ -58,21 +58,27 @@ export function useGroupControlOperation(group: string | null) {
       ? ticket.status
       : undefined;
   const outcome: GroupOperationOutcome | undefined =
-    status && id
-      ? {
-          kind:
-            status.phase.kind === "committed" &&
-            !isGroupHistoryCleanupPending(status)
-              ? "committed"
-              : status.phase.kind === "cancelled"
-                ? "cancelled"
-                : status.phase.kind === "rejected"
-                  ? "rejected"
-                  : "pending",
-          id,
-          status,
-        }
-      : (current?.outcome ?? (id ? { kind: "unconfirmed", id } : undefined));
+    ticket &&
+    ticket.account_id === account &&
+    ticket.group === group &&
+    ticket.admissionFailure &&
+    id
+      ? { kind: "not_admitted", id, error: ticket.admissionFailure.error }
+      : status && id
+        ? {
+            kind:
+              status.phase.kind === "committed" &&
+              !isGroupHistoryCleanupPending(status)
+                ? "committed"
+                : status.phase.kind === "cancelled"
+                  ? "cancelled"
+                  : status.phase.kind === "rejected"
+                    ? "rejected"
+                    : "pending",
+            id,
+            status,
+          }
+        : (current?.outcome ?? (id ? { kind: "unconfirmed", id } : undefined));
   const invoking = useRef<string | null>(null);
   const completion = useRef<{
     scope: string;

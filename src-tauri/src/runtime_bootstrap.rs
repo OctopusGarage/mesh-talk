@@ -539,6 +539,52 @@ mod tests {
     use mesh_talk_core::eventlog::event::ConversationId;
     use tauri::Listener;
 
+    #[test]
+    fn inbound_dispatch_does_not_acquire_session_until_main_thread_execution() {
+        let (session, _, authority) = authority();
+        let lease = authority.lease.clone();
+        let published = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = published.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = session
+            .matching(&lease, |_| {
+                let worker = std::thread::spawn(move || {
+                    send.send(authority.queued_current(move || {
+                        observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }))
+                    .unwrap();
+                });
+                let queued = receive.recv_timeout(std::time::Duration::from_secs(2));
+                (worker, queued)
+            })
+            .unwrap();
+        worker.0.join().unwrap();
+        assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+        worker
+            .1
+            .expect("dispatch must not wait for the session lock")();
+        assert!(published.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn queued_inbound_event_rechecks_session_and_runtime_before_publication() {
+        for replace_runtime in [false, true] {
+            let (session, node, authority) = authority();
+            let published = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = published.clone();
+            let queued = authority.queued_current(move || {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            if replace_runtime {
+                node.next_lifecycle_ticket();
+            } else {
+                session.clear();
+            }
+            queued();
+            assert!(!published.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
+
     fn authority() -> (
         crate::state::SessionState,
         crate::chat_commands::NodeState,

@@ -113,6 +113,19 @@ access. Decoded image geometry is cached by live Blob URL (at most 64 entries)
 so virtualized remounts can reserve the known size; initial decode may resize
 a row, with reader anchors and live-edge intent owned by the viewport. Transfer readiness
 must not swap an ordinary preview from a compact file card to an image row.
+
+Image receipt uses an opaque theme surface and the image presentation of
+`ReceiveProgress.tsx`. Waiting is static; a known zero remains accessible without
+a visible percentage. Positive incomplete chunk counts drive a small radial
+indicator, with phase-only live announcements. Complete chunk counts, local reads
+and image loading retain a preparing state; file readiness alone does not reveal
+the image. A current-source load reveals it with a brief opacity transition,
+reduced with the user's motion preference. Cached geometry skips preparation on
+remount. Load/error callbacks require current source and session ownership, and
+preview failure belongs to its Blob URL so a replacement can recover. No receive
+speed, stall cause, cancel action or thumbnail is inferred from chunk counts.
+Ordinary file progress and attachment consent retain their existing presentation.
+
 The ordinary-image lightbox owns pointer-anchored wheel zoom (1–8 times the
 window-fit size), double-click zoom, bounded pointer dragging, fit reset and
 keyboard zoom (+/−/0). Resize clamps the current position; reopening resets it.
@@ -318,7 +331,7 @@ internal transitions or import back into the chat composition module at runtime.
 DM file status refresh continues after the file offer's receipt, until the
 separate file-progress projection reaches completion. Receipt of the offer must
 not freeze an earlier approval or byte-progress snapshot on the sender.
-Active history and reaction reads use the shared native-read deadline so a stalled
+Active history, background coverage and reaction reads use the shared native-read deadline so a stalled
 IPC request releases the loading indicator into the existing retry state. Late
 results from a timed-out read cannot replace a newer snapshot. The chat identity
 boot window is thirty seconds of elapsed monotonic time, including native waits;
@@ -328,6 +341,18 @@ seconds, preserving the failure label until identity resolves. Successful recove
 clears failure and reloads favorites and roster without a restart. Logout or a
 superseding run invalidates delayed results and stops its ticker. These presentation
 deadlines do not cancel native work or establish whether the participant runtime is healthy.
+Verified identity completes the boot indicator independently of roster/archive
+hydration. Draft loading, settings observations (including readback after an
+acknowledged save), account profiles, lock status, diagnostics, contact/privacy
+policy, avatars, favorites and forwarding-source inspection reuse the same
+ten-second read deadline and pending-native-read budget. Linked read-receipt
+observations do not await the serialized mark-write lane. Mutation completion is
+never inferred from a read timeout; settings and receipt writes retain their order.
+Receipt updates preserve unchanged conversation projections. Persistence coalesces
+the latest immutable snapshot in a fixed 100 ms window and flushes before
+restoration, explicit writes, owner/runtime retirement, page hiding and visibility
+changes. The identity, unread-priority and alias budgets are unchanged. Like other
+browser-local state, an abrupt process termination can lose the unflushed window.
 The history module defines its own state/context interface; `chat.ts` composes it
 and supplies runtime generations plus status refresh. Its patches cannot mutate
 that session context. `conversationModel.ts` owns shared Conversation/message data
@@ -402,6 +427,12 @@ outcomes. `outgoingIntent/groupOperations.ts` binds body-free tickets to the
 existing aggregate outgoing state with atomic capacity and protected retention;
 it does not create another message cache. Original native invocation lifetime
 protects terminal tickets from eviction, as do message-intent references.
+The caller observes an invocation for at most ten seconds; expiry returns its
+current ticket while the original native invocation remains owned and protected
+against duplicate submission. A late definitive pre-admission refusal records a
+local admission failure and settles its existing outgoing owner; it never invents
+a committed or rejected core operation. Ambiguous replies preserve the original
+operation ID for observation and explicit retry.
 The existing ticker and action/message owners must supply observation scheduling,
 terminal presentation and exact public-event reconciliation. Session checks also
 cover synchronous retirement caused by reactive state and diagnostic callbacks.
@@ -413,6 +444,8 @@ navigation, refresh and error capabilities. `chat.ts` supplies these capabilitie
 and preserves its existing public actions. The common member-mutation sequence
 is private to the owner; distinct leave/dissolve/acceptance transitions remain
 explicit. Standalone tests exercise the owner without initializing chat.
+Optional member/roster hydration after an acknowledged commit uses the shared
+read deadline, so a stalled refresh cannot keep the completed action dialog busy.
 
 Attachment approval ordering and stale-session checks belong to
 `ui/features/chat/attachments/attachmentDecision.ts`, reused by message bubbles
@@ -696,6 +729,13 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   native session/lock authority; the settings controller owns acknowledged local
   bindings. Registration tokens prevent retired renderer cleanup from releasing
   newer keys. See [screenshot shortcuts](settings.md#screenshot-shortcuts).
+  Capture owns a single child task through window restoration even if the IPC
+  caller disappears. Pixel acquisition has a twenty-second deadline on macOS and
+  Windows, and two minutes on Linux for interactive portal approval; native
+  screenshot helper processes use fifteen seconds and
+  are killed and reaped on expiry. Restoration and returned pixels still require
+  the original unlocked session. Non-cancellable Windows capture workers retain
+  their own single-operation permit after UI timeout, preventing retry buildup.
 - `DiagnosticsDialog.tsx` delegates observations and native actions to
   `diagnostics/useDiagnosticsController.ts`. Each opening owns independent
   refresh generations, serial peer polling, bounded activity history and
@@ -761,6 +801,18 @@ call negotiation and termination. See [device checks](settings.md#microphone-and
   same-volume staging directory, then publishes it by directory rename. Existing
   partial directories are preserved for recovery. Subsequent encrypted metadata
   writes replace a synchronized sibling file instead of truncating the live file.
+- `recovery/setup.rs` owns the serialized encrypted credential-storage lane for
+  backup setup/status and remembered Drive grants. Its blocking worker retains
+  that lane even when its caller is cancelled. Password derivation, decryption,
+  serialization and temporary-file synchronization run outside the global
+  session and app-lock guards. Exact session generation and lock revision are
+  checked at capture, atomic publication/deletion and final plaintext release;
+  parent-directory synchronization follows publication outside those guards.
+- Local contact favorites use their own read/modify/write lane, including linked
+  imports. Every caller acquires it before session authority; JSON preparation
+  and file synchronization run on a blocking worker. Only final atomic replacement
+  retains the captured session/lock authority. An import additionally retains
+  its runtime lifecycle lease and verifies the expected cryptographic account.
 - Privacy commands reuse the same admission for checked observations and
   operation-enclosing IO commits. Core `*_guarded` methods await the privacy gate
   without host session authority, then enclose synchronous policy/proof/route

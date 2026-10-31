@@ -119,6 +119,10 @@
           {
             "name": "New group selection lists each foreign account once, uses its canonical display identity, and excludes the creator account; desktop creation authenticates account grants before distribution.",
             "reference": "docs/help/topics/channels.md#start-a-channel"
+          },
+          {
+            "name": "Operation mint reads are bounded; a ten-second presentation deadline observes the exact retained ticket without cancelling or resubmitting a native mutation. Late committed, rejected and definite pre-admission outcomes apply only to the current session; late non-admission retains transferred outgoing payload for explicit retry.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
@@ -175,7 +179,9 @@
         "frontend/src/lib/packArchive.test.ts",
         "frontend/src/store/packs.test.ts",
         "frontend/src/components/identity/AvatarEditMenu.tsx",
-        "frontend/src/components/identity/AvatarEditMenu.test.ts"
+        "frontend/src/components/identity/AvatarEditMenu.test.ts",
+        "frontend/src/store/avatars.ts",
+        "frontend/src/store/avatars.test.ts"
       ],
       "frontend": [
         "src/lib/linkedAvatarOverrides.test.ts",
@@ -194,6 +200,10 @@
           {
             "name": "Certified same-account authority, bounded versioned records and deletion tombstones preserve convergence without exposing private records to other group members",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Avatar and receipt reads have bounded observation waits; a stalled receipt write retains mutation serialization while remote receipt polling continues independently, and retired owners cannot publish late snapshots.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
@@ -316,6 +326,10 @@
           {
             "name": "Selections, editor drafts and asynchronous collection results cannot cross conversation or owner/runtime lifetimes",
             "reference": "docs/favorites.md#ownership-and-acceptance"
+          },
+          {
+            "name": "Favorite list reads have bounded observation waits, including refresh after a successful mutation; an unavailable projection cannot conceal or duplicate durable collection acceptance.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
@@ -654,6 +668,10 @@
           {
             "name": "Native can_manage authorizes certified owner-account devices and explicit denial wins over legacy device ownership; roster/profile identity never grants authority. Absent authority fields retain exact device-owner compatibility. Owner badges use authoritative owner_account_id; account removal is atomic.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Committed group operations remain successful when optional roster or member hydration times out; bounded reads cannot undo or resubmit a durable mutation.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       }
@@ -954,7 +972,9 @@
         "frontend/src/features/chat/LinkDeviceDialog.tsx",
         "frontend/src/features/chat/LinkDeviceDialog.test.ts",
         "frontend/e2e/audit-fixes.spec.ts",
-        "frontend/src/lib/i18n.ts"
+        "frontend/src/lib/i18n.ts",
+        "frontend/src/store/privacy.ts",
+        "frontend/src/store/privacy.test.ts"
       ],
       "frontend": [
         "src/lib/readDeadline.test.ts",
@@ -968,7 +988,8 @@
         "src/features/chat/useSerialPoll.test.ts",
         "src/features/chat/PersonalDevices.test.ts",
         "src/lib/api.test.ts",
-        "src/features/chat/LinkDeviceDialog.test.ts"
+        "src/features/chat/LinkDeviceDialog.test.ts",
+        "src/store/privacy.test.ts"
       ],
       "consumers": [
         "frontend-chat",
@@ -995,6 +1016,10 @@
           {
             "name": "Account login availability and applied revision are observed independently of history progress; retired account/session polls cannot report sign-in as applied",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
+          },
+          {
+            "name": "Contact and privacy policy reads release presentation loading after a bounded wait, preserve explicit error recovery and reject late snapshots from expired reads or retired sessions without timing out mutation ownership.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
@@ -1020,7 +1045,8 @@
         "src/store/updates.test.ts",
         "src/store/updateRestart.test.ts",
         "src/features/chat/UpdatePanel.test.ts",
-        "src/lib/api/diagnostics.test.ts"
+        "src/lib/api/diagnostics.test.ts",
+        "src/features/chat/diagnostics/useDiagnosticsController.test.ts"
       ],
       "capability": {
         "summary": "Coordinate explicit signed updates, safe restart preparation and manual fallback while preserving native release, platform and channel authority.",
@@ -1372,7 +1398,7 @@
             "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
           },
           {
-            "name": "The public language owner ships complete same-key locale resources; URL choice overrides saved/browser preferences. Article English fallback is explicit, commands and resource destinations remain unchanged, and failed or stale loads cannot partially translate the current page.",
+            "name": "The public language owner ships complete same-key locale resources; URL choice overrides saved/browser preferences. Article English fallback is explicit, commands and resource destinations remain unchanged, and failed or stale loads cannot partially translate the current page. Settlement observes the latest owned language change without replaying it or treating completion as success.",
             "reference": "docs/DOCUMENTATION_GUIDELINES.md#public-documentation-styling"
           },
           {
@@ -1955,7 +1981,11 @@
         "frontend/e2e/media-scroll.spec.ts",
         "frontend/e2e/media-recovery.spec.ts",
         "frontend/e2e/media-lifecycle.spec.ts",
-        "frontend/e2e/media-hook-harness.tsx"
+        "frontend/e2e/media-hook-harness.tsx",
+        "frontend/src/features/chat/MediaPreview.test.ts",
+        "frontend/src/features/chat/ReceiveProgress.tsx",
+        "frontend/src/features/chat/ReceiveProgress.test.ts",
+        "frontend/e2e/image-receiving.spec.ts"
       ],
       "frontend": [
         "src/features/chat/MediaPreview.test.ts",
@@ -1963,7 +1993,8 @@
         "src/features/chat/mediaFileRead.test.ts",
         "src/features/chat/mediaFile.test.ts",
         "src/features/chat/useConversationViewport.test.ts",
-        "src/features/chat/protectedImage.test.ts"
+        "src/features/chat/protectedImage.test.ts",
+        "src/features/chat/ReceiveProgress.test.ts"
       ],
       "capability": {
         "summary": "Fit decoded images to their original proportions within bounded thumbnails, reuse known geometry on virtualized remounts within bounded session ownership, and support bounded full-size image zoom and pan.",
@@ -1979,6 +2010,10 @@
           },
           {
             "name": "Ordinary media reuse shares admitted reads and URLs, bounds idle Blob bytes and entries, expires idle URLs, and revokes on owner/runtime retirement; protected reveals remain ephemeral.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
+          },
+          {
+            "name": "Image receipt keeps an opaque, bounded frame with measured radial progress and phase-only announcements; preparation lasts until the current source loads, cached remounts skip it, and stale callbacks or a previous source failure cannot affect a replacement.",
             "reference": "docs/module-boundaries.md#inline-media-presentation"
           }
         ]
@@ -2039,7 +2074,8 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/reply-preview.spec.ts",
         "frontend/src/features/chat/replyNavigation.ts",
-        "frontend/src/features/chat/replyNavigation.test.ts"
+        "frontend/src/features/chat/replyNavigation.test.ts",
+        "frontend/e2e/helpers/message-highlight.ts"
       ],
       "frontend": [
         "src/features/chat/ReplyPreview.test.ts",
@@ -2140,6 +2176,10 @@
           {
             "name": "The badge writer coalesces current counts, retries with bounded backoff and native admission, and retires with its exact desktop/account/runtime lifetime.",
             "reference": "docs/group-conversation-reception.md#unread-review-and-badge-recovery"
+          },
+          {
+            "name": "Receipt persistence coalesces within a fixed 100 ms window and flushes before restoration and owner retirement; unchanged conversations retain immutable projections and existing unread/alias bounds.",
+            "reference": "docs/module-boundaries.md"
           }
         ]
       },
@@ -2159,8 +2199,12 @@
         "guide": "docs/help/topics/channels.md#file-delivery",
         "invariants": [
           {
-            "name": "A known zero chunk count remains accessible as zero percent and uses waiting language; receiving language starts after a positive chunk count.",
+            "name": "A known zero chunk count remains accessible as zero percent and uses waiting language; receiving language starts after a positive chunk count. Image presentation omits visible zero, announces phases separately from percentage updates, and treats readiness or complete counts as preparing until the preview can display.",
             "reference": "docs/help/topics/channels.md#file-delivery"
+          },
+          {
+            "name": "Image progress uses existing theme tokens and reduced-motion preferences, exposes no unsupported transfer actions, and preserves ordinary file progress and consent semantics.",
+            "reference": "docs/module-boundaries.md#inline-media-presentation"
           }
         ]
       }
@@ -2232,6 +2276,10 @@
           {
             "name": "Partial retries retain the original request and accepted item identities; protected, recalled and expired sources remain subject to canonical core admission.",
             "reference": "docs/message-forwarding.md#source-admission-and-lifecycle"
+          },
+          {
+            "name": "Source inspection reads have bounded observation waits and stale previews cannot enable forwarding. Existing batch status remains visible while its original invocation is unresolved, with busy mutation ownership preserved to prevent duplicate retry.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
@@ -2864,7 +2912,10 @@
         "frontend/e2e/media-scroll.spec.ts",
         "frontend/e2e/media-recovery.spec.ts",
         "frontend/e2e/media-lifecycle.spec.ts",
-        "frontend/e2e/media-hook-harness.tsx"
+        "frontend/e2e/media-hook-harness.tsx",
+        "frontend/src/features/chat/ReceiveProgress.tsx",
+        "frontend/src/features/chat/ReceiveProgress.test.ts",
+        "frontend/e2e/image-receiving.spec.ts"
       ],
       "browser": [
         "e2e/media-scroll.spec.ts",
@@ -2872,7 +2923,9 @@
         "e2e/media-lifecycle.spec.ts",
         "e2e/chat.spec.ts",
         "e2e/protected-messages.spec.ts",
-        "e2e/ui-visual-regression.spec.ts"
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/image-receiving.spec.ts",
+        "e2e/file-receive-controls.spec.ts"
       ],
       "native": ["host"]
     },
@@ -2902,7 +2955,8 @@
         "frontend/src/features/chat/ConversationView.tsx",
         "frontend/e2e/reply-preview.spec.ts",
         "frontend/src/features/chat/replyNavigation.ts",
-        "frontend/src/features/chat/replyNavigation.test.ts"
+        "frontend/src/features/chat/replyNavigation.test.ts",
+        "frontend/e2e/helpers/message-highlight.ts"
       ],
       "browser": ["e2e/reply-preview.spec.ts", "e2e/chat.spec.ts"]
     },

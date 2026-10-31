@@ -220,6 +220,6 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
     assert!(source_meta.is_some());
     assert!(
         converged.is_ok(),
-        "external custody waited behind held history: source_count={source_count:?}, sibling_count={sibling_count:?}, source_meta={source_meta:?}, sibling_meta={sibling_meta:?}"
+        "external custody must converge while history is held"
     );
 }

@@ -191,6 +191,11 @@ test("session capability retains executable generation and retirement obligation
       "src-tauri/src/runtime_bootstrap.rs",
     ],
     [
+      "Inbound callbacks queue main-thread publication before acquiring exact-session and runtime authority, preventing native-window rendezvous from inverting the session lock.",
+      "runtime_bootstrap::tests::inbound_dispatch_does_not_acquire_session_until_main_thread_execution",
+      "src-tauri/src/runtime_bootstrap.rs",
+    ],
+    [
       "Inbound DM, channel and file presentation queues before acquiring desktop-session authority; UI-thread execution revalidates the exact session and runtime without a worker/main-thread focus-query deadlock.",
       "events::notification_policy_tests::notification_presentation_queues_without_waiting_for_the_main_thread_session_lock",
       "src-tauri/src/events.rs",

@@ -356,6 +356,19 @@ impl RuntimeAuthority {
             Ok(operation(info))
         })?
     }
+
+    /// Acquire authority only when the queued operation executes. Inbound events
+    /// can query native windows, whose getters synchronously rendezvous with the
+    /// main thread; holding the session while dispatching would invert that wait.
+    pub(crate) fn queued_current<F: FnOnce() + Send + 'static>(
+        &self,
+        operation: F,
+    ) -> impl FnOnce() + Send + 'static + use<F> {
+        let authority = self.clone();
+        move || {
+            let _ = authority.current(|_| operation());
+        }
+    }
 }
 
 /// Failure and cancellation retire only this startup's observation. A successful

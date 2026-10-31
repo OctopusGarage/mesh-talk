@@ -21,6 +21,8 @@ permissions:
 
 jobs:
   deterministic:
+    # Every PR executes these contracts in the shared Health caller.
+    if: github.event_name == 'workflow_dispatch'
     name: Deterministic eval contracts
     runs-on: ubuntu-latest
     steps:

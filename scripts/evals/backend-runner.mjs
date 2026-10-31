@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
@@ -12,20 +12,27 @@ export const BACKEND_SUITES = {
   channel_and_file_cli: ["two_cli_nodes_exchange_a_channel_message", "two_cli_nodes_transfer_a_file"],
 };
 
-export function validateBackendOutput(output, expected) {
+export const LARGE_FOLDER_SCENARIO = "large_directory_enqueue_uses_compact_manifest_instead_of_frame_error";
+
+export function validateBackendOutput(output, expected, { allowFiltered = false } = {}) {
   const successful = [...output.matchAll(/^test (\S+) \.\.\. ok\s*$/gm)].map(match => match[1]);
   assert.equal(successful.length, expected.length, "Missing, duplicate or zero executed backend scenarios");
   for (const name of expected) assert.equal(successful.filter(value => value === name).length, 1, `Missing successful scenario: ${name}`);
   const summaries = [...output.matchAll(/test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out/g)];
   assert.equal(summaries.length, 1, "Missing unique Cargo test summary");
   assert.equal(Number(summaries[0][1]), expected.length, "Incorrect scenario count");
-  for (const count of summaries[0].slice(2)) assert.equal(Number(count), 0, "Failed, ignored, measured or filtered backend test");
+  for (const count of summaries[0].slice(2, allowFiltered ? 5 : 6)) assert.equal(Number(count), 0, "Failed, ignored, measured or filtered backend test");
   return successful;
+}
+
+export function backendCargoArgs(target, coverage = false) {
+  assert.ok(Object.hasOwn(BACKEND_SUITES, target), `Unknown backend suite: ${target}`);
+  return [...(coverage ? ["llvm-cov", "--no-report"] : ["test"]), "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--ignored", "--test-threads=1", "--nocapture"];
 }
 
 function runCargo(target) {
   return new Promise((resolveRun, reject) => {
-    const child = spawn("cargo", ["test", "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--ignored", "--test-threads=1", "--nocapture"], { env: { ...process.env, CARGO_TERM_COLOR: "never" }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+    const child = spawn("cargo", backendCargoArgs(target, process.env.EVAL_COVERAGE === "1"), { env: { ...process.env, CARGO_TERM_COLOR: "never" }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
     let output = "", bytes = 0, failure, forcedKill;
     const stopTree = reason => {
       if (failure) return;
@@ -107,4 +114,12 @@ async function main() {
     await writeFile(join(root, "report.json"), JSON.stringify(report, null, 2));
   }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  if (process.argv[2] === "--validate-large-folder" && process.argv.length === 4) {
+    validateBackendOutput(await readFile(process.argv[3], "utf8"), [LARGE_FOLDER_SCENARIO], { allowFiltered: true });
+    console.log("Large-folder acceptance: 1 real scenario passed");
+  } else {
+    assert.equal(process.argv.length, 2, "Usage: backend-runner.mjs [--validate-large-folder FILE]");
+    await main();
+  }
+}

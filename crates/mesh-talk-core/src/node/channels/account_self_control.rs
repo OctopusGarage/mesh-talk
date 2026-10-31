@@ -1047,10 +1047,153 @@ pub(in crate::node) mod tests {
         .await
         .unwrap_or_else(|_| panic!("{}", diagnosis()));
     }
-    async fn reference_self_control_over_noise(input: AccountSelfControlInput) {
+
+    #[derive(Debug, Default)]
+    struct SelfControlOperationTrace {
+        started: Option<std::time::Instant>,
+        events: Vec<(u128, &'static str, String)>,
+        omitted: usize,
+    }
+
+    impl SelfControlOperationTrace {
+        fn record(&mut self, node: &'static str, event: String) {
+            let Some(started) = self.started else {
+                return;
+            };
+            // Keep the admission prefix; the separate rolling trace retains
+            // the failure tail when a busy exchange exceeds this bound.
+            if self.events.len() < 256 {
+                self.events
+                    .push((started.elapsed().as_millis(), node, event));
+            } else {
+                self.omitted += 1;
+            }
+        }
+    }
+
+    struct SelfControlHoldRelease(std::sync::Arc<tokio::sync::Semaphore>);
+
+    impl Drop for SelfControlHoldRelease {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+
+    struct SelfControlRequestHold {
+        pages: std::sync::Mutex<crate::node::account_group::ControlTestPages>,
+        original: std::sync::Mutex<Option<(tokio::task::Id, std::sync::Weak<()>)>>,
+        release: std::sync::Arc<tokio::sync::Semaphore>,
+        armed: std::sync::atomic::AtomicBool,
+        admitted: std::sync::atomic::AtomicBool,
+        published: std::sync::atomic::AtomicBool,
+        first_wake_revision: std::sync::atomic::AtomicU64,
+        wake_received: std::sync::atomic::AtomicBool,
+        cancelled: std::sync::atomic::AtomicBool,
+        replacement_seen: std::sync::atomic::AtomicBool,
+        operation_header_seen: std::sync::atomic::AtomicBool,
+    }
+
+    impl SelfControlRequestHold {
+        fn new() -> Self {
+            Self {
+                pages: Default::default(),
+                original: Default::default(),
+                release: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+                armed: Default::default(),
+                admitted: Default::default(),
+                published: Default::default(),
+                first_wake_revision: Default::default(),
+                wake_received: Default::default(),
+                cancelled: Default::default(),
+                replacement_seen: Default::default(),
+                operation_header_seen: Default::default(),
+            }
+        }
+
+        fn observe_executor(&self, event: &str) {
+            use std::sync::atomic::Ordering;
+            self.pages.lock().unwrap().observe(event);
+            if self
+                .original
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(task, _)| {
+                    event == format!("control_cancel task={task:?} reason=same_source")
+                })
+            {
+                self.cancelled.store(true, Ordering::Release);
+            }
+            if let Some(revision) = event
+                .strip_prefix("wake_received revision=")
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                let first = self.first_wake_revision.load(Ordering::Acquire);
+                if first > 0 && revision >= first {
+                    self.wake_received.store(true, Ordering::Release);
+                }
+            }
+        }
+
+        async fn hold_original(
+            &self,
+            request: &crate::node::account_documents::wire::DocumentRequest,
+        ) {
+            use std::sync::atomic::Ordering;
+            if !self.armed.load(Ordering::Acquire) {
+                return;
+            }
+            let candidate = {
+                let pages = self.pages.lock().unwrap();
+                pages.live_request(request).and_then(|page| {
+                    let lifetime = pages.lifetime(page.task)?;
+                    Some((page, lifetime))
+                })
+            };
+            let Some((page, lifetime)) = candidate else {
+                return;
+            };
+            {
+                let mut original = self.original.lock().unwrap();
+                if let Some((task, _)) = original.as_ref() {
+                    if page.task != *task && self.admitted.load(Ordering::Acquire) {
+                        self.replacement_seen.store(true, Ordering::Release);
+                    }
+                    return;
+                }
+                if !page.dispatch().is_some_and(|dispatch| {
+                    !dispatch.paired && !dispatch.protected && dispatch.natural_origin()
+                }) {
+                    return;
+                }
+                *original = Some((page.task, lifetime));
+            }
+            let _ = self.release.acquire().await;
+        }
+
+        fn flags(&self) -> [bool; 7] {
+            use std::sync::atomic::Ordering;
+            let original = self.original.lock().unwrap();
+            [
+                original.is_some(),
+                original
+                    .as_ref()
+                    .is_some_and(|(_, lifetime)| lifetime.upgrade().is_some()),
+                self.cancelled.load(Ordering::Acquire),
+                self.wake_received.load(Ordering::Acquire),
+                self.replacement_seen.load(Ordering::Acquire),
+                self.operation_header_seen.load(Ordering::Acquire),
+                !self.release.is_closed(),
+            ]
+        }
+    }
+
+    async fn reference_self_control_over_noise(input: AccountSelfControlInput, hold_request: bool) {
         let pending = input != AccountSelfControlInput::Leave;
         let accepted_after = input == AccountSelfControlInput::Accept;
-        use crate::node::{AccountDevice, AccountGroupOperationPhase, SyncCategory};
+        use crate::node::{
+            AccountDevice, AccountDocumentDomain, AccountGroupOperationPhase, SyncCategory,
+        };
         let f = fixture(pending);
         let dir = tempfile::tempdir().unwrap();
         let group = f.group;
@@ -1065,6 +1208,23 @@ pub(in crate::node) mod tests {
             reference_identity,
             Account::from_secret_bytes(shared.secret_bytes()),
         );
+        // Ordinary public membership recovery may inherit this account's grant
+        // and turn the reference into a local executor before admission. Keep
+        // that independent owner gated through the remote-operation proof.
+        let membership_hold =
+            SelfControlHoldRelease(std::sync::Arc::new(tokio::sync::Semaphore::new(0)));
+        let membership_release = membership_hold.0.clone();
+        *reference
+            .account_channel_maintenance_test_hook
+            .lock()
+            .unwrap() = Some(std::sync::Arc::new(move |channel| {
+            let release = membership_release.clone();
+            Box::pin(async move {
+                if channel == group {
+                    let _ = release.acquire().await;
+                }
+            })
+        }));
         let extra = (!pending).then(|| {
             direct_node(
                 &dir.path().join("extra"),
@@ -1129,6 +1289,14 @@ pub(in crate::node) mod tests {
         let trace = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let trace_started = std::time::Instant::now();
         let trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let operation_trace =
+            std::sync::Arc::new(std::sync::Mutex::new(SelfControlOperationTrace::default()));
+        let request_hold = hold_request.then(|| std::sync::Arc::new(SelfControlRequestHold::new()));
+        // The hooks and held server future retain the observer. A separate
+        // owner must release its response even if the caller panics first.
+        let _request_hold_release = request_hold
+            .as_ref()
+            .map(|hold| SelfControlHoldRelease(hold.release.clone()));
         let selected_trace_peer = std::sync::Arc::new(std::sync::Mutex::new(
             None::<crate::identity::device::PublicIdentity>,
         ));
@@ -1141,23 +1309,74 @@ pub(in crate::node) mod tests {
             let client_trace = trace.clone();
             let client_labels = peer_labels.clone();
             let client_omitted = trace_omitted.clone();
+            let client_operation_trace = operation_trace.clone();
+            let client_request_hold = request_hold.clone();
             let weak = std::sync::Arc::downgrade(node);
-            let selected_trace_peer = selected_trace_peer.clone();
+            let client_selected_trace_peer = selected_trace_peer.clone();
             let own_public = node.identity.public();
             let reference_public = reference.identity.public();
             let completed_scopes = settled_scopes.clone();
             let queue_samples = std::sync::Mutex::new(std::collections::HashMap::new());
             *node.account_client_test_hook.lock().unwrap() =
                 Some(std::sync::Arc::new(move |peer, event| {
-                    let selected_pair =
-                        selected_trace_peer
-                            .lock()
-                            .unwrap()
-                            .as_ref()
-                            .is_some_and(|online| {
-                                (own_public == reference_public && &peer == online)
-                                    || (&own_public == online && peer == reference_public)
-                            });
+                    if let Some(hold) = client_request_hold.as_ref() {
+                        use std::sync::atomic::Ordering;
+                        let online = client_selected_trace_peer.lock().unwrap().clone();
+                        if online.as_ref() == Some(&own_public) && peer == reference_public {
+                            hold.observe_executor(&event);
+                        }
+                        if own_public == reference_public && hold.admitted.load(Ordering::Acquire) {
+                            if event.starts_with("operation_local_published ") {
+                                hold.published.store(true, Ordering::Release);
+                            }
+                            if online.as_ref() == Some(&peer)
+                                && hold.published.load(Ordering::Acquire)
+                                && let Some(revision) = event
+                                    .strip_prefix("wake_send_begin revision=")
+                                    .and_then(|value| value.parse::<u64>().ok())
+                            {
+                                let _ = hold.first_wake_revision.compare_exchange(
+                                    0,
+                                    revision,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                );
+                            }
+                        }
+                    }
+                    // Request bytes, intent identifiers and nonce fragments
+                    // are not needed to diagnose scheduling or authentication.
+                    if event.starts_with("control_request_body=") {
+                        return;
+                    }
+                    let event = if event.starts_with("control_task ") {
+                        std::iter::once("control_task")
+                            .chain(event.split_ascii_whitespace().filter(|field| {
+                                ["paired=", "protected=", "resumed=", "replacement=", "hint="]
+                                    .iter()
+                                    .any(|prefix| field.starts_with(prefix))
+                            }))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    } else if event.starts_with("control_cancel ") {
+                        format!(
+                            "control_cancel {}",
+                            event
+                                .split_ascii_whitespace()
+                                .find(|field| field.starts_with("reason="))
+                                .unwrap_or("reason=unknown")
+                        )
+                    } else {
+                        event
+                    };
+                    let selected_pair = client_selected_trace_peer
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|online| {
+                            (own_public == reference_public && &peer == online)
+                                || (&own_public == online && peer == reference_public)
+                        });
                     if selected_pair {
                         let scope = match event.as_str() {
                             "document_scope_settled scope=Control" => Some(0),
@@ -1194,13 +1413,21 @@ pub(in crate::node) mod tests {
                         }
                         samples.insert(key, state);
                     }
-                    let selected_responder = selected_trace_peer
+                    let selected_responder = client_selected_trace_peer
                         .lock()
                         .unwrap()
                         .as_ref()
                         .is_some_and(|online| {
                             &own_public == online || own_public == reference_public
                         });
+                    if selected_pair
+                        || (selected_responder && event.starts_with("operation_local_published"))
+                    {
+                        client_operation_trace
+                            .lock()
+                            .unwrap()
+                            .record(label, event.clone());
+                    }
                     if (selected_responder && event.starts_with("responder_"))
                         || event.starts_with("document_scope_settled")
                         || event.starts_with("operation_local_published")
@@ -1236,16 +1463,56 @@ pub(in crate::node) mod tests {
             let trace = trace.clone();
             let omitted = trace_omitted.clone();
             let peer_labels = peer_labels.clone();
+            let operation_trace = operation_trace.clone();
+            let request_hold = request_hold.clone();
+            let selected_trace_peer = selected_trace_peer.clone();
+            let own_public = node.identity.public();
+            let reference_public = reference.identity.public();
             *node.account_session_test_hook.lock().unwrap() = Some(std::sync::Arc::new(
                 move |peer, frame| {
                     let trace = trace.clone();
                     let omitted = omitted.clone();
+                    let operation_trace = operation_trace.clone();
+                    let request_hold = request_hold.clone();
+                    let requester_node = own_public == reference_public;
+                    let reference_id = reference_public.user_id();
+                    let selected_pair =
+                        selected_trace_peer
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .is_some_and(|online| {
+                                (own_public == reference_public && &peer == online)
+                                    || (&own_public == online && peer == reference_public)
+                            });
                     let peer_label = peer_labels
                         .get(&peer.user_id())
                         .copied()
                         .unwrap_or("unknown");
                     Box::pin(async move {
                         use crate::node::account_sync_wire::AccountHistoryFrame;
+                        if requester_node
+                            && selected_pair
+                            && let Some(hold) = request_hold.as_ref()
+                        {
+                            match &frame {
+                                AccountHistoryFrame::DocumentsRequest { body } => {
+                                    if let Some(request) = crate::node::account_documents::wire::DocumentRequest::decode(body)
+                                        .filter(|request| request.domain == AccountDocumentDomain::GroupControl)
+                                    {
+                                        hold.hold_original(&request).await;
+                                    }
+                                }
+                                AccountHistoryFrame::DocumentHeader { body }
+                                    if serde_json::from_slice::<crate::node::AccountDocumentMeta>(body).is_ok_and(|meta| {
+                                        matches!(meta.key, crate::node::AccountDocumentKey::GroupOperation { channel, source_device }
+                                            if channel == hex::encode(group.as_bytes()) && source_device == reference_id)
+                                    }) => {
+                                    hold.operation_header_seen.store(true, std::sync::atomic::Ordering::Release);
+                                }
+                                _ => {}
+                            }
+                        }
                         let key_kind = |key: &crate::node::AccountDocumentKey| match key {
                             crate::node::AccountDocumentKey::GroupOperation { .. } => "operation",
                             crate::node::AccountDocumentKey::GroupControl { .. } => "control",
@@ -1257,13 +1524,12 @@ pub(in crate::node) mod tests {
                                 crate::node::account_documents::wire::DocumentRequest::decode(&body)
                                     .map(|request| {
                                         format!(
-                                            "request from={peer_label} v={} domain={:?} after={} zero={} probe={} nonce_prefix={}",
+                                            "request from={peer_label} v={} domain={:?} after={} zero={} probe={}",
                                             request.version,
                                             request.domain,
                                             request.after.as_ref().map_or("none", key_kind),
                                             request.known_digest == [0; 32],
                                             request.operation.is_some(),
-                                            request.operation.as_ref().map(|probe| hex::encode(&probe.nonce[..4])).unwrap_or_else(|| "none".into()),
                                         )
                                     })
                             }
@@ -1282,16 +1548,17 @@ pub(in crate::node) mod tests {
                                 serde_json::from_slice::<serde_json::Value>(&body).ok()
                                     .filter(|complete| complete["domain"] == "group_control")
                                     .map(|complete| {
-                                        let nonce = serde_json::from_value::<[u8;32]>(complete["operation"]["nonce"].clone()).ok();
-                                        format!("complete_before_send to={peer_label} operation={} next={} kinds={:?} nonce_prefix={}",
+                                        format!("complete_before_send to={peer_label} operation={} next={} kinds={:?}",
                                             !complete["operation"].is_null(), !complete["next"].is_null(),
-                                            complete["operation"]["supported_kinds"].as_u64(),
-                                            nonce.map(|nonce| hex::encode(&nonce[..4])).unwrap_or_else(|| "none".into()))
+                                            complete["operation"]["supported_kinds"].as_u64())
                                     })
                             }
                             _ => None,
                         };
                         if let Some(event) = event {
+                            if selected_pair {
+                                operation_trace.lock().unwrap().record(label, event.clone());
+                            }
                             let mut trace = trace.lock().unwrap();
                             if trace.len() >= 128 {
                                 trace.pop_front();
@@ -1589,44 +1856,76 @@ pub(in crate::node) mod tests {
                 );
             }
         }
-        let executor_label = nodes
-            .iter()
-            .find(|(_, node)| node.user_id() == online.user_id())
-            .unwrap()
-            .0;
         let fanout_trace = trace.clone();
+        let fanout_operation_trace = operation_trace.clone();
         *online.control_fanout_start_test_hook.lock().unwrap() = Some(Box::new(move || {
+            fanout_operation_trace
+                .lock()
+                .unwrap()
+                .record(online_label, "fanout_started".to_owned());
             fanout_trace.lock().unwrap().push_back((
                 trace_started.elapsed().as_millis(),
-                executor_label,
+                online_label,
                 "fanout_started".to_owned(),
             ));
         }));
+        let operation = input.operation();
+        let id = reference
+            .new_account_group_operation_id(&shared.account_id())
+            .unwrap();
+        if let Some(hold) = request_hold.as_ref() {
+            hold.armed.store(true, std::sync::atomic::Ordering::Release);
+            online.account_sync_notify.notify_one();
+            wait_self_control_noise_diagnosed(
+                readiness_budget.saturating_sub(readiness_started.elapsed()),
+                || hold.original.lock().unwrap().is_some(),
+                || format!("the exact executor must own a live unpaired read from the requester before admission; hold_flags={:?}", hold.flags()),
+            ).await;
+        }
         trace.lock().unwrap().push_back((
             trace_started.elapsed().as_millis(),
             "reference",
             "admission_started".to_owned(),
         ));
-        let operation = input.operation();
-        let id = reference
-            .new_account_group_operation_id(&shared.account_id())
-            .unwrap();
+        {
+            let mut operation_trace = operation_trace.lock().unwrap();
+            operation_trace.started = Some(std::time::Instant::now());
+            operation_trace.record("reference", "admission_started".to_owned());
+        }
         let admission_started = std::time::Instant::now();
         let admitted = reference
-            .submit_account_group_operation(&shared.account_id(), id, group, operation.clone())
+            .submit_account_group_operation_if(&shared.account_id(), id, group, operation.clone(), |commit| {
+                if let Some(hold) = request_hold.as_ref() {
+                    let original = hold.original.lock().unwrap().clone().unwrap();
+                    assert!(
+                        original.1.upgrade().is_some() && hold.pages.lock().unwrap().is_active(original.0),
+                        "the original executor read must remain live at the exact operation admission"
+                    );
+                    hold.admitted.store(true, std::sync::atomic::Ordering::Release);
+                }
+                commit()
+            })
             .unwrap();
+        operation_trace
+            .lock()
+            .unwrap()
+            .record("reference", "admission_returned".to_owned());
         trace.lock().unwrap().push_back((
             trace_started.elapsed().as_millis(),
             "reference",
             "admission_returned".to_owned(),
         ));
         assert_eq!(admitted.executions.len(), 1);
-        let executor = nodes
+        let (executor_label, executor) = nodes
             .iter()
             .find(|(_, node)| node.user_id() == admitted.executions[0].device_id)
-            .unwrap()
-            .1
-            .clone();
+            .map(|(label, node)| (*label, node.clone()))
+            .unwrap();
+        assert!(
+            executor.identity.public() == online.identity.public()
+                && executor.identity.public() != reference.identity.public(),
+            "the reference operation must pin the exact selected remote source"
+        );
         assert_eq!(executor.account_id(), shared.account_id());
         assert!(
             !executor.runtime_work.is_closed(),
@@ -1657,6 +1956,10 @@ pub(in crate::node) mod tests {
                     .unwrap()
                     .map(|status| status.phase);
                 if phase != previous_phase {
+                    operation_trace
+                        .lock()
+                        .unwrap()
+                        .record(executor_label, format!("executor_phase={phase:?}"));
                     trace.lock().unwrap().push_back((
                         trace_started.elapsed().as_millis(),
                         executor_label,
@@ -1690,6 +1993,10 @@ pub(in crate::node) mod tests {
                             AccountGroupRole::Left
                         };
                 if ready {
+                    operation_trace
+                        .lock()
+                        .unwrap()
+                        .record("reference", "converged".to_owned());
                     trace.lock().unwrap().push_back((
                         trace_started.elapsed().as_millis(),
                         "reference",
@@ -1704,6 +2011,7 @@ pub(in crate::node) mod tests {
             }
         })
         .await;
+        let held_request_flags = request_hold.as_ref().map(|hold| hold.flags());
         if convergence.is_err() {
             let diagnostics: Vec<_> = nodes.iter().map(|(label, node)| {
                 let status = node.account_group_operation_status(&shared.account_id(), id).ok().flatten();
@@ -1722,8 +2030,26 @@ pub(in crate::node) mod tests {
             // Drop the diagnostic mutex before panicking; background observers
             // must not turn the original failure into unrelated poison panics.
             let failure_trace = trace.lock().unwrap().iter().cloned().collect::<Vec<_>>();
+            let operation_trace = format!("{:?}", operation_trace.lock().unwrap());
+            if let Some(hold) = request_hold.as_ref() {
+                hold.release.close();
+            }
             panic!(
-                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} trace={failure_trace:?}"
+                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} held_request_flags={held_request_flags:?} operation_prefix={operation_trace} trace={failure_trace:?}"
+            );
+        }
+        if let Some(hold) = request_hold.as_ref() {
+            hold.release.close();
+        }
+        eprintln!(
+            "self control operation prefix: {:?}",
+            operation_trace.lock().unwrap()
+        );
+        if let Some(flags) = held_request_flags {
+            assert_eq!(
+                flags,
+                [true, false, true, true, true, true, true],
+                "a request publication Wake must retire the exact old child and deliver the operation through a distinct live read while its original response stays held"
             );
         }
         eprintln!(
@@ -1858,6 +2184,7 @@ pub(in crate::node) mod tests {
             handle.abort();
             let _ = handle.await;
         }
+        drop(membership_hold);
         for (_, node) in &nodes {
             node.sessions.clear();
             tokio::time::timeout(std::time::Duration::from_secs(5), node.runtime_work.drain())
@@ -1904,16 +2231,21 @@ pub(in crate::node) mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reference_modern_accept_uses_noise_and_keeps_optional_archive_off() {
-        reference_self_control_over_noise(AccountSelfControlInput::Accept).await;
+        reference_self_control_over_noise(AccountSelfControlInput::Accept, false).await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reference_modern_leave_keeps_left_over_old_member_head_and_reopen() {
-        reference_self_control_over_noise(AccountSelfControlInput::Leave).await;
+        reference_self_control_over_noise(AccountSelfControlInput::Leave, false).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reference_modern_decline_uses_noise_and_keeps_left_without_acceptance_or_archive() {
-        reference_self_control_over_noise(AccountSelfControlInput::Decline).await;
+        reference_self_control_over_noise(AccountSelfControlInput::Decline, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reference_modern_leave_request_overtakes_the_executors_held_requester_read() {
+        reference_self_control_over_noise(AccountSelfControlInput::Leave, true).await;
     }
 
     fn decline_payload(grant: AccountGrantId) -> Vec<u8> {
