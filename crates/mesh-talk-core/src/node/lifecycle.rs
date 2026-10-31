@@ -716,6 +716,7 @@ mod personal_scope_tests {
                 .unwrap();
         }
         node.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&node, group);
         let access = node.account_group_access(group).unwrap();
         assert_eq!(access.role, AccountGroupRole::Member);
         let lifetime = access
@@ -783,6 +784,7 @@ mod personal_scope_tests {
         );
         node.log.lock().unwrap().append_durable(dissolve).unwrap();
         node.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&node, group);
         let closed = node.account_group_access_with_closed(group).unwrap();
         assert_eq!(closed.role, AccountGroupRole::Dissolved);
         assert_eq!(closed.sources.len(), 1);

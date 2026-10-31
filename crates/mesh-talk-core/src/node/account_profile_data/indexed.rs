@@ -207,6 +207,25 @@ impl IndexedAccountProfileStore {
                 .transpose()
         })
     }
+    /// Exact accepted-value revision, including equal-version tie changes.
+    /// Optional document publication checks this header before loading the body.
+    pub(crate) fn change_revision(&self, account: &str) -> Result<Option<u64>, LogError> {
+        self.source.profile().database().read(|c| {
+            let revision: Option<i64> = c
+                .query_row(
+                    "SELECT change_revision FROM current_account_profile_headers WHERE account=?1",
+                    [account],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            revision
+                .map(|value| {
+                    u64::try_from(value).map_err(|_| invalid("invalid profile change revision"))
+                })
+                .transpose()
+        })
+    }
+
     /// One durable pending bit per current value, independent of later writes
     /// to other accounts. Exact change revisions prevent stale acknowledgements.
     pub(crate) fn projection_revision(&self, account: &str) -> Result<Option<u64>, LogError> {

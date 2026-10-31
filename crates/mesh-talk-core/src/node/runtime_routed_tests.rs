@@ -261,12 +261,17 @@ async fn names_initialization_error_waits_for_node_initializer_completion() {
     )
     .await;
     assert!(result.is_err());
-    assert!(directory.join("messages.log").is_file());
-    // Reopening immediately after error must not race a detached Node writer.
+    // Profile source validation rejects the invalid names path before database
+    // publication. Completion includes the failed initializer, not a detached
+    // writer that could create the database after this error returns.
+    assert!(!directory.join("profile.db").exists());
+    // Remove only the deliberately invalid names path, then reopen this same
+    // profile immediately: the failed startup must have joined its Node writer.
+    std::fs::remove_dir(directory.join("names.log")).unwrap();
     let node = NodeRuntime::start(
         root.path(),
-        "other",
-        "Other",
+        "owner",
+        "Owner",
         "pw",
         0,
         |_| {},
@@ -428,7 +433,12 @@ async fn start_opens_a_node_and_exposes_its_identity() {
     assert!(node_dir.join("messages.log").exists());
     assert!(node_dir.join("sent.log").exists());
 
-    // Reopening the same dir reloads the SAME identity (persistent).
+    let user_id = runtime.user_id().to_owned();
+    let account_id = runtime.account_id().to_owned();
+    let host_account_id = runtime.host_account_id().map(str::to_owned);
+    runtime.stop().await;
+
+    // Reopening after joined shutdown reloads the SAME identity (persistent).
     let runtime2 = NodeRuntime::start(
         dir.path(),
         "alice-user-id",
@@ -443,13 +453,14 @@ async fn start_opens_a_node_and_exposes_its_identity() {
     )
     .await
     .expect("runtime reopens");
-    assert_eq!(runtime.user_id(), runtime2.user_id());
+    assert_eq!(user_id, runtime2.user_id());
 
     // The cryptographic account is created on disk and stable across reopen.
-    assert_eq!(runtime.account_id().len(), 32); // account_id is 32 hex chars
-    assert_eq!(runtime.host_account_id(), Some("alice-user-id"));
+    assert_eq!(account_id.len(), 32); // account_id is 32 hex chars
+    assert_eq!(host_account_id.as_deref(), Some("alice-user-id"));
     assert!(node_dir.join("account.keystore").exists());
-    assert_eq!(runtime.account_id(), runtime2.account_id());
+    assert_eq!(account_id, runtime2.account_id());
+    runtime2.stop().await;
 }
 
 #[tokio::test]
@@ -720,7 +731,7 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
         runtime.known_account_names().unwrap()[&account.account_id()][0],
         "Messi10"
     );
-    drop(runtime);
+    runtime.stop().await;
     let reopened = NodeRuntime::start(
         dir.path(),
         "owner",
@@ -745,6 +756,7 @@ async fn offline_account_names_survive_roster_expiry_and_restart_without_presenc
             .iter()
             .all(|peer| peer.presence_evidence(std::time::Instant::now()).is_empty())
     );
+    reopened.stop().await;
 }
 
 #[tokio::test]

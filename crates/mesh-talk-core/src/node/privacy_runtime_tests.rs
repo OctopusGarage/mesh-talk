@@ -1042,13 +1042,41 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
     let keys = alice.identity.secret_bytes();
     let own = crate::identity::account::Account::from_secret_bytes(alice.account.secret_bytes());
     drop(alice);
-    // Simulate a crash during an append, then verify future scopes remain replayable.
+    // A published migration source is a downgrade barrier, not an active
+    // append log. Reject a torn legacy tail, then restore its exact original
+    // bytes and verify the indexed scopes survive the ordinary reopen below.
     use std::io::Write;
+    let scopes = base.join("sent-manifest-scopes.log");
+    let source_len = std::fs::metadata(&scopes).unwrap().len();
     std::fs::OpenOptions::new()
         .append(true)
-        .open(base.join("sent-manifest-scopes.log"))
+        .open(&scopes)
         .unwrap()
         .write_all(&[0, 0, 0, 50, 1, 2])
+        .unwrap();
+    let (tx, _) = mpsc::unbounded_channel();
+    let (ctx, _) = mpsc::unbounded_channel();
+    let (ftx, _) = mpsc::unbounded_channel();
+    let rejected = Node::open_with_account(
+        DeviceIdentity::from_secret_bytes(keys.0, keys.1),
+        crate::identity::account::Account::from_secret_bytes(own.secret_bytes()),
+        Arc::new(Mutex::new(crate::discovery::Roster::default())),
+        tx,
+        ctx,
+        ftx,
+        &base.join("messages.log"),
+        &base.join("sent.log"),
+        "pw",
+    );
+    assert!(matches!(
+        rejected,
+        Err(crate::eventlog::LogError::CorruptFile(_))
+    ));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&scopes)
+        .unwrap()
+        .set_len(source_len)
         .unwrap();
     let (tx, _) = mpsc::unbounded_channel();
     let (ctx, _) = mpsc::unbounded_channel();
@@ -1113,16 +1141,15 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
         .send_file_to_account(&account.account_id(), &path, crate::file::FileKind::File)
         .await
         .unwrap();
-    let (_, scopes) = crate::storage::record_log::EncryptedRecordLog::<StoredManifestScope>::open(
-        &base.join("sent-manifest-scopes.log"),
+    // Live scope references use the bounded encrypted index. The authenticated
+    // legacy barrier stays fixed and must never resume append-log writes.
+    assert_eq!(std::fs::metadata(&scopes).unwrap().len(), source_len);
+    crate::node::filebook::scopes::IndexedManifestScopes::authenticate(
+        &reopened.storage,
+        &scopes,
         "pw",
-        b"MTFSC1",
     )
     .unwrap();
-    assert!(
-        scopes.is_empty(),
-        "tracked file scopes belong to bounded delivery metadata"
-    );
     {
         let delivery = reopened.delivery.lock().unwrap();
         for file_conversation in [file, second] {
@@ -1131,6 +1158,29 @@ async fn invisible_account_file_scopes_survive_restart_for_every_destination() {
                 .find(|card| card.file_conversation == file_conversation)
                 .unwrap();
             assert_eq!(card.destinations.len(), 2);
+            let indexed_scopes = reopened
+                .manifest_scopes
+                .scopes(file_conversation)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(indexed_scopes.len(), card.destinations.len());
+            for scope in indexed_scopes {
+                assert!(
+                    card.destinations
+                        .iter()
+                        .any(|destination| destination.binding.event_id == scope.event)
+                );
+                let original = reopened
+                    .log
+                    .lock()
+                    .unwrap()
+                    .get(&scope.event)
+                    .unwrap()
+                    .unwrap();
+                assert!(original.verify_signature() && original.verify_integrity());
+                assert_eq!(scope.parent, original.conversation_id);
+                assert_eq!(scope.author, original.author);
+            }
             for device in &devices {
                 let destination = card
                     .destinations
@@ -1785,7 +1835,7 @@ async fn invisible_late_invitation_can_arrive_through_an_allowed_post_office() {
     for event in events {
         store.lock().unwrap().ingest(event).unwrap();
     }
-    carol.process_channel(group);
+    crate::node::test_support::settle_group_metadata(&carol, group);
     assert!(
         carol
             .list_channels()

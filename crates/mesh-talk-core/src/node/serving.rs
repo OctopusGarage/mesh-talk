@@ -1141,6 +1141,7 @@ impl Node {
 
     /// Install validated control metadata independently of plaintext retries,
     /// preserving local crypto state and the pending plaintext batch.
+    #[cfg(test)]
     pub(in crate::node) fn refresh_channel_control_metadata(
         &self,
         conv: ConversationId,
@@ -1154,58 +1155,28 @@ impl Node {
     fn prepare_channel_metadata_turn(&self, conv: ConversationId) -> Result<bool, LogError> {
         use crate::eventlog::sync::network::PreparationBudget;
         self.channel_checkpoints.queue_runtime(conv)?;
-        let (step, state) = {
+        let step = {
             let log = self.log.lock().expect("log lock");
-            let step = self.channel_checkpoints.project_step_with_budget(
+            self.channel_checkpoints.project_step_with_budget(
                 log.repository()?,
                 &self.identity,
                 conv,
                 PreparationBudget::default(),
-            )?;
-            if !step.ready {
-                self.channel_recovery_notify.notify_one();
-                return Ok(false);
-            }
-            (step, self.channel_checkpoints.current_state(conv)?)
+            )?
         };
-        let Some(state) = state else {
+        if !step.ready {
+            self.channel_recovery_notify.notify_one();
+            return Ok(false);
+        }
+        if !self.install_current_channel_metadata(conv)? {
             self.channel_checkpoints.finish_runtime(conv, None)?;
             return Ok(true);
-        };
-        {
-            let mut book = self.channels.lock().expect("channel book lock");
-            let before = book.info_projection(conv);
-            // Recheck while holding the book guard, following outgoing's
-            // book -> log order; a concurrently appended control cannot install
-            // an old display as fresh membership for subsequent authoring.
-            let log = self.log.lock().expect("log lock");
-            let state = self
-                .channel_checkpoints
-                .current_state(state.id())?
-                .ok_or(LogError::StaleCursor)?;
-            book.install_indexed_state(state);
-            if let Some(state) = book.state_mut(&conv)
-                && !state.has_my_sender(state.epoch())
-                && let Some(bytes) = self
-                    .channel_senders
-                    .lock()
-                    .expect("sender store lock")
-                    .current(&conv, state.epoch())?
-            {
-                let key = crate::channel::sender_key::SenderKey::deserialize(&bytes).ok_or_else(
-                    || LogError::CorruptFile("invalid channel sender checkpoint".into()),
-                )?;
-                state.import_my_sender(state.epoch(), key);
-            }
-            drop(log);
-            if before != book.info_projection(conv) {
-                let _ = self.channel_changes.send(conv);
-            }
         }
         // The canonical step already consumed this turn's allowance. Do not
         // reset the budget when it published the final control.
         if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
             self.channel_recovery_notify.notify_one();
+            self.account_sync_notify.notify_one();
             return Ok(false);
         }
         let step = {
@@ -1218,6 +1189,12 @@ impl Node {
             )?
         };
         if step.ready {
+            // Deferred presentation can finish after account publication observed
+            // no current group or an unprepared policy. Resume that existing lane
+            // now; unchanged ready reads must not create a publication wake loop.
+            if step.rows != 0 || step.edges != 0 || step.bytes != 0 {
+                self.account_sync_notify.notify_one();
+            }
             let mut book = self.channels.lock().expect("channel book lock");
             let before = book.info_projection(conv);
             self.channel_checkpoints.install_prepared_presentation(
@@ -1236,6 +1213,95 @@ impl Node {
             self.channel_recovery_notify.notify_one();
         }
         Ok(ready)
+    }
+
+    /// Install one already-published snapshot, using the same source fence and
+    /// lock order for runtime turns and local admission.
+    fn install_current_channel_metadata(&self, conv: ConversationId) -> Result<bool, LogError> {
+        let mut book = self.channels.lock().expect("channel book lock");
+        let before = book.info_projection(conv);
+        // Recheck while holding the book guard, following outgoing's
+        // book -> log order; a concurrently appended control cannot install
+        // an old display as fresh membership for subsequent authoring.
+        let log = self.log.lock().expect("log lock");
+        let state = self.channel_checkpoints.current_state(conv)?;
+        let Some(state) = state else {
+            return Ok(false);
+        };
+        book.install_indexed_state(state);
+        if let Some(state) = book.state_mut(&conv)
+            && !state.has_my_sender(state.epoch())
+            && let Some(bytes) = self
+                .channel_senders
+                .lock()
+                .expect("sender store lock")
+                .current(&conv, state.epoch())?
+        {
+            let key = crate::channel::sender_key::SenderKey::deserialize(&bytes)
+                .ok_or_else(|| LogError::CorruptFile("invalid channel sender checkpoint".into()))?;
+            state.import_my_sender(state.epoch(), key);
+        }
+        drop(log);
+        if before != book.info_projection(conv) {
+            let _ = self.channel_changes.send(conv);
+        }
+        Ok(true)
+    }
+
+    /// Local acceptance can finish a short appended tail without inheriting a
+    /// stale authority snapshot. All phases consume one allowance; a backlog
+    /// remains pending for the existing worker instead of draining here.
+    pub(in crate::node) fn prepare_channel_admission(
+        &self,
+        channel: ConversationId,
+        budget: &mut crate::eventlog::sync::network::PreparationBudget,
+    ) -> Result<(), LogError> {
+        self.channel_checkpoints.queue_runtime(channel)?;
+        let mut advanced = false;
+        while budget.rows >= 2 && budget.edges > 0 && budget.bytes >= 512 {
+            let step = {
+                let log = self.log.lock().expect("log lock");
+                match self.channel_checkpoints.project_step_with_budget(
+                    log.repository()?,
+                    &self.identity,
+                    channel,
+                    *budget,
+                ) {
+                    Err(LogError::PageBudgetTooSmall { required })
+                        if required
+                            <= crate::eventlog::sync::network::PreparationBudget::default()
+                                .bytes =>
+                    {
+                        break;
+                    }
+                    result => result?,
+                }
+            };
+            advanced |= step.rows != 0 || step.edges != 0 || step.bytes != 0;
+            // A phase-only transition also consumes a scheduling row, so even
+            // zero-I/O continuation changes cannot create an unbounded loop.
+            budget.rows = budget
+                .rows
+                .checked_sub(step.rows.max(usize::from(!step.ready)))
+                .ok_or(LogError::InvalidPageBudget)?;
+            budget.edges = budget
+                .edges
+                .checked_sub(step.edges)
+                .ok_or(LogError::InvalidPageBudget)?;
+            budget.bytes = budget
+                .bytes
+                .checked_sub(step.bytes)
+                .ok_or(LogError::InvalidPageBudget)?;
+            if step.ready {
+                self.install_current_channel_metadata(channel)?;
+                if advanced {
+                    self.account_sync_notify.notify_one();
+                }
+                return Ok(());
+            }
+        }
+        self.channel_recovery_notify.notify_one();
+        Err(LogError::StaleCursor)
     }
 
     /// Local control APIs may await their accepted intent, yielding between
@@ -1263,6 +1329,15 @@ impl Node {
                 .lock()
                 .expect("channel retry lock");
             let lane = pending.lanes.entry(conv).or_default();
+            // Storage retry is catch-up even when the failed arrival began live.
+            // Ordinary bounded continuation yields keep their original provenance.
+            if matches!(
+                &error,
+                NodeError::Log(LogError::Io(_) | LogError::Database(_) | LogError::Storage(_))
+            ) && let Some((arrival, _)) = &mut lane.continuation
+            {
+                *arrival = super::reception_effects::ArrivalKind::CatchUp;
+            }
             let delay = lane.delay_ms.max(1000);
             lane.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
             lane.delay_ms = (delay * 2).min(30_000);
@@ -1471,6 +1546,25 @@ impl Node {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(in crate::node) fn channel_plaintext_retry_pending_for_test(
+        &self,
+        channel: ConversationId,
+    ) -> bool {
+        self.pending_channel_plaintext
+            .lock()
+            .expect("channel retry lock")
+            .lanes
+            .get(&channel)
+            .is_some_and(|lane| {
+                lane.retry_at.is_some()
+                    && matches!(
+                        lane.continuation,
+                        Some((super::reception_effects::ArrivalKind::CatchUp, _))
+                    )
+            })
+    }
+
     /// Retry the exact durable ciphertext work with no reachable peer or new event.
     pub(in crate::node) fn retry_channel_plaintext(&self) {
         let turn = || -> Result<(), NodeError> {
@@ -1510,6 +1604,17 @@ impl Node {
                         .lock()
                         .expect("channel retry lock");
                     let lane = pending.lanes.entry(channel).or_default();
+                    // Storage retry is catch-up even when the failed arrival began live.
+                    // Ordinary bounded continuation yields keep their original provenance.
+                    if matches!(
+                        &error,
+                        NodeError::Log(
+                            LogError::Io(_) | LogError::Database(_) | LogError::Storage(_)
+                        )
+                    ) && let Some((arrival, _)) = &mut lane.continuation
+                    {
+                        *arrival = super::reception_effects::ArrivalKind::CatchUp;
+                    }
                     let delay = lane.delay_ms.max(1000);
                     lane.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
                     lane.delay_ms = (delay * 2).min(30_000);

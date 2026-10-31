@@ -262,6 +262,10 @@ impl Node {
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
+        // A prior local send may have advanced the signed source. Finish its
+        // bounded metadata continuation before sealing; durable acceptance below
+        // still rechecks the exact epoch and current membership.
+        self.await_channel_metadata(channel).await?;
         let payload = ReactionPayload {
             target,
             emoji: emoji.to_string(),
@@ -655,6 +659,7 @@ mod acceptance_tests {
                 };
                 node.append_event(channel, EventKind::MembershipChange, metadata.encode())?;
                 node.process_channel(channel);
+                super::super::test_support::settle_group_metadata(&node, channel);
                 commit()
             };
             let result = if recall {

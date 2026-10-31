@@ -91,6 +91,8 @@ fn append(f: &Fixture, identity: &DeviceIdentity, wall: u64, remove: bool) -> Ev
     );
     let id = event.id;
     log.append_durable(event).unwrap();
+    drop(log);
+    settle_group_metadata(&f.observer, f.group);
     id
 }
 
@@ -286,6 +288,7 @@ async fn modern_reaction_keeps_its_causal_account_after_device_adoption() {
         )
         .unwrap();
     f.observer.process_channel(f.group);
+    settle_group_metadata(&f.observer, f.group);
     assert_eq!(
         f.observer
             .account_group_projection(f.group)

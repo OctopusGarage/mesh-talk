@@ -105,8 +105,9 @@ async fn recovered_group_beyond_publication_slice_refreshes_before_exact_network
     }
     let old_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     configure(&owner, &path, old_listener.local_addr().unwrap().port());
-    owner.publish_account_group_access_for(group);
-    owner.publish_group_inventory_for(group);
+    // Establish the pre-crash source head through the same bounded preparation
+    // used by a real fanout; later reopen/fanout assertions remain untouched.
+    owner.prepare_account_group_fanout(group).await.unwrap();
     assert_eq!(inventory(&owner, group).name, "Before recovery");
     let id = owner
         .new_account_group_operation_id(&account.account_id())

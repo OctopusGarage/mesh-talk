@@ -1522,6 +1522,9 @@ async fn installed_sticker_header_export_refuses_unsupported_manifests_and_forei
     let mut ordinary = base.clone();
     ordinary.v2.file_conv = ConversationId::new([73; 32]);
     ordinary.kind = FileKind::File;
+    // A reserved sticker name requires media intent at admission. Use a valid
+    // ordinary offer to exercise the independent proof-reuse rejection below.
+    ordinary.v2.name = "ordinary-file.png".into();
     install(AnyManifest::V3(ordinary));
     assert!(
         node.sticker_chunk_proof(ConversationId::new([73; 32]))

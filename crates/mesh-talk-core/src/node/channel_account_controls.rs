@@ -271,6 +271,7 @@ mod tests {
                 }
             }
             node.process_channel(channel);
+            crate::node::test_support::settle_group_metadata(&node, channel);
             Self {
                 _directory: directory,
                 node,

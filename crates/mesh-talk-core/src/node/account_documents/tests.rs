@@ -89,6 +89,73 @@ pub(super) fn node_with_identity(
     .unwrap()
 }
 
+pub(super) use super::super::test_support::settle_group_metadata;
+
+#[test]
+fn completed_channel_metadata_wakes_deferred_inventory_without_an_idle_loop() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        eventlog::{Event, EventKind},
+    };
+    use futures_util::FutureExt;
+    let directory = tempfile::tempdir().unwrap();
+    let source = node(directory.path(), &Account::generate());
+    let group = new_channel_id();
+    let initial = Event::new(
+        &source.identity,
+        group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "Deferred inventory".into(),
+            members: vec![source.identity.public()],
+            epoch: 0,
+            owner: source.user_id(),
+        }
+        .encode(),
+    );
+    source.log.lock().unwrap().append(initial).unwrap();
+    while source
+        .account_sync_notify
+        .notified()
+        .now_or_never()
+        .is_some()
+    {}
+    assert!(matches!(
+        source.try_publish_group_inventory_groups(&[group]),
+        Err(NodeError::Log(crate::eventlog::LogError::StaleCursor))
+    ));
+    assert!(
+        source
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_none()
+    );
+    settle_group_metadata(&source, group);
+    assert!(
+        source
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_some(),
+        "completed metadata must resume the publisher that observed Pending"
+    );
+    source.refresh_channel_control_metadata(group).unwrap();
+    assert!(
+        source
+            .account_sync_notify
+            .notified()
+            .now_or_never()
+            .is_none(),
+        "an unchanged ready read must not create a publication wake loop"
+    );
+    group_inventory_source_document(&source, group);
+}
+
 #[tokio::test]
 async fn failed_initial_sibling_custody_is_repaired_after_history_recovers() {
     use crate::{discovery::Announce, node::account_devices::AccountDevice};
@@ -828,25 +895,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     }
     assert!(
         actual.is_ok(),
-        "authenticated external custody must converge before restart: count={:?}, channels={:?}, own_history={}, observations={:?}, sync={:?}",
-        sibling.channel_custody_count(channel, event).unwrap(),
-        sibling.list_channels().unwrap(),
-        sibling
-            .channel_history(channel, 10)
-            .unwrap()
-            .iter()
-            .any(|row| row.id == event && row.from_me),
-        sibling
-            .channel_custody_observations(channel, event)
-            .iter()
-            .map(|meta| (
-                meta,
-                sibling
-                    .account_document(&meta.key)
-                    .map(|document| document.map(|document| document.payload().len())),
-            ))
-            .collect::<Vec<_>>(),
-        sibling.device_sync_status(),
+        "authenticated external custody must converge before restart"
     );
     if !external_online {
         sibling
@@ -1032,8 +1081,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         assert_eq!(
             a.channel_custody_count(channel, event).unwrap(),
             Some(1),
-            "a fresh authenticated probe repairs the negative; receiver={:?}",
-            lost.list_channels().unwrap()
+            "a fresh authenticated probe repairs the negative"
         );
         let mut cursor = custody_cursor();
         pull_custody_page(&sibling, &source_peer, &mut cursor).await;
@@ -3546,9 +3594,7 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     target.runtime_work.drain().await;
     assert!(
         result.is_ok(),
-        "same-account descriptive inventory must include both distinct legacy groups with their owner offline: expected channels={}; actual channels={}",
-        ids.len(),
-        target.list_channels().unwrap().len()
+        "same-account descriptive inventory must include both distinct legacy groups with their owner offline"
     );
     if optional_off {
         assert!(
@@ -3623,9 +3669,10 @@ fn group_inventory_legacy_fixture(
     );
     source.log.lock().unwrap().append(event).unwrap();
     source.process_channel(id);
+    settle_group_metadata(source, id);
     id
 }
-fn group_inventory_source_document(
+pub(super) fn group_inventory_source_document(
     source: &Node,
     id: crate::eventlog::ConversationId,
 ) -> AccountDocument {
@@ -3692,12 +3739,14 @@ fn copy_public_group(source: &Node, target: &Node, group: crate::eventlog::Conve
         target.log.lock().unwrap().append(event).unwrap();
     }
     target.process_channel(group);
+    settle_group_metadata(target, group);
 }
 
 fn group_control_source_document(
     source: &Node,
     group: crate::eventlog::ConversationId,
 ) -> AccountDocument {
+    settle_group_metadata(source, group);
     source.publish_account_group_access(&mut None);
     source
         .account_document(&AccountDocumentKey::GroupControl {
@@ -4012,6 +4061,7 @@ fn group_control_old_head_replay_and_reopen_preserve_the_latest_signed_observati
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let current = group_control_source_document(&owner, group);
     let store_path = dir.path().join("store");
     let mut store =
@@ -4065,6 +4115,7 @@ fn group_control_restored_older_public_state_cannot_republish_a_newer_own_head_a
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let current = group_control_source_document(&owner, group);
     restored
         .account_documents
@@ -4155,6 +4206,7 @@ fn group_control_rejected_parent_cannot_hide_a_later_applied_owner_transfer_on_r
         source.log.lock().unwrap().append(event.clone()).unwrap();
     }
     source.process_channel(group);
+    settle_group_metadata(&source, group);
     assert_eq!(source.channel_owner(group), source.user_id());
     let keys = source.identity.secret_bytes();
     let restored = node_with_identity(
@@ -4183,6 +4235,7 @@ fn group_control_rejected_parent_cannot_hide_a_later_applied_owner_transfer_on_r
         .unwrap()
         .id;
     source.process_channel(group);
+    settle_group_metadata(&source, group);
     assert_eq!(
         source.channel_owner(group),
         recipient.user_id(),
@@ -4192,8 +4245,8 @@ fn group_control_rejected_parent_cannot_hide_a_later_applied_owner_transfer_on_r
         !source
             .account_group_projection(group)
             .unwrap()
-            .authorized
-            .contains(&applied),
+            .is_authorized(applied)
+            .unwrap(),
         "the rejected competing parent means the historical authorized index omits this applied decision"
     );
     let latest = group_control_source_document(&source, group);
@@ -4238,6 +4291,7 @@ fn group_control_unreadable_latest_own_head_cannot_be_overwritten_by_a_restored_
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let latest = group_control_source_document(&owner, group);
     restored
         .account_documents
@@ -4298,6 +4352,7 @@ async fn group_control_source_leave_is_individual_and_all_known_left_sources_pro
     for node in [&owner, &first, &second] {
         node.log.lock().unwrap().append(genesis.clone()).unwrap();
         node.process_channel(group);
+        settle_group_metadata(node, group);
     }
     for source in [&first, &second] {
         let document = group_control_source_document(source, group);
@@ -4375,6 +4430,7 @@ async fn sequential_legacy_departures_retain_only_a_whole_account_closed_source(
     for source in [&first, &second] {
         source.log.lock().unwrap().append(genesis.clone()).unwrap();
         source.process_channel(group);
+        settle_group_metadata(source, group);
     }
     // Each physical source must actually know its sibling's certified binding,
     // otherwise its individual departure cannot observe that remaining member.
@@ -4427,6 +4483,7 @@ async fn sequential_legacy_departures_retain_only_a_whole_account_closed_source(
         .clone();
     second.log.lock().unwrap().append(first_leave).unwrap();
     second.process_channel(group);
+    settle_group_metadata(&second, group);
     second
         .account_documents
         .lock()
@@ -4491,6 +4548,7 @@ async fn captured_initial_account_upgrade_never_resurrects_a_completed_legacy_de
         member.log.lock().unwrap().append(event.clone()).unwrap();
     }
     member.process_channel(group);
+    settle_group_metadata(&member, group);
     assert!(
         member
             .account_group_projection(group)
@@ -4561,6 +4619,7 @@ async fn captured_initial_account_upgrade_never_resurrects_a_completed_legacy_de
         .unwrap()
         .id;
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     assert_eq!(
         owner
             .account_group_projection(group)
@@ -4607,6 +4666,7 @@ async fn captured_initial_account_upgrade_never_resurrects_a_completed_legacy_de
         member.log.lock().unwrap().append(event).unwrap();
     }
     member.process_channel(group);
+    settle_group_metadata(&member, group);
     let after = member.account_group_access_with_closed(group).unwrap();
     assert_eq!(
         after.role,
@@ -4678,6 +4738,7 @@ async fn initial_upgrade_after_observed_departure_preserves_legacy_cleanup_prove
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     assert!(
         owner
             .account_group_projection(group)
@@ -4796,6 +4857,7 @@ async fn initial_upgrade_whole_cohort_closure_case(observed_first: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let upgrade = owner
         .account_group_projection(group)
         .unwrap()
@@ -4829,6 +4891,7 @@ async fn initial_upgrade_whole_cohort_closure_case(observed_first: bool) {
     );
     first.log.lock().unwrap().append(leaves[1].clone()).unwrap();
     first.process_channel(group);
+    settle_group_metadata(&first, group);
     assert_eq!(
         first.account_group_access_with_closed(group).unwrap().role,
         AccountGroupRole::Left
@@ -4959,6 +5022,7 @@ async fn group_control_terminal_source_case(acknowledge: bool) {
     );
     owner.log.lock().unwrap().append(genesis).unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     for source in [&first, &second] {
         copy_public_group(&owner, source, group);
     }
@@ -4996,6 +5060,7 @@ async fn group_control_terminal_source_case(acknowledge: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     copy_public_group(&owner, &first, group);
     let terminal = group_control_source_document(&first, group);
     reference
@@ -5057,6 +5122,7 @@ async fn group_control_terminal_source_case(acknowledge: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     copy_public_group(&owner, &second, group);
     let invited = group_control_source_document(&second, group);
     reference
@@ -5190,6 +5256,7 @@ fn group_control_equivalent_source_knowledge_reaches_a_publication_fixed_point()
     for source in [&first, &second] {
         source.log.lock().unwrap().append(genesis.clone()).unwrap();
         source.process_channel(group);
+        settle_group_metadata(source, group);
     }
     let exchange = || {
         let left = group_control_source_document(&first, group);
@@ -5287,6 +5354,7 @@ fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     if multifrontier {
         let parents = owner.log.lock().unwrap().heads(&group).unwrap();
         let first = crate::eventlog::Event::new(
@@ -5335,6 +5403,7 @@ fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
         owner.log.lock().unwrap().append(second).unwrap();
         assert_eq!(owner.log.lock().unwrap().heads(&group).unwrap().len(), 2);
         owner.process_channel(group);
+        settle_group_metadata(&owner, group);
     }
     let unavailable = group_control_source_document(&owner, group);
     assert!(unavailable.meta.revision > prior.meta.revision);
@@ -5395,6 +5464,7 @@ fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
             .append_event(group, EventKind::Message, b"different event two".to_vec())
             .unwrap();
         restored.process_channel(group);
+        settle_group_metadata(&restored, group);
         assert_eq!(
             restored
                 .log
@@ -5450,6 +5520,7 @@ fn group_control_resource_limit_case(multifrontier: bool, role_forks: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let secrets = owner.identity.secret_bytes();
     drop(owner);
     let owner = node_with_identity(
@@ -5523,6 +5594,7 @@ fn group_control_acknowledges_present_owner_decisions_that_lose_a_canonical_fork
         .unwrap();
     owner.log.lock().unwrap().append(old.clone()).unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     owner.roster.lock().unwrap().update(
         &Announce::new_with_account(&sibling.identity, &account, "Actual owner adoption", 9),
         "127.0.0.1".parse().unwrap(),
@@ -5562,13 +5634,14 @@ fn group_control_acknowledges_present_owner_decisions_that_lose_a_canonical_fork
         .expect("deterministic signed competing decision");
     owner.log.lock().unwrap().append(winning).unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     copy_public_group(&owner, &sibling, group);
     assert!(
         !sibling
             .account_group_projection(group)
             .unwrap()
-            .authorized
-            .contains(&old.id)
+            .is_authorized(old.id)
+            .unwrap()
     );
     assert!(sibling.log.lock().unwrap().get(&old.id).unwrap().is_some());
     sibling.roster.lock().unwrap().update(
@@ -5610,6 +5683,7 @@ fn group_control_private_messages_and_reactions_do_not_republish_role_metadata()
             .append_event(group, kind, b"private payload".to_vec())
             .unwrap();
         owner.process_channel(group);
+        settle_group_metadata(&owner, group);
         assert_eq!(
             group_control_source_document(&owner, group).meta,
             prior.meta
@@ -5749,6 +5823,7 @@ fn group_control_more_than_4096_concurrent_authorization_controls_do_not_freeze_
         owner.log.lock().unwrap().append(event).unwrap();
     }
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let prior = group_control_source_document(&owner, group);
     let signed = crate::node::account_group::wire::GroupControlHead::decode(
         prior.payload(),
@@ -5791,6 +5866,7 @@ fn group_control_more_than_4096_concurrent_authorization_controls_do_not_freeze_
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let current = group_control_source_document(&owner, group);
     assert!(
         current.meta.revision > prior.meta.revision,
@@ -5901,6 +5977,7 @@ fn group_control_obsolete_cache_recovery_case(force_negative: bool) {
             .unwrap();
     }
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let negative = group_control_source_document(&owner, group);
     let head = crate::node::account_group::wire::GroupControlHead::decode(
         negative.payload(),
@@ -5932,6 +6009,7 @@ fn group_control_obsolete_cache_recovery_case(force_negative: bool) {
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     let secrets = owner.identity.secret_bytes();
     drop(owner);
     let owner = node_with_identity(
@@ -5993,6 +6071,7 @@ fn group_control_normal_authorization_history_growth_keeps_bounded_current_heads
         )
         .unwrap();
     owner.process_channel(group);
+    settle_group_metadata(&owner, group);
     assert_eq!(
         owner.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
@@ -6882,6 +6961,7 @@ fn group_inventory_post_office_display_fact_keeps_existing_member_count_consiste
         ))
         .unwrap();
     source.process_channel(id);
+    settle_group_metadata(&source, id);
     assert_eq!(source.list_channels().unwrap()[0].member_count, 2);
     let _ = group_inventory_source_document(&source, id);
     let key = AccountDocumentKey::GroupInventory {
@@ -6979,6 +7059,7 @@ fn group_inventory_long_canonical_names_fit_payload_budget_and_preserve_required
             ))
             .unwrap();
         source.process_channel(id);
+        settle_group_metadata(&source, id);
         let count = source.list_channels().unwrap()[0].member_count;
         let _ = group_inventory_source_document(&source, id);
         let key = AccountDocumentKey::GroupInventory {
@@ -7414,7 +7495,7 @@ async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restore
                 .append_durable(event.clone())
                 .unwrap();
         }
-        target.process_channel(f.group);
+        settle_group_metadata(target, f.group);
         assert_eq!(
             target.account_group_access(f.group).unwrap().role,
             AccountGroupRole::Member
@@ -7448,7 +7529,7 @@ async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restore
         .unwrap()
         .append_durable(leave.clone())
         .unwrap();
-    source.process_channel(f.group);
+    settle_group_metadata(&source, f.group);
     source.publish_account_group_access_for(f.group);
     assert_eq!(
         source.account_group_access(f.group).unwrap().role,
@@ -7570,7 +7651,7 @@ async fn canonical_left_denies_stale_physical_enqueue_and_fresh_lifetime_restore
             .append_durable(event.clone())
             .unwrap();
     }
-    stale.process_channel(f.group);
+    settle_group_metadata(&stale, f.group);
     stale.publish_account_group_access_for(f.group);
     let current = stale.account_group_access(f.group).unwrap();
     assert_eq!(current.role, AccountGroupRole::Member);

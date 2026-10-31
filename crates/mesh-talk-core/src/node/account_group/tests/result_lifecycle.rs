@@ -69,6 +69,10 @@ async fn retired_file_result_is_status_only(retirement: Retirement) {
     let next_id = source
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
+    // This fixture drives accepted effects without the participant worker.
+    // Finish metadata before constructing the internal executor snapshot whose
+    // preflight is then tested while the delivery lock is held.
+    source.await_channel_metadata(group).await.unwrap();
     let executor = source
         .account_group_access(group)
         .unwrap()

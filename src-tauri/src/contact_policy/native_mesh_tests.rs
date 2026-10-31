@@ -391,9 +391,18 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
         bob_handle.send_channel_message(group, b"synthetic group history before personal deletion"),
     )
     .unwrap();
-    until("original group message reaches Alice", || {
-        !alice_handle.channel_history(group, 20).unwrap().is_empty()
-    });
+    until(
+        "original group message reaches Alice",
+        || match alice_handle.channel_history(group, 20) {
+            Ok(history) => history
+                .iter()
+                .any(|entry| entry.text == b"synthetic group history before personal deletion"),
+            Err(mesh_talk_core::node::NodeError::Log(
+                mesh_talk_core::eventlog::LogError::StaleCursor,
+            )) => false,
+            Err(error) => panic!("group history read failed: {error}"),
+        },
+    );
     tauri::async_runtime::block_on(alice_handle.leave_channel(group)).unwrap();
     let deleted = invoke_raw("owner_delete_left_channel", delete_body);
     assert!(

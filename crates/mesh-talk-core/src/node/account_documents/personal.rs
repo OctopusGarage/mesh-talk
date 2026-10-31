@@ -798,7 +798,19 @@ impl Node {
                     .channel_membership_commit
                     .lock()
                     .expect("membership commit mutex");
-                let access = self.account_group_access_with_closed(reference.group)?;
+                let access = match self.account_group_access_with_closed(reference.group) {
+                    Ok(access) => access,
+                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                        // The leave is committed, but its canonical metadata may
+                        // still be preparing. Keep the cleanup ticket and let the
+                        // existing recovery owner finish before testing the exact
+                        // closed lifetime; never erase from a partial projection.
+                        self.channel_checkpoints.queue_runtime(reference.group)?;
+                        self.channel_recovery_notify.notify_one();
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
                 if access.role == AccountGroupRole::Left
                     && access
                         .sources
@@ -1101,6 +1113,7 @@ mod tests {
             );
             node.log.lock().unwrap().append_durable(genesis).unwrap();
             node.process_channel(group);
+            super::super::tests::settle_group_metadata(&node, group);
             node.received
                 .lock()
                 .unwrap()
@@ -1213,6 +1226,7 @@ mod tests {
                 .unwrap();
         }
         node.process_channel(group);
+        super::super::tests::settle_group_metadata(&node, group);
         node.persist_group_delete(group, None).unwrap();
         let rejoin = Event::new(
             &owner,
@@ -1252,6 +1266,7 @@ mod tests {
                 .unwrap();
         }
         node.process_channel(group);
+        super::super::tests::settle_group_metadata(&node, group);
         let conversation = super::channel(group);
         let draft = AccountDocumentKey::Draft {
             conversation: conversation.clone(),
@@ -1657,6 +1672,7 @@ mod tests {
         );
         member.log.lock().unwrap().append_durable(genesis).unwrap();
         member.process_channel(group);
+        super::super::tests::settle_group_metadata(&member, group);
         member
             .received
             .lock()
@@ -1693,6 +1709,7 @@ mod tests {
         assert!(!member.history(group, 10).unwrap().is_empty());
         for _ in 0..8 {
             member.maintain_account_group_operation_effects();
+            super::super::tests::settle_group_metadata(&member, group);
             member.retry_conversation_personal_cleanup().unwrap();
         }
         assert_eq!(
@@ -1724,6 +1741,7 @@ mod tests {
                 )))
                 .hidden
         );
+        super::super::tests::settle_group_metadata(&reopened, group);
         assert!(reopened.history(group, 10).unwrap().is_empty());
     }
 }

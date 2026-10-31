@@ -49,7 +49,26 @@ async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
             .unwrap();
         chain.round(1, 0, group).await;
         chain.round(2, 1, group).await;
-        assert!(chain.nodes[2].channel_metadata(group).is_err());
+        let mut denied = false;
+        for _ in 0..128 {
+            match chain.nodes[2].channel_metadata(group) {
+                Err(_) => {
+                    denied = true;
+                    break;
+                }
+                Ok(value) => {
+                    assert!(
+                        value.query_pending,
+                        "unaccepted membership must not become readable"
+                    );
+                    assert!(value.cover.is_none());
+                    assert!(value.announcement.is_none());
+                    assert!(value.announcement_history.is_empty());
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(denied, "prepared metadata must deny unaccepted membership");
         chain.nodes[2].accept_channel_invite(group).await.unwrap();
         chain.round(1, 2, group).await;
         chain.servers[0].take().unwrap().abort();
@@ -195,6 +214,42 @@ impl Chain {
         self.nodes[to].process_channel(channel);
     }
 
+    // No background recovery is running in this topology fixture. Advance only
+    // already-retained local work, never create an extra route across a partition.
+    async fn settle_retained(&self, index: usize, channel: ConversationId) {
+        let node = &self.nodes[index];
+        tokio::time::timeout(Duration::from_secs(5), async {
+            node.await_channel_metadata(channel).await.unwrap();
+            loop {
+                match node.process_channel_reception_inner(channel, "live", false) {
+                    Ok(()) | Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                    }
+                    Err(error) => panic!("retained channel work failed: {error}"),
+                }
+                node.process_channel_file_reception(channel, "live")
+                    .unwrap();
+                let pending: bool = node
+                    .storage
+                    .database()
+                    .read(|c| {
+                        c.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                            [channel.as_bytes().as_slice()],
+                            |row| row.get(0),
+                        )
+                        .map_err(Into::into)
+                    })
+                    .unwrap();
+                if !pending && node.pending_channel_file().is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bounded retained channel work must converge locally");
+    }
+
     async fn accepted_group(&self) -> ConversationId {
         let channel = self.nodes[0]
             .create_channel_invited(
@@ -254,6 +309,17 @@ impl Chain {
         )
         .await
         .expect("bounded adjacent-member recovery");
+    }
+
+    async fn recover_retained(&self, index: usize, channel: ConversationId) {
+        // The original recovery deadline includes deferred local processing.
+        // No worker or additional network route is introduced by this barrier.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.nodes[index].pull_one_channel_from_member(0).await;
+            self.settle_retained(index, channel).await;
+        })
+        .await
+        .expect("bounded adjacent recovery and retained projection");
     }
 
     fn has_text(&self, index: usize, channel: ConversationId, text: &[u8]) -> bool {
@@ -420,7 +486,7 @@ async fn assert_metered_group_file_replica(kind: crate::file::FileKind) {
         );
     }
     chain.round(2, 1, group).await;
-    chain.nodes[2].process_file_events(group);
+    chain.settle_retained(2, group).await;
     if kind == crate::file::FileKind::File {
         chain.nodes[2].decide_attachment(file, true).unwrap();
     }
@@ -526,8 +592,8 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
         .send_channel_message(group, b"held behind C")
         .await
         .unwrap();
-    chain.recover(1).await;
-    chain.recover(2).await;
+    chain.recover_retained(1, group).await;
+    chain.recover_retained(2, group).await;
     assert!(
         chain.has_text(2, group, b"held behind C"),
         "share off still receives its own copy"
@@ -542,7 +608,7 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
         .await
         .unwrap();
     for i in 3..6 {
-        chain.recover(i).await;
+        chain.recover_retained(i, group).await;
     }
     for i in 3..6 {
         assert!(!chain.has_text(i, group, b"held behind C"));
@@ -559,19 +625,19 @@ async fn group_chain_waits_for_sharing_and_recovers_after_bridge_partition() {
         .set_channel_replica_enabled(group, true)
         .await
         .unwrap();
-    chain.nodes[3].process_channel(group);
+    chain.settle_retained(3, group).await;
     assert!(chain.has_text(3, group, b"held behind C"));
     // D stops serving before E copies the event. No other cross-site edge exists.
     let server = chain.servers[3].take().unwrap();
     server.abort();
     let _ = server.await;
-    chain.recover(4).await;
-    chain.recover(5).await;
+    chain.recover_retained(4, group).await;
+    chain.recover_retained(5, group).await;
     assert!(!chain.has_text(5, group, b"held behind C"));
     let listener = TcpListener::bind(chain.addresses[3]).await.unwrap();
     chain.servers[3] = Some(Chain::serve(Arc::clone(&chain.nodes[3]), listener));
-    chain.recover(4).await;
-    chain.recover(5).await;
+    chain.recover_retained(4, group).await;
+    chain.recover_retained(5, group).await;
     assert!(chain.has_text(5, group, b"held behind C"));
     assert!(
         chain.has_text(5, group, b"C while not sharing"),
@@ -1103,9 +1169,30 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
 
 #[tokio::test]
 async fn channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet() {
+    async fn finish_progress(node: &Node, group: ConversationId) {
+        use futures_util::FutureExt;
+        // This fixture has no recovery worker. Finish its admitted setup/message
+        // continuations before testing idle rounds, consuming their progress wake.
+        for _ in 0..128 {
+            node.process_channel_reception_inner(group, "live", false)
+                .unwrap();
+            if node
+                .channel_checkpoints
+                .next_runtime(None)
+                .unwrap()
+                .is_none()
+            {
+                let _ = node.channel_recovery_notify.notified().now_or_never();
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("fixture reception must finish its bounded continuation");
+    }
     let chain = Chain::new().await;
     let group = chain.accepted_group().await;
     let receiver = &chain.nodes[1];
+    finish_progress(receiver, group).await;
     assert!(
         tokio::time::timeout(
             Duration::from_millis(20),
@@ -1125,6 +1212,7 @@ async fn channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet() {
     )
     .await
     .expect("validated received message signals the dedicated recovery notification");
+    finish_progress(receiver, group).await;
     for _ in 0..3 {
         receiver.process_channel(group);
     }

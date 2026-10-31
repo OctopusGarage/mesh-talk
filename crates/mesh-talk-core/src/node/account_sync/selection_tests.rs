@@ -2352,6 +2352,7 @@ async fn archive_authorization_transition_rebuilds_cached_membership_selection()
         }
         drop(log);
         to.process_channel(channel);
+        crate::node::test_support::settle_group_metadata(to, channel);
     };
     copy_public(&owner, &source);
     source.accept_channel_invite(channel).await.unwrap();
@@ -4273,7 +4274,7 @@ async fn recalled_private_file_blocks_late_cards_and_stale_sibling_byte_release(
         .await;
     assert!(
         result.is_err(),
-        "known recall denies verified bytes from an offline stale sibling at final commit: {result:?}"
+        "known recall denies verified bytes from an offline stale sibling at final commit"
     );
     assert!(!receiver.media.contains(file));
     let (after, _, _) = original.export_sync_records(

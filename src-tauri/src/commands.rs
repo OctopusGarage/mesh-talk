@@ -1030,6 +1030,7 @@ mod tests {
                 .manage(app_state.clone())
                 .manage(app_state.app_lock().clone())
                 .manage(node.clone())
+                .manage(crate::reception_host::ReceptionHostState::default())
                 .manage(settings.clone())
                 .invoke_handler(tauri::generate_handler![
                     login,
@@ -2707,7 +2708,7 @@ mod tests {
         let latest = RuntimeAuthority::request(session.clone(), lease, node.clone()).unwrap();
         assert!(stale.begin().await.is_err());
         assert!(node.0.write().await.is_some());
-        let permit = latest.begin().await.unwrap();
+        let mut permit = latest.begin().await.unwrap();
         // Actual production coordinator + actual NodeRuntime::stop. Core retirement
         // tests independently prove blocked writers drain inside that awaited stop.
         assert!(node.0.write().await.is_none());
@@ -2716,6 +2717,9 @@ mod tests {
                 .await
                 .is_err()
         );
+        // Match the production replacement path: the joined runtime's storage
+        // handoff remains exclusive until the startup permit releases it.
+        drop(permit.take_retired());
         session.set_display_name("renamed during preparation".into());
         let runtime = mesh_talk_core::node::NodeRuntime::start_guarded(
             root.path(),

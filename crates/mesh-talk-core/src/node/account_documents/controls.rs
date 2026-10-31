@@ -498,6 +498,108 @@ impl Node {
             .complete_control(id)?;
         Ok(true)
     }
+    /// Explicit offline export must preserve verified peer recalls even when
+    /// their normal receive turn has not run. Scan only account-owned control
+    /// headers, hydrate Delete rows individually, and reuse the original verifier.
+    pub(in crate::node) fn prepare_private_recalls_for_recovery(&self) -> Result<(), NodeError> {
+        let (owner, revision) = {
+            let log = self.log.lock().expect("log mutex");
+            let repository = log.repository()?;
+            (repository.receiving_owner()?, repository.source_revision()?)
+        };
+        let check_source = || -> Result<(), NodeError> {
+            let log = self.log.lock().expect("log mutex");
+            let repository = log.repository()?;
+            if repository.receiving_owner()? != owner || repository.source_revision()? != revision {
+                return Err(crate::eventlog::LogError::StaleCursor.into());
+            }
+            Ok(())
+        };
+        let mut after = -1;
+        loop {
+            check_source()?;
+            let page = self
+                .log
+                .lock()
+                .expect("log mutex")
+                .repository()?
+                .bootstrap_control_headers(after, i64::MAX)?;
+            if page.is_empty() {
+                break;
+            }
+            for row in page {
+                after = row.ordinal;
+                if !row.active || row.header.kind != EventKind::Delete {
+                    continue;
+                }
+                let required = row.header.stored_bytes.saturating_mul(3);
+                if required > 8 * 1024 * 1024 {
+                    return Err(crate::eventlog::LogError::PageBudgetTooSmall { required }.into());
+                }
+                check_source()?;
+                let event = self
+                    .log
+                    .lock()
+                    .expect("log mutex")
+                    .get(&row.header.id)?
+                    .ok_or(crate::eventlog::LogError::StaleCursor)?;
+                self.project_private_dm_control(event)?;
+            }
+        }
+        // Portable marks require both a verified claim and its exact retained
+        // account route. A different actor's recall cannot become a tombstone.
+        let mut after = None;
+        loop {
+            check_source()?;
+            let page = self
+                .account_documents
+                .lock()
+                .expect("documents mutex")
+                .list(AccountDocumentDomain::DmRecall, after.as_ref(), 64);
+            if page.is_empty() {
+                break;
+            }
+            for meta in page {
+                after = Some(meta.key.clone());
+                let document = self
+                    .account_documents
+                    .lock()
+                    .expect("documents mutex")
+                    .get(&meta.key)?;
+                let Some(document) = document else {
+                    continue;
+                };
+                if !valid_payload(&document.meta, document.payload()) {
+                    continue;
+                }
+                let Some((peer, target, actor)) = parts(&document.meta.key) else {
+                    continue;
+                };
+                let target = EventId::new(
+                    hex::decode(target)
+                        .ok()
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .ok_or_else(invalid)?,
+                );
+                let Some((sender, _, _)) = self.private_dm_target_route(peer, target)? else {
+                    continue;
+                };
+                if sender != actor {
+                    continue;
+                }
+                let value: Control =
+                    serde_json::from_slice(document.payload()).map_err(|_| invalid())?;
+                check_source()?;
+                self.recalls.lock().expect("recalls mutex").record(
+                    account_conversation_id(&self.account_id(), peer),
+                    target,
+                    value.wall,
+                )?;
+            }
+        }
+        check_source()
+    }
+
     pub(in crate::node) fn bootstrap_private_dm_controls(&self) -> Result<(), NodeError> {
         loop {
             let (after, through) = self
@@ -679,21 +781,9 @@ impl Node {
             {
                 continue;
             }
-            let actor = self
-                .file_message_identities
-                .lock()
-                .expect("identity mutex")
-                .row_author_account(&row)?;
-            let actor = actor.or_else(|| {
-                if row.from == self.user_id() {
-                    Some(own.clone())
-                } else {
-                    self.historical_dm_peers()
-                        .into_iter()
-                        .find(|p| p.user_id == row.from)
-                        .and_then(|p| p.account_id())
-                }
-            });
+            // A portable recall requires the retained signed manifest and its
+            // certified author, not an inference from the transcript's label.
+            let actor = self.file_message_row_author_account(&row, None)?;
             if let Some(actor) = actor
                 && (actor == own || actor == peer)
             {

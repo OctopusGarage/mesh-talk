@@ -2833,6 +2833,7 @@ impl Node {
         let mut custody_migration = None;
         let mut inventory_publication = None;
         let mut public_profile_publication = None;
+        let mut public_profile_projection = None;
         let mut personal_after = None;
         let mut personal_retry_at: Option<std::time::Instant> = None;
         let mut group_access_publication = None;
@@ -2882,6 +2883,14 @@ impl Node {
                 self.publish_public_profile_documents_page(&mut public_profile_publication)
             {
                 log::debug!("contact profile publication deferred: {error}");
+            }
+            {
+                let _commit = self.account_sync_commit.lock().expect("sync commit mutex");
+                if let Err(error) =
+                    self.project_public_profile_documents_page(&mut public_profile_projection)
+                {
+                    log::debug!("contact profile projection deferred: {error}");
+                }
             }
             // Explicit File copies and invitation capability/history preparation
             // share the existing attachment slots. Optional archive policy cannot stop
@@ -3245,24 +3254,25 @@ impl Node {
                 document_owners.insert(task.id(), owner);
             }
             while let Some(group) = fanout.start_next() {
-                // Bootstrap recovery may commit a group outside this turn's
-                // ordinary publication slice. Refresh that exact source before
-                // its owned public distribution can start.
-                self.publish_account_group_access_for(group);
-                self.publish_group_inventory_for(group);
-                self.publish_account_group_operations_for(group);
-                #[cfg(test)]
-                {
-                    let hook = self.control_fanout_start_test_hook.lock().unwrap().take();
-                    if let Some(hook) = hook {
-                        hook();
-                    }
-                }
                 let node = self.clone();
                 let Some(permit) = self.runtime_work.admit() else {
                     return;
                 };
                 let task = fanout_tasks.spawn(permit.track(async move {
+                    // Bootstrap recovery may commit a group outside this
+                    // turn's publication slice. Its owned worker prepares the
+                    // exact source before claiming readiness or opening a peer.
+                    if let Err(error) = node.prepare_account_group_fanout(group).await {
+                        log::debug!("account group fanout preparation deferred: {error}");
+                        return (group, true);
+                    }
+                    #[cfg(test)]
+                    {
+                        let hook = node.control_fanout_start_test_hook.lock().unwrap().take();
+                        if let Some(hook) = hook {
+                            hook();
+                        }
+                    }
                     let members = node.channel_members(group);
                     let deferred = node.distribute_account_group_effects(group, &members).await;
                     (group, deferred)
@@ -4883,6 +4893,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let open = |name: &str| {
+            let profile = directory.path().join(name);
             let (dm, _) = mpsc::unbounded_channel();
             let (channel, _) = mpsc::unbounded_channel();
             let (file, _) = mpsc::unbounded_channel();
@@ -4892,8 +4903,8 @@ mod tests {
                 dm,
                 channel,
                 file,
-                &directory.path().join(format!("{name}-events.log")),
-                &directory.path().join(format!("{name}-sent.log")),
+                &profile.join(format!("{name}-events.log")),
+                &profile.join(format!("{name}-sent.log")),
                 "pw",
             )
             .unwrap()

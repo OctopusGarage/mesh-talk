@@ -688,6 +688,12 @@ mod tests {
         let f = Fixture::new();
         let media = f.dir.path().join("receiver/media");
         let retained = f.dir.path().join("receiver/media-before-failure");
+        // An indexed cleanup touches only retained candidates. Seed the real
+        // candidate so the fault still reaches physical persistence.
+        f.receiver
+            .media
+            .store_bytes(ConversationId::new([240; 32]), "failure.bin", b"retained")
+            .unwrap();
         std::fs::rename(&media, &retained).unwrap();
         std::fs::write(&media, b"not a directory").unwrap();
         let result = f

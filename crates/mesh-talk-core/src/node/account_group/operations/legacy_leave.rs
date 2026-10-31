@@ -516,6 +516,7 @@ mod tests {
                 .append_durable(genesis.clone())
                 .unwrap();
             current.process_channel(group);
+            crate::node::test_support::settle_group_metadata(current, group);
             for (public, certificate) in [
                 (
                     coordinator.identity.public(),
@@ -660,6 +661,7 @@ mod tests {
             .append_durable(effect)
             .unwrap();
         coordinator.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&coordinator, group);
         coordinator
             .import_group_operation_result_for_test(
                 ResultProjection {
@@ -766,6 +768,7 @@ mod tests {
             .append_durable(genesis.clone())
             .unwrap();
         coordinator.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&coordinator, group);
         let local_source = Node::public_account_group_source(
             group,
             &coordinator.account_group_projection(group).unwrap(),
@@ -865,6 +868,7 @@ mod tests {
             .append_durable(effect.clone())
             .unwrap();
         coordinator.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&coordinator, group);
         {
             let mut journal = coordinator.group_operations.lock().unwrap();
             let mut entry = journal.entries[&local.id].clone();
@@ -945,6 +949,7 @@ mod tests {
         );
         node.log.lock().unwrap().append_durable(genesis).unwrap();
         node.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&node, group);
         let pinned = Node::public_account_group_source(
             group,
             &node.account_group_projection(group).unwrap(),

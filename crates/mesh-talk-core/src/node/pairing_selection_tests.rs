@@ -8,6 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 fn open(dir: &std::path::Path, name: &str) -> Arc<Node> {
+    let dir = dir.join(name);
     let (d, _) = mpsc::unbounded_channel();
     let (c, _) = mpsc::unbounded_channel();
     let (f, _) = mpsc::unbounded_channel();

@@ -648,6 +648,22 @@ impl Node {
                 result = Some(status);
                 return Ok(());
             }
+            // A newly accepted local public tail can leave canonical metadata
+            // pending. Finish only one bounded admission allowance before the
+            // strict executor read; reference-only groups retain their private
+            // source rule and idempotent IDs above never reallocate work.
+            let local_channel = self
+                .log
+                .lock()
+                .expect("log mutex")
+                .repository()?
+                .has_kind(&group, crate::eventlog::EventKind::MembershipChange)?;
+            if local_channel {
+                self.prepare_channel_admission(
+                    group,
+                    &mut crate::eventlog::sync::network::PreparationBudget::default(),
+                )?;
+            }
             let access = self.account_group_access(group)?;
             if !operation.kind().admits_role(access.role) {
                 return Err(NodeError::Authorization(

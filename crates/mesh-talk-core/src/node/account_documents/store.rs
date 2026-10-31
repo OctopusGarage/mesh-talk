@@ -1394,6 +1394,7 @@ mod tests {
         );
         node.log.lock().unwrap().append(genesis).unwrap();
         node.process_channel(group);
+        super::super::tests::settle_group_metadata(&node, group);
         node.publish_account_group_access(&mut None);
         let document = node.account_document(&control).unwrap().unwrap();
         store
@@ -1638,6 +1639,7 @@ mod tests {
         );
         node.log.lock().unwrap().append_durable(genesis).unwrap();
         node.process_channel(group);
+        super::super::tests::settle_group_metadata(&node, group);
         node.publish_account_group_access_for(group);
         let mut head = node
             .group_control_heads(group)

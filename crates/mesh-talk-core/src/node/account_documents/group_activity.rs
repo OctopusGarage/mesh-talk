@@ -289,7 +289,8 @@ mod tests {
         );
         source.log.lock().unwrap().append(initial).unwrap();
         source.process_channel(group);
-        source.publish_group_inventory_for(group);
+        super::super::tests::settle_group_metadata(&source, group);
+        super::super::tests::group_inventory_source_document(&source, group);
         source.publish_group_activity_for(group);
         (directory, account, source, target, group)
     }
@@ -445,8 +446,9 @@ mod tests {
                 )
                 .unwrap();
             source.process_channel(group);
+            super::super::tests::settle_group_metadata(&source, group);
         }
-        source.publish_group_inventory_for(group);
+        super::super::tests::group_inventory_source_document(&source, group);
         copy_inventory(&source, &target, group);
         assert!(target.channel_activity(group).unwrap().is_empty());
         source.publish_group_activity_for(group);
@@ -497,6 +499,7 @@ mod tests {
         );
         target.log.lock().unwrap().append(event).unwrap();
         target.process_channel(group);
+        super::super::tests::settle_group_metadata(&target, group);
         assert!(target.channel_shared_reference(group).is_none());
         assert_eq!(
             target.channel_activity(group).unwrap()[0].actor,
@@ -525,6 +528,7 @@ mod tests {
             )
             .unwrap();
         source.process_channel(group);
+        super::super::tests::settle_group_metadata(&source, group);
         let events: Vec<_> = source
             .log
             .lock()
@@ -537,8 +541,9 @@ mod tests {
             second.log.lock().unwrap().append(event).unwrap();
         }
         second.process_channel(group);
+        super::super::tests::settle_group_metadata(&second, group);
         for node in [&source, &second] {
-            node.publish_group_inventory_for(group);
+            super::super::tests::group_inventory_source_document(node, group);
             node.publish_group_activity_for(group);
             copy_inventory(node, &target, group);
         }
@@ -572,7 +577,8 @@ mod tests {
             )
             .unwrap();
         source.process_channel(group);
-        source.publish_group_inventory_for(group);
+        super::super::tests::settle_group_metadata(&source, group);
+        super::super::tests::group_inventory_source_document(&source, group);
         source.publish_group_activity_for(group);
         assert_eq!(
             source.account_document_meta(&key(&source, group)),

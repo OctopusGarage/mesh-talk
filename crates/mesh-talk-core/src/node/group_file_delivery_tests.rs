@@ -42,6 +42,41 @@ fn duplicate(identity: &DeviceIdentity) -> DeviceIdentity {
     DeviceIdentity::from_secret_bytes(ed, x)
 }
 
+// These fixtures intentionally run no participant worker, so mailbox and raw
+// signed-event intake must explicitly resume the same bounded channel/file work.
+async fn settle_group_files(node: &Node, channel: ConversationId) {
+    node.await_channel_metadata(channel).await.unwrap();
+    for _ in 0..64 {
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts()
+            .0;
+        node.process_channel_file_reception(channel, "live")
+            .unwrap();
+        let after = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts()
+            .0;
+        assert!(
+            after - before <= 64,
+            "one file turn must retain its body budget"
+        );
+        if node.pending_channel_file().is_none() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("group file fixture must complete its bounded continuation");
+}
+
 impl GroupRelayFixture {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -86,7 +121,7 @@ impl GroupRelayFixture {
         for event in setup {
             b.log.lock().unwrap().append_durable(event).unwrap();
         }
-        b.process_channel(group);
+        b.await_channel_metadata(group).await.unwrap();
         a.set_bridge_discovery_enabled(true);
         b.set_bridge_discovery_enabled(true);
         // Group authority must be sufficient; no private-DM permission is added.
@@ -174,6 +209,7 @@ impl GroupRelayFixture {
         let (manifest, file, payload) = self.enqueue_offer_expiring(expires_at_ms).await;
         self.federate().await;
         self.b.drain_from_post_office().await;
+        settle_group_files(&self.b, self.group).await;
         let offer = self.offers.try_recv().expect("an authorized group offer must arrive through federation without granting private-DM access");
         assert_eq!(offer.event_id, manifest);
         assert_eq!(offer.file_conv, file);
@@ -201,22 +237,29 @@ impl GroupRelayFixture {
             )
             .await
             .unwrap();
+        // The manual attachment worker also needs the just-accepted signed
+        // manifest's current authority before selecting recipient custody.
+        self.a.await_channel_metadata(self.group).await.unwrap();
         self.a.flush_channel_file(self.group, file).await;
         (manifest, file, payload)
     }
 
     async fn return_controls(&self) {
         self.b.drain_from_post_office().await;
+        settle_group_files(&self.b, self.group).await;
         self.federate().await;
         self.a.drain_from_post_office().await;
+        settle_group_files(&self.a, self.group).await;
     }
 
     async fn transfer_tick(&self) {
         // This is the existing production attachment worker seam. It must
         // retry relay-backed outgoing group work even with no incoming files.
+        self.a.await_channel_metadata(self.group).await.unwrap();
         self.a.pull_pending_files().await;
         self.federate().await;
         self.b.drain_from_post_office().await;
+        settle_group_files(&self.b, self.group).await;
     }
 
     fn restart_clients(&mut self) {
@@ -538,8 +581,7 @@ async fn authorized_group_file_card_surfaces_without_observing_the_senders_annou
         for event in history {
             recipient.log.lock().unwrap().append_durable(event).unwrap();
         }
-        recipient.process_channel(f.group);
-        recipient.process_file_events(f.group);
+        settle_group_files(&recipient, f.group).await;
         let offer = offers
             .try_recv()
             .expect("missing discovery proof must not suppress an authorized group file card");
@@ -686,6 +728,7 @@ async fn offline_group_file_is_deposited_before_consent_and_received_after_sende
         f.federate().await;
         assert!(f.qs.lock().unwrap().has(&outer));
         f.b.drain_from_post_office().await;
+        settle_group_files(&f.b, f.group).await;
         let offer = f
             .offers
             .try_recv()
@@ -701,6 +744,7 @@ async fn offline_group_file_is_deposited_before_consent_and_received_after_sende
         f.b.decide_attachment(file, true).unwrap();
         for _ in 0..8 {
             f.b.drain_from_post_office().await;
+            settle_group_files(&f.b, f.group).await;
             if f.b.file_ready_to_save(file).unwrap() {
                 break;
             }

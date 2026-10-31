@@ -4,12 +4,11 @@
 use super::*;
 use crate::eventlog::sync::network::{PreparationBudget, PreparationStep};
 use std::{
-    future::Future,
+    future::{Future, poll_fn},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
 };
-use tokio::sync::oneshot;
 
 pub(super) enum Step<T> {
     Pending(PreparationStep),
@@ -24,7 +23,7 @@ trait Command: Send {
 }
 struct Request<T, F> {
     action: F,
-    result: Option<oneshot::Sender<T>>,
+    result: Arc<Mutex<Option<T>>>,
 }
 impl<T: Send, F> Command for Request<T, F>
 where
@@ -38,9 +37,7 @@ where
         match (self.action)(view, budget)? {
             Step::Pending(work) => Ok((false, work)),
             Step::Ready(value, work) => {
-                if let Some(result) = self.result.take() {
-                    let _ = result.send(value);
-                }
+                *self.result.lock().expect("history continuation result") = Some(value);
                 Ok((true, work))
             }
         }
@@ -62,7 +59,10 @@ impl HistoryContext {
         + Send
         + 'static,
     ) -> Result<T, LogError> {
-        let (send, receive) = oneshot::channel();
+        // This future is polled by our measured command scheduler, not Tokio.
+        // Tokio oneshot adds a task-cooperation Pending even after send; that
+        // would look like a missing command and discard a valid continuation.
+        let result = Arc::new(Mutex::new(None));
         {
             let mut request = self.request.lock().expect("history continuation request");
             if request.is_some() {
@@ -70,10 +70,16 @@ impl HistoryContext {
             }
             *request = Some(Box::new(Request {
                 action,
-                result: Some(send),
+                result: Arc::clone(&result),
             }));
         }
-        receive.await.map_err(|_| LogError::StaleCursor)
+        Ok(poll_fn(
+            move |_| match result.lock().expect("history continuation result").take() {
+                Some(value) => Poll::Ready(value),
+                None => Poll::Pending,
+            },
+        )
+        .await)
     }
 }
 impl<T: Send + 'static> HistoryQuery<T> {
@@ -305,6 +311,33 @@ mod tests {
             "deep authority must yield before returning a verdict"
         );
         assert_eq!(ready, Some(expected));
+        // More than Tokio's cooperative task allowance must still progress
+        // without an unrelated executor yield. Each call remains one measured
+        // metadata request, and the selected result cannot disappear mid-stack.
+        let mut handoffs = HistoryQuery::new(source, move |context| async move {
+            let mut found = 0;
+            for _ in 0..300 {
+                found += usize::from(context.header(selected).await?.is_some());
+            }
+            Ok(found)
+        });
+        let before = repository.body_read_counts();
+        let mut count = None;
+        for _ in 0..301 {
+            let work = match handoffs.step(&view, budget).unwrap() {
+                Step::Pending(work) => work,
+                Step::Ready(found, work) => {
+                    count = Some(found);
+                    work
+                }
+            };
+            assert!(work.rows <= 1 && work.edges == 0 && work.bytes <= 128);
+            if count.is_some() {
+                break;
+            }
+        }
+        assert_eq!(count, Some(300));
+        assert_eq!(repository.body_read_counts(), before);
         // A yielded decision cannot be used after a signed source append.
         let event = repository.get(&selected).unwrap().unwrap();
         let mut stale = HistoryQuery::new(source, move |context| async move {

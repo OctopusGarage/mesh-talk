@@ -718,6 +718,14 @@ impl Node {
                 }
             }
             MessageDestination::Channel(channel) => {
+                let local = {
+                    let log = self.log.lock().expect("log mutex");
+                    log.repository()?
+                        .has_kind(channel, crate::eventlog::EventKind::MembershipChange)?
+                };
+                if local {
+                    self.await_channel_metadata(*channel).await?;
+                }
                 if !AccountGroupOperationKind::File
                     .admits_role(self.account_group_access(*channel)?.role)
                 {

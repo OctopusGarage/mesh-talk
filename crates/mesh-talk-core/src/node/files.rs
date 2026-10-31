@@ -1065,6 +1065,7 @@ impl Node {
         + Send,
     ) -> Result<(EventId, ConversationId), NodeError> {
         authorize(&mut || Ok(()))?;
+        self.await_channel_metadata(channel).await?;
         super::expiry_policy::validate_outgoing(expires_at_ms)?;
         {
             let book = self.channels.lock().expect("channels mutex not poisoned");

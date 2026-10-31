@@ -4901,7 +4901,7 @@ mod group_control_tests {
                 .create_channel("bounded observed activity", vec![])
                 .await
                 .unwrap();
-            fixture.source.publish_group_inventory_for(group);
+            super::super::super::tests::group_inventory_source_document(&fixture.source, group);
             fixture.source.publish_group_activity_for(group);
             let key = AccountDocumentKey::GroupActivity {
                 channel: hex::encode(group.as_bytes()),

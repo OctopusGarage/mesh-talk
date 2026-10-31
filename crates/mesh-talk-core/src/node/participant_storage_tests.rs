@@ -545,7 +545,7 @@ fn participant_custom_sources_cannot_alias_account_or_runtime_owners() {
                 "pw"
             )
             .is_err(),
-            "source alias {name} was admitted"
+            "reserved source alias was admitted"
         );
         assert!(
             !directory.path().join("messages.log").exists(),
@@ -1188,7 +1188,7 @@ fn identity_preflight_rejects_reaction_delivery_and_opaque_names() {
             lease
                 .validate_identity_sources(&directory.path().join(&leaf))
                 .is_err(),
-            "identity occupied {leaf}"
+            "identity occupied a reserved source path"
         );
         assert!(!directory.path().join(leaf).exists());
     }

@@ -37,6 +37,7 @@ impl Fixture {
             .manage(state.clone())
             .manage(state.app_lock().clone())
             .manage(node.clone())
+            .manage(crate::reception_host::ReceptionHostState::default())
             .manage(DriveState::default())
             .manage(crate::settings::SettingsState::isolated(
                 root.path().join("settings.json"),
@@ -445,6 +446,23 @@ fn registered_cloud_commands_round_trip_real_archive_and_restart_runtime() {
     )
     .unwrap();
     assert_eq!(reopened.account_id(), account);
+    // This bare offline owner has no worker to prepare channel projections.
+    // A second backup must drive its selected favorite sources itself and must
+    // never turn pending protection checks into a successful, lossy archive.
+    let offline_key = RecoveryKey::generate();
+    let mut offline_archive = Vec::new();
+    reopened
+        .write_encrypted_recovery_archive(&mut offline_archive, &offline_key, 1)
+        .unwrap();
+    let offline_preview = Node::inspect_encrypted_recovery_archive(
+        std::io::Cursor::new(&offline_archive),
+        &offline_key,
+        target.root.path(),
+    )
+    .unwrap();
+    assert_eq!(offline_preview.favorites, 1);
+    assert_eq!(offline_preview.favorite_files, 2);
+    assert_eq!(offline_preview.missing_favorite_files, 0);
     assert_eq!(
         reopened.list_message_favorites("", 0, 10).unwrap().items,
         vec![favorite]

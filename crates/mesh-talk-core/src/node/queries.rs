@@ -54,10 +54,16 @@ impl Node {
         channel: ConversationId,
         limit: usize,
     ) -> Result<Vec<HistoryEntry>, super::NodeError> {
+        // Signed channel identity is authoritative even before a restored
+        // channel appears in presentation. The selected history path below
+        // independently checks canonical/recall readiness before hydration.
         if !self
-            .list_channels()?
-            .iter()
-            .any(|summary| summary.id == channel)
+            .log
+            .lock()
+            .expect("log mutex")
+            .repository()?
+            .has_kind(&channel, crate::eventlog::EventKind::MembershipChange)?
+            && self.channel_shared_reference(channel).is_none()
         {
             return Ok(Vec::new());
         }

@@ -174,10 +174,8 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
     })
     .await;
     let source_count = source.channel_custody_count(group, event).unwrap();
-    let sibling_count = sibling.channel_custody_count(group, event).unwrap();
     let external_has_original = external.log.lock().unwrap().get(&event).unwrap().is_some();
     let source_meta = source.account_document_meta(&custody_key);
-    let sibling_meta = sibling.account_document_meta(&custody_key);
     release.close();
     source.note_account_local_change();
     let resumed = tokio::time::timeout(Duration::from_secs(8), async {
@@ -205,11 +203,8 @@ async fn external_custody_reaches_sibling_while_authenticated_history_is_held() 
     }
     assert!(
         resumed.is_ok(),
-        "history and custody must resume after release: requests={}, held_source_count={source_count:?}, held_sibling_count={sibling_count:?}, external_has_original={external_has_original}, held_source_meta={source_meta:?}, held_sibling_meta={sibling_meta:?}, resumed_source_count={:?}, resumed_sibling_count={:?}, resumed_meta_equal={}",
+        "history and custody must resume after release: requests={}",
         history_requests.load(Ordering::SeqCst),
-        source.channel_custody_count(group, event).unwrap(),
-        sibling.channel_custody_count(group, event).unwrap(),
-        source.account_document_meta(&custody_key) == sibling.account_document_meta(&custody_key),
     );
     assert_eq!(
         source_count,

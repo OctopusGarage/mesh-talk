@@ -1316,7 +1316,13 @@ synchronizing the parent directory before successful return.
 `account_documents/public_profile.rs` relays original signed contact profiles under
 Profile consent; `account_profile_io.rs` retains signature, revision and avatar
 projection authority. Per-source document heads preserve each contact's original
-profile, with bounded optional publication repair that cannot block login.
+profile. Constructor work initializes only the optional reconciliation receipts;
+the existing account-sync worker repairs at most sixteen publication heads and
+sixteen projection heads per turn. Exact account/device-scoped completion receipts
+compare accepted profile change revisions or signed document revision/hash before
+loading avatars. Missing or failed receipts remain retryable after restart; an
+unchanged warm open does not replay contact document payloads. Canonical profile
+admission and its interrupted avatar projection keep their existing owners.
 `account_documents/group_activity.rs` owns History-gated source-signed control
 observations tied to the selected inventory snapshot. It cannot install membership
 or keys. Both reuse the existing document worker and certified sibling sessions.

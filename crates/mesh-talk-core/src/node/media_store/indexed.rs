@@ -205,6 +205,19 @@ impl MediaIndex {
    let mut rows=query.query(params![self.namespace,prior,after])?;let mut page=Vec::new();while let Some(row)=rows.next()?{page.push(entry(row)?);}Ok(page)
   }).map_err(io)
     }
+    /// Cleanup deletes its own cursor row, so seek by the immutable name value
+    /// rather than resolving the previous row as export pagination requires.
+    pub(super) fn prune_page(&self, after: Option<&str>) -> std::io::Result<Vec<MediaEntry>> {
+        self.profile.database().read(|c| {
+            let mut query = c.prepare("SELECT name,file,legacy,partial,revision FROM media_files WHERE namespace=?1 AND name>coalesce(?2,'') ORDER BY name LIMIT 32")?;
+            let mut rows = query.query(params![self.namespace, after])?;
+            let mut page = Vec::new();
+            while let Some(row) = rows.next()? {
+                page.push(entry(row)?);
+            }
+            Ok(page)
+        }).map_err(io)
+    }
     pub(super) fn has_legacy(&self) -> std::io::Result<bool> {
         self.profile
             .database()

@@ -498,6 +498,39 @@ mod tests {
                 events.push(event);
             }
             drop(log);
+            // This fixture installs signed history directly and has no runtime
+            // worker. Prepare that setup before exercising file receive/CAS:
+            // one reception call intentionally advances only one bounded phase.
+            let budget = crate::eventlog::sync::network::PreparationBudget::default();
+            let mut ready = false;
+            for _ in 0..16 * (events.len() + 2) {
+                let log = receiver.log.lock().unwrap();
+                let step = receiver
+                    .channel_checkpoints
+                    .project_step_with_budget(
+                        log.repository().unwrap(),
+                        &receiver.identity,
+                        channel,
+                        budget,
+                    )
+                    .unwrap();
+                assert!(step.rows <= budget.rows);
+                assert!(step.edges <= budget.edges);
+                assert!(step.bytes <= budget.bytes);
+                if step.ready {
+                    ready = true;
+                    break;
+                }
+            }
+            assert!(ready, "signed file fixture authority must finish preparing");
+            assert!(events.iter().all(|event| {
+                !receiver
+                    .received_files
+                    .lock()
+                    .unwrap()
+                    .contains(event.id)
+                    .unwrap()
+            }));
             receiver
                 .process_channel_reception_inner(channel, "live", false)
                 .unwrap();

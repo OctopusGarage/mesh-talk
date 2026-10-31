@@ -209,6 +209,10 @@ impl Node {
         if !input.canonical() {
             return Err(NodeError::InvalidInput("invalid target account".into()));
         }
+        // This async data worker owns invitation preparation even when the
+        // general channel recovery loop is absent. Finish the selected metadata
+        // dependency before reading its strict authority and history policy.
+        self.await_channel_metadata(group).await?;
         if let Some(grant) = self
             .account_group_projection(group)?
             .authority

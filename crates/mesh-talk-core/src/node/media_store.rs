@@ -338,7 +338,7 @@ impl MediaStore {
         if let Some(index) = &self.index {
             let mut after = None;
             loop {
-                let page = index.page(after.as_deref(), None)?;
+                let page = index.prune_page(after.as_deref())?;
                 if page.is_empty() {
                     return Ok(());
                 }
@@ -1508,6 +1508,25 @@ mod tests {
             "replacement revision fences the old orphan decision"
         );
     }
+    #[test]
+    fn indexed_media_pruning_seeks_past_deleted_cursor_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = indexed_store(directory.path());
+        for number in 0..70 {
+            store
+                .store_bytes(indexed_id(number), "image.png", b"bytes")
+                .unwrap();
+        }
+        let retained = indexed_id(35);
+        store
+            .prune_unreferenced(&HashSet::from([retained]))
+            .unwrap();
+        assert_eq!(store.read(retained).unwrap(), b"bytes");
+        assert_eq!(store.managed_files().unwrap().count(), 1);
+        store.prune_unreferenced(&HashSet::new()).unwrap();
+        assert_eq!(store.managed_files().unwrap().count(), 0);
+    }
+
     #[test]
     fn indexed_media_export_pages_reject_duplicate_ids_and_changed_inventory() {
         let directory = tempfile::tempdir().unwrap();

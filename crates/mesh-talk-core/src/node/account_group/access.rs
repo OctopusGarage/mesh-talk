@@ -1118,14 +1118,14 @@ impl Node {
             .into_iter()
             .flatten()
             .collect();
-        let (mut local_frontier, (fingerprint, count)) =
+        let (local_frontier, (fingerprint, count)) =
             authorization_view_at(self, log, group, scope)?;
-        let mut frontier = local_frontier.clone();
-        let complete_frontier = frontier.len() <= MAX_ACCESS_FRONTIER;
-        frontier.truncate(MAX_ACCESS_FRONTIER);
-        if !complete_frontier {
-            local_frontier.clear();
-        }
+        let complete_frontier = local_frontier.len() <= MAX_ACCESS_FRONTIER;
+        let frontier = local_frontier
+            .iter()
+            .take(MAX_ACCESS_FRONTIER)
+            .copied()
+            .collect();
         let mut result = SourceAccess {
             source,
             owner_proof,

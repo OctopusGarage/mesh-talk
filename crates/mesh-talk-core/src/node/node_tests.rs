@@ -10,6 +10,32 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+// Bare fixtures inject signed rows without the host's recovery worker. Drive
+// that same bounded owner until its durable channel demand is retired.
+fn settle_injected_channel(node: &Node, channel: ConversationId) {
+    crate::node::test_support::settle_group_metadata(node, channel);
+    for _ in 0..30_000 {
+        node.process_channel_reception_inner(channel, "live", false)
+            .unwrap();
+        let pending: bool = node
+            .storage
+            .database()
+            .read(|c| {
+                c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                    [channel.as_bytes().as_slice()],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        if !pending {
+            return;
+        }
+    }
+    panic!("injected channel fixture did not finish its bounded receive work");
+}
+
 #[tokio::test]
 async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless() {
     let a = tempfile::tempdir().unwrap();
@@ -45,8 +71,7 @@ async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless(
     for event in alice.log.lock().unwrap().events(&channel).unwrap() {
         bob.log.lock().unwrap().append(event).unwrap();
     }
-    bob.process_channel_reception_inner(channel, "live", false)
-        .unwrap();
+    settle_injected_channel(&bob, channel);
     assert_eq!(bob.channel_history(channel, 10).unwrap().len(), 1);
     alice.recall_channel(channel, target).await.unwrap();
     let recall = alice
@@ -59,6 +84,7 @@ async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless(
         .find(|event| event.kind == EventKind::Delete)
         .unwrap();
     bob.log.lock().unwrap().append(recall.clone()).unwrap();
+    crate::node::test_support::settle_group_metadata(&bob, channel);
     bob.storage.database().transaction(|c| {
         c.execute_batch("CREATE TEMP TRIGGER channel_recall_failure AFTER INSERT ON recall_marks BEGIN SELECT RAISE(ABORT,'injected recall failure'); END;")?;
         Ok(())
@@ -100,8 +126,7 @@ async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless(
             Ok(())
         })
         .unwrap();
-    bob.process_channel_reception_inner(channel, "live", false)
-        .unwrap();
+    settle_injected_channel(&bob, channel);
     assert!(
         bob.recalls
             .lock()
@@ -164,8 +189,7 @@ async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless(
         sealed.encode(),
     );
     bob.log.lock().unwrap().append(delete).unwrap();
-    bob.process_channel_reception_inner(channel, "live", false)
-        .unwrap();
+    settle_injected_channel(&bob, channel);
     assert!(
         !bob.recalls
             .lock()
@@ -200,8 +224,7 @@ async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless(
         .job;
     let late_id = late.id;
     bob.log.lock().unwrap().append(late).unwrap();
-    bob.process_channel_reception_inner(channel, "live", false)
-        .unwrap();
+    settle_injected_channel(&bob, channel);
     assert_eq!(
         bob.channel_checkpoints
             .source_binding(channel)
@@ -1959,7 +1982,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
     for event in invitation {
         member.log.lock().unwrap().append(event).unwrap();
     }
-    member.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&member, channel);
     member.accept_channel_invite(channel).await.unwrap();
     let acceptance = member
         .log
@@ -1972,7 +1995,7 @@ async fn recovered_channel_history_remains_readable_on_a_fresh_device() {
         .unwrap()
         .clone();
     source.log.lock().unwrap().append(acceptance).unwrap();
-    source.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&source, channel);
     assert_eq!(
         source.list_channels().unwrap()[0].member_count,
         2,
@@ -3164,7 +3187,12 @@ async fn preferred_post_office_fails_over_and_fallback_mailbox_is_drained_after_
     let fallback_addr = fallback_listener.local_addr().unwrap();
     let (fallback_ed, fallback_x) = fallback.secret_bytes();
     let fallback_store = Arc::new(Mutex::new(
-        PostOffice::open(&dir.path().join("fallback.log"), "pw", fallback).unwrap(),
+        PostOffice::open(
+            &dir.path().join("fallback").join("fallback.log"),
+            "pw",
+            fallback,
+        )
+        .unwrap(),
     ));
     let fallback_task = tokio::spawn(run_relay_accept_loop(
         DeviceIdentity::from_secret_bytes(fallback_ed, fallback_x),
@@ -3205,8 +3233,8 @@ async fn preferred_post_office_fails_over_and_fallback_mailbox_is_drained_after_
             dm,
             channels,
             files,
-            &dir.path().join(format!("{name}.log")),
-            &dir.path().join(format!("{name}-sent.log")),
+            &dir.path().join(name).join(format!("{name}.log")),
+            &dir.path().join(name).join(format!("{name}-sent.log")),
             "pw",
         )
         .unwrap();
@@ -3245,7 +3273,12 @@ async fn preferred_post_office_fails_over_and_fallback_mailbox_is_drained_after_
     let preferred_listener = TcpListener::bind(preferred_addr).await.unwrap();
     let (preferred_ed, preferred_x) = preferred.secret_bytes();
     let preferred_store = Arc::new(Mutex::new(
-        PostOffice::open(&dir.path().join("preferred.log"), "pw", preferred).unwrap(),
+        PostOffice::open(
+            &dir.path().join("preferred").join("preferred.log"),
+            "pw",
+            preferred,
+        )
+        .unwrap(),
     ));
     let preferred_task = tokio::spawn(run_relay_accept_loop(
         DeviceIdentity::from_secret_bytes(preferred_ed, preferred_x),
@@ -3301,10 +3334,20 @@ async fn alternate_federated_relay_delivers_when_preferred_is_offline() {
         DeviceIdentity::from_secret_bytes(ed, x)
     };
     let fallback_store = Arc::new(Mutex::new(
-        PostOffice::open(&dir.path().join("fallback.log"), "pw", duplicate(&fallback)).unwrap(),
+        PostOffice::open(
+            &dir.path().join("fallback").join("fallback.log"),
+            "pw",
+            duplicate(&fallback),
+        )
+        .unwrap(),
     ));
     let remote_store = Arc::new(Mutex::new(
-        PostOffice::open(&dir.path().join("remote.log"), "pw", duplicate(&remote)).unwrap(),
+        PostOffice::open(
+            &dir.path().join("remote").join("remote.log"),
+            "pw",
+            duplicate(&remote),
+        )
+        .unwrap(),
     ));
     let fallback_directory = FederationDirectory::new();
     let fallback_task = tokio::spawn(
@@ -3361,8 +3404,8 @@ async fn alternate_federated_relay_delivers_when_preferred_is_offline() {
             dm,
             channels,
             files,
-            &dir.path().join(format!("{name}.log")),
-            &dir.path().join(format!("{name}-sent.log")),
+            &dir.path().join(name).join(format!("{name}.log")),
+            &dir.path().join(name).join(format!("{name}-sent.log")),
             "pw",
         )
         .unwrap();
@@ -4507,7 +4550,10 @@ async fn channel_member_recovers_missed_message_from_peer() {
         "carol",
     );
     let before_recovery = carol_node.channel_history(channel, 10).unwrap();
-    assert!(before_recovery.is_empty(), "{before_recovery:?}");
+    assert!(
+        before_recovery.is_empty(),
+        "history must be empty before recovery"
+    );
     assert!(
         !carol_node.verified_dm_pull_peer(&bob_node.user_id()),
         "channel recovery must not depend on DM safety-number verification"
@@ -5248,8 +5294,8 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         a_dm,
         a_ch,
         a_file,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -5259,8 +5305,8 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         b_dm,
         b_ch,
         b_file,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -5270,8 +5316,8 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         c_dm,
         c_ch,
         c_file,
-        &dir.path().join("c.log"),
-        &dir.path().join("c-sent.log"),
+        &dir.path().join("c").join("c.log"),
+        &dir.path().join("c").join("c-sent.log"),
         "pw",
     )
     .unwrap();
@@ -5415,11 +5461,29 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .transfer_channel_owner(channel, &bob_uid)
         .await
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while bob_node.channel_owner(channel) != bob_uid {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recipient projects the transferred owner");
     assert_eq!(bob_node.channel_owner(channel), bob_uid);
     bob_node
         .add_channel_member(channel, carol_node.identity.public())
         .await
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !alice_node
+            .channel_members(channel)
+            .iter()
+            .any(|member| member.user_id() == carol_uid)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recipient projects the new owner's membership change");
     assert!(
         alice_node
             .channel_members(channel)
@@ -5484,8 +5548,15 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
     let recovered = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             bob_node.retry_channel_departures().await;
-            let canonical = alice_node.account_group_projection(channel).unwrap();
-            if canonical.authorized.contains(&departure.id)
+            let canonical = match alice_node.account_group_projection(channel) {
+                Ok(canonical) => canonical,
+                Err(crate::eventlog::LogError::StaleCursor) => {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Err(error) => panic!("departure projection failed: {error}"),
+            };
+            if canonical.is_authorized(departure.id).unwrap()
                 && canonical
                     .state
                     .as_ref()
@@ -5569,8 +5640,8 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         a_dm,
         a_ch,
         a_file,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -5580,8 +5651,8 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         b_dm,
         b_ch,
         b_file,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -5662,6 +5733,13 @@ async fn channel_messages_are_forward_secret_and_history_comes_from_stores() {
         .send_channel_message(channel, b"retry after disk recovery")
         .await
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !bob_node.channel_plaintext_retry_pending_for_test(channel) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the receiver must attempt the failing durable write");
     assert!(b_ch_r.try_recv().is_err());
     assert_eq!(bob_node.channel_history(channel, 10).unwrap().len(), 2);
     bob_node
@@ -5780,8 +5858,8 @@ async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
         alice_dm_tx,
         alice_ch_tx,
         alice_file_tx,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -5791,8 +5869,8 @@ async fn renaming_a_channel_propagates_to_members_and_is_owner_only() {
         bob_dm_tx,
         bob_ch_tx,
         bob_file_tx,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6055,8 +6133,8 @@ async fn owner_dissolution_syncs_to_member_over_loopback() {
         a_dm,
         a_ch,
         a_file,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6066,8 +6144,8 @@ async fn owner_dissolution_syncs_to_member_over_loopback() {
         b_dm,
         b_ch,
         b_file,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6399,8 +6477,8 @@ async fn attachment_offer_waits_for_exact_recipient_approval() {
         a_dm,
         a_ch,
         a_file,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6410,8 +6488,8 @@ async fn attachment_offer_waits_for_exact_recipient_approval() {
         b_dm,
         b_ch,
         b_file,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6554,8 +6632,8 @@ async fn two_nodes_transfer_nested_directory_and_save_it() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6565,8 +6643,8 @@ async fn two_nodes_transfer_nested_directory_and_save_it() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6665,8 +6743,8 @@ async fn recipient_pulls_file_chunks_directly_when_push_missed() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6676,8 +6754,8 @@ async fn recipient_pulls_file_chunks_directly_when_push_missed() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8261,8 +8339,8 @@ async fn account_recall_over_the_wire_tombstones_for_the_receiver() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8273,8 +8351,8 @@ async fn account_recall_over_the_wire_tombstones_for_the_receiver() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8424,8 +8502,8 @@ async fn send_file_to_account_shows_in_sender_account_history() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8436,8 +8514,8 @@ async fn send_file_to_account_shows_in_sender_account_history() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8807,8 +8885,8 @@ async fn send_to_account_self_syncs_to_own_other_device() {
         a1_dm,
         a1_ch,
         a1_f,
-        &dir.path().join("a1.log"),
-        &dir.path().join("a1-sent.log"),
+        &dir.path().join("a1").join("a1.log"),
+        &dir.path().join("a1").join("a1-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8819,8 +8897,8 @@ async fn send_to_account_self_syncs_to_own_other_device() {
         a2_dm,
         a2_ch,
         a2_f,
-        &dir.path().join("a2.log"),
-        &dir.path().join("a2-sent.log"),
+        &dir.path().join("a2").join("a2.log"),
+        &dir.path().join("a2").join("a2-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8831,8 +8909,8 @@ async fn send_to_account_self_syncs_to_own_other_device() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -9919,8 +9997,8 @@ async fn linking_transfers_the_account_secret_with_a_valid_code() {
         d,
         c,
         f,
-        &dir.path().join("l.log"),
-        &dir.path().join("l-sent.log"),
+        &dir.path().join("l").join("l.log"),
+        &dir.path().join("l").join("l-sent.log"),
         "pw",
     )
     .unwrap();
@@ -9935,8 +10013,8 @@ async fn linking_transfers_the_account_secret_with_a_valid_code() {
         d2,
         c2,
         f2,
-        &dir.path().join("j.log"),
-        &dir.path().join("j-sent.log"),
+        &dir.path().join("j").join("j.log"),
+        &dir.path().join("j").join("j-sent.log"),
         "pw",
     )
     .unwrap();
@@ -10356,8 +10434,8 @@ async fn account_history_backfills_to_a_linked_device() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -10381,8 +10459,8 @@ async fn account_history_backfills_to_a_linked_device() {
         d,
         e,
         f,
-        &dir.path().join("a2.log"),
-        &dir.path().join("a2-sent.log"),
+        &dir.path().join("a2").join("a2.log"),
+        &dir.path().join("a2").join("a2-sent.log"),
         "pw",
     )
     .unwrap();
@@ -10947,8 +11025,8 @@ async fn setting_an_avatar_propagates_to_a_peer_account_over_loopback() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -10959,8 +11037,8 @@ async fn setting_an_avatar_propagates_to_a_peer_account_over_loopback() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -11583,6 +11661,7 @@ async fn group_reception_projection_failure_case(failed_rollback: bool, restart:
         ));
     }
     append(68, EventKind::ChannelDissolve, vec![]);
+    crate::node::test_support::settle_group_metadata(&node, conv);
     if failed_rollback {
         // Fail after the receiver, transcript and receipt identity have all
         // been written inside the real production transaction.
@@ -11622,10 +11701,26 @@ async fn group_reception_projection_failure_case(failed_rollback: bool, restart:
             node.close_profile().unwrap();
             let (reopened, mut reopened_rx) =
                 open(DeviceIdentity::from_secret_bytes(secret.0, secret.1));
+            assert_eq!(reopened.reception_effects.head().unwrap().sequence, 0);
+            assert_eq!(
+                reopened
+                    .log
+                    .lock()
+                    .unwrap()
+                    .repository()
+                    .unwrap()
+                    .body_read_counts(),
+                (0, 0),
+                "open must not drain the pending receive backlog"
+            );
+            crate::node::test_support::settle_group_metadata(&reopened, conv);
+            reopened
+                .process_channel_reception_inner(conv, "catch_up", true)
+                .unwrap();
             assert_eq!(
                 reopened.channel_history(conv, 100).unwrap().len(),
                 64,
-                "startup must yield before draining the final pending row"
+                "one bounded receive turn must yield before the final pending row"
             );
             assert_eq!(
                 reopened.reception_effects.head().unwrap().sequence,
@@ -12917,6 +13012,22 @@ fn participant_event_growth_reads_owned_bodies_and_preserves_finite_network_view
     let store_owner = node.sync_store(&peer.public());
     let store = store_owner.lock().unwrap();
     let view = NetworkSyncStore::open_view(&*store, &conversation).unwrap();
+    let budget = crate::eventlog::sync::network::PreparationBudget::default();
+    let mut ready = false;
+    for _ in 0..4096 {
+        let step = NetworkSyncStore::prepare_view_step(&*store, &view, budget).unwrap();
+        assert!(
+            step.rows <= budget.rows && step.edges <= budget.edges && step.bytes <= budget.bytes
+        );
+        if step.ready {
+            ready = true;
+            break;
+        }
+    }
+    assert!(
+        ready,
+        "finite network preparation must finish its captured source"
+    );
     let new = Event::new(
         &node.identity,
         conversation,
@@ -12956,6 +13067,31 @@ fn participant_event_growth_reads_owned_bodies_and_preserves_finite_network_view
     }
     assert_eq!(ids.len(), 40);
     assert!(!ids.contains(&new.id));
+    let have = Default::default();
+    for prepare in [false, true] {
+        let mut ready = false;
+        for _ in 0..4096 {
+            let step = if prepare {
+                NetworkSyncStore::prepare_export_step(&*store, &view, &have, budget)
+            } else {
+                NetworkSyncStore::reset_export_step(&*store, &view, budget)
+            }
+            .unwrap();
+            assert!(
+                step.rows <= budget.rows
+                    && step.edges <= budget.edges
+                    && step.bytes <= budget.bytes
+            );
+            if step.ready {
+                ready = true;
+                break;
+            }
+        }
+        assert!(
+            ready,
+            "finite export preparation must finish its captured source"
+        );
+    }
     let mut exported = Vec::new();
     let mut cursor = None;
     loop {

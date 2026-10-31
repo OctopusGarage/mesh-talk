@@ -1066,9 +1066,21 @@ impl Node {
         log.repository()?.initialize_ancestry()?;
         let channel_checkpoints =
             super::channel::checkpoint::ChannelCheckpointStore::open(storage.clone())?;
+        // At most the existing bounded WAL cohort contributes channel IDs.
+        // Restored historical channels are not added to this recovery allowance.
+        let mut recovered_control_channels = std::collections::BTreeSet::new();
         loop {
             if let Some(tx) = delivery.pending_transactions().first() {
                 delivery.validate_message_action_transaction(tx, &log, &identity)?;
+                use super::delivery_store::DeliveryTransaction;
+                if let DeliveryTransaction::ChannelControl { events }
+                | DeliveryTransaction::AccountSelfControl { events, .. }
+                | DeliveryTransaction::LegacyMemberLeave { events, .. }
+                | DeliveryTransaction::AccountOwnerControl { events, .. } = tx.body()
+                    && let Some(event) = events.first()
+                {
+                    recovered_control_channels.insert(*event.conversation_id.as_bytes());
+                }
             }
             let recall = delivery
                 .pending_transactions()
@@ -1312,15 +1324,12 @@ impl Node {
             reaction_queries: Mutex::default(),
             my_dm_reactions: Mutex::new(my_dm_reactions),
         };
+        node.initialize_public_profile_reconciliation()?;
         node.reconcile_account_profiles_on_open().map_err(|error| {
             LogError::CorruptFile(format!("account profile projection: {error}"))
         })?;
-        if let Err(error) = node.project_public_profile_documents() {
-            log::debug!("contact profile projection deferred: {error}");
-        }
-        if let Err(error) = node.publish_public_profile_documents() {
-            log::debug!("contact profile publication deferred: {error}");
-        }
+        // Optional signed-document repair runs in finite account-sync turns.
+        // Its durable sources and exact receipts survive a stopped runtime.
         node.prune_expired_received_on_open()
             .map_err(|error| LogError::CorruptFile(format!("expiry cleanup: {error}")))?;
         if node.retry_conversation_personal_cleanup().is_err() {
@@ -1388,6 +1397,17 @@ impl Node {
                     })?;
                     state.import_my_sender(state.epoch(), key);
                 }
+            }
+        }
+        // Recovered controls can make the restored presentation stale. Advance
+        // only this bounded cohort under one global canonical allowance; larger
+        // work remains queued and strict readers retain their Pending fence.
+        let mut recovery_budget = crate::eventlog::sync::network::PreparationBudget::default();
+        for channel in recovered_control_channels {
+            let channel = ConversationId::new(channel);
+            match node.prepare_channel_admission(channel, &mut recovery_budget) {
+                Ok(()) | Err(LogError::StaleCursor) => {}
+                Err(error) => return Err(error),
             }
         }
         node.archived_channels = archived_channel_summaries(&node.channel_checkpoints)?;
@@ -1502,13 +1522,14 @@ impl Node {
             })
             .collect();
         let local_ids: std::collections::HashSet<_> = book.channel_ids().into_iter().collect();
-        channels.extend(
-            self.archived_channels
-                .iter()
-                .filter(|archive| book.state(&archive.id).is_none())
-                .cloned(),
-        );
         drop(book);
+        // Deferred projection can publish an imported channel after open. Read
+        // current indexed summaries instead of freezing that initial empty view.
+        channels.extend(
+            archived_channel_summaries(&self.channel_checkpoints)?
+                .into_iter()
+                .filter(|archive| !local_ids.contains(&archive.id)),
+        );
         for channel in &mut channels {
             let (accounts, unbound) = self.channel_member_account_sets(channel.id)?;
             if !channel.archived || !accounts.is_empty() || !unbound.is_empty() {

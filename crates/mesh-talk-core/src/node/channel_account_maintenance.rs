@@ -340,8 +340,9 @@ impl Node {
                             value.poll_at = Instant::now() + RETRY;
                         }
                     }
+                    let generation = value.generation;
                     if let Some(channel) = value.pending.pop_front() {
-                        let _ = tokio::time::timeout(Duration::from_secs(15), async {
+                        let pulled = tokio::time::timeout(Duration::from_secs(15), async {
                             let mut connection =
                                 self.privacy_sync_dial(peer.addr, &peer.public).await.ok()?;
                             let store = self.pull_sync_store(connection.peer_identity());
@@ -353,7 +354,16 @@ impl Node {
                             Some(())
                         })
                         .await;
-                        self.maintain_one_account_channel(channel, work).await;
+                        let maintained = self.maintain_one_account_channel(channel, work).await;
+                        if (!matches!(pulled, Ok(Some(()))) || !maintained)
+                            && let Some(value) = work.peers.get_mut(&peer.public.user_id())
+                            && value.generation == generation
+                        {
+                            // This bounded inventory slot remains work until its
+                            // signed controls are ready, even before list_channels
+                            // can expose the newly recovered group.
+                            value.pending.push_back(channel);
+                        }
                     }
                 }
             }
@@ -450,7 +460,7 @@ impl Node {
         &self,
         channel: ConversationId,
         work: &mut ChannelAccountMaintenance,
-    ) {
+    ) -> bool {
         #[cfg(test)]
         {
             let hook = self
@@ -472,9 +482,16 @@ impl Node {
         };
         drop(policy);
         match result {
-            Ok(Some(members)) => self.distribute_channel(channel, &members).await,
-            Ok(None) => {}
-            Err(_) => log::warn!("account channel maintenance deferred"),
+            Ok(Some(members)) => {
+                self.distribute_channel(channel, &members).await;
+                true
+            }
+            Ok(None) => true,
+            Err(NodeError::Log(LogError::StaleCursor)) => false,
+            Err(error) => {
+                log::warn!("account channel maintenance deferred: {error}");
+                false
+            }
         }
     }
     fn commit_account_maintenance(
@@ -482,6 +499,22 @@ impl Node {
         channel: ConversationId,
         work: &mut ChannelAccountMaintenance,
     ) -> Result<Option<Vec<PublicIdentity>>, NodeError> {
+        self.commit_account_maintenance_with_budget(
+            channel,
+            work,
+            &mut crate::eventlog::sync::network::PreparationBudget::default(),
+        )
+    }
+    fn commit_account_maintenance_with_budget(
+        &self,
+        channel: ConversationId,
+        work: &mut ChannelAccountMaintenance,
+        preparation: &mut crate::eventlog::sync::network::PreparationBudget,
+    ) -> Result<Option<Vec<PublicIdentity>>, NodeError> {
+        // Reuse one bounded admission allowance for the selected channel and
+        // every locally appended control tail. Pending before any append remains
+        // retryable; an accepted control retains its explicit fanout outcome.
+        self.prepare_channel_admission(channel, preparation)?;
         let own = self.own_group_proof();
         let me = self.identity.public();
         let mut projection = self.account_group_projection(channel)?;
@@ -573,7 +606,19 @@ impl Node {
                 return Ok(None);
             }
             self.append_event(channel, EventKind::ChannelAccountAuthority, payload)?;
-            self.process_channel(channel);
+            match self.prepare_channel_admission(channel, preparation) {
+                Ok(()) => {}
+                Err(LogError::StaleCursor) => {
+                    // The control is already durable. Hand its recipients to
+                    // the existing async fanout, which finishes selected
+                    // preparation after releasing membership/privacy guards.
+                    return Ok(projection
+                        .state
+                        .as_ref()
+                        .map(|state| state.members().to_vec()));
+                }
+                Err(error) => return Err(error.into()),
+            }
             projection = self.account_group_projection(channel)?;
             changed = true;
         }
@@ -606,30 +651,71 @@ impl Node {
                 EventKind::ChannelDeviceInheritance,
                 control.encode(),
             )?;
-            self.process_channel(channel);
+            match self.prepare_channel_admission(channel, preparation) {
+                Ok(()) => {}
+                Err(LogError::StaleCursor) => {
+                    // The control is already durable. Hand its recipients to
+                    // the existing async fanout, which finishes selected
+                    // preparation after releasing membership/privacy guards.
+                    return Ok(projection
+                        .state
+                        .as_ref()
+                        .map(|state| state.members().to_vec()));
+                }
+                Err(error) => return Err(error.into()),
+            }
             projection = self.account_group_projection(channel)?;
-            let Some(state) = projection
+            if !projection
                 .state
                 .as_ref()
-                .filter(|state| state.is_member(&self.user_id()))
-            else {
+                .is_some_and(|state| state.is_member(&self.user_id()))
+            {
                 return Ok(None);
-            };
-            // An inherited genuine account invitation remains pending until accepted.
-            // Pending membership never installs a sender or shares receive material.
-            if state.is_accepted_member(&self.user_id()) {
-                self.distribute_my_sender_key(channel, state.members())?;
             }
             changed = true;
         }
-        if self.share_account_receive_keys(channel, &projection, work)? {
+        // An inherited genuine account invitation remains pending until accepted.
+        // Derive repair from durable authority/sender state so a budget yield
+        // after inheritance cannot permanently skip sender installation.
+        let state = projection
+            .state
+            .as_ref()
+            .expect("authority has channel state");
+        if state.is_accepted_member(&self.user_id())
+            && projection
+                .authority
+                .inherited_device_proofs()
+                .into_iter()
+                .any(|(_, _, proof)| proof.public() == me)
+            && self
+                .channel_senders
+                .lock()
+                .expect("sender store lock")
+                .current(&channel, state.epoch())?
+                .is_none()
+        {
+            self.commit_my_sender_key(channel, state.members())?;
+            match self.prepare_channel_admission(channel, preparation) {
+                Ok(()) => {}
+                Err(LogError::StaleCursor) => {
+                    // The control is already durable. Hand its recipients to
+                    // the existing async fanout, which finishes selected
+                    // preparation after releasing membership/privacy guards.
+                    return Ok(projection
+                        .state
+                        .as_ref()
+                        .map(|state| state.members().to_vec()));
+                }
+                Err(error) => return Err(error.into()),
+            }
+            projection = self.account_group_projection(channel)?;
             changed = true;
-            self.process_channel(channel);
+        }
+        if self.share_account_receive_keys(channel, &projection, work, preparation)? {
+            changed = true;
         }
         Ok(if changed {
-            self.account_group_projection(channel)?
-                .state
-                .map(|state| state.members().to_vec())
+            projection.state.map(|state| state.members().to_vec())
         } else {
             None
         })
@@ -639,6 +725,7 @@ impl Node {
         channel: ConversationId,
         projection: &super::channel::ChannelMembershipProjection,
         work: &mut ChannelAccountMaintenance,
+        preparation: &mut crate::eventlog::sync::network::PreparationBudget,
     ) -> Result<bool, NodeError> {
         let Some(state) = projection.state.as_ref().filter(|state| {
             state.is_accepted_member(&self.user_id())
@@ -757,6 +844,11 @@ impl Node {
                 control.encode(),
             )?;
             changed = true;
+            match self.prepare_channel_admission(channel, preparation) {
+                Ok(()) => {}
+                Err(LogError::StaleCursor) => return Ok(true),
+                Err(error) => return Err(error.into()),
+            }
             let next = self.account_group_projection(channel)?;
             if next.authority.current_event() != Some(authority)
                 || !next
@@ -1234,15 +1326,23 @@ mod tests {
                 .is_accepted_member(&target.user_id())
         );
         let absent = {
-            let book = target.channels.lock().unwrap();
-            let mut distributions = book
-                .state(&channel)
+            let binding = target
+                .channel_checkpoints
+                .source_binding(channel)
                 .unwrap()
-                .current_receive_distributions();
-            let absent = distributions
-                .iter()
-                .all(|(author, _, _)| author != &source.user_id());
-            for (_, _, value) in &mut distributions {
+                .unwrap();
+            let epoch = target
+                .channel_checkpoints
+                .current_state(channel)
+                .unwrap()
+                .unwrap()
+                .epoch();
+            let mut distribution = target
+                .channel_checkpoints
+                .receiver_distribution(&binding, &source.user_id(), epoch)
+                .unwrap();
+            let absent = distribution.is_none();
+            if let Some(value) = distribution.as_mut() {
                 zeroize::Zeroize::zeroize(&mut value.chain_key);
             }
             absent
@@ -1342,8 +1442,8 @@ mod tests {
             target
                 .account_group_projection(channel)
                 .unwrap()
-                .authorized
-                .contains(&message)
+                .is_authorized(message)
+                .unwrap()
         );
         assert_eq!(author, source.user_id());
         let header_held = tokio::time::timeout(Duration::from_secs(8), async {
@@ -1397,19 +1497,24 @@ mod tests {
         );
         let keys_arrived = tokio::time::timeout(Duration::from_secs(8), async {
             loop {
-                let arrived = {
-                    let book = target.channels.lock().unwrap();
-                    let mut values = book
-                        .state(&channel)
-                        .unwrap()
-                        .current_receive_distributions();
-                    let found = values.iter().any(|(identity, key_epoch, distribution)| {
-                        identity == &author && *key_epoch == epoch && distribution.n > position
-                    });
-                    for (_, _, value) in &mut values {
-                        zeroize::Zeroize::zeroize(&mut value.chain_key);
-                    }
-                    found
+                let selected = (|| -> Result<bool, LogError> {
+                    let Some(binding) = target.channel_checkpoints.source_binding(channel)? else {
+                        return Ok(false);
+                    };
+                    let Some(mut distribution) = target
+                        .channel_checkpoints
+                        .receiver_distribution(&binding, &author, epoch)?
+                    else {
+                        return Ok(false);
+                    };
+                    let found = distribution.n > position;
+                    zeroize::Zeroize::zeroize(&mut distribution.chain_key);
+                    Ok(found)
+                })();
+                let arrived = match selected {
+                    Ok(found) => found,
+                    Err(LogError::StaleCursor) => false,
+                    Err(error) => panic!("selected late receive-key lookup failed: {error}"),
                 };
                 if arrived {
                     break;
@@ -1568,7 +1673,12 @@ mod tests {
         for _ in 0..3 {
             assert!(
                 !source
-                    .share_account_receive_keys(channel, &projection, &mut source_work)
+                    .share_account_receive_keys(
+                        channel,
+                        &projection,
+                        &mut source_work,
+                        &mut crate::eventlog::sync::network::PreparationBudget::default(),
+                    )
                     .unwrap()
             );
         }
@@ -1763,6 +1873,7 @@ mod tests {
         node.append_event(channel, EventKind::MembershipChange, meta.encode())
             .unwrap();
         node.process_channel(channel);
+        crate::node::test_support::settle_group_metadata(node, channel);
         let mut work = ChannelAccountMaintenance::default();
         assert!(
             node.commit_account_maintenance(channel, &mut work)
@@ -1792,6 +1903,75 @@ mod tests {
                 .authority
                 .current_event()
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn account_maintenance_pending_tail_keeps_the_accepted_control_fanout() {
+        let group = Group::new().await;
+        let node = &group.nodes[0];
+        let channel = crate::channel::new_channel_id();
+        let members = vec![node.identity.public()];
+        node.append_event(
+            channel,
+            EventKind::MembershipChange,
+            crate::channel::ChannelMeta {
+                name: "bounded maintenance fanout".into(),
+                members: members.clone(),
+                owner: node.user_id(),
+                epoch: 0,
+            }
+            .encode(),
+        )
+        .unwrap();
+        crate::node::test_support::settle_group_metadata(node, channel);
+        node.authorize_legacy_channel_migration_if(|commit| commit())
+            .unwrap();
+        let mut work = ChannelAccountMaintenance::default();
+        let mut budget = crate::eventlog::sync::network::PreparationBudget {
+            rows: 2,
+            ..Default::default()
+        };
+        let fanout = node
+            .commit_account_maintenance_with_budget(channel, &mut work, &mut budget)
+            .unwrap();
+        assert_eq!(fanout, Some(members));
+        assert!(
+            matches!(
+                node.account_group_projection(channel),
+                Err(LogError::StaleCursor)
+            ),
+            "the accepted authority must retain its fanout when this turn cannot finish its tail"
+        );
+        let accepted = node
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::ChannelAccountAuthority)
+            .map(|event| event.id)
+            .collect::<Vec<_>>();
+        assert_eq!(accepted.len(), 1);
+        node.await_channel_metadata(channel).await.unwrap();
+        assert!(
+            node.commit_account_maintenance(channel, &mut work)
+                .unwrap()
+                .is_none(),
+            "unchanged maintenance must not schedule another network fanout"
+        );
+        assert_eq!(
+            node.log
+                .lock()
+                .unwrap()
+                .events(&channel)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == EventKind::ChannelAccountAuthority)
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            accepted
         );
     }
 

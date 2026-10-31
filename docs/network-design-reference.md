@@ -2287,6 +2287,14 @@ pages with continuations mean progress, not an empty history. Existing participa
 policy projections use an explicit legacy adapter until their own owners adopt
 the paged contract.
 
+The SDK's `node::request_round` accepts a caller-owned authenticated
+`SecureChannel`, selected conversation and `SyncStore`. The caller retains
+admission and disclosure policy responsibility. This existing collecting
+compatibility path also lets external acceptance rigs observe a live relay over
+its normal authenticated protocol; it does not open retired legacy paths or
+acquire a second profile writer lease. Production participant and relay workers
+continue to use their bounded network stores.
+
 Durable admission assigns a commit ordinal only after every same-conversation
 parent exists. Commit-order export therefore supplies the required topological
 prefix even when signed clocks are inverted. Deterministic timeline ordering is

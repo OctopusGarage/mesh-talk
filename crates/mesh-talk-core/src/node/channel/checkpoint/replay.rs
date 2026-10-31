@@ -557,7 +557,10 @@ impl ChannelCheckpointStore {
                 continue;
             }
             if budget.rows < 3 {
-                return Err(LogError::InvalidPageBudget);
+                // A valid caller remainder can pay for this selected header
+                // without enough rows for its causal cut. Charge that read,
+                // retain the cursor, and resume under the next allowance.
+                return Ok(work);
             }
             // Retained headers were admitted only after integrity/signature
             // validation. This empty legacy control needs no body or parent Vec.

@@ -24,6 +24,31 @@ CREATE TABLE group_raw_control_views(channel BLOB PRIMARY KEY CHECK(length(chann
 CREATE TABLE group_raw_control_marks(event BLOB PRIMARY KEY CHECK(length(event)=32)) WITHOUT ROWID;";
 
 const INPUT_SCHEMA: &str = "CREATE TABLE group_raw_control_inputs(channel BLOB PRIMARY KEY CHECK(length(channel)=32),source_key BLOB NOT NULL CHECK(length(source_key) IN(9,33))) WITHOUT ROWID;";
+// The wire cache remains limited to 4096 heads plus its overflow sentinel.
+// A local publication receipt retains the separately capped physical frontier
+// on disk; it is never kept in the 64-slot directory preparation cache.
+const RECEIPT_SCHEMA: &str = "
+CREATE TABLE group_raw_control_receipts(channel BLOB PRIMARY KEY CHECK(length(channel)=32),source_key BLOB NOT NULL CHECK(length(source_key) IN(9,33)),event_count INTEGER NOT NULL CHECK(event_count>=0 AND event_count<=131072)) WITHOUT ROWID;
+CREATE TABLE group_raw_control_receipt_rows(channel BLOB NOT NULL CHECK(length(channel)=32),event BLOB NOT NULL CHECK(length(event)=32),PRIMARY KEY(channel,event)) WITHOUT ROWID;";
+fn receipt_frontier(
+    node: &Node,
+    group: ConversationId,
+    count: usize,
+) -> Result<Vec<EventId>, crate::eventlog::LogError> {
+    if count > crate::node::account_documents::MAX_LOCAL_FRONTIER {
+        return Err(crate::eventlog::LogError::PageBudgetTooSmall {
+            required: count.saturating_mul(32),
+        });
+    }
+    node.storage.database().read(|c| {
+        let mut query = c.prepare("SELECT event FROM group_raw_control_receipt_rows WHERE channel=?1 ORDER BY event LIMIT ?2")?;
+        let mut rows = query.query(params![group.as_bytes().as_slice(),count as i64])?;
+        let mut frontier = Vec::with_capacity(count);
+        while let Some(row) = rows.next()? { frontier.push(id(row.get(0)?)?); }
+        if frontier.len() != count { return Err(invalid()); }
+        Ok(frontier)
+    })
+}
 const CONTROL_KINDS: [EventKind; 7] = [
     EventKind::MembershipChange,
     EventKind::ChannelOwnerTransfer,
@@ -111,7 +136,16 @@ pub(super) fn read(
         if !inputs {
             c.execute_batch(INPUT_SCHEMA)?;
         }
-        crate::storage::profile::manifest::validate_ddl(c, INPUT_SCHEMA)
+        crate::storage::profile::manifest::validate_ddl(c, INPUT_SCHEMA)?;
+        let receipts: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='group_raw_control_receipts')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !receipts {
+            c.execute_batch(RECEIPT_SCHEMA)?;
+        }
+        crate::storage::profile::manifest::validate_ddl(c, RECEIPT_SCHEMA)
     })?;
     if scope.is_none() {
         let source_key = cache_key(repository, group, revision)?;
@@ -122,20 +156,41 @@ pub(super) fn read(
             if bytes.len() % 32 != 0 || bytes.len() / 32 > MAX_ACCESS_FRONTIER + 1 {
                 return Err(invalid());
             }
-            let frontier = bytes
-                .as_chunks::<32>()
-                .0
-                .iter()
-                .copied()
-                .map(EventId::new)
-                .collect();
-            return Ok((
-                frontier,
-                (
-                    fingerprint.try_into().map_err(|_| invalid())?,
-                    usize::try_from(count).map_err(|_| invalid())?,
-                ),
-            ));
+            let receipt_count: Option<i64> = node.storage.database().read(|c| {
+                c.query_row("SELECT event_count FROM group_raw_control_receipts WHERE channel=?1 AND source_key=?2",params![group.as_bytes().as_slice(),source_key], |r| r.get(0)).optional().map_err(Into::into)
+            })?;
+            let frontier = if bytes.len() / 32 <= MAX_ACCESS_FRONTIER {
+                Some(
+                    bytes
+                        .as_chunks::<32>()
+                        .0
+                        .iter()
+                        .copied()
+                        .map(EventId::new)
+                        .collect(),
+                )
+            } else {
+                // An older truncated cache cannot stand in for the complete
+                // physical receipt. Rebuild it from retained metadata once.
+                receipt_count
+                    .map(|count| {
+                        receipt_frontier(
+                            node,
+                            group,
+                            usize::try_from(count).map_err(|_| invalid())?,
+                        )
+                    })
+                    .transpose()?
+            };
+            if let Some(frontier) = frontier {
+                return Ok((
+                    frontier,
+                    (
+                        fingerprint.try_into().map_err(|_| invalid())?,
+                        usize::try_from(count).map_err(|_| invalid())?,
+                    ),
+                ));
+            }
         }
     }
     #[cfg(test)]
@@ -169,6 +224,17 @@ pub(super) fn read(
     }
     let stamp: ([u8; 32], usize) = (digest.finalize().into(), count);
     clear_marks(node)?;
+    node.storage.database().transaction(|c| {
+        c.execute(
+            "DELETE FROM group_raw_control_receipts WHERE channel=?1",
+            [group.as_bytes().as_slice()],
+        )?;
+        Ok(())
+    })?;
+    while node.storage.database().transaction(|c| {
+        c.execute("DELETE FROM group_raw_control_receipt_rows WHERE channel=?1 AND event IN(SELECT event FROM group_raw_control_receipt_rows WHERE channel=?1 LIMIT 128)",[group.as_bytes().as_slice()]).map_err(Into::into)
+    })? != 0 {}
+    let mut receipt_count = 0usize;
     while repository
         .order_step(&group, CausalOrder::Logical, OrderWorkBudget::default())?
         .readiness
@@ -202,6 +268,18 @@ pub(super) fn read(
                     .map_err(Into::into)
                 })?;
                 if relevant && !marked {
+                    receipt_count += node.storage.database().transaction(|c| {
+                        c.execute(
+                            "INSERT OR IGNORE INTO group_raw_control_receipt_rows VALUES(?1,?2)",
+                            params![group.as_bytes().as_slice(), event.as_bytes().as_slice()],
+                        )
+                        .map_err(Into::into)
+                    })?;
+                    if receipt_count > crate::node::account_documents::MAX_LOCAL_FRONTIER {
+                        return Err(crate::eventlog::LogError::PageBudgetTooSmall {
+                            required: receipt_count.saturating_mul(32),
+                        });
+                    }
                     frontier.insert(event);
                     if frontier.len() > MAX_ACCESS_FRONTIER + 1 {
                         frontier.pop_last();
@@ -238,10 +316,11 @@ pub(super) fn read(
             .collect();
         let source_key = cache_key(repository, group, revision)?;
         node.storage.database().transaction(|c| {
+            c.execute("INSERT INTO group_raw_control_receipts VALUES(?1,?2,?3) ON CONFLICT(channel) DO UPDATE SET source_key=excluded.source_key,event_count=excluded.event_count",params![group.as_bytes().as_slice(),&source_key,receipt_count as i64])?;
             c.execute("INSERT INTO group_raw_control_inputs VALUES(?1,?2) ON CONFLICT(channel) DO UPDATE SET source_key=excluded.source_key",params![group.as_bytes().as_slice(),source_key])?;
             c.execute("INSERT INTO group_raw_control_views VALUES(?1,?2,?3,?4,?5) ON CONFLICT(channel) DO UPDATE SET revision=excluded.revision,fingerprint=excluded.fingerprint,event_count=excluded.event_count,frontier=excluded.frontier",params![group.as_bytes().as_slice(),revision,stamp.0.as_slice(),i64::try_from(stamp.1).map_err(|_|invalid())?,bytes])?;
             Ok(())
         })?;
     }
-    Ok((frontier, stamp))
+    Ok((receipt_frontier(node, group, receipt_count)?, stamp))
 }

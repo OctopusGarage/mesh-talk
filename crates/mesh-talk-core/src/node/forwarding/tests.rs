@@ -439,7 +439,12 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
                 .flush_accepted_message(&MessageDestination::Channel(group), id)
                 .await;
         }
-        while recipient.channel_history(group, 10).unwrap().len() < 2 {
+        loop {
+            match recipient.channel_history(group, 10) {
+                Ok(history) if history.len() >= 2 => break,
+                Ok(_) | Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                Err(error) => panic!("recipient history failed: {error}"),
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let history = recipient.channel_history(group, 10).unwrap();
@@ -459,15 +464,21 @@ async fn forwarding_to_group_delivers_ordered_text_and_independent_merged_file()
         assert!(merged.items[0].status == "pending" || merged.items[0].status == "accepted");
         let merged = wait_forward_receipts(&sender, &request).await;
         let archive_id = merged.items[0].message_id.as_ref().unwrap();
-        let archive = sender
-            .channel_history(group, 10)
-            .unwrap()
-            .into_iter()
-            .find(|row| row.id.to_hex() == *archive_id)
-            .unwrap()
-            .file
-            .unwrap()
-            .file_conv;
+        let archive = loop {
+            match sender.channel_history(group, 10) {
+                Ok(history) => {
+                    if let Some(row) = history
+                        .into_iter()
+                        .find(|row| row.id.to_hex() == *archive_id)
+                    {
+                        break row.file.unwrap().file_conv;
+                    }
+                }
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                Err(error) => panic!("forwarded archive history failed: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         sender.flush_channel_file(group, archive).await;
         let offer = offers.recv().await.unwrap();
         assert_eq!(offer.name, "Chat records.mtchat");
@@ -1273,6 +1284,7 @@ async fn committed_group_progress_frees_batch_budget_and_survives_restart() {
     );
     node.log.lock().unwrap().append_durable(genesis).unwrap();
     node.process_channel(group);
+    crate::node::test_support::settle_group_metadata(&node, group);
     let mut selected = source(&node);
     selected.message_ids.truncate(1);
     let mut requests = Vec::new();

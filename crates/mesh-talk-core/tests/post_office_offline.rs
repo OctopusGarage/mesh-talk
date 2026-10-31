@@ -8,13 +8,24 @@
 mod support;
 
 use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{
+    Mutex,
+    mpsc::{self, Receiver},
+};
 use std::time::{Duration, Instant};
 
-use mesh_talk_core::eventlog::{ConversationId, EventKind, persist::PersistentEventLog};
+use mesh_talk_core::eventlog::{
+    ConversationId, Event, EventId, EventKind, EventLog, sync::network::NetworkSyncStore,
+};
+use mesh_talk_core::identity::device::{DeviceIdentity, PublicIdentity};
 use mesh_talk_core::identity::keystore;
+use mesh_talk_core::node::request_round;
+use mesh_talk_core::postoffice::IndexedPostOffice;
 use mesh_talk_core::postoffice::opaque::RelayMailbox;
+use mesh_talk_core::storage::profile::ProfileStorageLease;
+use mesh_talk_core::transport::SecureChannel;
 
 /// A spawned `mesh-talk-node` (normal or `--post-office`) with a line view of stdout.
 struct CliNode {
@@ -107,16 +118,82 @@ impl Drop for CliNode {
     }
 }
 
-/// Read the user_id from a startup line beginning with `prefix` (`node ` or
-/// `post-office `): the token after the prefix.
-fn read_user_id(node: &CliNode, prefix: &str, timeout: Duration) -> String {
+/// Read the identity and OS-assigned TCP port from the real startup line.
+fn read_startup(node: &CliNode, prefix: &str, timeout: Duration) -> (String, SocketAddr) {
     let line = node
         .wait_for(|l| l.starts_with(prefix), timeout)
         .unwrap_or_else(|| panic!("startup line starting with {prefix:?} within {timeout:?}"));
-    line.split_whitespace()
+    let user_id = line
+        .split_whitespace()
         .nth(1)
         .expect("startup line has a user_id")
-        .to_string()
+        .to_string();
+    let port = line
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("tcp/"))
+        .expect("startup line has a TCP port")
+        .trim_end_matches(',')
+        .parse::<u16>()
+        .unwrap();
+    (user_id, SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+}
+
+/// Observe the running relay through its authenticated public sync boundary.
+/// Opening its retired legacy path cannot inspect the indexed store, and an
+/// observer must not acquire a second writer lease over either live profile.
+fn await_relay_event(
+    runtime: &tokio::runtime::Runtime,
+    address: SocketAddr,
+    identity: &DeviceIdentity,
+    relay: &PublicIdentity,
+    mailbox: &RelayMailbox,
+    matches: impl Fn(&Event) -> bool,
+) -> (EventId, EventId, ConversationId) {
+    let store = Mutex::new(EventLog::default());
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut last_observation = "no matching wrapper";
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let result = runtime.block_on(async {
+            tokio::time::timeout(remaining.min(Duration::from_secs(5)), async {
+                let stream = tokio::net::TcpStream::connect(address)
+                    .await
+                    .map_err(|_| "connect failed")?;
+                let mut channel = SecureChannel::connect(stream, identity, Some(relay))
+                    .await
+                    .map_err(|_| "authentication failed")?;
+                request_round(&mut channel, &store, mailbox.id())
+                    .await
+                    .map_err(|_| "sync failed")?;
+                Ok::<_, &str>(())
+            })
+            .await
+        });
+        last_observation = match result {
+            Ok(Ok(())) => "no matching wrapper",
+            Ok(Err(stage)) => stage,
+            Err(_) => "observation timed out",
+        };
+        if result.is_ok_and(|result| result.is_ok()) {
+            let observed = store.lock().unwrap();
+            for outer in observed.events(&mailbox.id()) {
+                let inner = mailbox
+                    .open(outer)
+                    .expect("relay wrapper must authenticate its signed inner event");
+                if matches(&inner) {
+                    assert_eq!(
+                        mailbox.wrap(&inner).unwrap().id,
+                        outer.id,
+                        "relay retained the exact opaque wrapper"
+                    );
+                    assert_ne!(outer.id, inner.id);
+                    assert!(!observed.has(&inner.id));
+                    return (outer.id, inner.id, inner.conversation_id);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100).min(remaining));
+    }
+    panic!("relay durably contains only the opaque wrapper within 45s: {last_observation}");
 }
 
 /// Poll `/peers` until `want_uid` appears in `node`'s roster, or fail after 25s.
@@ -157,7 +234,7 @@ fn offline_dm_delivered_via_post_office() {
         "Relay",
         dp,
     );
-    let po_uid = read_user_id(&po, "post-office ", Duration::from_secs(90));
+    let (po_uid, po_address) = read_startup(&po, "post-office ", Duration::from_secs(90));
 
     // Alice and Bob (normal nodes). Keep Bob's keystore path to restart him later.
     let mut alice = CliNode::node(
@@ -167,8 +244,8 @@ fn offline_dm_delivered_via_post_office() {
     );
     let bob_keystore = dir.path().join("bob").join("identity.keystore");
     let mut bob = CliNode::node(&bob_keystore, "Bob", dp);
-    let alice_uid = read_user_id(&alice, "node ", Duration::from_secs(90));
-    let bob_uid = read_user_id(&bob, "node ", Duration::from_secs(90));
+    let (alice_uid, _) = read_startup(&alice, "node ", Duration::from_secs(90));
+    let (bob_uid, _) = read_startup(&bob, "node ", Duration::from_secs(90));
     assert_ne!(alice_uid, bob_uid);
 
     // Everyone converges: Alice needs Bob (to address) + PO (to replicate); Bob
@@ -191,40 +268,22 @@ fn offline_dm_delivered_via_post_office() {
 
     // Alice DMs offline Bob: direct dial fails, the event is replicated to the PO.
     alice.send(&format!("/msg {} held-hello", &bob_uid[..8]));
-    // Derive the pairwise mailbox from the fixture identities and observe the
-    // exact opaque wrapper at the relay. The original signed event must not be
-    // stored there. Only load existing fixture logs; the observer never writes.
-    let sender_log = dir.path().join("alice/messages.log");
+    // Derive the exact pairwise mailbox from the fixture identities. The
+    // observer only requests already-retained wrappers from the running relay.
     let relay_log = dir.path().join("relay/relay.log");
     let alice_id = keystore::load(&dir.path().join("alice/identity.keystore"), "pw").unwrap();
     let bob_id = keystore::load(&bob_keystore, "pw").unwrap();
     let relay_id = keystore::load(&dir.path().join("relay/identity.keystore"), "pw").unwrap();
     let mailbox = RelayMailbox::new(&alice_id, &bob_id.public(), &relay_id.public()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let mut replicated = None;
-    while Instant::now() < deadline {
-        if sender_log.is_file()
-            && relay_log.is_file()
-            && let (Ok(sender), Ok(relay)) = (
-                PersistentEventLog::open(&sender_log, "pw"),
-                PersistentEventLog::open(&relay_log, "pw"),
-            )
-        {
-            replicated = sender.all_event_ids().unwrap().into_iter().find_map(|id| {
-                let event = sender.get(&id).unwrap()?;
-                if event.kind != EventKind::Message || event.author.user_id() != alice_uid {
-                    return None;
-                }
-                let outer = mailbox.wrap(&event).ok()?;
-                (relay.has(&outer.id).unwrap() && !relay.has(&id).unwrap()).then_some(outer.id)
-            });
-        }
-        if replicated.is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let replicated = replicated.expect("relay durably contains only the opaque DM wrapper");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let replicated = await_relay_event(
+        &runtime,
+        po_address,
+        &alice_id,
+        &relay_id.public(),
+        &mailbox,
+        |event| event.kind == EventKind::Message && event.author.user_id() == alice_uid,
+    );
 
     // Create a private channel while Bob is still offline. The relay must hold
     // its original channel event only inside the same pairwise mailbox.
@@ -238,33 +297,14 @@ fn offline_dm_delivered_via_post_office() {
     let group_hex = created.split_whitespace().nth(1).unwrap().to_string();
     let group = ConversationId::new(hex::decode(&group_hex).unwrap().try_into().unwrap());
     alice.send(&format!("/channel-msg {} held-channel", &group_hex[..8]));
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let mut replicated_group = None;
-    while Instant::now() < deadline {
-        if let (Ok(sender), Ok(relay)) = (
-            PersistentEventLog::open(&sender_log, "pw"),
-            PersistentEventLog::open(&relay_log, "pw"),
-        ) {
-            assert_eq!(
-                relay.conversation_len(&group).unwrap(),
-                0,
-                "channel ID stays private"
-            );
-            replicated_group = sender.all_event_ids().unwrap().into_iter().find_map(|id| {
-                let event = sender.get(&id).unwrap()?;
-                if event.conversation_id != group || event.kind != EventKind::Message {
-                    return None;
-                }
-                let outer = mailbox.wrap(&event).ok()?;
-                relay.has(&outer.id).unwrap().then_some(outer.id)
-            });
-        }
-        if replicated_group.is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let replicated_group = replicated_group.expect("relay holds the opaque channel event");
+    let replicated_group = await_relay_event(
+        &runtime,
+        po_address,
+        &alice_id,
+        &relay_id.public(),
+        &mailbox,
+        |event| event.conversation_id == group && event.kind == EventKind::Message,
+    );
 
     // Route isolation: the original sender must be gone before the recipient
     // returns, otherwise ordinary peer synchronization could fake relay success.
@@ -273,7 +313,7 @@ fn offline_dm_delivered_via_post_office() {
     // Bob comes back (same keystore → same identity); his drain pulls from the PO.
     let bob = CliNode::node(&bob_keystore, "Bob", dp);
     assert_eq!(
-        read_user_id(&bob, "node ", Duration::from_secs(90)),
+        read_startup(&bob, "node ", Duration::from_secs(90)).0,
         bob_uid
     );
     let deadline = Instant::now() + Duration::from_secs(45);
@@ -292,7 +332,26 @@ fn offline_dm_delivered_via_post_office() {
     }
     drop(bob);
     drop(po);
-    let retained = PersistentEventLog::open(&relay_log, "pw").expect("reopen stopped relay store");
-    assert!(retained.has(&replicated).unwrap());
-    assert!(retained.has(&replicated_group).unwrap());
+    let retained = IndexedPostOffice::open_with_lease(
+        ProfileStorageLease::acquire(relay_log.parent().unwrap()).unwrap(),
+        &relay_log,
+        "pw",
+        relay_id,
+    )
+    .expect("reopen stopped indexed relay store");
+    for (outer, inner, conversation) in [replicated, replicated_group] {
+        assert!(retained.durable_have(&mailbox.id(), &outer).unwrap());
+        assert!(
+            !retained.durable_have(&conversation, &inner).unwrap(),
+            "the original signed event must never be retained by the relay"
+        );
+    }
+    assert_eq!(
+        retained
+            .metadata(&retained.open_view(&group).unwrap())
+            .unwrap()
+            .count,
+        0,
+        "channel ID stays private"
+    );
 }

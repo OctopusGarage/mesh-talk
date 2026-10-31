@@ -681,6 +681,7 @@ impl Node {
         enabled: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -719,6 +720,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -1016,8 +1018,14 @@ impl Node {
         })?;
         let (channel, members) = distribution.expect("authorized channel commit executed");
         self.await_channel_metadata(channel).await?;
-        self.record_channel_owner_origin(channel)?;
         self.distribute_my_sender_key(channel, &members)?;
+        // Key publication advances the signed source too. Complete that local
+        // intent before exposing a newly created channel to immediate sends.
+        self.await_channel_metadata(channel).await?;
+        // This grants automatic account migration permission. Grant it only
+        // after creation's final source read, so maintenance cannot append an
+        // authority upgrade between sender publication and metadata completion.
+        self.record_channel_owner_origin(channel)?;
         self.distribute_channel(channel, &members).await;
         Ok(channel)
     }
@@ -1027,6 +1035,18 @@ impl Node {
     /// their entry to follow our chain from `n = 0`. Called at create and on each
     /// membership change so members at a new epoch can read our new messages.
     pub(in crate::node) fn distribute_my_sender_key(
+        &self,
+        channel: ConversationId,
+        members: &[PublicIdentity],
+    ) -> Result<(), NodeError> {
+        self.commit_my_sender_key(channel, members)?;
+        self.process_channel(channel);
+        Ok(())
+    }
+
+    /// Commit the same sender WAL without spending another canonical allowance.
+    /// Bounded maintenance prepares its accepted tail with its existing budget.
+    pub(in crate::node) fn commit_my_sender_key(
         &self,
         channel: ConversationId,
         members: &[PublicIdentity],
@@ -1095,7 +1115,6 @@ impl Node {
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
         drop(delivery);
-        self.process_channel(channel);
         Ok(())
     }
 
@@ -1134,6 +1153,7 @@ impl Node {
         require_account_sibling: bool,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<bool, NodeError> {
+        self.await_channel_metadata(channel).await?;
         let upgraded = self
             .account_group_projection(channel)?
             .authority
@@ -1292,6 +1312,7 @@ impl Node {
         member_user_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         // Policy serialization precedes host authorization and membership locks.
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
@@ -1383,6 +1404,7 @@ impl Node {
         account_id: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         // Policy serialization precedes host authorization and membership locks.
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
@@ -1486,6 +1508,7 @@ impl Node {
         new_name: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
         authorize(&mut || {
             let _membership = self
@@ -1544,7 +1567,9 @@ impl Node {
         new_owner: &str,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let mut distribution = None;
+        let mut transfer = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
@@ -1558,7 +1583,7 @@ impl Node {
                 super::channel_account_controls::AccountChannelMutation::Unchanged => return Ok(()),
                 super::channel_account_controls::AccountChannelMutation::Legacy => {}
             }
-            let (owner, accepted) = {
+            let (owner, accepted, members) = {
                 let book = self.channels.lock().expect("channels mutex not poisoned");
                 let state = book
                     .state(&channel)
@@ -1566,6 +1591,7 @@ impl Node {
                 (
                     state.owner().to_string(),
                     state.is_accepted_member(new_owner),
+                    state.members().to_vec(),
                 )
             };
             if !self.channel_can_manage(channel)? {
@@ -1581,30 +1607,33 @@ impl Node {
                     "new owner must have accepted the channel invitation".into(),
                 ));
             }
-            self.append_event(
+            let (_, event) = self.append_event_with_profile_parent(
                 channel,
                 EventKind::ChannelOwnerTransfer,
                 new_owner.as_bytes().to_vec(),
+                None,
             )?;
-            self.process_channel(channel);
-            let members = {
-                let book = self.channels.lock().expect("channels mutex not poisoned");
-                let state = book
-                    .state(&channel)
-                    .ok_or_else(|| NodeError::Channel(format!("unknown channel {channel:?}")))?;
-                if state.owner() != new_owner {
-                    return Err(NodeError::Channel(
-                        "channel membership changed before ownership transfer completed".into(),
-                    ));
-                }
-                state.members().to_vec()
-            };
-            distribution = Some(members.clone());
+            transfer = Some(event);
+            distribution = Some(members);
             Ok(())
         })?;
         let Some(members) = distribution else {
             return Ok(());
         };
+        self.await_channel_metadata(channel).await?;
+        if let Some(event) = transfer {
+            let projection = self.account_group_projection(channel)?;
+            if projection.ownership != Some(event)
+                || !projection
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.owner() == new_owner)
+            {
+                return Err(NodeError::Channel(
+                    "channel membership changed before ownership transfer completed".into(),
+                ));
+            }
+        }
         self.distribute_channel(channel, &members).await;
         Ok(())
     }
@@ -1620,6 +1649,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let own_proof = self.own_group_proof();
         let mut distribution = None;
         authorize(&mut || {
@@ -1643,9 +1673,18 @@ impl Node {
             distribution = Some(self.apply_legacy_member_leave(channel, &own_proof)?);
             Ok(())
         })?;
-        let Some(members) = distribution else {
+        let Some((members, event)) = distribution else {
             return Ok(());
         };
+        self.await_channel_metadata(channel).await?;
+        if !self
+            .account_group_projection(channel)?
+            .is_authorized(event)?
+        {
+            return Err(NodeError::Channel(
+                "legacy departure was not admitted".into(),
+            ));
+        }
         self.distribute_channel(channel, &members).await;
         self.process_channel(channel);
         Ok(())
@@ -1663,6 +1702,7 @@ impl Node {
         channel: ConversationId,
         authorize: impl FnOnce(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let own_proof = self.own_group_proof();
         let mut distribution = None;
         authorize(&mut || {
@@ -1676,11 +1716,12 @@ impl Node {
                 .current_event()
                 .is_some()
             {
-                distribution = Some(self.apply_account_self_control(
+                let (members, event) = self.apply_account_self_control(
                     channel,
                     account_self_control::AccountSelfControlInput::Accept,
                     &own_proof,
-                )?);
+                )?;
+                distribution = Some((members, Some(event)));
                 return Ok(());
             }
             let members = {
@@ -1695,12 +1736,22 @@ impl Node {
             };
             self.append_event(channel, EventKind::ChannelAccept, vec![])?;
             self.process_channel(channel);
-            distribution = Some(members.clone());
+            distribution = Some((members, None));
             Ok(())
         })?;
-        let Some(members) = distribution else {
+        let Some((members, event)) = distribution else {
             return Ok(());
         };
+        self.await_channel_metadata(channel).await?;
+        if let Some(event) = event
+            && !self
+                .account_group_projection(channel)?
+                .is_authorized(event)?
+        {
+            return Err(NodeError::Channel(
+                "account self control was not admitted".into(),
+            ));
+        }
         self.distribute_channel(channel, &members).await;
         Ok(())
     }
@@ -1800,6 +1851,7 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let id = self.enqueue_channel_message_reply_expiring_if(
             channel,
             text,
@@ -1809,6 +1861,9 @@ impl Node {
         )?;
         self.flush_accepted_message(&MessageDestination::Channel(channel), id)
             .await;
+        if let Err(error) = self.await_channel_metadata(channel).await {
+            log::debug!("accepted channel metadata preparation deferred: {error}");
+        }
         Ok(())
     }
 
@@ -1850,6 +1905,7 @@ impl Node {
         mut authorize: impl FnMut(&mut dyn FnMut() -> Result<(), NodeError>) -> Result<(), NodeError>
         + Send,
     ) -> Result<(), NodeError> {
+        self.await_channel_metadata(channel).await?;
         let id = self.enqueue_sticker_channel_expiring_if(
             channel,
             sticker_id,
@@ -1859,6 +1915,9 @@ impl Node {
         )?;
         self.flush_accepted_message(&MessageDestination::Channel(channel), id)
             .await;
+        if let Err(error) = self.await_channel_metadata(channel).await {
+            log::debug!("accepted channel metadata preparation deferred: {error}");
+        }
         Ok(())
     }
 
@@ -3084,6 +3143,7 @@ mod fanout_tests {
         );
         node.log.lock().unwrap().append(preference).unwrap();
         node.process_channel(channel);
+        crate::node::test_support::settle_group_metadata(&node, channel);
         assert!(!node.channel_replica_enabled(channel, &peer.public().user_id()));
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await

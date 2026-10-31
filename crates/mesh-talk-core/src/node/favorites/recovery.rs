@@ -97,17 +97,70 @@ pub(in crate::node) struct PortableFavorites<'a> {
     records: Vec<&'a FavoriteRecord>,
 }
 
-impl FavoriteStore {
-    pub(in crate::node) fn portable_projection(&self, node: &Node) -> PortableFavorites<'_> {
-        PortableFavorites {
-            records: self
-                .current
-                .values()
-                .filter(|record| {
-                    record.removed || !node.favorite_has_protected_content(&record.favorite)
-                })
-                .collect(),
+impl Node {
+    /// Offline bulk export has no participant worker. Prepare only the selected
+    /// favorite source channels, one existing bounded owner turn at a time.
+    /// The favorite journal lock is released before any projection work.
+    pub(in crate::node) fn prepare_favorite_export(&self) -> Result<(), NodeError> {
+        let channels: BTreeSet<_> = self
+            .favorites
+            .lock()
+            .expect("favorites mutex")
+            .current
+            .values()
+            .filter(|record| !record.removed && record.favorite.source.kind == "channel")
+            .filter_map(|record| conversation(&record.favorite.source.target))
+            .map(|channel| *channel.as_bytes())
+            .collect();
+        // The journal admits at most MAX_FAVORITES records; no event bodies or
+        // historical conversation inventory are collected here.
+        for channel in channels {
+            let channel = ConversationId::new(channel);
+            let captured = self
+                .log
+                .lock()
+                .expect("log mutex")
+                .repository()?
+                .metadata(&channel)?;
+            loop {
+                let projected = {
+                    let log = self.log.lock().expect("log mutex");
+                    let repository = log.repository()?;
+                    if repository.metadata(&channel)? != captured {
+                        return Err(LogError::StaleCursor.into());
+                    }
+                    self.channel_checkpoints.history_read_ready(channel)?
+                        || self
+                            .channel_checkpoints
+                            .project_step_with_budget(
+                                repository,
+                                &self.identity,
+                                channel,
+                                crate::eventlog::sync::network::PreparationBudget::default(),
+                            )?
+                            .ready
+                };
+                if projected && self.process_channel_recalls(channel)?.0 {
+                    break;
+                }
+            }
         }
+        Ok(())
+    }
+}
+
+impl FavoriteStore {
+    pub(in crate::node) fn portable_projection(
+        &self,
+        node: &Node,
+    ) -> Result<PortableFavorites<'_>, NodeError> {
+        let mut records = Vec::new();
+        for record in self.current.values() {
+            if record.removed || !node.favorite_protection(&record.favorite)? {
+                records.push(record);
+            }
+        }
+        Ok(PortableFavorites { records })
     }
 }
 

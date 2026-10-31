@@ -86,7 +86,13 @@ async fn account_invitation_runs_in_existing_data_workers_and_reuses_its_origina
                 .unwrap()
                 .unwrap();
             if status.phase == AccountGroupOperationPhase::Committed {
-                break status;
+                // The durable result may precede its canonical projection. Only
+                // the real worker advances that dependency within this deadline.
+                match owner.account_group_projection(group) {
+                    Ok(_) => break status,
+                    Err(crate::eventlog::LogError::StaleCursor) => {}
+                    Err(error) => panic!("committed invitation projection failed: {error}"),
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -593,6 +599,9 @@ async fn public_group_from(
         .unwrap();
     drop(channel);
     target.process_channel(group);
+    // The bare topology serves sessions without the participant recovery loop.
+    // Complete only retained local metadata before testing a ready consumer.
+    target.await_channel_metadata(group).await.unwrap();
 }
 
 /// Mandatory private documents share the real capability probe and never pull

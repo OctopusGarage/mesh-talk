@@ -101,7 +101,12 @@ Favorites preserve removal tombstones and expiry restrictions. Only already
 retained, live referenced files are exported, with the existing 64 MiB per-file
 limit. Canonical-known protected Favorites are excluded as a single eligibility
 projection for records, counts and attachments; ordinary Favorites remain portable
-after their original history is cleared. Ordinary and Favorite media share the
+after their original history is cleared. Explicit offline export prepares only
+the selected Favorite source channels through existing bounded canonical and
+recall turns, outside the Favorite journal lock. A source change or protection
+read/storage failure aborts the export instead of silently omitting a Favorite.
+This preparation belongs to the requested export, not application startup.
+Ordinary and Favorite media share the
 8 GiB aggregate media limit. Size, chunk order and SHA-256 are checked before
 publication. Staged attachment files open only while writing or installing, so
 large collections do not require one handle per retained file.

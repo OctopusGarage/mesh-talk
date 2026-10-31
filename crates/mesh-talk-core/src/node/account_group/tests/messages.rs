@@ -117,18 +117,29 @@ async fn account_operation_send_confirms_exact_custody(external_member: bool, ba
         .primary_event
         .expect("committed public message identity");
     assert!(
-        holder
-            .channel_history(group, 10)
-            .unwrap()
-            .iter()
-            .any(|row| row.id == event),
-        "the member received the exact account-operation message"
+        holder.log.lock().unwrap().get(&event).unwrap().is_some(),
+        "the explicit fanout must retain the exact original without source repair"
     );
     assert_eq!(
         source.channel_custody_count(group, event).unwrap(),
         Some(usize::from(external_member)),
         "the explicit send fanout confirms external durable custody and excludes own-account siblings"
     );
+    // Durable custody precedes the receiver's bounded plaintext projection.
+    // Only the holder runtime may finish it; the source worker stays stopped.
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            match holder.channel_history(group, 10) {
+                Ok(rows) if rows.iter().any(|row| row.id == event) => break,
+                Ok(_)
+                | Err(crate::node::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                Err(_) => panic!("member history query failed"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the member must project the exact account-operation message");
     server.abort();
     let _ = server.await;
 }
@@ -560,13 +571,15 @@ async fn reference_member_send_fixture(fail_receive: bool) {
                     .unwrap()
                     .unwrap();
                 if status.phase == AccountGroupOperationPhase::Committed
-                    && status.primary_event.is_some_and(|event| {
-                        external
-                            .history(group, 20)
-                            .unwrap()
-                            .iter()
-                            .any(|row| row.id == event)
-                    })
+                    && status
+                        .primary_event
+                        .is_some_and(|event| match external.history(group, 20) {
+                            Ok(rows) => rows.iter().any(|row| row.id == event),
+                            Err(crate::node::NodeError::Log(
+                                crate::eventlog::LogError::StaleCursor,
+                            )) => false,
+                            Err(_) => panic!("external member history query failed"),
+                        })
                 {
                     break status;
                 }

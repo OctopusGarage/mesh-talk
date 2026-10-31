@@ -899,6 +899,7 @@ mod tests {
         );
         node.log.lock().unwrap().append_durable(genesis).unwrap();
         node.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&node, group);
         let bytes = b"original prepared bytes";
         let manifest = FileManifestV3 {
             v2: FileManifestV2 {

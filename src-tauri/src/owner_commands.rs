@@ -3731,14 +3731,31 @@ mod tests {
             .to_owned();
         let args =
             serde_json::json!({"owner":"alice", "expectedAccount":account, "channelId":channel});
-        let initial = fixture.invoke("channel_metadata", args.clone()).unwrap();
+        // A successful mutation returns one bounded read. Resume that same
+        // registered getter while it explicitly reports unfinished indexing,
+        // just as the metadata settings UI does after saving.
+        let settled = |mut value: serde_json::Value| {
+            for _ in 0..128 {
+                if !value["query_pending"].as_bool().unwrap() {
+                    return value;
+                }
+                assert!(value["cover"].is_null());
+                assert!(value["announcement"].is_null());
+                assert!(value["announcement_history"].as_array().unwrap().is_empty());
+                value = fixture.invoke("channel_metadata", args.clone()).unwrap();
+            }
+            panic!("registered metadata query must finish its bounded continuation");
+        };
+        let initial = settled(fixture.invoke("channel_metadata", args.clone()).unwrap());
         assert!(initial["announcement"].is_null());
         let mut publish = args.clone();
         publish["content"] = "Welcome".into();
         publish["expectedRevision"] = serde_json::Value::Null;
-        let saved = fixture
-            .invoke("set_channel_announcement", publish.clone())
-            .unwrap();
+        let saved = settled(
+            fixture
+                .invoke("set_channel_announcement", publish.clone())
+                .unwrap(),
+        );
         assert_eq!(saved["announcement"]["content"], "Welcome");
         assert!(
             fixture
@@ -3754,9 +3771,11 @@ mod tests {
         );
         publish["expectedRevision"] = saved["announcement"]["revision"].clone();
         publish["content"] = serde_json::Value::Null;
-        let cleared = fixture
-            .invoke("set_channel_announcement", publish.clone())
-            .unwrap();
+        let cleared = settled(
+            fixture
+                .invoke("set_channel_announcement", publish.clone())
+                .unwrap(),
+        );
         assert!(cleared["announcement"]["content"].is_null());
         assert_ne!(
             cleared["announcement"]["revision"],

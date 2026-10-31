@@ -52,9 +52,34 @@ impl Node {
     #[cfg(test)]
     pub(in crate::node) async fn maintain_account_group_operations(self: &Arc<Self>) {
         for group in self.maintain_account_group_operation_effects() {
+            self.prepare_account_group_fanout(group).await.unwrap();
             let members = self.channel_members(group);
             self.distribute_account_group_effects(group, &members).await;
         }
+    }
+
+    /// Complete selected metadata publication before an owned fanout opens a
+    /// peer. Directory preparation yields between its existing bounded turns;
+    /// real storage/source errors return to the existing deferred ticket.
+    pub(in crate::node) async fn prepare_account_group_fanout(
+        &self,
+        group: ConversationId,
+    ) -> Result<(), NodeError> {
+        self.await_channel_metadata(group).await?;
+        loop {
+            match self.try_publish_group_inventory_groups(&[group]) {
+                Ok(()) => break,
+                Err(NodeError::Log(crate::eventlog::LogError::Io(error)))
+                    if error.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        self.publish_account_group_access_for(group);
+        self.publish_account_group_operations_for(group);
+        Ok(())
     }
 
     /// Distribute every control while confirming the latest exact source

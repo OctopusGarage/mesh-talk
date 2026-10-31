@@ -208,6 +208,7 @@ pub use runtime::{
     RuntimeNetworkOptions,
 };
 pub use search::{RecentSearchResults, ReferencedSearchHit, SearchContext, SearchReference};
+pub use session::request_round;
 
 mod outgoing_message;
 pub use outgoing_message::{MessageAcceptance, MessageDestination, OutgoingMessageRequest};

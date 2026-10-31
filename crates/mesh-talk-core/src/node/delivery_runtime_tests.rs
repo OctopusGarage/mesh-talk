@@ -3381,17 +3381,21 @@ fn legacy_file_erasure_capacity_refusal_preserves_durable_row_and_key() {
         crate::dm::seal(&alice, &b.identity.public().x25519_pub, &manifest.encode()).unwrap(),
     );
     let id = event.id;
-    b.log.lock().unwrap().append_durable(event).unwrap();
+    b.log.lock().unwrap().append_durable(event.clone()).unwrap();
     b.received_files
         .lock()
         .unwrap()
-        .record_durable(&ReceivedEntry {
-            event_id: id,
-            conversation: host,
-            from: alice.user_id(),
-            wall_clock: 1,
-            plaintext: manifest.encode(),
-        })
+        .record_file_with_reception(
+            &ReceivedEntry {
+                event_id: id,
+                conversation: host,
+                from: alice.user_id(),
+                wall_clock: 1,
+                plaintext: manifest.encode(),
+            },
+            Some(&event),
+            None,
+        )
         .unwrap();
     let mut store = DeliveryStore::open_with_limits(
         &dir.path().join("tight"),

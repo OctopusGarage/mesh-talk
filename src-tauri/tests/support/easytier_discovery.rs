@@ -145,12 +145,14 @@ fn bounds_and_deduplicates_candidates() {
 static INVENTORY_CLI_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(unix)]
-fn fake_cli(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
+fn fake_cli(dir: &std::path::Path, name: &str, body: &str) -> tokio::process::Command {
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    path
+    // The fixture is script data for the installed shell, not a new executable
+    // whose first-run assessment competes with the real two-second deadline.
+    let mut command = crate::background_command::command("/bin/sh");
+    command.arg(path);
+    command
 }
 
 #[cfg(unix)]
@@ -175,7 +177,12 @@ async fn inventory_falls_back_and_queries_only_the_selected_rpc_routes() {
         ),
     );
     let result = local_inventory_from(
-        vec![dir.path().join("missing"), failed, malformed, ready],
+        vec![
+            crate::background_command::command(dir.path().join("missing")),
+            failed,
+            malformed,
+            ready,
+        ],
         "127.0.0.1:15899",
         47475,
     )

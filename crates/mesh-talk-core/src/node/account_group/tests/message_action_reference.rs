@@ -1,6 +1,6 @@
 //! Explicit account actions work through Noise while optional public history is off.
 use super::*;
-use crate::node::AccountGroupTextInput;
+use crate::node::{AccountGroupTextInput, NodeError};
 
 #[path = "reaction_account_reduction.rs"]
 mod reaction_account_reduction;
@@ -694,11 +694,13 @@ async fn reference_message_action(recall: bool) {
                 .is_some_and(|status| {
                     status.phase == AccountGroupOperationPhase::Committed
                         && status.primary_event.is_some_and(|id| {
-                            external
-                                .history(group, 20)
-                                .unwrap()
-                                .iter()
-                                .any(|row| row.id == id)
+                            match external.history(group, 20) {
+                                Ok(rows) => rows.iter().any(|row| row.id == id),
+                                Err(crate::node::NodeError::Log(
+                                    crate::eventlog::LogError::StaleCursor,
+                                )) => false,
+                                Err(error) => panic!("incoming history read failed: {error}"),
+                            }
                         })
                 })
         },
@@ -1096,13 +1098,15 @@ async fn reference_message_action(recall: bool) {
                     .target,
                 target
             );
-            assert!(
-                external
-                    .history(group, 20)
-                    .unwrap()
-                    .iter()
-                    .any(|row| row.id == target && row.recalled)
-            );
+            wait_action_fixture(
+                || match external.history(group, 20) {
+                    Ok(rows) => rows.iter().any(|row| row.id == target && row.recalled),
+                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                    Err(error) => panic!("external recall history failed: {error}"),
+                },
+                "the authenticated public recall must finish its bounded projection",
+            )
+            .await;
             assert!(
                 reference
                     .recalls
@@ -1416,6 +1420,7 @@ async fn role_bootstrap_refreshes_the_requested_group_after_a_real_owner_transfe
         )
         .unwrap();
     source.process_channel(group);
+    settle_group_metadata(&source, group);
     source.publish_account_group_access_for(group);
     assert_eq!(
         source.account_group_access(group).unwrap().role,

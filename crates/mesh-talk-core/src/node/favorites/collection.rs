@@ -4,32 +4,38 @@ use super::*;
 impl Node {
     /// Favorite snapshots have no reveal policy. Reject a retained canonical
     /// protected source rather than turning that snapshot into another reveal path.
-    /// A failed canonical read is logged and denies this snapshot/export too.
+    /// A failed canonical read is logged and denies local snapshot access too.
     pub(in crate::node) fn favorite_has_protected_content(
         &self,
         favorite: &MessageFavorite,
     ) -> bool {
-        if favorite
+        self.favorite_protection(favorite).unwrap_or_else(|error| {
+            log::warn!("favorite content eligibility denied: {error}");
+            true
+        })
+    }
+
+    /// Export must distinguish protected content from an unfinished or failed
+    /// read: the latter aborts publication instead of silently losing a favorite.
+    pub(in crate::node) fn favorite_protection(
+        &self,
+        favorite: &MessageFavorite,
+    ) -> Result<bool, NodeError> {
+        for file in favorite
             .messages
             .iter()
-            .filter_map(|m| m.file.as_ref())
-            .any(|file| {
-                conversation(&file.file_conv).is_some_and(|conv| {
-                    self.files
-                        .lock()
-                        .expect("files mutex")
-                        .manifest(conv)
-                        .map(|manifest| {
-                            manifest.is_some_and(|manifest| manifest.protection().is_some())
-                        })
-                        .unwrap_or_else(|error| {
-                            log::warn!("favorite protection lookup failed: {error}");
-                            true
-                        })
-                })
-            })
+            .filter_map(|message| message.file.as_ref())
         {
-            return true;
+            if let Some(conv) = conversation(&file.file_conv)
+                && self
+                    .files
+                    .lock()
+                    .expect("files mutex")
+                    .manifest(conv)?
+                    .is_some_and(|manifest| manifest.protection().is_some())
+            {
+                return Ok(true);
+            }
         }
         let source = &favorite.source;
         let selected: Vec<_> = source
@@ -49,27 +55,21 @@ impl Node {
             )
         } else {
             let Some(conv) = conversation(&source.target) else {
-                return true;
+                return Ok(true);
             };
             (conv, None)
         };
-        let context = match self.project_history(
+        let context = self.project_history(
             conv,
             account,
             crate::node::queries::HistorySelection::Selected(&selected),
-        ) {
-            Ok(context) => context,
-            Err(error) => {
-                log::warn!("favorite content eligibility denied: {error}");
-                return true;
-            }
-        };
-        context.is_some_and(|context| {
+        )?;
+        Ok(context.is_some_and(|context| {
             context
                 .messages
                 .iter()
                 .any(|entry| entry.protection.is_some())
-        })
+        }))
     }
 
     pub fn list_message_favorites(

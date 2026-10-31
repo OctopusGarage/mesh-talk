@@ -670,6 +670,11 @@ impl Node {
                 node.import_file_message_identity(bundle)
                     .map_err(|_| SnapshotError::InvalidFileCard)?;
             }
+            // Restore is an explicit bulk operation with no participant worker.
+            // Publish imported channel metadata/recall readiness in bounded owner
+            // steps before returning the fresh profile; ordinary open stays lazy.
+            node.prepare_recovered_channel_metadata()
+                .map_err(|_| SnapshotError::Io)?;
             // The node was opened before records were installed, so its cached
             // channel/file views are stale. Return a verified fresh view.
             drop(contacts_log);
@@ -680,6 +685,55 @@ impl Node {
             let _ = std::fs::remove_dir_all(staging_dir);
         }
         result
+    }
+
+    fn prepare_recovered_channel_metadata(&self) -> Result<(), super::NodeError> {
+        use crate::eventlog::{EventKind, LogError, repository::pages::PageBudget};
+        let mut after = None;
+        loop {
+            let page = self
+                .log
+                .lock()
+                .expect("log mutex")
+                .repository()?
+                .conversations_page(after.as_ref(), PageBudget::default())?;
+            for metadata in page.items {
+                let channel = metadata.conversation;
+                if !self
+                    .log
+                    .lock()
+                    .expect("log mutex")
+                    .repository()?
+                    .has_kind(&channel, EventKind::MembershipChange)?
+                {
+                    continue;
+                }
+                loop {
+                    let ready = {
+                        let log = self.log.lock().expect("log mutex");
+                        let repository = log.repository()?;
+                        if repository.metadata(&channel)?.as_ref() != Some(&metadata) {
+                            return Err(LogError::StaleCursor.into());
+                        }
+                        self.channel_checkpoints
+                            .project_step_with_budget(
+                                repository,
+                                &self.identity,
+                                channel,
+                                crate::eventlog::sync::network::PreparationBudget::default(),
+                            )?
+                            .ready
+                    };
+                    if ready && self.process_channel_recalls(channel)?.0 {
+                        break;
+                    }
+                }
+            }
+            after = page.next;
+            if after.is_none() {
+                return Ok(());
+            }
+        }
     }
 
     /// Account IDs represented in durable message or file history, even when no
@@ -744,6 +798,10 @@ impl Node {
         created_at_ms: u64,
     ) -> Result<(), SnapshotError> {
         self.prune_expired_received()
+            .map_err(|_| SnapshotError::Io)?;
+        self.prepare_favorite_export()
+            .map_err(|_| SnapshotError::Io)?;
+        self.prepare_private_recalls_for_recovery()
             .map_err(|_| SnapshotError::Io)?;
         let mut record_count = 0u64;
         self.visit_recovery_records(&mut |_| {
@@ -1124,7 +1182,9 @@ impl Node {
         }
         let now = self.expiry_now();
         let favorites = self.favorites.lock().expect("favorites mutex");
-        let portable = favorites.portable_projection(self);
+        let portable = favorites
+            .portable_projection(self)
+            .map_err(|_| SnapshotError::Io)?;
         let favorite_files = portable.portable_files(now)?;
         for payload in portable.portable_records(&own, now) {
             emit(SnapshotRecordV1::Favorite { payload: payload? })?;

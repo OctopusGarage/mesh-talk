@@ -19,8 +19,30 @@ fn cover() -> String {
 // The selected query reports unfinished canonical/index work explicitly. Tests
 // wait for that same public continuation and keep all final semantic assertions.
 fn metadata(node: &Node, channel: crate::eventlog::ConversationId) -> super::ChannelMetadata {
-    for _ in 0..128 {
+    // Each publication can need several bounded ancestry/authority phases.
+    // Bound the fixture's total work by its signed input, rather than treating
+    // one query page as a completed projection.
+    let turns = (node.log.lock().unwrap().conversation_len(&channel).unwrap() + 1) * 64;
+    for _ in 0..turns {
+        let before = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
         let value = node.channel_metadata(channel).unwrap();
+        let after = node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .body_read_counts();
+        assert!(
+            after.1 - before.1 <= 64,
+            "one metadata request must retain its body budget"
+        );
         if !value.query_pending {
             return value;
         }
@@ -29,6 +51,22 @@ fn metadata(node: &Node, channel: crate::eventlog::ConversationId) -> super::Cha
         assert!(value.announcement_history.is_empty());
     }
     panic!("selected group metadata did not finish its bounded continuation");
+}
+
+// Direct signed-event copies bypass the participant worker. Complete its
+// canonical/presentation continuation before invoking a settled-state API.
+fn settle_channel(node: &Node, channel: crate::eventlog::ConversationId) {
+    let turns = (node.log.lock().unwrap().conversation_len(&channel).unwrap() + 1) * 64;
+    node.process_channel(channel);
+    for _ in 0..turns {
+        node.retry_channel_plaintext();
+        match node.channel_checkpoints.prepared_history_policy(channel) {
+            Ok(_) => return,
+            Err(crate::eventlog::LogError::StaleCursor) => {}
+            Err(_) => panic!("channel fixture preparation failed"),
+        }
+    }
+    panic!("channel fixture must complete its bounded continuation");
 }
 
 // The worker owns one bounded authority turn; a missing release is not a
@@ -112,6 +150,7 @@ async fn adopted_account_cannot_read_historical_devices_encrypted_group_metadata
     let mut work = super::super::channel_account_maintenance::ChannelAccountMaintenance::default();
     for _ in 0..12 {
         owner.maintain_account_channels(&mut work).await;
+        settle_channel(&owner, group);
     }
     assert!(
         owner
@@ -294,7 +333,7 @@ fn copy(from: &Node, to: &Node, channel: crate::eventlog::ConversationId) {
     for event in from.metadata_events(channel).unwrap() {
         to.log.lock().unwrap().append(event).unwrap();
     }
-    to.process_channel(channel);
+    settle_channel(to, channel);
 }
 
 #[tokio::test]
@@ -551,7 +590,7 @@ async fn selected_group_metadata_does_not_read_retained_message_bodies() {
             .repository()
             .unwrap()
             .body_read_counts();
-        let value = owner.channel_metadata(group).unwrap();
+        let value = metadata(&owner, group);
         assert_eq!(
             value.announcement.unwrap().content.as_deref(),
             Some("current")
@@ -619,15 +658,7 @@ async fn metadata_history_window_counts_valid_but_undecryptable_publications() {
             .unwrap();
     }
     owner.process_channel(group);
-    let mut result = None;
-    for _ in 0..64 {
-        let value = owner.channel_metadata(group).unwrap();
-        if !value.query_pending {
-            result = Some(value);
-            break;
-        }
-    }
-    let result = result.expect("bounded metadata projection must finish");
+    let result = metadata(&owner, group);
     assert!(result.announcement_pending);
     assert!(result.announcement.is_none());
     assert_eq!(

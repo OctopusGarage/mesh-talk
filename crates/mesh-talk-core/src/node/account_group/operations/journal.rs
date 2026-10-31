@@ -1888,6 +1888,7 @@ mod tests {
             .append_durable(genesis.clone())
             .unwrap();
         node.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&node, group);
         let operation = AccountGroupOperation::Rename {
             name: "Journal after".into(),
         };

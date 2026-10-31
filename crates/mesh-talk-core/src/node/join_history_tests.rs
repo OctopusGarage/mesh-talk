@@ -20,7 +20,7 @@ fn node(dir: &std::path::Path) -> Arc<Node> {
     .unwrap()
 }
 
-fn copy(from: &Node, to: &Node, channel: ConversationId) {
+fn copy_events(from: &Node, to: &Node, channel: ConversationId) {
     let events = from
         .log
         .lock()
@@ -32,6 +32,10 @@ fn copy(from: &Node, to: &Node, channel: ConversationId) {
     for event in events {
         to.log.lock().unwrap().append(event).unwrap();
     }
+}
+
+fn copy(from: &Node, to: &Node, channel: ConversationId) {
+    copy_events(from, to, channel);
     to.process_channel(channel);
     settle_history(to);
 }
@@ -40,7 +44,14 @@ fn settle_history(node: &Node) -> Vec<ConversationId> {
     let mut ready = Vec::new();
     for _ in 0..30000 {
         node.retry_channel_plaintext();
-        for channel in node.retry_join_history().unwrap() {
+        let released = match node.retry_join_history() {
+            Ok(released) => released,
+            // A release can advance the source while another bounded history
+            // continuation is still attached to the previous checkpoint.
+            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => continue,
+            Err(_) => panic!("history retry failed"),
+        };
+        for channel in released {
             if !ready.contains(&channel) {
                 ready.push(channel);
             }
@@ -511,11 +522,14 @@ async fn join_history_authorized_replica_releases_without_owner_and_survives_res
     copy(&alice, &bob, channel);
     copy(&alice, &carol, channel);
     carol.accept_channel_invite(channel).await.unwrap();
-    copy(&carol, &bob, channel);
     drop(alice);
+    // Disable the replica before delivering acceptance. The copy helper also
+    // runs the real bounded release worker; an already-published release cannot
+    // be revoked by changing sharing afterwards.
     bob.set_channel_replica_enabled(channel, false)
         .await
         .unwrap();
+    copy(&carol, &bob, channel);
     settle_history(&bob);
     copy(&bob, &carol, channel);
     assert!(carol.channel_history(channel, 10).unwrap().is_empty());
@@ -1241,7 +1255,7 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
             control.signed_encode(channel, &owner.account),
         )
         .unwrap();
-    owner.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&owner, channel);
     owner
         .try_account_channel_invite(
             channel,
@@ -1429,7 +1443,7 @@ async fn account_invitation_three_event_wal_recovers_atomically_after_restart() 
             control.signed_encode(channel, &owner.account),
         )
         .unwrap();
-    owner.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&owner, channel);
     owner
         .try_account_channel_invite(
             channel,
@@ -1437,6 +1451,7 @@ async fn account_invitation_three_event_wal_recovers_atomically_after_restart() 
             &target.own_group_proof(),
         )
         .unwrap();
+    crate::node::test_support::settle_group_metadata(&owner, channel);
     let all = owner
         .log
         .lock()
@@ -1530,6 +1545,9 @@ async fn account_invitation_three_event_wal_recovers_atomically_after_restart() 
             .is_some()),
         "one pending WAL record recovers invitation, account grant and frozen offer together"
     );
+    // The exact signed WAL rows above are durable before any projection repair.
+    // This bare reopened profile has no worker to finish its bounded metadata.
+    crate::node::test_support::settle_group_metadata(&recovered, channel);
     let projection = recovered.account_group_projection(channel).unwrap();
     let grant = projection
         .authority
@@ -1564,7 +1582,10 @@ async fn join_history_rejected_release_is_not_reopened_by_safe_tail_control() {
         .unwrap();
     copy(&alice, &bob, channel);
     bob.accept_channel_invite(channel).await.unwrap();
-    copy(&bob, &alice, channel);
+    // Install acceptance without running Alice's release worker: this fixture
+    // deliberately supplies the only release below with an invalid sealed key.
+    copy_events(&bob, &alice, channel);
+    crate::node::test_support::settle_group_metadata(&alice, channel);
     let offer = alice
         .log
         .lock()
@@ -1618,6 +1639,7 @@ async fn join_history_rejected_release_is_not_reopened_by_safe_tail_control() {
     for event in alice.log.lock().unwrap().events(&channel).unwrap() {
         bob.log.lock().unwrap().append(event).unwrap();
     }
+    crate::node::test_support::settle_group_metadata(&bob, channel);
     bob.account_group_projection(channel).unwrap();
     assert_eq!(
         bob.channel_checkpoints

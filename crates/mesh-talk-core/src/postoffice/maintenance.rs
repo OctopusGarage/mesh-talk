@@ -577,7 +577,9 @@ mod tests {
         let mailbox =
             crate::postoffice::opaque::RelayMailbox::federated(&author, &recipient.public())
                 .unwrap();
-        for seq in 1..=24 {
+        // Garbage must exceed the maintained 256-page physical-GC activation
+        // threshold; smaller inventories intentionally retain their free pages.
+        for seq in 1..=64 {
             let event = mailbox
                 .wrap(&Event::new(
                     &author,
@@ -617,7 +619,29 @@ mod tests {
         let (stop, rx) = watch::channel(false);
         let worker = office.run_maintenance(rx);
         tokio::pin!(worker);
-        tokio::select! {r=&mut worker=>panic!("worker stopped: {r:?}"),_=tokio::time::sleep(Duration::from_millis(550))=>{}}
+        // This inventory crosses physical-GC hysteresis and therefore needs
+        // several paced slices. Observe actual completion instead of assuming
+        // the larger fixture drains in the old small-inventory sleep window.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut worker => panic!("worker stopped: {result:?}"),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+                if db.physical_stats().unwrap().page_count < before.page_count
+                    && !office
+                        .state
+                        .next_work_at(super::super::network::unix_now())
+                        .unwrap()
+                        .has_work()
+                    && !office.state.digest_work_pending().unwrap()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("paced logical and physical cleanup must complete");
         stop.send_replace(true);
         worker.await.unwrap();
         let after = db.physical_stats().unwrap();

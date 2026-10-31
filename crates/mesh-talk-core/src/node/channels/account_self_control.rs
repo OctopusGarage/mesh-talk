@@ -121,7 +121,7 @@ impl Node {
         group: ConversationId,
         input: AccountSelfControlInput,
         own: &Announce,
-    ) -> Result<Vec<PublicIdentity>, NodeError> {
+    ) -> Result<(Vec<PublicIdentity>, EventId), NodeError> {
         let mut delivery = self.delivery.lock().expect("delivery mutex");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
@@ -151,17 +151,9 @@ impl Node {
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
         drop(delivery);
-        self.process_channel(group);
-        if !self
-            .account_group_projection(group)?
-            .authorized
-            .contains(&id)
-        {
-            return Err(NodeError::Channel(
-                "account self control was not admitted".into(),
-            ));
-        }
-        Ok(recipients)
+        // The async entrypoint releases membership/delivery guards before
+        // advancing bounded canonical turns and checking this exact event.
+        Ok((recipients, id))
     }
 
     /// Caller owns membership/delivery allocation and this immutable log view.
@@ -345,7 +337,7 @@ impl Node {
         &self,
         group: ConversationId,
         own: &Announce,
-    ) -> Result<Vec<PublicIdentity>, NodeError> {
+    ) -> Result<(Vec<PublicIdentity>, EventId), NodeError> {
         let mut delivery = self.delivery.lock().expect("delivery mutex");
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
@@ -370,17 +362,9 @@ impl Node {
         self.recover_delivery(&mut delivery)
             .map_err(NodeError::Log)?;
         drop(delivery);
-        self.process_channel(group);
-        if !self
-            .account_group_projection(group)?
-            .authorized
-            .contains(&event_id)
-        {
-            return Err(NodeError::Channel(
-                "legacy departure was not admitted".into(),
-            ));
-        }
-        Ok(recipients)
+        // The async entrypoint releases membership/delivery guards before
+        // advancing bounded canonical turns and checking this exact event.
+        Ok((recipients, event_id))
     }
 }
 
@@ -856,6 +840,7 @@ pub(in crate::node) mod tests {
             node.log.lock().unwrap().append_durable(parent).unwrap();
         }
         node.process_channel(group);
+        crate::node::test_support::settle_group_metadata(&node, group);
         let operation = if pending {
             AccountGroupOperation::AcceptInvitation
         } else {
@@ -899,6 +884,7 @@ pub(in crate::node) mod tests {
             &node.identity.public().ed25519_pub
         );
         assert_eq!(status.committed_events, vec![effects[0].id]);
+        node.await_channel_metadata(group).await.unwrap();
         assert_eq!(
             node.account_group_access(group).unwrap().role,
             if pending {
@@ -947,6 +933,7 @@ pub(in crate::node) mod tests {
                 node.log.lock().unwrap().append_durable(parent).unwrap();
             }
             node.process_channel(group);
+            crate::node::test_support::settle_group_metadata(&node, group);
             let operation = if pending {
                 AccountGroupOperation::AcceptInvitation
             } else {
@@ -1660,7 +1647,11 @@ pub(in crate::node) mod tests {
             .id;
         if !pending {
             wait_self_control_noise(|| nodes.iter().filter(|(_, node)| node.user_id() != reference.user_id())
-                .all(|(_, node)| node.history(group, 100).unwrap().iter().any(|row| row.id == archive)),
+                .all(|(_, node)| match node.history(group, 100) {
+                    Ok(rows) => rows.iter().any(|row| row.id == archive),
+                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                    Err(error) => panic!("archive marker history failed: {error}"),
+                }),
                 "the archive marker must be fully retained by physical sources before reference enrollment").await;
         }
         // Keep the original signed Member head through a real account exchange
@@ -1746,12 +1737,18 @@ pub(in crate::node) mod tests {
             exact_protocol && exact_route && settled.into_iter().all(|complete| complete)
         };
         let readiness = || {
-            let role_ready = reference.account_group_access(group).unwrap().role
-                == if pending {
-                    AccountGroupRole::Invited
-                } else {
-                    AccountGroupRole::Member
-                };
+            let role_ready = match reference.account_group_access(group) {
+                Ok(access) => {
+                    access.role
+                        == if pending {
+                            AccountGroupRole::Invited
+                        } else {
+                            AccountGroupRole::Member
+                        }
+                }
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                Err(error) => panic!("reference readiness failed: {error}"),
+            };
             let capability_ready = reference
                 .group_operation_versions
                 .lock()
@@ -1893,19 +1890,46 @@ pub(in crate::node) mod tests {
             operation_trace.record("reference", "admission_started".to_owned());
         }
         let admission_started = std::time::Instant::now();
-        let admitted = reference
-            .submit_account_group_operation_if(&shared.account_id(), id, group, operation.clone(), |commit| {
-                if let Some(hold) = request_hold.as_ref() {
-                    let original = hold.original.lock().unwrap().clone().unwrap();
+        let operation_budget = std::time::Duration::from_secs(8);
+        let admitted = loop {
+            let result = reference.submit_account_group_operation_if(
+                &shared.account_id(), id, group, operation.clone(), |commit| {
+                    if let Some(hold) = request_hold.as_ref() {
+                        let original = hold.original.lock().unwrap().clone().unwrap();
+                        assert!(
+                            original.1.upgrade().is_some() && hold.pages.lock().unwrap().is_active(original.0),
+                            "the original executor read must remain live at the exact operation admission"
+                        );
+                    }
+                    let result = commit();
+                    if result.is_ok() && let Some(hold) = request_hold.as_ref() {
+                        hold.admitted.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    result
+                },
+            );
+            match result {
+                Ok(admitted) => break admitted,
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
                     assert!(
-                        original.1.upgrade().is_some() && hold.pages.lock().unwrap().is_active(original.0),
-                        "the original executor read must remain live at the exact operation admission"
+                        reference
+                            .account_group_operation_status(&shared.account_id(), id)
+                            .unwrap()
+                            .is_none(),
+                        "Pending must precede durable operation admission"
                     );
-                    hold.admitted.store(true, std::sync::atomic::Ordering::Release);
+                    assert!(
+                        admission_started.elapsed() < operation_budget,
+                        "selected metadata must become ready within the original operation deadline"
+                    );
+                    // The synchronous API retains no intent on Pending. Retry
+                    // the same identity after yielding to its existing worker;
+                    // every authorization still observes the original held read.
+                    tokio::task::yield_now().await;
                 }
-                commit()
-            })
-            .unwrap();
+                Err(error) => panic!("self-control admission failed: {error}"),
+            }
+        };
         operation_trace
             .lock()
             .unwrap()
@@ -1948,7 +1972,8 @@ pub(in crate::node) mod tests {
             }
         );
         let event_kind = input.event_kind();
-        let convergence = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        let remaining = operation_budget.saturating_sub(admission_started.elapsed());
+        let convergence = tokio::time::timeout(remaining, async {
             let mut previous_phase = None;
             loop {
                 let phase = executor
@@ -2092,6 +2117,7 @@ pub(in crate::node) mod tests {
                 && event.verify_signature()
         );
         if input == AccountSelfControlInput::Decline {
+            owner.await_channel_metadata(group).await.unwrap();
             assert!(
                 owner
                     .log
@@ -2155,6 +2181,9 @@ pub(in crate::node) mod tests {
                 );
             }
         }
+        // The exact accepted effect is already retained above. Complete only
+        // this owner's selected metadata before checking its derived authority.
+        owner.await_channel_metadata(group).await.unwrap();
         assert_eq!(
             owner
                 .account_group_projection(group)

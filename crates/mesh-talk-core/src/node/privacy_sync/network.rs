@@ -831,7 +831,7 @@ mod tests {
                 step.rows <= budget.rows
                     && step.edges <= budget.edges
                     && step.bytes <= budget.bytes,
-                "canonical authority exceeded the caller's complete turn budget: {step:?}"
+                "canonical authority exceeded the caller's complete turn budget"
             );
             turns += 1;
             if step.ready {
@@ -964,7 +964,7 @@ mod tests {
                 step.rows <= budget.rows
                     && step.edges <= budget.edges
                     && step.bytes <= budget.bytes,
-                "every rejected or admitted edge must fit the turn: {step:?}"
+                "every rejected or admitted edge must fit the turn"
             );
             step.ready
         };
@@ -1130,7 +1130,7 @@ mod tests {
                     step.rows <= budget.rows
                         && step.edges <= budget.edges
                         && step.bytes <= budget.bytes,
-                    "every preparation turn must honor work budgets: {step:?}"
+                    "every preparation turn must honor work budgets"
                 );
                 turns += 1;
                 if !reloaded && !step.ready && view.preparation.lock().unwrap().metadata.count > 0 {

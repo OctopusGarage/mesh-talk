@@ -591,6 +591,8 @@ async fn recv_have_owned<IO: AsyncRead + AsyncWrite + Unpin>(
 /// `conversation`: send a Request (+ our streamed have), receive the Response
 /// (ingesting its events) + the responder's streamed have, then send the Followup.
 /// Converges the conversation in both directions. Returns what this side applied.
+/// SDK callers own the authenticated channel, selected conversation and store;
+/// they must enforce their own disclosure/admission policy before invoking it.
 /// This compatibility entrypoint explicitly uses the legacy collecting adapter;
 /// bounded source consumers call [`request_round_paged`].
 pub async fn request_round<S, IO>(

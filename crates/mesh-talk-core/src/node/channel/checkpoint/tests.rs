@@ -168,8 +168,15 @@ fn channel_indexed_authority_tail_and_warm_turns_read_no_historical_bodies() {
         // Genesis and initial rotation are the only decoded bodies, regardless
         // of history length. Header admission does not fetch message ciphertext.
         assert_eq!(repository.body_read_counts(), (2, 2));
-        let state = fixture.store.current_page(None).unwrap().remove(0);
-        assert_eq!(state.name(), "checkpoint");
+        let state = fixture
+            .store
+            .current_page(None)
+            .unwrap_or_else(|_| panic!("current channel page must be readable"))
+            .remove(0);
+        assert!(
+            state.name() == "checkpoint",
+            "current channel name must match"
+        );
         assert!(state.is_member(&fixture.me.public().user_id()));
         let warm = ChannelCheckpointStore::open(fixture.store.profile.clone()).unwrap();
         for _ in 0..4 {
@@ -1928,7 +1935,7 @@ fn channel_causal_query_yields_exact_work_and_preserves_strict_ancestry() {
         };
         assert!(
             work.rows <= budget.rows && work.edges <= budget.edges && work.bytes <= budget.bytes,
-            "{work:?}"
+            "preparation must stay within the caller row, edge and byte budgets"
         );
         if ready.is_some() {
             break;
@@ -2043,7 +2050,7 @@ fn channel_owner_query_preserves_later_unobserved_ownership_loss() {
                 work.rows <= budget.rows
                     && work.edges <= budget.edges
                     && work.bytes <= budget.bytes,
-                "{work:?}"
+                "preparation must stay within the caller row, edge and byte budgets"
             );
             if result.is_some() {
                 break;
@@ -2260,7 +2267,7 @@ fn channel_logical_retirement_reclaims_orphan_facts_in_bounded_turns() {
     let mut turns = 0;
     loop {
         let work = fixture.store.retire_orphan_step(7).unwrap();
-        assert!(work <= 7, "retirement exceeded caller row budget: {work}");
+        assert!(work <= 7, "retirement exceeded caller row budget");
         if work == 0 {
             break;
         }
@@ -2282,4 +2289,64 @@ fn channel_logical_retirement_reclaims_orphan_facts_in_bounded_turns() {
     );
     assert_eq!(fixture.log.repository().unwrap().body_read_counts(), reads);
     assert!(turns > 257 / 7);
+}
+
+#[test]
+fn channel_legacy_departure_yields_a_charged_two_row_remainder() {
+    use crate::eventlog::sync::network::PreparationBudget;
+    let f = Fixture::new(0);
+    f.project();
+    let (parents, lamport) = f.log.prepare(&f.channel).unwrap();
+    let leave = Event::new(
+        &f.me,
+        f.channel,
+        1,
+        parents,
+        lamport,
+        3,
+        EventKind::ChannelLeave,
+        vec![],
+    );
+    let repository = f.log.repository().unwrap();
+    repository.append(&leave).unwrap();
+    let budget = PreparationBudget {
+        rows: 2,
+        ..Default::default()
+    };
+    let mut yielded = false;
+    for _ in 0..128 {
+        let step = f
+            .store
+            .project_step_with_budget(repository, &f.me, f.channel, budget)
+            .unwrap();
+        assert!(
+            step.rows <= budget.rows && step.edges <= budget.edges && step.bytes <= budget.bytes
+        );
+        let retained: bool = f.store.profile.database().read(|c| {
+            c.query_row("SELECT EXISTS(SELECT 1 FROM channel_legacy_scan WHERE channel=?1 AND next_rank=2)",
+                [f.channel.as_bytes().as_slice()], |r|r.get(0)).map_err(LogError::from)
+        }).unwrap();
+        if !step.ready
+            && step.rows == 1
+            && step.bytes == std::mem::size_of::<crate::eventlog::repository::EventHeader>()
+            && retained
+        {
+            yielded = true;
+            break;
+        }
+    }
+    assert!(
+        yielded,
+        "a valid two-row remainder must yield after its charged departure header"
+    );
+    f.project();
+    assert!(
+        f.store
+            .published_projection(f.channel)
+            .unwrap()
+            .unwrap()
+            .is_authorized(leave.id)
+            .unwrap(),
+        "yielding must preserve the exact signed departure for its later complete allowance"
+    );
 }

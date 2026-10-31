@@ -339,6 +339,9 @@ impl Node {
         + Send,
     ) -> Result<(), NodeError> {
         authorize(&mut || Ok(()))?;
+        // Authorization precedes derived preparation, and the durable callback
+        // still rejects a membership change after this bounded continuation.
+        self.await_channel_metadata(channel).await?;
         let me = Author::from_ed25519(self.identity.public().ed25519_pub);
         let recallable_file_target = self
             .received_files
@@ -817,6 +820,7 @@ mod acceptance_tests {
             .unwrap();
             target
         };
+        super::super::test_support::settle_group_metadata(&node, channel);
         assert!(matches!(
             node.recall_channel(channel, target.id).await,
             Err(NodeError::Log(LogError::ClockExhausted))

@@ -367,11 +367,17 @@ impl Node {
         let mut result = None;
         let mut wrapped = Some(wrapped);
         let mut request = request;
+        let mut preparation = crate::eventlog::sync::network::PreparationBudget::default();
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
+            {
+                let mut store = self.delivery.lock().expect("delivery lock");
+                self.recover_delivery(&mut store).map_err(NodeError::Log)?;
+            }
+            self.prepare_channel_admission(channel, &mut preparation)?;
             // A signed account departure can reach this device before its public
             // control cut. It is a terminal negative, never a replacement for
             // the physical membership and full-identity checks below.
@@ -382,11 +388,10 @@ impl Node {
                 return Err(NodeError::Channel("not an active channel member".into()));
             }
             let mut store = self.delivery.lock().expect("delivery lock");
+            self.recover_delivery(&mut store).map_err(NodeError::Log)?;
             let wrapped = wrapped
                 .take()
                 .ok_or_else(|| NodeError::InvalidInput("accept is single-use".into()))?;
-            self.recover_delivery(&mut store).map_err(NodeError::Log)?;
-            self.process_channel(channel);
             let book = self.channels.lock().expect("channels lock");
             let state = book
                 .state(&channel)
@@ -422,6 +427,11 @@ impl Node {
             log::warn!("accepted channel message awaits local recovery: {error}");
         }
         drop(store);
+        // Acceptance already committed: preparation failure cannot turn its
+        // exact returned ID into a retryable send failure. The worker resumes it.
+        if let Err(error) = self.prepare_channel_admission(channel, &mut preparation) {
+            log::debug!("accepted channel metadata awaits preparation: {error}");
+        }
         self.process_channel(channel);
         self.delivery_notify.notify_one();
         Ok(id)
@@ -435,6 +445,128 @@ mod tests {
     use crate::discovery::Announce;
     use crate::eventlog::LogError;
     use crate::identity::{account::Account, device::DeviceIdentity};
+
+    #[tokio::test]
+    async fn local_channel_admission_prepares_each_accepted_tail_without_a_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "peer",
+            9,
+        );
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let channel = node
+            .create_channel("local admission", vec![])
+            .await
+            .unwrap();
+        for index in 0..4 {
+            let body = format!("accepted {index}");
+            let id = node
+                .enqueue_channel_message_reply_expiring_if(
+                    channel,
+                    body.as_bytes(),
+                    None,
+                    None,
+                    |commit| {
+                        assert!(node.delivery.try_lock().is_ok());
+                        commit()
+                    },
+                )
+                .unwrap();
+            assert!(node.log.lock().unwrap().get(&id).unwrap().is_some());
+            assert!(
+                node.channel_checkpoints
+                    .current_state(channel)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+        assert_eq!(node.channel_history(channel, 10).unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn local_channel_admission_leaves_a_large_backlog_pending_with_one_budget() {
+        use crate::eventlog::sync::network::PreparationBudget;
+        let dir = tempfile::tempdir().unwrap();
+        let peer = Announce::new_with_account(
+            &DeviceIdentity::generate(),
+            &Account::generate(),
+            "peer",
+            9,
+        );
+        let (node, _, _) = super::super::test_support::node_with_files(
+            dir.path(),
+            DeviceIdentity::generate(),
+            Account::generate(),
+            &peer,
+        );
+        let channel = node
+            .create_channel("pending admission", vec![])
+            .await
+            .unwrap();
+        {
+            let mut log = node.log.lock().unwrap();
+            for _ in 0..129 {
+                let (parents, lamport) = log.prepare(&channel).unwrap();
+                let event = Event::new(
+                    &node.identity,
+                    channel,
+                    log.next_sequence(
+                        &channel,
+                        &Author::from_ed25519(node.identity.public().ed25519_pub),
+                    )
+                    .unwrap(),
+                    parents,
+                    lamport,
+                    0,
+                    EventKind::Message,
+                    vec![0],
+                );
+                log.append(event).unwrap();
+            }
+        }
+        let count = || {
+            node.storage
+                .database()
+                .read(|c| {
+                    Ok(c.query_row(
+                        "SELECT count(*) FROM channel_event_authority WHERE channel=?1",
+                        [channel.as_bytes().as_slice()],
+                        |row| row.get::<_, i64>(0),
+                    )?)
+                })
+                .unwrap()
+        };
+        let before = count();
+        let mut budget = PreparationBudget::default();
+        assert!(matches!(
+            node.prepare_channel_admission(channel, &mut budget),
+            Err(LogError::StaleCursor)
+        ));
+        assert!(budget.rows < PreparationBudget::default().rows);
+        assert!(usize::try_from(count() - before).unwrap() <= PreparationBudget::default().rows);
+        assert!(node.channel_checkpoints.current_state(channel).is_err());
+        assert!(
+            node.delivery
+                .lock()
+                .unwrap()
+                .pending_transactions()
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn two_event_rotation_clock_exhaustion_leaves_wal_and_sender_unchanged() {
@@ -475,7 +607,7 @@ mod tests {
             .unwrap()
             .append_durable(genesis.clone())
             .unwrap();
-        node.process_channel(channel);
+        node.await_channel_metadata(channel).await.unwrap();
         let before_senders = node
             .channels
             .lock()

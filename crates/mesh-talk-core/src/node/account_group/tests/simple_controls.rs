@@ -69,6 +69,7 @@ async fn owner_fixture(modern: bool) -> (tempfile::TempDir, Account, Arc<Node>, 
             &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
         )
         .await;
+    settle_group_metadata(&owner, group);
     let sibling = node(&dir.path().join("inherited"), &account);
     link(&owner, &sibling);
     link(&sibling, &owner);
@@ -105,6 +106,7 @@ async fn owner_fixture(modern: bool) -> (tempfile::TempDir, Account, Arc<Node>, 
         )
         .unwrap();
     sibling.process_channel(group);
+    settle_group_metadata(&sibling, group);
     assert_ne!(sibling.channel_owner(group), sibling.user_id());
     assert!(
         sibling.channel_can_manage(group).unwrap(),

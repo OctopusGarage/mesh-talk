@@ -124,8 +124,7 @@ async fn personal_file_unaccepted_wal_leaves_no_history() {
     let node = open(&profile, identity, account);
     let (manifest, _) = node.stage_file(&source, FileKind::File, |_| {}).unwrap();
     let host = super::super::conversation::account_conversation_id(&target, &target);
-    let proof_path = profile.join("account-file-proofs.log");
-    let before = std::fs::metadata(&proof_path).unwrap().len();
+    let before = node.account_file_proofs.lock().unwrap().revision().unwrap();
     // Use the record log's read-only append fault: Windows cannot rename a
     // directory containing the live log handles. Proof/chunk writes stay real.
     node.delivery
@@ -146,7 +145,7 @@ async fn personal_file_unaccepted_wal_leaves_no_history() {
         .unwrap()
         .fail_journal_appends_for_test(false)
         .unwrap();
-    assert!(std::fs::metadata(&proof_path).unwrap().len() > before);
+    assert!(node.account_file_proofs.lock().unwrap().revision().unwrap() > before);
     assert!(result.is_err());
     assert!(
         node.delivery

@@ -1,4 +1,5 @@
 use super::*;
+use crate::node::test_support::settle_group_metadata;
 use crate::{
     channel::{ChannelMeta, new_channel_id},
     discovery::{Announce, Roster},
@@ -146,6 +147,7 @@ fn legacy_group(owner: &Node, member: &Node) -> Event {
 fn install(node: &Node, event: &Event) {
     node.log.lock().unwrap().append(event.clone()).unwrap();
     node.process_channel(event.conversation_id);
+    settle_group_metadata(node, event.conversation_id);
 }
 
 #[test]
@@ -534,6 +536,7 @@ async fn modern_owner_access_reuses_the_existing_account_authority() {
             &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
         )
         .await;
+    settle_group_metadata(&owner, group);
     assert!(
         owner
             .account_group_projection(group)
@@ -1019,6 +1022,7 @@ async fn owner_binding_relay_scenario(owner_online: bool, certificate_only: bool
             )
             .unwrap();
         owner.process_channel(genesis.conversation_id);
+        settle_group_metadata(&owner, genesis.conversation_id);
         let transfer = owner
             .log
             .lock()
@@ -1254,6 +1258,7 @@ async fn a_newer_validated_owner_transfer_prevents_old_source_evidence_restoring
         )
         .unwrap();
     owner.process_channel(genesis.conversation_id);
+    settle_group_metadata(&owner, genesis.conversation_id);
     assert_eq!(
         owner.channel_owner(genesis.conversation_id),
         external.user_id()
@@ -1325,6 +1330,7 @@ async fn a_newer_source_member_observation_wins_before_its_public_transfer_arriv
         )
         .unwrap();
     owner.process_channel(genesis.conversation_id);
+    settle_group_metadata(&owner, genesis.conversation_id);
     assert_eq!(
         owner.channel_owner(genesis.conversation_id),
         external.user_id()
@@ -2002,6 +2008,7 @@ async fn modern_inherited_owner_executes_rename_through_the_account_facade() {
             &mut crate::node::channel_account_maintenance::ChannelAccountMaintenance::default(),
         )
         .await;
+    settle_group_metadata(&owner, group);
     assert!(
         owner
             .account_group_projection(group)
@@ -2047,6 +2054,7 @@ async fn modern_inherited_owner_executes_rename_through_the_account_facade() {
         )
         .unwrap();
     sibling.process_channel(group);
+    settle_group_metadata(&sibling, group);
     assert!(
         sibling.channel_can_manage(group).unwrap(),
         "the existing modern authority owner must authorize its inherited sibling"

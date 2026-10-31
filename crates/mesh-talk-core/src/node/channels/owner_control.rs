@@ -378,7 +378,7 @@ impl Node {
         drop(delivery);
         self.process_channel(channel);
         let projection = self.account_group_projection(channel)?;
-        if !projection.authorized.contains(&id) {
+        if !projection.is_authorized(id)? {
             return Err(NodeError::Channel(
                 "channel owner control was not admitted".into(),
             ));

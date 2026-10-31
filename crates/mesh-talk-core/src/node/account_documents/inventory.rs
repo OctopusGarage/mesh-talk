@@ -714,7 +714,7 @@ impl Node {
             log::debug!("group inventory publication deferred: {error}");
         }
     }
-    pub(super) fn try_publish_group_inventory_groups(
+    pub(in crate::node) fn try_publish_group_inventory_groups(
         &self,
         ids: &[ConversationId],
     ) -> Result<(), NodeError> {

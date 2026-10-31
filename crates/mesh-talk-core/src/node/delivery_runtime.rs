@@ -1070,6 +1070,9 @@ impl Node {
         if store.pending_transactions().is_empty() {
             return Ok(());
         }
+        // Recovery may retire several bounded WAL intents. Their canonical
+        // refreshes share one allowance instead of resetting it per channel.
+        let mut control_budget = crate::eventlog::sync::network::PreparationBudget::default();
         loop {
             let notification =
                 store
@@ -1287,8 +1290,14 @@ impl Node {
                 self.install_file_card_scopes(prepared_file_scopes);
             }
             if removed && let Some(channel) = control_channel {
-                // Refresh canonical controls after releasing projection guards.
-                self.refresh_channel_control_metadata(channel)?;
+                // Finish short control tails after releasing projection guards.
+                // A larger tail keeps its existing runtime ticket without
+                // turning an installed effect into failed durable recovery.
+                // Terminal status never permits reading a stale projection.
+                match self.prepare_channel_admission(channel, &mut control_budget) {
+                    Ok(()) | Err(LogError::StaleCursor) => {}
+                    Err(error) => return Err(error),
+                }
                 self.account_sync_notify.notify_one();
             }
             if removed && wake_local {
