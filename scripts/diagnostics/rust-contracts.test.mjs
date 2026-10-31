@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { buildAffectedPlan } from "../validation/affected.mjs";
 import { loadContracts } from "../validation/contracts.mjs";
+import { loadRequirements } from "../validation/pr-scenarios.mjs";
 
 const rootUrl = new URL("../../", import.meta.url);
 const root = fileURLToPath(rootUrl);
@@ -127,19 +128,19 @@ test("binary, integration harness and native build inputs retain explicit accept
   }
 });
 
-test("CLI profile ownership changes select explicit binary and restart evidence", () => {
+test("CLI profile ownership changes select shared subprocess locks and binary restart evidence", () => {
   const selected = plan("crates/mesh-talk-core/src/bin/mesh-talk-node.rs");
   assert.deepEqual(selected.blockers, []);
   assert.ok(owners("specifications/deployment_guide.md").includes("core-cli-harness"));
   const escalation = selected.escalation.join(" ");
-  assert.match(escalation, /--bin mesh-talk-node tests::profile_lock/u);
+  assert.match(escalation, /--lib storage::profile::tests::profile_lock/u);
   assert.match(escalation, /participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error/u);
   const owner = selected.owners.find(({ id }) => id === "core-cli-harness");
   assert.equal(owner?.capability?.guide,
     "specifications/deployment_guide.md#data-directory-ownership");
 });
 
-test("delivery observations retain Node consumers, evidence rules and native acceptance", () => {
+test("delivery observations retain Node consumers, evidence rules and native acceptance", async () => {
   const selected = plan("crates/mesh-talk-core/src/node/delivery_observation.rs");
   assert.deepEqual(selected.blockers, []);
   for (const expected of ["core-node", "desktop-session", "integration-service"]) {
@@ -149,9 +150,9 @@ test("delivery observations retain Node consumers, evidence rules and native acc
   assert.ok(owner.capability.invariants.some(({ reference }) =>
     reference === "docs/network-design-reference.md#runtime-delivery-observations"));
   assert.match(selected.escalation.join(" "), /observation.*recipient.*confirmation/iu);
-  const scenarios = JSON.parse(read("crates/mesh-talk-core/validation.json")).prScenarios;
-  assert.ok(scenarios.some(({ paths, native }) => native?.includes("host") &&
-    paths.includes("crates/mesh-talk-core/src/node/delivery_observation.rs")));
+  const requirements = await loadRequirements(["crates/mesh-talk-core/src/node/delivery_observation.rs"], root);
+  assert.ok(requirements.owners.includes("discovery-native"));
+  assert.ok(requirements.native.includes(process.platform));
 });
 
 test("desktop search reaches its session and frontend consumers", () => {
@@ -172,55 +173,104 @@ test("control task lifetime changes select their source-backed regression", () =
   assert.deepEqual(filters.filter((filter) => filter.includes(name)), [name]);
 });
 
+// Keep logical module aliases for #[path] declarations. Test filenames need not
+// match their module names (node/node.rs declares participant_storage_tests.rs).
+function inlineModules(source) {
+  // Mask strings/comments before balancing braces; fixture bodies often contain
+  // JSON, format strings and raw SQL with braces unrelated to Rust scope.
+  const masked = source.replace(
+    /\/\/[^\n]*|\/\*[\s\S]*?\*\/|(?:br|cr|r)(#*)"[\s\S]*?"\1|(?:b|c)?"(?:\\[\s\S]|[^"\\])*"|'(?:\\.|[^'\\])'/gu,
+    token => " ".repeat(token.length),
+  );
+  const modules = [];
+  const pattern = /\bmod\s+(\w+)\s*\{/gu;
+  let match;
+  while ((match = pattern.exec(masked))) {
+    const start = pattern.lastIndex;
+    let depth = 1, end = start;
+    while (end < masked.length && depth) {
+      if (masked[end] === "{") depth++;
+      if (masked[end] === "}") depth--;
+      end++;
+    }
+    if (depth !== 0) throw Error(`Unclosed source module ${match[1]}`);
+    modules.push({ name: match[1], source: source.slice(start, end - 1), start, end });
+    pattern.lastIndex = end;
+  }
+  return modules;
+}
+
+function librarySources(directory, files, readSource) {
+  const existing = new Set(files);
+  const sources = new Map();
+  function add(path, module, ancestors = [], source = readSource(path)) {
+    const key = `${module}:${path}`;
+    if (sources.has(key) || ancestors.includes(path)) return;
+    const children = inlineModules(source);
+    let directSource = source;
+    for (const { start, end } of children.toReversed()) {
+      directSource = directSource.slice(0, start) + "\n" + directSource.slice(end);
+    }
+    const tests = [...directSource.matchAll(/((?:\s*#\[[^\]]+\])+\s*)(?:async\s+)?fn\s+(\w+)\s*\(/gu)]
+      .filter(([, attributes]) => /#\[(?:tokio::)?test(?:\(|\])/u.test(attributes) && !/#\[ignore/u.test(attributes))
+      .map(([, , name]) => [...module, name].join("::"));
+    sources.set(key, tests);
+    for (const child of children) {
+      add(path, [...module, child.name], ancestors, child.source);
+    }
+    for (const [, relative, child] of directSource.matchAll(
+      /#\[path\s*=\s*"([^"]+)"\]\s*(?:#\[[^\]]+\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/gu,
+    )) {
+      const referenced = posix.normalize(posix.join(posix.dirname(path), relative));
+      if (existing.has(referenced)) add(referenced, [...module, child], [...ancestors, path]);
+    }
+  }
+  for (const path of files) {
+    if (!path.startsWith(`${directory}/src/`) || path.startsWith(`${directory}/src/bin/`) || !path.endsWith(".rs")) continue;
+    const module = path.slice(`${directory}/src/`.length, -3).split("/");
+    if (["lib", "mod"].includes(module.at(-1))) module.pop();
+    add(path, module);
+  }
+  return [...new Set([...sources.values()].flat())];
+}
+
+function hasTestEvidence(sources, filter) {
+  // Cargo's positional filter is a substring of the qualified test name, not
+  // an exact function name. Several owners intentionally select a module name.
+  return sources.some(name => name.includes(filter));
+}
+
+test("source evidence follows declared path modules and Cargo name prefixes without borrowing unrelated or ignored tests", () => {
+  const fixtures = new Map([
+    ["crate/src/node/node.rs", '#[path = "../fixtures/checks.rs"]\nmod participant_storage_tests;'],
+    ["crate/src/fixtures/checks.rs", '#[test]\nfn participant_event_reopens() {}\n#[test]\n#[ignore]\nfn ignored_only() {}'],
+    ["crate/src/node/unrelated.rs", '#[test]\nfn absent_in_selected_module() {}\nmod scoped { #[test] fn nested() { let text = "}"; } }'],
+    ["crate/src/bin/tool.rs", '#[test]\nfn binary_only() {}'],
+  ]);
+  const sources = librarySources("crate", [...fixtures.keys()], path => fixtures.get(path));
+  assert.ok(hasTestEvidence(sources, "node::node::participant_storage_tests::"));
+  assert.ok(hasTestEvidence(sources, "node::node::participant_storage_tests::participant_event_"));
+  assert.ok(hasTestEvidence(sources, "event_reopen"));
+  assert.ok(hasTestEvidence(sources, "participant_storage_tests"));
+  assert.ok(hasTestEvidence(sources, "node::unrelated::scoped::nested"));
+  for (const filter of ["node::node::wrong_alias::", "node::node::participant_storage_tests::absent_in_selected_module", "node::unrelated::scoped::absent_in_selected_module", "node::unrelated::nested", "ignored_only", "binary_only"]) {
+    assert.equal(hasTestEvidence(sources, filter), false, filter);
+  }
+});
+
 // Source evidence catches accidental empty/fabricated filters without compiling
 // four crates. Cargo's actual per-platform --list inventory remains authoritative.
 test("every Rust selector has nonignored library test evidence in its owning module", () => {
+  const sources = new Map([...packages].map(([name, directory]) => [name,
+    librarySources(directory, sourceFiles.filter(path => existsSync(new URL(path, rootUrl))), read),
+  ]));
   for (const contract of contracts) {
     for (const { package: packageName, filters } of contract.rust ?? []) {
       const directory = packages.get(packageName);
       assert.ok(directory, packageName);
       for (const filter of filters) {
-        const segments = filter.split("::").filter(Boolean);
-        const exactName = filter.endsWith("::") ? null : segments.pop();
-        if (segments.at(-1) === "tests") segments.pop();
-        const modulePath = `${directory}/src/${segments.join("/")}`;
-        // Deleted tracked paths still require ownership above, but cannot
-        // provide executable source evidence for a current selector.
-        const sourcePaths = sourceFiles.filter(
-          (path) =>
-            existsSync(new URL(path, rootUrl)) &&
-            path.startsWith(`${directory}/src/`) &&
-            !path.startsWith(`${directory}/src/bin/`) &&
-            path.endsWith(".rs") &&
-            (!segments.length ||
-              path === `${modulePath}.rs` ||
-              path.startsWith(`${modulePath}/`)),
-        );
-        // Rust modules can place their library tests outside src/ using #[path].
-        for (const path of [...sourcePaths]) {
-          for (const [, relative] of read(path).matchAll(
-            /#\[path\s*=\s*"([^"]+)"\]/gu,
-          )) {
-            const referenced = posix.normalize(
-              posix.join(posix.dirname(path), relative),
-            );
-            if (sourceFiles.includes(referenced)) sourcePaths.push(referenced);
-          }
-        }
-        const evidence = sourcePaths.some((path) => {
-          const source = read(path);
-          const tests = source.matchAll(
-            /((?:\s*#\[[^\]]+\])+\s*)(?:async\s+)?fn\s+(\w+)\s*\(/gu,
-          );
-          return [...tests].some(
-            ([, attributes, name]) =>
-              /#\[(?:tokio::)?test(?:\(|\])/u.test(attributes) &&
-              !/#\[ignore/u.test(attributes) &&
-              (!exactName || name === exactName),
-          );
-        });
         assert.ok(
-          evidence,
+          hasTestEvidence(sources.get(packageName), filter),
           `${contract.id}: ${packageName} ${filter} lacks nonignored source evidence`,
         );
       }

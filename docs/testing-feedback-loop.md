@@ -729,6 +729,15 @@ writing and preserves file ownership and permissions. This avoids a slow
 runner-image mirror consuming the existing job budget; browser workers, retries,
 test inventories and deadlines are unchanged.
 
+The Windows workspace producer runs `scripts/ci/windows-native-deps.mjs` before
+Cargo. It probes installed Perl executables for native `MSWin32` execution and
+the `IPC::Cmd` / `Locale::Maketext::Simple` modules, then pins the validated
+absolute path through `OPENSSL_SRC_PERL` and `PERL`. This avoids Git Bash's partial
+MSYS Perl during vendored OpenSSL configuration without changing vendoring,
+compiler settings or test gates. Missing or incomplete native installations
+fail the dependency step. Portable probe fixtures do not replace the hosted
+Windows build.
+
 Windows full-regression runners expand the IPv4 TCP client port pool to
 10000–65534 before browser execution. Repeated fresh contexts load Vite's module
 graph over loopback; the default 16K pool can exhaust while closed connections
