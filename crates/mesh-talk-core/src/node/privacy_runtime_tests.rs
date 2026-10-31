@@ -1780,6 +1780,7 @@ async fn manually_allowed_invisible_device_can_receive_later_channel_invitation(
             .expect("approved inviter's channel ancestry syncs");
     }
     carol.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&carol, channel);
     assert!(
         carol
             .list_channels()
@@ -2029,6 +2030,7 @@ async fn invisible_late_invitee_follows_an_accepted_owner_transfer() {
             .is_empty()
     );
     carol.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&carol, channel);
     assert!(
         carol
             .list_channels()

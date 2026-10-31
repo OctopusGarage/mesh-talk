@@ -225,6 +225,10 @@
           {
             "name": "New account-group invitation verification has one twenty-second deadline across the complete selected account set before host authorization or durable group creation; expiry creates no partial group and never skips a required target or relaxes its authenticated account binding.",
             "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
+          },
+          {
+            "name": "Direct owner-control commits retain an exact internal event receipt; asynchronous completion releases authorization, privacy and membership guards before bounded metadata preparation and validates that exact admitted event before fanout or public success.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
           }
         ]
       },
@@ -787,6 +791,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::join_history::tests::",
+            "node::join_history::indexed::continuation::tests::join_history_selected_offer_yields_and_matches_independent_legacy_authority",
             "node::channel::tests::late_joiner_cannot_read_pre_join_history",
             "node::session::tests::",
             "node::group_chain_tests::public_group_history_capability_metadata_is_cached_and_principal_scoped"
@@ -823,6 +828,10 @@
           {
             "name": "Indexed offer/release selectors retain canonical and causal invitation authority and exact received identities; unchanged source retry turns decode no historical controls.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "A normal history continuation shares one row, edge and byte allowance across its measured commands and caps phase-only work; residual allocation refusal retains the selected command for a fresh turn with conservative spent-work charging, while a row larger than the full caller allowance remains an explicit budget error.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
@@ -990,6 +999,10 @@
           {
             "name": "Canonical preparation shares caller row, edge and byte limits across all phases; plaintext read readiness also fences unattempted admitted recalls and exact dependency wakes without blocking dormant unknown-target retries.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Indexed current-state installation preserves the canonical device-local acceptance cutoff and retry ticket without changing current-epoch sender retention or indexed receiver retirement; a fresh invitation clears the former cutoff while pure authority projections retain their separate semantics.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
@@ -1940,7 +1953,8 @@
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/group_chain_tests.rs",
         "crates/mesh-talk-core/src/node/runtime.rs",
-        "crates/mesh-talk-core/src/node/privacy_sync/"
+        "crates/mesh-talk-core/src/node/privacy_sync/",
+        "crates/mesh-talk-core/src/eventlog/repository/selection.rs"
       ],
       "rust": [
         {
@@ -1955,7 +1969,10 @@
             "paged_preparation_yields_unlocked_and_observes_concurrent_revocation",
             "node::privacy_sync::causal_export_tests::",
             "node::session::paged_tests::",
-            "participant_durable_have_request_uses_no_historical_bodies"
+            "participant_durable_have_request_uses_no_historical_bodies",
+            "participant_selection_retirement_",
+            "background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes",
+            "channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet"
           ]
         }
       ],
@@ -1974,6 +1991,10 @@
           {
             "name": "Production principal preparation yields between bounded header/edge turns, persists resumable SQL selection facts, and rejects changed authorization before publication; fresh views do not collect retained event bodies. Legal wide-parent events retain progress and exact Have-dependent eligibility.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Completed zero-work ordering and authority phases may advance within one finite preparation turn, while working or unchanged owners retain their yield boundary. Retired selection cleanup shares one physical row allowance across all child and singleton tables, preserving active views and existing domain/owner eligibility.",
+            "reference": "docs/module-boundaries.md#coordinated-state-owners"
           }
         ]
       },
@@ -2521,7 +2542,8 @@
         "crates/mesh-talk-core/src/bin/mesh-talk-node/reception.rs",
         "crates/mesh-talk-core/src/node/files/reception.rs",
         "crates/mesh-talk-core/src/node/files/channel_receive.rs",
-        "crates/mesh-talk-core/src/node/channel/checkpoint/file_preview.rs"
+        "crates/mesh-talk-core/src/node/channel/checkpoint/file_preview.rs",
+        "crates/mesh-talk-core/src/node/serving.rs"
       ],
       "rust": [
         {
@@ -2531,7 +2553,10 @@
             "node::runtime_delivery::tests::",
             "node::host_reception::tests::",
             "retired_account_producers_cannot_install_effects_in_the_adopted_namespace",
-            "node::files::channel_receive::tests::"
+            "node::files::channel_receive::tests::",
+            "node::serving::channel_plaintext_retry_tests::",
+            "node::node::tests::group_reception_terminal_is_independent_of_erased_and_expired_rows",
+            "node::node::tests::channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance"
           ]
         }
       ],
@@ -2554,6 +2579,10 @@
           {
             "name": "Fixed-consumer ACKs advance a committed prefix; incremental pending retirement waits for every enrolled consumer and never treats RAM autosave admission as durable completion. Captured adoption generations reject former readers and ACK handles even after their account returns, while a fresh reader resumes its existing stream.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
+          },
+          {
+            "name": "Source-revision continuation preserves its reception provenance and does not create or increase a storage retry deadline; actual I/O, database and encrypted-storage failures retain catch-up provenance and the existing exponential retry schedule.",
+            "reference": "docs/network-design-reference.md#d-group-creation-distribution-and-member-recovery"
           }
         ]
       },

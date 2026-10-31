@@ -91,15 +91,23 @@ impl HistoryContext {
         };
         let mut query = None;
         self.request(move |view, budget| {
-            let Some(query) = query.as_mut() else {
+            let Some(pending) = query.as_mut() else {
                 query = Some(view.start_owner_authorization(&header)?);
                 return Ok(Step::Pending(units(1, 128)));
             };
-            match view.owner_authorized_step(query, budget)? {
-                OwnerAuthorizationStep::Pending(work) => Ok(Step::Pending(work)),
-                OwnerAuthorizationStep::Ready {
+            match view.owner_authorized_step(pending, budget) {
+                Ok(OwnerAuthorizationStep::Pending(work)) => Ok(Step::Pending(work)),
+                Ok(OwnerAuthorizationStep::Ready {
                     authorized, work, ..
-                } => Ok(Step::Ready(authorized, work)),
+                }) => Ok(Step::Ready(authorized, work)),
+                Err(error @ LogError::PageBudgetTooSmall { .. }) => {
+                    // This disposable owner query moves its phase before byte
+                    // admission. Restart only that subquery on a fresh turn;
+                    // the outer selected offer/cursor has not been published.
+                    query = None;
+                    Err(error)
+                }
+                Err(error) => Err(error),
             }
         })
         .await

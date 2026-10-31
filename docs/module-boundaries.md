@@ -192,6 +192,10 @@ repository network pages. `core/eventlog/repository/selection.rs` owns disposabl
 SQL authorization IDs, causal closure, and bounded retirement cleanup.
 `core/node/privacy_sync/principal/` and `principal.rs` own current principal state
 and resumable preparation; historical IDs, departures and ancestry stay on disk.
+Already-current ordering and authority phases may advance within the same finite
+turn only while they spend no work. Working owners retain their separate budgeted
+turn. Selection retirement shares one row allowance across its fixed child and
+singleton tables; active selections remain outside retirement eligibility.
 `core/node/session.rs` releases the store lock and yields between preparation
 turns, including exact Durable-Have requests. Ready views use scalar source/proof
 checks. `core/node/channel/graph/preparing.rs` owns suspended graph decisions and
@@ -214,17 +218,31 @@ current display and resumable policy/departure selectors. `checkpoint/work.rs`
 queues current channel identities for the existing recovery loop, preserving
 pre-open expiry provenance with a scalar open epoch and committed-event cutoff.
 One failing channel retains its own retry deadline and does not block other
-channels. Startup restores validated current metadata and the active sending epoch;
+channels. Source-revision invalidation resumes the same bounded reception lane
+without increasing its persistence retry deadline or changing live provenance.
+I/O, database and encrypted-storage failures retain catch-up provenance and the
+existing exponential retry schedule.
+Startup restores validated current metadata and the active sending epoch;
 new signed controls resume after account adoption rather than draining in open.
 Fresh authority and recall-readiness checks remain separate from display state.
+Installing an indexed current state preserves its exact device-local acceptance
+cutoff and the corresponding retry ticket without changing current-epoch sender
+retention or indexed receiver retirement. A fresh invitation clears the former
+cutoff, and obsolete sender epochs retain their existing retirement policy.
+Pure authority projection retains its separate, nonlocal meaning.
 The checkpoint cleanup owner retires disposable facts in bounded turns after
 logical channel retirement, even when no later read revisits the channel.
 Consumed receiver/evidence/receipt state is preserved.
 `join_history/indexed/continuation.rs` suspends the existing offer, first-valid
 selection, lifetime and release checks at selected database/authority operations.
-Each normal retry advances one bounded operation through the shared owner, causal
-or ancestry query APIs. The existing recovery loop resumes pending work; no task,
-connection lock or plaintext queue is retained between turns. Active receive and
+Each normal retry advances measured operations through the shared owner, causal
+or ancestry query APIs within one shared row, edge and byte allowance. A finite
+command cap bounds phase-only work. A selected allocation that cannot fit the
+remaining allowance retains its command for a fresh turn, with conservative
+charging when the admission error cannot report spent work. A command that cannot
+fit the caller's full allowance remains an explicit budget error. The existing
+recovery loop resumes pending work; no task, connection lock or plaintext queue is
+retained between turns. Active receive and
 send stacks are capped by the existing retry limits and keep only protocol-capped
 encrypted snapshots and current membership. The durable release cursor advances
 only with the existing transcript/effect transaction; restart resumes its same
@@ -1060,6 +1078,12 @@ validation reconstructs its saved parent view and checks the complete witness
 and public authority. Current peer labels, later account adoption and later
 grants cannot retarget an already prepared effect. Source acceptance preflights
 the complete envelope against the existing journal and transaction budgets.
+
+A direct owner mutation returns an internal durable event receipt from its
+synchronous commit. Its asynchronous caller releases authorization, privacy and
+membership guards before resuming bounded metadata preparation, then checks that
+exact event's admission before distribution or successful completion. A committed
+WAL effect does not imply that its derived current-authority view is ready.
 
 Each witness row binds its physical membership lifetime, acceptance state and
 corresponding certified identity together. A valid proof or accepted role from a

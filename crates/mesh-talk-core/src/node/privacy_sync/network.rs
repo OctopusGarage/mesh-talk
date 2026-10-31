@@ -775,6 +775,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn participant_network_small_ready_channel_has_no_empty_preparation_turns() {
+        for retained in [8usize, 9] {
+            let directory = tempfile::tempdir().unwrap();
+            let peer = DeviceIdentity::generate();
+            let proof = Announce::new_with_account(&peer, &Account::generate(), "Peer", 9);
+            let (node, _, _) = super::super::super::test_support::node_with_files(
+                directory.path(),
+                DeviceIdentity::generate(),
+                Account::generate(),
+                &proof,
+            );
+            let channel = node
+                .create_channel("Small ready group", vec![peer.public()])
+                .await
+                .unwrap();
+            while node.log.lock().unwrap().events(&channel).unwrap().len() < retained {
+                node.append_event(channel, EventKind::Message, vec![1])
+                    .unwrap();
+            }
+            node.await_channel_metadata(channel).await.unwrap();
+            let owner = node.sync_store(&peer.public());
+            let store = owner.lock().unwrap();
+            // Prepare current kind/order/authority metadata once, as the real
+            // recovery worker's completed setup does. Each later view is new.
+            drop(open_prepared(&store, &channel));
+            for _ in 0..3 {
+                let view = NetworkSyncStore::open_view(&*store, &channel).unwrap();
+                let budget = PreparationBudget::default();
+                let mut turns = 0;
+                loop {
+                    let work = NetworkSyncStore::prepare_view_step(&*store, &view, budget).unwrap();
+                    turns += 1;
+                    assert!(
+                        work.rows <= budget.rows
+                            && work.edges <= budget.edges
+                            && work.bytes <= budget.bytes
+                    );
+                    assert!(
+                        work.ready || work.rows != 0 || work.edges != 0 || work.bytes != 0,
+                        "an already-current phase must not persist and yield an empty turn"
+                    );
+                    assert!(
+                        turns <= 2,
+                        "a {retained}-event current view must finish within two measured turns"
+                    );
+                    if work.ready {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    NetworkSyncStore::metadata(&*store, &view).unwrap().count,
+                    retained as u64
+                );
+                NetworkSyncStore::validate_view(&*store, &view).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn participant_network_canonical_authority_respects_each_preparation_budget() {
         let directory = tempfile::tempdir().unwrap();
         let account = Account::generate();
@@ -1679,6 +1738,7 @@ mod tests {
             node.log.lock().unwrap().append_durable(e.clone()).unwrap();
         }
         node.process_channel(conversation);
+        crate::node::test_support::settle_group_metadata(&node, conversation);
         assert!(!node.shares_replica(&conversation).unwrap());
         let owner = node.sync_store(&peer.public());
         let store = owner.lock().unwrap();

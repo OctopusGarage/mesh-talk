@@ -159,6 +159,30 @@ async fn cached_private_channel_archive_rechecks_signed_sharing_and_dissolution(
             .unwrap()
             .is_dissolved()
     );
+    let body_reads = || {
+        (
+            source.sentlog.lock().unwrap().body_reads(),
+            source.received.lock().unwrap().body_reads(),
+            source.received_files.lock().unwrap().body_reads(),
+        )
+    };
+    let before = body_reads();
+    assert!(matches!(
+        source.prepare_account_export(
+            &receiver.identity.public(),
+            None,
+            true,
+            false,
+            AccountSyncVersion::V2,
+        ),
+        Err(NodeError::Log(LogError::StaleCursor))
+    ));
+    assert_eq!(
+        body_reads(),
+        before,
+        "unprepared dissolution must refuse the cached archive before reading bodies"
+    );
+    settle_read_checkpoint(&source, group);
     assert!(
         !contains(),
         "a terminal public control revokes the retained source archive"
@@ -688,9 +712,22 @@ async fn selected_history_and_archive_wait_for_admitted_recall_before_body_reads
     for event in sender.log.lock().unwrap().events(&channel).unwrap() {
         source.log.lock().unwrap().append(event).unwrap();
     }
-    source
-        .process_channel_reception_inner(channel, "live", false)
-        .unwrap();
+    // This bare receiver has no recovery worker. Complete only the initial
+    // injected message before beginning the unapplied-recall privacy boundary.
+    for _ in 0..256 {
+        source
+            .process_channel_reception_inner(channel, "live", false)
+            .unwrap();
+        if source
+            .received
+            .lock()
+            .unwrap()
+            .contains_in(&channel, target)
+            .unwrap()
+        {
+            break;
+        }
+    }
     assert!(
         source
             .history(channel, 10)

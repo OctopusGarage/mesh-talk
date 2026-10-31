@@ -650,7 +650,7 @@ async fn v4_client_persists_source_account_record_without_relabeling_target_cred
     task.await.unwrap();
     drop(target);
     let reopened = super::super::account_access::AccountAccessStore::open(
-        &dir.path().join("target/account-access.log"),
+        &dir.path().join("target/target/account-access.log"),
         "pw",
     )
     .unwrap();

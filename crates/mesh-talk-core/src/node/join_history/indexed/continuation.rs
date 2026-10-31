@@ -51,6 +51,9 @@ pub(super) struct HistoryQuery<T> {
     pub(super) source: ChannelSource,
     context: HistoryContext,
     future: Pin<Box<dyn Future<Output = Result<T, LogError>> + Send>>,
+    // An admitted command that did not fit a prior turn's residual bytes gets
+    // a fresh allowance until it completes; selected rows are never skipped.
+    exclusive_command: bool,
 }
 impl HistoryContext {
     pub(super) async fn request<T: Send + 'static>(
@@ -95,6 +98,7 @@ impl<T: Send + 'static> HistoryQuery<T> {
             source,
             context,
             future,
+            exclusive_command: false,
         }
     }
     pub(super) fn step(
@@ -121,37 +125,85 @@ impl<T: Send + 'static> HistoryQuery<T> {
                 },
             ));
         }
-        let mut command = self
-            .context
-            .request
-            .lock()
-            .expect("history continuation request")
-            .take()
-            .ok_or(LogError::StaleCursor)?;
-        let (complete, mut work) = command.step(view, budget)?;
-        if work.rows > budget.rows || work.edges > budget.edges || work.bytes > budget.bytes {
-            return Err(LogError::CorruptFile(
-                "join-history preparation exceeded its work budget".into(),
-            ));
-        }
-        if work.rows == 0 && work.edges == 0 && work.bytes == 0 {
-            work.rows = 1;
-            work.bytes = 64;
-        }
-        if !complete {
-            *self
+        let mut total = PreparationStep::default();
+        // Every command shares this allowance. The command cap also bounds
+        // phase-only work that reports bytes without consuming a row.
+        for _ in 0..budget.rows {
+            let remaining = PreparationBudget {
+                rows: budget.rows - total.rows,
+                edges: budget.edges - total.edges,
+                bytes: budget.bytes - total.bytes,
+            };
+            if remaining.rows < 2 || remaining.edges == 0 || remaining.bytes < 512 {
+                break;
+            }
+            let mut command = self
                 .context
                 .request
                 .lock()
-                .expect("history continuation request") = Some(command);
-        } else if let Poll::Ready(value) = self.future.as_mut().poll(&mut cx) {
+                .expect("history continuation request")
+                .take()
+                .ok_or(LogError::StaleCursor)?;
+            let outcome = command.step(view, remaining);
+            let (complete, mut work) = match outcome {
+                Ok(value) => value,
+                Err(LogError::PageBudgetTooSmall { required })
+                    if (total.rows != 0 || total.edges != 0 || total.bytes != 0)
+                        && required <= budget.bytes =>
+                {
+                    // A nested owner may have done bounded prefix work before
+                    // refusing the selected allocation. Its error has no spent
+                    // counters, so conservatively charge this entire allowance.
+                    total.rows = budget.rows;
+                    total.edges = budget.edges;
+                    total.bytes = budget.bytes;
+                    self.exclusive_command = true;
+                    *self
+                        .context
+                        .request
+                        .lock()
+                        .expect("history continuation request") = Some(command);
+                    view.checkpoints.check_source(&self.source)?;
+                    return Ok(Step::Pending(total));
+                }
+                Err(error) => return Err(error),
+            };
+            if work.rows == 0 && work.edges == 0 && work.bytes == 0 {
+                work.rows = 1;
+                work.bytes = 64;
+            }
+            if work.rows > remaining.rows
+                || work.edges > remaining.edges
+                || work.bytes > remaining.bytes
+            {
+                return Err(LogError::CorruptFile(
+                    "join-history preparation exceeded its work budget".into(),
+                ));
+            }
+            total.rows += work.rows;
+            total.edges += work.edges;
+            total.bytes += work.bytes;
+            if !complete {
+                *self
+                    .context
+                    .request
+                    .lock()
+                    .expect("history continuation request") = Some(command);
+            } else {
+                self.exclusive_command = false;
+                if let Poll::Ready(value) = self.future.as_mut().poll(&mut cx) {
+                    view.checkpoints.check_source(&self.source)?;
+                    total.ready = true;
+                    return Ok(Step::Ready(value?, total));
+                }
+            }
             view.checkpoints.check_source(&self.source)?;
-            work.ready = true;
-            return Ok(Step::Ready(value?, work));
+            if self.exclusive_command {
+                break;
+            }
         }
         view.checkpoints.check_source(&self.source)?;
-        work.ready = false;
-        Ok(Step::Pending(work))
+        Ok(Step::Pending(total))
     }
 }
 pub(super) fn units(rows: usize, bytes: usize) -> PreparationStep {
@@ -312,8 +364,13 @@ mod tests {
         );
         assert_eq!(ready, Some(expected));
         // More than Tokio's cooperative task allowance must still progress
-        // without an unrelated executor yield. Each call remains one measured
-        // metadata request, and the selected result cannot disappear mid-stack.
+        // without an unrelated executor yield. The narrow supported allowance
+        // keeps every handoff measured without losing its suspended result.
+        let handoff_budget = PreparationBudget {
+            rows: 2,
+            edges: 1,
+            bytes: 512,
+        };
         let mut handoffs = HistoryQuery::new(source, move |context| async move {
             let mut found = 0;
             for _ in 0..300 {
@@ -323,21 +380,162 @@ mod tests {
         });
         let before = repository.body_read_counts();
         let mut count = None;
+        let mut handoff_turns = 0;
         for _ in 0..301 {
-            let work = match handoffs.step(&view, budget).unwrap() {
+            handoff_turns += 1;
+            let work = match handoffs.step(&view, handoff_budget).unwrap() {
                 Step::Pending(work) => work,
                 Step::Ready(found, work) => {
                     count = Some(found);
                     work
                 }
             };
-            assert!(work.rows <= 1 && work.edges == 0 && work.bytes <= 128);
+            assert!(
+                work.rows <= handoff_budget.rows
+                    && work.edges <= handoff_budget.edges
+                    && work.bytes <= handoff_budget.bytes
+            );
             if count.is_some() {
                 break;
             }
         }
         assert_eq!(count, Some(300));
+        assert!(handoff_turns > 128);
         assert_eq!(repository.body_read_counts(), before);
+        // Many real selected header reads share one allowance. The prior
+        // one-command scheduler required 300 turns despite ample row budget.
+        let mut batched = HistoryQuery::new(source, move |context| async move {
+            let mut found = 0;
+            for _ in 0..300 {
+                found += usize::from(context.header(selected).await?.is_some());
+            }
+            Ok(found)
+        });
+        let batch_budget = PreparationBudget::default();
+        let mut completed = None;
+        let mut batch_turns = 0;
+        let mut header_reads = 0;
+        let before_bodies = repository.body_read_counts();
+        let before_facts = facts();
+        for _ in 0..10 {
+            batch_turns += 1;
+            let work = match batched.step(&view, batch_budget).unwrap() {
+                Step::Pending(work) => work,
+                Step::Ready(value, work) => {
+                    completed = Some(value);
+                    work
+                }
+            };
+            assert!(
+                work.rows <= batch_budget.rows
+                    && work.edges == 0
+                    && work.bytes <= batch_budget.bytes
+            );
+            header_reads += work.rows;
+            if completed.is_some() {
+                break;
+            }
+        }
+        assert_eq!(completed, Some(300));
+        assert_eq!(header_reads, 300);
+        assert!(batch_turns > 1 && batch_turns <= 10);
+        assert_eq!(facts(), before_facts);
+        assert_eq!(repository.body_read_counts(), before_bodies);
+
+        // A stateful command may make several measured phase transitions in
+        // one turn, but must yield before exposing an unfinished result.
+        let mut phases = HistoryQuery::new(source, move |context| async move {
+            let mut after = 0;
+            context
+                .request(move |_, _| {
+                    after += 1;
+                    if after == 12 {
+                        Ok(Step::Ready(after, units(1, 128)))
+                    } else {
+                        Ok(Step::Pending(units(1, 128)))
+                    }
+                })
+                .await
+        });
+        let phase_budget = PreparationBudget {
+            rows: 8,
+            edges: 1,
+            bytes: 4096,
+        };
+        let Step::Pending(work) = phases.step(&view, phase_budget).unwrap() else {
+            panic!("unfinished phases must not expose a partial result");
+        };
+        assert!(
+            work.rows > 1 && work.rows <= phase_budget.rows && work.bytes <= phase_budget.bytes
+        );
+        let Step::Ready(value, work) = phases.step(&view, phase_budget).unwrap() else {
+            panic!("remaining phases must use the next bounded allowance");
+        };
+        assert_eq!(value, 12);
+        assert!(work.rows <= phase_budget.rows && work.bytes <= phase_budget.bytes);
+
+        // The second real selected body fits a fresh turn but not the residual
+        // allowance. No oversized body may be read during the refusal, and the
+        // conservative charge includes all work before that admission failure.
+        let selected_header = repository.header(&selected).unwrap().unwrap();
+        let body_bytes = selected_header.stored_bytes * 3 + std::mem::size_of::<Event>();
+        assert!(body_bytes > 768);
+        let allocation_budget = PreparationBudget {
+            rows: 8,
+            edges: 32,
+            bytes: body_bytes + 896,
+        };
+        let mut allocation = HistoryQuery::new(source, move |context| async move {
+            let first = context.body(selected).await?.map(|event| event.id);
+            let second = context.body(selected).await?.map(|event| event.id);
+            Ok((first, second))
+        });
+        let before_bodies = repository.body_read_counts().1;
+        let before_facts = facts();
+        let Step::Pending(work) = allocation.step(&view, allocation_budget).unwrap() else {
+            panic!("selected allocation must wait for a fresh turn");
+        };
+        assert_eq!(work.rows, allocation_budget.rows);
+        assert_eq!(work.edges, allocation_budget.edges);
+        assert_eq!(work.bytes, allocation_budget.bytes);
+        let read = repository.body_read_counts().1 - before_bodies;
+        assert_eq!(read, 1);
+        assert!(read <= allocation_budget.rows && read * body_bytes <= allocation_budget.bytes);
+        assert_eq!(facts(), before_facts);
+        let before_bodies = repository.body_read_counts().1;
+        let Step::Ready(value, work) = allocation.step(&view, allocation_budget).unwrap() else {
+            panic!("selected allocation must progress with its fresh allowance");
+        };
+        assert_eq!(value, (Some(selected), Some(selected)));
+        assert!(
+            work.rows <= allocation_budget.rows
+                && work.edges <= allocation_budget.edges
+                && work.bytes <= allocation_budget.bytes
+        );
+        let read = repository.body_read_counts().1 - before_bodies;
+        assert_eq!(read, 1);
+        assert!(read <= allocation_budget.rows && read * body_bytes <= allocation_budget.bytes);
+        assert_eq!(facts(), before_facts);
+
+        // A body that cannot fit the caller's full allowance remains an explicit
+        // budget error, rather than an indefinitely retained pending command.
+        let mut too_small = HistoryQuery::new(source, move |context| async move {
+            context.body(selected).await
+        });
+        let before_bodies = repository.body_read_counts();
+        assert!(matches!(
+            too_small.step(
+                &view,
+                PreparationBudget {
+                    bytes: body_bytes - 1,
+                    ..allocation_budget
+                }
+            ),
+            Err(LogError::PageBudgetTooSmall { required }) if required == body_bytes
+        ));
+        assert_eq!(repository.body_read_counts(), before_bodies);
+        assert_eq!(facts(), before_facts);
+
         // A yielded decision cannot be used after a signed source append.
         let event = repository.get(&selected).unwrap().unwrap();
         let mut stale = HistoryQuery::new(source, move |context| async move {

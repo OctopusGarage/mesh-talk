@@ -4574,8 +4574,8 @@ mod tests {
                     dm,
                     channel,
                     file,
-                    &directory.path().join(format!("{name}-events.log")),
-                    &directory.path().join(format!("{name}-sent.log")),
+                    &directory.path().join(name).join("events.log"),
+                    &directory.path().join(name).join("sent.log"),
                     "pw",
                 )
                 .unwrap()

@@ -1199,6 +1199,7 @@ impl Node {
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
         let mut distribution = None;
+        let mut owner_control = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
@@ -1216,6 +1217,14 @@ impl Node {
                     )
                 })?;
                 match self.try_account_channel_invite(channel, &new_member, proof)? {
+                    super::channel_account_controls::AccountChannelMutation::CommittedControl {
+                        event,
+                        recipients,
+                    } => {
+                        owner_control = Some(event);
+                        distribution = Some(recipients);
+                        return Ok(());
+                    }
                     super::channel_account_controls::AccountChannelMutation::Changed(members) => {
                         distribution = Some(members);
                         return Ok(());
@@ -1285,6 +1294,9 @@ impl Node {
             Ok(())
         })?;
         drop(policy);
+        if let Some(event) = owner_control {
+            self.await_account_owner_control(channel, event).await?;
+        }
         let Some(new_members) = distribution else {
             return Ok(false);
         };
@@ -1317,6 +1329,7 @@ impl Node {
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
         let mut distribution = None;
+        let mut owner_control = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
@@ -1330,6 +1343,14 @@ impl Node {
                     .and_then(|state| state.member_account_id(member_user_id))
                     .unwrap_or("");
                 match self.try_account_channel_remove(channel, account)? {
+                    super::channel_account_controls::AccountChannelMutation::CommittedControl {
+                        event,
+                        recipients,
+                    } => {
+                        owner_control = Some(event);
+                        distribution = Some(recipients);
+                        return Ok(());
+                    }
                     super::channel_account_controls::AccountChannelMutation::Changed(members) => {
                         distribution = Some(members);
                         return Ok(());
@@ -1389,6 +1410,9 @@ impl Node {
             Ok(())
         })?;
         drop(policy);
+        if let Some(event) = owner_control {
+            self.await_account_owner_control(channel, event).await?;
+        }
         let Some(new_members) = distribution else {
             return Ok(());
         };
@@ -1409,12 +1433,21 @@ impl Node {
         // Never retain it during network distribution.
         let policy = self.privacy.gate.read().await;
         let mut distribution = None;
+        let mut owner_control = None;
         authorize(&mut || {
             let _membership = self
                 .channel_membership_commit
                 .lock()
                 .expect("channel membership commit lock");
             match self.try_account_channel_remove(channel, account_id)? {
+                super::channel_account_controls::AccountChannelMutation::CommittedControl {
+                    event,
+                    recipients,
+                } => {
+                    owner_control = Some(event);
+                    distribution = Some(recipients);
+                    return Ok(());
+                }
                 super::channel_account_controls::AccountChannelMutation::Changed(members) => {
                     distribution = Some(members);
                     return Ok(());
@@ -1481,6 +1514,9 @@ impl Node {
             Ok(())
         })?;
         drop(policy);
+        if let Some(event) = owner_control {
+            self.await_account_owner_control(channel, event).await?;
+        }
         if let Some(members) = distribution {
             self.distribute_channel(channel, &members).await;
         }
@@ -1569,6 +1605,7 @@ impl Node {
     ) -> Result<(), NodeError> {
         self.await_channel_metadata(channel).await?;
         let mut distribution = None;
+        let mut owner_control = None;
         let mut transfer = None;
         authorize(&mut || {
             let _membership = self
@@ -1576,6 +1613,14 @@ impl Node {
                 .lock()
                 .expect("channel membership commit lock");
             match self.try_account_channel_transfer(channel, new_owner)? {
+                super::channel_account_controls::AccountChannelMutation::CommittedControl {
+                    event,
+                    recipients,
+                } => {
+                    owner_control = Some(event);
+                    distribution = Some(recipients);
+                    return Ok(());
+                }
                 super::channel_account_controls::AccountChannelMutation::Changed(members) => {
                     distribution = Some(members);
                     return Ok(());
@@ -1617,6 +1662,9 @@ impl Node {
             distribution = Some(members);
             Ok(())
         })?;
+        if let Some(event) = owner_control {
+            self.await_account_owner_control(channel, event).await?;
+        }
         let Some(members) = distribution else {
             return Ok(());
         };

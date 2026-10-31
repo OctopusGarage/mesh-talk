@@ -302,15 +302,6 @@ impl Chain {
         channel
     }
 
-    async fn recover(&self, index: usize) {
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.nodes[index].pull_one_channel_from_member(0),
-        )
-        .await
-        .expect("bounded adjacent-member recovery");
-    }
-
     async fn recover_retained(&self, index: usize, channel: ConversationId) {
         // The original recovery deadline includes deferred local processing.
         // No worker or additional network route is introduced by this barrier.
@@ -340,7 +331,7 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
         .await
         .unwrap();
     for i in 1..6 {
-        chain.recover(i).await;
+        chain.recover_retained(i, group).await;
         assert!(
             chain.has_text(i, group, b"A to F through members"),
             "member {i} decrypts original author's event"
@@ -364,7 +355,7 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
         "no group metadata, keys, or content disclosed to a nonmember"
     );
     // A second reconciliation does not duplicate the delivered message.
-    chain.recover(5).await;
+    chain.recover_retained(5, group).await;
     assert_eq!(chain.nodes[5].channel_history(group, 100).unwrap().len(), 1);
     // Removal rotates the epoch. Even a formerly accepted member cannot
     // recover the later sender key or ciphertext by guessing the group id.
@@ -373,14 +364,14 @@ async fn group_chain_crosses_three_lans_without_sender_routes_or_relays() {
         .await
         .unwrap();
     for i in 1..5 {
-        chain.recover(i).await;
+        chain.recover_retained(i, group).await;
     }
     chain.nodes[0]
         .send_channel_message(group, b"after F removal")
         .await
         .unwrap();
     for i in 1..5 {
-        chain.recover(i).await;
+        chain.recover_retained(i, group).await;
     }
     assert!(chain.has_text(4, group, b"after F removal"));
     let mut removed_connection = chain.nodes[5]
@@ -679,20 +670,21 @@ async fn unprocessed_durable_group_never_exposes_events_to_nonmember() {
             .is_none()
     );
     let store = chain.nodes[5].serve_sync_store(&chain.nodes[6].identity.public());
-    let store = store.lock().unwrap();
-    assert_eq!(
-        store.fingerprint_and_len(&group).unwrap(),
-        (crate::eventlog::sync::fingerprint(Vec::new()), 0)
-    );
-    assert!(!store.requires_channel_v2(&group).unwrap());
-    assert!(store.event_ids(&group).unwrap().is_empty());
-    assert!(
-        store
-            .events_excluding(&group, &Default::default())
-            .unwrap()
-            .is_empty()
-    );
-    drop(store);
+    {
+        let store = store.lock().unwrap();
+        assert_eq!(
+            store.fingerprint_and_len(&group).unwrap(),
+            (crate::eventlog::sync::fingerprint(Vec::new()), 0)
+        );
+        assert!(!store.requires_channel_v2(&group).unwrap());
+        assert!(store.event_ids(&group).unwrap().is_empty());
+        assert!(
+            store
+                .events_excluding(&group, &Default::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
     let peer = chain.nodes[4].identity.public();
     let member_store = chain.nodes[5].serve_sync_store(&peer);
     let before = member_store
@@ -705,6 +697,7 @@ async fn unprocessed_durable_group_never_exposes_events_to_nonmember() {
         "authorized invitation ancestry still bootstraps before book refresh"
     );
     chain.nodes[5].process_channel(group);
+    chain.nodes[5].await_channel_metadata(group).await.unwrap();
     let replays = chain.nodes[5]
         .channel_projection_replays
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -843,6 +836,7 @@ async fn public_group_metadata_invalidates_for_authority_history_and_privacy_cha
     assert!(before_book_refresh.0.1 > 0);
     assert!(before_book_refresh.1);
     node.process_channel(group);
+    node.await_channel_metadata(group).await.unwrap();
     assert_eq!(
         metadata(node, &member, group).0.1,
         0,
@@ -1059,23 +1053,61 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
     );
 }
 
-#[tokio::test]
+// These independent hosts use synchronous durable storage. Match the production
+// multithread executor without changing the network or post-send time budgets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes() {
     let mut chain = Chain::new().await;
     let group = chain.accepted_group().await;
+    // Setup copied the signed controls without a recovery worker. Complete only
+    // that retained work before measuring propagation of a new message.
+    for index in 0..6 {
+        chain.settle_retained(index, group).await;
+        let projection = chain.nodes[index].account_group_projection(group).unwrap();
+        let state = projection.state.as_ref().unwrap();
+        for member in &chain.nodes[..6] {
+            assert!(state.is_accepted_member(&member.user_id()));
+        }
+    }
+    let mut recovery_before = Vec::with_capacity(6);
     // Switch the prepared, fully accepted membership to the complete production
     // accept/recovery runtime. No manual recovery calls occur after this point.
     for index in 0..6 {
         let previous = chain.servers[index].take().unwrap();
         previous.abort();
         let _ = previous.await;
+        recovery_before.push(
+            chain.nodes[index]
+                .channel_recovery(group)
+                .and_then(|recovery| recovery.checked_at),
+        );
         let listener = TcpListener::bind(chain.addresses[index]).await.unwrap();
         chain.servers[index] = Some(tokio::spawn(
             chain.nodes[index].clone().run_accept_loop(listener),
         ));
     }
-    // Let startup and its immediately-ready interval tick finish before sending.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Require a new clean authenticated exchange by each replacement worker;
+    // historical peer_checked state cannot satisfy this setup barrier. This
+    // setup deadline is separate from the unchanged post-message two seconds.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut initialized = [false; 6];
+        loop {
+            for (index, node) in chain.nodes[..6].iter().enumerate() {
+                initialized[index] |= node.channel_recovery(group).is_some_and(|recovery| {
+                    recovery.phase == "peer_checked"
+                        && recovery.checked_at.is_some_and(|checked| {
+                            recovery_before[index].is_none_or(|before| checked > before)
+                        })
+                });
+            }
+            if initialized.into_iter().all(|ready| ready) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("prepared adjacent endpoints must finish their initial background exchange");
     let route_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let route_started = std::time::Instant::now();
     let last_peer = chain.nodes[5].identity.public();
@@ -1102,8 +1134,24 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     let sender = chain.servers[0].take().unwrap();
     sender.abort();
     let _ = sender.await;
+    // A live worker can invalidate a read checkpoint between polling turns.
+    // Only that typed pending state is retried, within the original deadline;
+    // no manual projection or network recovery is driven by these pure reads.
     let received = tokio::time::timeout(Duration::from_secs(2), async {
-        while !chain.has_text(5, group, b"notification-driven background gossip") {
+        loop {
+            let all_received =
+                (1..6).all(
+                    |index| match chain.nodes[index].channel_history(group, 100) {
+                        Ok(history) => history
+                            .iter()
+                            .any(|row| row.text == b"notification-driven background gossip"),
+                        Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                        Err(error) => panic!("background history read failed: {error}"),
+                    },
+                );
+            if all_received {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -1162,9 +1210,6 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         );
     }
     received.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
-    for index in 1..6 {
-        assert!(chain.has_text(index, group, b"notification-driven background gossip"));
-    }
 }
 
 #[tokio::test]

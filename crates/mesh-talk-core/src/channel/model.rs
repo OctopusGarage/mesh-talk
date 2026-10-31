@@ -293,6 +293,14 @@ impl ChannelState {
             self.pending_invite = self.is_member(me) && !self.is_accepted_member(me);
         }
     }
+    /// Install the device-local indexed projection, including its acceptance
+    /// cutoff. Pure authority projections lack this local cutoff and continue
+    /// to use `install_membership_projection` directly.
+    pub(crate) fn install_indexed_membership_projection(&mut self, projected: Self) {
+        self.accepted_event_id = projected.accepted_event_id;
+        self.install_membership_projection(projected);
+    }
+
     /// Copy projected authority without replacing local sending/receiving ratchets.
     pub(crate) fn install_membership_projection(&mut self, projected: Self) {
         self.name = projected.name;

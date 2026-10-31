@@ -227,15 +227,17 @@ impl Preparation {
             // per historical header. Its row, edge and byte caps still include
             // rejected work, and the session yields after this finite turn.
             for transition in 0..budget.rows {
+                let spent = step.rows != 0 || step.edges != 0 || step.bytes != 0;
                 if transition > 0
-                    && (matches!(self.phase, Phase::Authority | Phase::Order)
+                    && ((spent && matches!(self.phase, Phase::Authority | Phase::Order))
                         || step.rows == budget.rows
                         || step.edges == budget.edges
                         || budget.bytes - step.bytes < 64)
                 {
                     break;
                 }
-                let separate_turn = matches!(self.phase, Phase::Authority | Phase::Order);
+                let phase = self.phase;
+                let separate_turn = matches!(phase, Phase::Authority | Phase::Order);
                 let remaining = PreparationBudget {
                     rows: budget.rows - step.rows,
                     edges: budget.edges - step.edges,
@@ -254,7 +256,17 @@ impl Preparation {
                 step.edges += next.edges;
                 step.bytes += next.bytes;
                 step.ready = next.ready;
-                if step.ready || separate_turn {
+                // An already-current order/authority owner may advance its
+                // phase without spending work. Keep that finite transition in
+                // this allowance instead of persisting and yielding an empty
+                // turn. A working owner still gets its original exclusive turn.
+                if step.ready
+                    || (separate_turn
+                        && (next.rows != 0
+                            || next.edges != 0
+                            || next.bytes != 0
+                            || self.phase == phase))
+                {
                     break;
                 }
             }

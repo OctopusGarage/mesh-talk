@@ -1242,6 +1242,9 @@ async fn pending_forwarding_order_survives_restart_and_cancelled_predecessor() {
         "terminal cancellation releases the following leg"
     );
     reopened.maintain_account_group_operation_effects();
+    // This bare-node fixture committed the second send without a participant
+    // worker. Finish only its bounded metadata continuation before reading it.
+    crate::node::test_support::settle_group_metadata(&reopened, group);
     assert_eq!(
         reopened
             .channel_history(group, 10)

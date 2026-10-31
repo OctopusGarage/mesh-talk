@@ -203,6 +203,20 @@ impl AccountDocumentStore {
     ) -> Result<Self, LogError> {
         Self::open_inner(None, dir, password, account)
     }
+    /// Authenticate the legacy owner before the first shared SQL publication.
+    /// Warm opens already retain that publication and avoid this migration-only
+    /// validation pass, including its standalone blob inventory.
+    pub(in crate::node) fn authenticate_legacy(
+        profile: &crate::storage::profile::context::ProfileStorage,
+        dir: &Path,
+        password: &str,
+        account: &[u8; 32],
+    ) -> Result<(), LogError> {
+        if profile.participant_database().is_none() {
+            drop(Self::open_inner(None, dir, password, account)?);
+        }
+        Ok(())
+    }
     pub(in crate::node) fn open_profile(
         profile: std::sync::Arc<crate::storage::profile::context::ProfileStorage>,
         dir: &Path,

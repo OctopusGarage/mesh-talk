@@ -941,6 +941,12 @@ impl Node {
         account_transitions.commit_own(&identity.public(), &account.public().ed25519_pub)?;
         account_transitions.discard_pending(&identity.public(), &account.public().ed25519_pub)?;
         let account_document_updates = tokio::sync::watch::channel(0).0;
+        super::account_documents::store::AccountDocumentStore::authenticate_legacy(
+            &storage,
+            dir,
+            password,
+            &account.public().ed25519_pub,
+        )?;
         storage.complete_participant(password, legacy_previous.as_deref())?;
         let media = super::media_store::MediaStore::open_profile(
             storage.clone(),

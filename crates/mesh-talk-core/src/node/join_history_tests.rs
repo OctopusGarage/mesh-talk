@@ -873,9 +873,34 @@ async fn join_history_leave_then_rejoin_off_closes_the_original_permission() {
         .unwrap();
     copy(&alice, &bob, channel);
     bob.accept_channel_invite(channel).await.unwrap();
-    copy(&bob, &alice, channel);
+    // This scenario closes permission before the original key is released.
+    // Stage acceptance and departure authority without running the sender's
+    // global history retry, which could legitimately release the first offer.
+    copy_events(&bob, &alice, channel);
+    crate::node::test_support::settle_group_metadata(&alice, channel);
+    let release_count = || {
+        alice
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::ChannelJoinHistory
+                    && matches!(
+                        decode::<HistoryControl>(&event.ciphertext),
+                        Some(HistoryControl::Release(_))
+                    )
+            })
+            .count()
+    };
+    assert_eq!(release_count(), 0, "the original key must remain withheld");
+    assert!(bob.channel_history(channel, 10).unwrap().is_empty());
     bob.leave_channel(channel).await.unwrap();
-    copy(&bob, &alice, channel);
+    copy_events(&bob, &alice, channel);
+    crate::node::test_support::settle_group_metadata(&alice, channel);
+    assert_eq!(release_count(), 0);
     alice
         .set_channel_history_policy(channel, HistoryPolicy::Off)
         .await
@@ -892,6 +917,11 @@ async fn join_history_leave_then_rejoin_off_closes_the_original_permission() {
     assert_eq!(
         alice.log.lock().unwrap().events(&channel).unwrap().len(),
         count
+    );
+    assert_eq!(
+        release_count(),
+        0,
+        "a closed grant cannot release its old key"
     );
     copy(&alice, &bob, channel);
     assert!(bob.channel_history(channel, 10).unwrap().is_empty());
@@ -1051,6 +1081,9 @@ async fn join_history_former_owner_fork_cannot_override_current_owner_policy() {
     .unwrap();
     drop(log);
     alice.process_channel(channel);
+    // The forged signed append still needs bounded policy preparation before
+    // observing its rejection; this fixture has no participant worker.
+    crate::node::test_support::settle_group_metadata(&alice, channel);
     assert_eq!(alice.channel_owner(channel), bob.user_id());
     assert_eq!(
         alice.channel_history_policy(channel).unwrap(),
@@ -1093,6 +1126,9 @@ async fn join_history_former_owner_cannot_backdate_a_policy_into_a_closed_owner_
     .unwrap();
     drop(log);
     alice.process_channel(channel);
+    // The forged signed append still needs bounded policy preparation before
+    // observing its rejection; this fixture has no participant worker.
+    crate::node::test_support::settle_group_metadata(&alice, channel);
     assert_eq!(alice.channel_owner(channel), bob.user_id());
     assert_eq!(
         alice.channel_history_policy(channel).unwrap(),
@@ -1358,7 +1394,8 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
         );
     }
     owner
-        .try_account_channel_remove(channel, &anchor.account_id())
+        .remove_channel_account_members_if(channel, &anchor.account_id(), |commit| commit())
+        .await
         .unwrap();
     let removed = owner.account_group_projection(channel).unwrap();
     assert!(
@@ -1377,6 +1414,9 @@ async fn account_invitation_history_reaches_accepting_sibling_while_anchor_is_of
             &anchor.own_group_proof(),
         )
         .unwrap();
+    // The explicit local invitation helper has no participant worker; finish
+    // its metadata before checking the new grant against the old release.
+    crate::node::test_support::settle_group_metadata(&owner, channel);
     let reinvited = owner.account_group_projection(channel).unwrap();
     assert!(
         !account_release_admitted(

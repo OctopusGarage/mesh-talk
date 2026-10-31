@@ -997,8 +997,8 @@ async fn auto_enrolls_certified_sibling_with_owner_signed_invitation() {
             dm,
             channel,
             file,
-            &dir.path().join(format!("{name}-node.log")),
-            &dir.path().join(format!("{name}-sent.log")),
+            &dir.path().join(name).join(format!("{name}-node.log")),
+            &dir.path().join(name).join(format!("{name}-sent.log")),
             "pw",
         )
         .unwrap()
@@ -2136,6 +2136,7 @@ async fn recovered_channel_can_rejoin_send_and_reopen_without_sent_sequence_conf
     restored.log.lock().unwrap().append(invitation).unwrap();
     drop(restored);
     let rejoined = Node::open_recovery_profile(&restored_dir, "new password").unwrap();
+    crate::node::test_support::settle_group_metadata(&rejoined, channel);
     assert!(!rejoined.list_channels().unwrap()[0].archived);
     assert!(rejoined.list_channels().unwrap()[0].pending_invite);
     rejoined.accept_channel_invite(channel).await.unwrap();
@@ -2149,6 +2150,7 @@ async fn recovered_channel_can_rejoin_send_and_reopen_without_sent_sequence_conf
         .unwrap();
     drop(rejoined);
     let reopened = Node::open_recovery_profile(&restored_dir, "new password").unwrap();
+    crate::node::test_support::settle_group_metadata(&reopened, channel);
     assert_eq!(reopened.channel_history(channel, 10).unwrap().len(), 3);
 }
 
@@ -2463,8 +2465,8 @@ async fn reconnecting_dm_recipient_pulls_from_sender_without_sender_route_or_rel
             dm_tx,
             ch_tx,
             file_tx,
-            &dir.path().join(format!("{name}.log")),
-            &dir.path().join(format!("{name}-sent.log")),
+            &dir.path().join(name).join(format!("{name}.log")),
+            &dir.path().join(name).join(format!("{name}-sent.log")),
             "pw",
         )
         .unwrap();
@@ -2688,8 +2690,8 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
         alice_tx,
         a_ch_tx,
         a_file_tx,
-        &dir.path().join("alice.log"),
-        &dir.path().join("alice-sent.log"),
+        &dir.path().join("alice").join("alice.log"),
+        &dir.path().join("alice").join("alice-sent.log"),
         "pw",
     )
     .unwrap();
@@ -2699,8 +2701,8 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
         bob_tx,
         b_ch_tx,
         b_file_tx,
-        &dir.path().join("bob.log"),
-        &dir.path().join("bob-sent.log"),
+        &dir.path().join("bob").join("bob.log"),
+        &dir.path().join("bob").join("bob-sent.log"),
         "pw",
     )
     .unwrap();
@@ -2819,6 +2821,20 @@ async fn offline_dm_delivered_via_post_office_over_loopback() {
     bob_node.drain_from_post_office().await;
     assert!(
         bob_node
+            .log
+            .lock()
+            .unwrap()
+            .repository()
+            .unwrap()
+            .has_kind(&group, EventKind::MembershipChange)
+            .unwrap(),
+        "the relay must deliver the signed group before local metadata preparation"
+    );
+    // This manual drain fixture has no participant recovery worker. Finish its
+    // existing selected metadata work without another network route or pull.
+    crate::node::test_support::settle_group_metadata(&bob_node, group);
+    assert!(
+        bob_node
             .list_channels()
             .unwrap()
             .iter()
@@ -2928,6 +2944,7 @@ async fn channel_custody_inherited_holder_requires_signed_account_authority() {
         )
         .unwrap();
     owner.process_channel(channel);
+    crate::node::test_support::settle_group_metadata(&owner, channel);
     {
         let book = owner.channels.lock().unwrap();
         let state = book.state(&channel).unwrap();
@@ -4210,8 +4227,8 @@ async fn stalled_channel_peer_does_not_delay_healthy_member() {
             dm_tx,
             ch_tx,
             file_tx,
-            &dir.path().join(format!("{name}.log")),
-            &dir.path().join(format!("{name}-sent.log")),
+            &dir.path().join(name).join(format!("{name}.log")),
+            &dir.path().join(name).join(format!("{name}-sent.log")),
             "pw",
         )
         .unwrap();
@@ -4336,8 +4353,8 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
             dm_tx,
             ch_tx,
             file_tx,
-            &dir.path().join(format!("{name}.log")),
-            &dir.path().join(format!("{name}-sent.log")),
+            &dir.path().join(name).join(format!("{name}.log")),
+            &dir.path().join(name).join(format!("{name}-sent.log")),
             "pw",
         )
         .unwrap();
@@ -6986,8 +7003,8 @@ async fn a_dm_reaction_is_visible_to_both_peers() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6997,8 +7014,8 @@ async fn a_dm_reaction_is_visible_to_both_peers() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -7613,8 +7630,8 @@ async fn channel_reactions_are_visible_to_members() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -7624,8 +7641,8 @@ async fn channel_reactions_are_visible_to_members() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -7924,8 +7941,8 @@ async fn a_reply_round_trips_with_its_reply_to() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -7935,8 +7952,8 @@ async fn a_reply_round_trips_with_its_reply_to() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8043,8 +8060,8 @@ async fn dm_messages_are_forward_secret_over_the_ratchet() {
         alice_tx,
         a_ch_tx,
         a_file_tx,
-        &dir.path().join("alice.log"),
-        &dir.path().join("alice-sent.log"),
+        &dir.path().join("alice").join("alice.log"),
+        &dir.path().join("alice").join("alice-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8054,8 +8071,8 @@ async fn dm_messages_are_forward_secret_over_the_ratchet() {
         bob_tx,
         b_ch_tx,
         b_file_tx,
-        &dir.path().join("bob.log"),
-        &dir.path().join("bob-sent.log"),
+        &dir.path().join("bob").join("bob.log"),
+        &dir.path().join("bob").join("bob-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8148,8 +8165,8 @@ async fn dm_messages_are_forward_secret_over_the_ratchet() {
         dave_tx,
         d_ch_tx,
         d_file_tx,
-        &dir.path().join("dave.log"),
-        &dir.path().join("dave-sent.log"),
+        &dir.path().join("dave").join("dave.log"),
+        &dir.path().join("dave").join("dave-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8233,8 +8250,8 @@ async fn send_to_account_delivers_to_a_peer_account_over_loopback() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -8245,8 +8262,8 @@ async fn send_to_account_delivers_to_a_peer_account_over_loopback() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -9214,10 +9231,14 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if channel_texts(&a2_node)
-                .iter()
-                .any(|item| item.id == old_channel_id)
-            {
+            let received = match a2_node.channel_history(channel, 10) {
+                Ok(history) => history
+                    .iter()
+                    .any(|item| item.file.is_none() && item.id == old_channel_id),
+                Err(NodeError::Log(LogError::StaleCursor)) => false,
+                Err(_) => panic!("linked channel history failed"),
+            };
+            if received {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -9389,10 +9410,14 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
                     linked_plaintext_metadata(&a2_node, original_new),
                 ));
             }
-            if channel_texts(&a2_node)
-                .iter()
-                .any(|item| item.text == b"after sibling joined")
-            {
+            let received = match a2_node.channel_history(channel, 10) {
+                Ok(history) => history
+                    .iter()
+                    .any(|item| item.file.is_none() && item.text == b"after sibling joined"),
+                Err(NodeError::Log(LogError::StaleCursor)) => false,
+                Err(_) => panic!("linked channel history failed"),
+            };
+            if received {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -10094,8 +10119,8 @@ async fn linking_with_a_wrong_code_is_refused() {
         d,
         c,
         f,
-        &dir.path().join("l.log"),
-        &dir.path().join("l-sent.log"),
+        &dir.path().join("linker/l.log"),
+        &dir.path().join("linker/l-sent.log"),
         "pw",
     )
     .unwrap();
@@ -10109,8 +10134,8 @@ async fn linking_with_a_wrong_code_is_refused() {
         d2,
         c2,
         f2,
-        &dir.path().join("j.log"),
-        &dir.path().join("j-sent.log"),
+        &dir.path().join("joiner/j.log"),
+        &dir.path().join("joiner/j-sent.log"),
         "pw",
     )
     .unwrap();
@@ -10167,8 +10192,8 @@ async fn send_file_to_account_delivers_to_a_peer_account() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -10179,8 +10204,8 @@ async fn send_file_to_account_delivers_to_a_peer_account() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -10282,8 +10307,8 @@ async fn account_reaction_aggregates_on_the_peer_account() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &dir.path().join("a").join("a.log"),
+        &dir.path().join("a").join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -10294,8 +10319,8 @@ async fn account_reaction_aggregates_on_the_peer_account() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &dir.path().join("b").join("b.log"),
+        &dir.path().join("b").join("b-sent.log"),
         "pw",
     )
     .unwrap();
@@ -11527,6 +11552,7 @@ async fn group_reception_history_respects_signed_ancestry_despite_clock_skew() {
             )
             .unwrap();
     }
+    crate::node::test_support::settle_group_metadata(&node, conv);
     let history = node.channel_history(conv, 10).unwrap();
     assert_eq!(
         history.iter().map(|entry| entry.id).collect::<Vec<_>>(),
@@ -11920,14 +11946,17 @@ async fn group_reception_terminal_is_independent_of_erased_and_expired_rows() {
                 .unwrap(),
         );
     }
+    crate::node::test_support::settle_group_metadata(&node, conv);
     node.received.lock().unwrap().fail_once_after_for_test(1);
     node.process_channel_reception(conv, "catch_up");
+    assert!(node.channel_plaintext_retry_pending_for_test(conv));
     let published = rx.try_recv().unwrap();
     assert_eq!(published.text, b"erase 0");
     assert!(!published.batch_complete);
     node.clear_conversation(conv).unwrap();
     tokio::time::sleep(Duration::from_millis(1100)).await;
     node.retry_channel_plaintext();
+    settle_injected_channel(&node, conv);
     let terminal = rx.try_recv().unwrap();
     assert!(terminal.reception_only && terminal.batch_complete);
     assert_eq!(terminal.batch_id, published.batch_id);
@@ -11954,12 +11983,15 @@ async fn group_reception_terminal_is_independent_of_erased_and_expired_rows() {
         EventKind::Message,
         sender.seal_sender_message(b"retained suffix").unwrap(),
     );
+    crate::node::test_support::settle_group_metadata(&node, conv);
     node.received.lock().unwrap().fail_once_after_for_test(1);
     node.process_channel_reception(conv, "catch_up");
+    assert!(node.channel_plaintext_retry_pending_for_test(conv));
     let published = rx.try_recv().unwrap();
     assert_eq!(published.text, b"expiring prefix");
     tokio::time::sleep(Duration::from_millis(1100)).await;
     node.retry_channel_plaintext();
+    settle_injected_channel(&node, conv);
     let remainder: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let visible: Vec<_> = remainder
         .iter()
@@ -13442,7 +13474,11 @@ async fn channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance(
             bob.process_channel_reception_inner(channel, "catch_up", false)
                 .unwrap();
             assert!(reads() - before <= 64);
-            if bob.received.lock().unwrap().contains(last).unwrap() {
+            // Body commit precedes the separate terminal turn. Retain the
+            // same ten-turn allowance until the producer retires its lane.
+            if bob.received.lock().unwrap().contains(last).unwrap()
+                && !bob.channel_plaintext_pending_for_test(channel)
+            {
                 break;
             }
             assert!(turn < 9, "retained single candidate made no progress");

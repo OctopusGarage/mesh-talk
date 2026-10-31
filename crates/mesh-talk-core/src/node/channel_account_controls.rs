@@ -1,12 +1,21 @@
 //! Mutations of upgraded account-principal channel authority.
 
 use super::{Node, NodeError};
-use crate::{eventlog::event::ConversationId, identity::device::PublicIdentity};
+use crate::{
+    eventlog::event::{ConversationId, EventId},
+    identity::device::PublicIdentity,
+};
 
 pub(super) enum AccountChannelMutation {
     Legacy,
     Unchanged,
     Changed(Vec<PublicIdentity>),
+    /// Durable owner effect whose exact indexed admission must complete after
+    /// the caller releases its authorization and membership guards.
+    CommittedControl {
+        event: EventId,
+        recipients: Vec<PublicIdentity>,
+    },
 }
 impl Node {
     pub(super) fn try_account_channel_remove(

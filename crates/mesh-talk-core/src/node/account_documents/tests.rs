@@ -6610,6 +6610,11 @@ async fn group_inventory_adoption_reconstructs_live_legacy_grants_but_excludes_o
             .is_none(),
         "old root documents must not be copied on adoption"
     );
+    // This bare reopened node has no recovery worker. Complete only the three
+    // retained groups before reading their strict account-scoped projections.
+    for group in [modern, legacy, invited_modern] {
+        settle_group_metadata(&adopted, group);
+    }
     assert_eq!(
         adopted.channel_previous_account(modern).unwrap(),
         Some(previous.account_id()),
@@ -7046,6 +7051,7 @@ fn group_inventory_publishes_validated_departure_and_dissolution_without_grantin
     );
     source.log.lock().unwrap().append(departure).unwrap();
     source.process_channel(id);
+    settle_group_metadata(&source, id);
     assert!(!source.channel_can_send(id).unwrap());
     let left = group_inventory_source_document(&source, id);
     assert!(left.meta.revision > initial.meta.revision);

@@ -168,11 +168,12 @@ fn channel_indexed_authority_tail_and_warm_turns_read_no_historical_bodies() {
         // Genesis and initial rotation are the only decoded bodies, regardless
         // of history length. Header admission does not fetch message ciphertext.
         assert_eq!(repository.body_read_counts(), (2, 2));
-        let state = fixture
-            .store
-            .current_page(None)
-            .unwrap_or_else(|_| panic!("current channel page must be readable"))
-            .remove(0);
+        let Ok(page) = fixture.store.current_page(None) else {
+            panic!("current channel page must be readable");
+        };
+        let Some(state) = page.into_iter().next() else {
+            panic!("current channel page must contain the selected channel");
+        };
         assert!(
             state.name() == "checkpoint",
             "current channel name must match"
@@ -2349,4 +2350,111 @@ fn channel_legacy_departure_yields_a_charged_two_row_remainder() {
             .unwrap(),
         "yielding must preserve the exact signed departure for its later complete allowance"
     );
+}
+
+#[test]
+fn indexed_book_preserves_acceptance_retry_ticket_and_sender_position() {
+    let fixture = Fixture::new(0);
+    let repository = fixture.log.repository().unwrap();
+    let channel = ConversationId::new([29; 32]);
+    let own = fixture.me.user_id();
+    let mut meta = ChannelMeta {
+        name: "acceptance checkpoint".into(),
+        members: vec![fixture.sender.public(), fixture.me.public()],
+        epoch: 0,
+        owner: fixture.sender.user_id(),
+    };
+    let invitation = Event::new(
+        &fixture.sender,
+        channel,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        meta.encode_invitation(),
+    );
+    repository.append(&invitation).unwrap();
+    let project = || {
+        for _ in 0..1024 {
+            if fixture
+                .store
+                .project_step(repository, &fixture.me, channel)
+                .unwrap()
+            {
+                return fixture.store.current_state(channel).unwrap().unwrap();
+            }
+        }
+        panic!("acceptance fixture projection did not settle");
+    };
+    let mut book = crate::node::channel::ChannelBook::new();
+    book.install_indexed_state(project());
+    assert!(book.state(&channel).unwrap().pending_invite());
+    assert!(book.pending_acceptances(&own).is_empty());
+    let sent_before = {
+        let state = book.state_mut(&channel).unwrap();
+        let mut sender = crate::channel::sender_key::SenderKey::generate();
+        let (_, mut message_key) = sender.try_ratchet().unwrap();
+        zeroize::Zeroize::zeroize(&mut message_key);
+        state.import_my_sender(0, sender);
+        state.export_my_senders()
+    };
+    let acceptance = Event::new(
+        &fixture.me,
+        channel,
+        1,
+        vec![invitation.id],
+        2,
+        2,
+        EventKind::ChannelAccept,
+        Vec::new(),
+    );
+    repository.append(&acceptance).unwrap();
+    let canonical = project();
+    assert!(canonical.accepted_event_id() == Some(acceptance.id));
+    let expected_members = canonical.members().to_vec();
+    book.install_indexed_state(canonical);
+    let installed = book.state(&channel).unwrap();
+    assert!(installed.accepted_event_id() == Some(acceptance.id));
+    assert!(!installed.pending_invite());
+    assert!(installed.export_my_senders() == sent_before);
+    assert!(book.pending_acceptances(&own) == vec![(channel, expected_members)]);
+
+    // A fresh invitation clears the old local cutoff and retry ticket. Its new
+    // epoch also retires the prior sender, preserving the indexed key policy.
+    meta.members = vec![fixture.sender.public()];
+    meta.epoch = 1;
+    let removal = Event::new(
+        &fixture.sender,
+        channel,
+        2,
+        vec![acceptance.id],
+        3,
+        3,
+        EventKind::MembershipChange,
+        meta.encode(),
+    );
+    repository.append(&removal).unwrap();
+    meta.members.push(fixture.me.public());
+    meta.epoch = 2;
+    let reinvitation = Event::new(
+        &fixture.sender,
+        channel,
+        3,
+        vec![removal.id],
+        4,
+        4,
+        EventKind::MembershipChange,
+        meta.encode_invitation(),
+    );
+    repository.append(&reinvitation).unwrap();
+    let canonical = project();
+    assert!(canonical.pending_invite());
+    assert!(canonical.accepted_event_id().is_none());
+    book.install_indexed_state(canonical);
+    let installed = book.state(&channel).unwrap();
+    assert!(installed.pending_invite());
+    assert!(installed.accepted_event_id().is_none());
+    assert!(installed.export_my_senders().is_empty());
+    assert!(book.pending_acceptances(&own).is_empty());
 }

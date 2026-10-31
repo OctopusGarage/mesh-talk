@@ -3105,6 +3105,30 @@ fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() 
             let account = Account::generate();
             let account_secret = account.secret_bytes();
             let (b, _, _) = node_with_files(dir.path(), identity, account, &ap);
+            // Node::open completed an empty import. Before staging the legacy
+            // corpus, put only this pristine fixture at its pre-startup import
+            // checkpoint; never reset accepted bindings or processing evidence.
+            b.storage
+                .database()
+                .transaction(|c| {
+                    assert_eq!(
+                        c.execute(
+                            concat!(
+                                "UPDATE file_book_owners SET imported=0 ",
+                                "WHERE account=?1 AND imported=1 ",
+                                "AND after_ordinal IS NULL AND revision=0 ",
+                                "AND NOT EXISTS(SELECT 1 FROM transcript_rows WHERE kind=3) ",
+                                "AND NOT EXISTS(SELECT 1 FROM file_book_bindings WHERE account=?1) ",
+                                "AND NOT EXISTS(SELECT 1 FROM file_book_processed WHERE account=?1)"
+                            ),
+                            [b.account.public().ed25519_pub.as_slice()],
+                        )?,
+                        1,
+                        "only an empty pre-corpus fixture may initialize pending import"
+                    );
+                    Ok(())
+                })
+                .unwrap();
             let wire =
                 super::conversation::dm_conversation_id(&alice.public(), &b.identity.public());
             let host = super::conversation::account_conversation_id(
@@ -3206,11 +3230,20 @@ fn file_book_rebuild_requires_valid_manifest_row_and_retained_signed_original() 
                 );
                 (b, Some(rx))
             } else {
-                b.reseed_live_file_book(&b.delivery.lock().unwrap())
-                    .unwrap();
+                super::files::import_file_book(
+                    &b.files.lock().unwrap(),
+                    &b.received_files.lock().unwrap(),
+                    &b.log.lock().unwrap(),
+                    &b.account_file_proofs.lock().unwrap(),
+                    &b.delivery.lock().unwrap(),
+                    &b.file_message_identities.lock().unwrap(),
+                    &b.account_suppression.lock().unwrap(),
+                )
+                .unwrap();
                 (b, None)
             };
             let book = b.files.lock().unwrap();
+            assert!(book.import_position().unwrap().is_none());
             let expected = matches!(shape, "valid-account-host" | "conflicting-alias");
             assert_eq!(
                 book.manifest(manifest.file_conv).unwrap().is_some(),
@@ -4542,6 +4575,10 @@ async fn dormant_receipt_full_binding_and_local_clear_survive_restart_in_public_
                         .unwrap()
                         .is_empty()
                 );
+                // Admission guards retain the profile lease until the owned
+                // transport sessions close, even after their policy is revoked.
+                drop(channel);
+                drop(receiver);
                 drop(b);
                 let (b, _) = node(
                     bd.path(),

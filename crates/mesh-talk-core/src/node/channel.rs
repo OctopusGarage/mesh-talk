@@ -579,7 +579,7 @@ impl ChannelBook {
     pub(in crate::node) fn install_indexed_state(&mut self, mut state: ChannelState) {
         let channel = state.id();
         if let Some(current) = self.states.get_mut(&channel) {
-            current.install_membership_projection(state);
+            current.install_indexed_membership_projection(state);
             current.use_indexed_receivers();
         } else {
             state.use_indexed_receivers();

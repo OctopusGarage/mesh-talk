@@ -310,12 +310,27 @@ fn registered_cloud_commands_round_trip_real_archive_and_restart_runtime() {
                 .send_file_channel(channel, &media_path, mesh_talk_core::file::FileKind::Media)
                 .await
                 .unwrap();
-            let ids: Vec<_> = node
-                .channel_history(channel, 100)
-                .unwrap()
-                .iter()
-                .map(|entry| entry.id.to_hex())
-                .collect();
+            // The runtime prepares the signed channel view in bounded turns.
+            // Wait for that selected read before capturing this archive fixture.
+            let history = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    match node.channel_history(channel, 100) {
+                        Ok(history) => break history,
+                        Err(mesh_talk_core::node::NodeError::Log(
+                            mesh_talk_core::eventlog::LogError::StaleCursor,
+                        )) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                        Err(_) => panic!("the selected cloud fixture history must be readable"),
+                    }
+                }
+            })
+            .await
+            .expect("the live runtime must prepare its selected cloud fixture history");
+            let ids: Vec<_> = history.iter().map(|entry| entry.id.to_hex()).collect();
+            assert_eq!(
+                ids.len(),
+                3,
+                "the archive must include all three fixture messages"
+            );
             let favorite = node
                 .save_message_favorite_guarded(
                     mesh_talk_core::node::FavoriteSource {

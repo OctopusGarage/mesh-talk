@@ -364,7 +364,22 @@ async fn group_inventory_releases_channels_before_profile_lookup() {
         );
         checked_hook.store(true, std::sync::atomic::Ordering::SeqCst);
     }));
-    node.publish_group_inventory(&mut None);
+    // A bare node does not run the bounded directory preparation worker.
+    // Finish this selected publication before inspecting its profile read hook.
+    crate::node::test_support::settle_group_metadata(&node, channel);
+    for turn in 0..1024 {
+        match node.try_publish_group_inventory_groups(&[channel]) {
+            Ok(()) => break,
+            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+            Err(NodeError::Log(crate::eventlog::LogError::Io(error)))
+                if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => panic!("selected inventory publication must succeed"),
+        }
+        assert!(
+            turn + 1 < 1024,
+            "selected inventory preparation must settle"
+        );
+    }
     assert!(checked.load(std::sync::atomic::Ordering::SeqCst));
     let references = node.group_inventory_references();
     let reference = references.get(&hex::encode(channel.as_bytes())).unwrap();

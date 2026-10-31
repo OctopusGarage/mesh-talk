@@ -1678,6 +1678,7 @@ async fn account_sync_pending_channel_requester_receives_no_archive_or_file_byte
         }
         drop(log);
         to.process_channel(group);
+        crate::node::test_support::settle_group_metadata(to, group);
     };
     copy_public(&owner, &source);
     source.accept_channel_invite(group).await.unwrap();

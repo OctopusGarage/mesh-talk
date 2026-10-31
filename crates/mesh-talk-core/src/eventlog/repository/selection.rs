@@ -73,10 +73,15 @@ fn cleanup_on(
     owner: [u8; 16],
     limit: usize,
 ) -> Result<bool, LogError> {
+    crate::eventlog::sync::network::scan_limit(limit)?;
     let id: Option<Vec<u8>> = c.query_row("SELECT id FROM participant_sync_views WHERE domain=?1 AND (retired=1 OR owner<>?2) LIMIT 1", params![domain.0.as_slice(),owner.as_slice()], |r|r.get(0)).optional()?;
     let Some(id) = id else {
         return Ok(false);
     };
+    // A small retired view may occupy several child tables. They share one
+    // allowance; none gets a fresh limit, and even the three singleton rows
+    // count toward it. The fixed table list bounds empty-table probes.
+    let mut remaining = limit;
     for (table, key) in [
         ("participant_sync_rows", "id"),
         ("participant_sync_have", "id"),
@@ -85,14 +90,25 @@ fn cleanup_on(
         ("participant_sync_departures", "pass,member,event"),
         ("participant_sync_authors", "author"),
     ] {
-        if c.execute(&format!("DELETE FROM {table} WHERE view=?1 AND ({key}) IN (SELECT {key} FROM {table} WHERE view=?1 LIMIT ?2)"),params![&id,limit as i64])? != 0 {return Ok(true);}
+        let removed = c.execute(
+            &format!("DELETE FROM {table} WHERE view=?1 AND ({key}) IN (SELECT {key} FROM {table} WHERE view=?1 LIMIT ?2)"),
+            params![&id, remaining as i64],
+        )?;
+        remaining -= removed;
+        if remaining == 0 {
+            return Ok(true);
+        }
     }
-    c.execute(
-        "DELETE FROM participant_sync_export_work WHERE view=?1",
-        [&id],
-    )?;
-    c.execute("DELETE FROM participant_sync_progress WHERE view=?1", [&id])?;
-    c.execute("DELETE FROM participant_sync_views WHERE id=?1", [&id])?;
+    for (table, key) in [
+        ("participant_sync_export_work", "view"),
+        ("participant_sync_progress", "view"),
+        ("participant_sync_views", "id"),
+    ] {
+        remaining -= c.execute(&format!("DELETE FROM {table} WHERE {key}=?1"), [&id])?;
+        if remaining == 0 {
+            return Ok(true);
+        }
+    }
     Ok(true)
 }
 impl EventRepository {
@@ -182,5 +198,118 @@ impl EventRepository {
             self.require_selection_on(c, selection)?;
             self.network_export_selected_on(c, view, have, after, budget, Some(&selection.id))
         })
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+
+    #[test]
+    fn participant_selection_retirement_shares_one_limit_across_all_tables() {
+        for limit in [1usize, 2, 5, 64] {
+            let c = Connection::open_in_memory().unwrap();
+            c.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            c.execute_batch(DDL).unwrap();
+            c.execute_batch(export::DDL).unwrap();
+            let domain = EventDomainId([3; 16]);
+            let owner = [4; 16];
+            let retired = [1u8; 16];
+            let active = [2u8; 16];
+            for (id, is_retired) in [(retired, true), (active, false)] {
+                c.execute(
+                    "INSERT INTO participant_sync_views VALUES(?1,?2,?3,?4)",
+                    params![
+                        id.as_slice(),
+                        owner.as_slice(),
+                        domain.0.as_slice(),
+                        is_retired
+                    ],
+                )
+                .unwrap();
+                for ordinal in 0..3i64 {
+                    let event = [ordinal as u8; 32];
+                    c.execute(
+                        "INSERT INTO participant_sync_rows VALUES(?1,?2,?3,1,1,0,0,0)",
+                        params![id.as_slice(), event.as_slice(), ordinal],
+                    )
+                    .unwrap();
+                    for table in [
+                        "participant_sync_have",
+                        "participant_sync_receipts",
+                        "participant_sync_ancestors",
+                    ] {
+                        c.execute(
+                            &format!("INSERT INTO {table} VALUES(?1,?2)"),
+                            params![id.as_slice(), event.as_slice()],
+                        )
+                        .unwrap();
+                    }
+                    c.execute(
+                        "INSERT INTO participant_sync_departures VALUES(?1,0,'member',?2)",
+                        params![id.as_slice(), event.as_slice()],
+                    )
+                    .unwrap();
+                    c.execute(
+                        "INSERT INTO participant_sync_authors VALUES(?1,?2)",
+                        params![id.as_slice(), event.as_slice()],
+                    )
+                    .unwrap();
+                }
+                c.execute(
+                    "INSERT INTO participant_sync_export_work VALUES(?1,-1,NULL,0,0)",
+                    [id.as_slice()],
+                )
+                .unwrap();
+                c.execute(
+                    "INSERT INTO participant_sync_progress VALUES(?1,x'00')",
+                    [id.as_slice()],
+                )
+                .unwrap();
+            }
+            // 18 child rows plus export, progress, and the parent: every
+            // physical row, including final singleton cleanup, is charged.
+            let mut remaining = 21u64;
+            let mut turns = 0;
+            while remaining > 0 {
+                let before = c.total_changes();
+                assert!(cleanup_on(&c, domain, owner, limit).unwrap());
+                let removed = c.total_changes() - before;
+                assert_eq!(removed, remaining.min(limit as u64));
+                remaining -= removed;
+                turns += 1;
+                let exists: bool = c
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM participant_sync_views WHERE id=?1)",
+                        [retired.as_slice()],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(exists, remaining != 0);
+            }
+            assert_eq!(turns, 21usize.div_ceil(limit));
+            assert!(!cleanup_on(&c, domain, owner, limit).unwrap());
+            let mut retained = 0i64;
+            for (table, key) in [
+                ("participant_sync_rows", "view"),
+                ("participant_sync_have", "view"),
+                ("participant_sync_receipts", "view"),
+                ("participant_sync_ancestors", "view"),
+                ("participant_sync_departures", "view"),
+                ("participant_sync_authors", "view"),
+                ("participant_sync_export_work", "view"),
+                ("participant_sync_progress", "view"),
+                ("participant_sync_views", "id"),
+            ] {
+                retained += c
+                    .query_row(
+                        &format!("SELECT count(*) FROM {table} WHERE {key}=?1"),
+                        [active.as_slice()],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap();
+            }
+            assert_eq!(retained, 21, "an active view must never be retired");
+        }
     }
 }

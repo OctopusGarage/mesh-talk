@@ -57,12 +57,23 @@ async fn account_invitation_runs_in_existing_data_workers_and_reuses_its_origina
         .unwrap()
         .id()
         .unwrap();
-    {
+    let event = {
         let _membership = owner.channel_membership_commit.lock().unwrap();
-        owner
+        let crate::node::channel_account_controls::AccountChannelMutation::CommittedControl {
+            event,
+            ..
+        } = owner
             .try_account_channel_remove(group, &target.account_id())
-            .unwrap();
-    }
+            .unwrap()
+        else {
+            panic!("removal must commit its exact owner control");
+        };
+        event
+    };
+    owner
+        .await_account_owner_control(group, event)
+        .await
+        .unwrap();
     owner
         .set_device_sync_category(SyncCategory::History, false)
         .unwrap();
@@ -635,14 +646,22 @@ async fn private_ahead_owner_fixture() -> Fixture {
         .unwrap()
         .authority
         .current_event();
-    {
+    let event = {
         let _membership = b.channel_membership_commit.lock().unwrap();
-        assert!(matches!(
-            b.try_account_channel_remove(group, &fixture.nodes[3].account_id())
-                .unwrap(),
-            crate::node::channel_account_controls::AccountChannelMutation::Changed(_)
-        ));
-    }
+        let crate::node::channel_account_controls::AccountChannelMutation::CommittedControl {
+            event,
+            ..
+        } = b
+            .try_account_channel_remove(group, &fixture.nodes[3].account_id())
+            .unwrap()
+        else {
+            panic!("removal must commit its exact owner control");
+        };
+        event
+    };
+    // Finish local admission without public fanout: the requester must still
+    // learn this new authority through the selected private observation first.
+    b.await_account_owner_control(group, event).await.unwrap();
     let new_authority = b
         .account_group_projection(group)
         .unwrap()

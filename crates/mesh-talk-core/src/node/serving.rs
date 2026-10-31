@@ -41,6 +41,27 @@ struct ChannelPlaintextRetry {
     continuation: Option<(super::reception_effects::ArrivalKind, bool)>,
 }
 
+impl ChannelPlaintextRetry {
+    /// A source revision change resumes the same bounded work; it is not a
+    /// persistence failure and must not inherit exponential storage backoff.
+    fn record_failure(&mut self, error: &NodeError, now: std::time::Instant) -> bool {
+        if matches!(error, NodeError::Log(LogError::StaleCursor)) {
+            return false;
+        }
+        if matches!(
+            error,
+            NodeError::Log(LogError::Io(_) | LogError::Database(_) | LogError::Storage(_))
+        ) && let Some((arrival, _)) = &mut self.continuation
+        {
+            *arrival = super::reception_effects::ArrivalKind::CatchUp;
+        }
+        let delay = self.delay_ms.max(1000);
+        self.retry_at = Some(now + Duration::from_millis(delay));
+        self.delay_ms = (delay * 2).min(30_000);
+        true
+    }
+}
+
 const POST_OFFICE_DRAIN_INTERVAL: Duration = Duration::from_secs(3);
 const MAX_DRAIN_DUE_ENTRIES: usize = 256;
 type DrainKey = super::session_pool::PeerEndpointKey;
@@ -1329,20 +1350,11 @@ impl Node {
                 .lock()
                 .expect("channel retry lock");
             let lane = pending.lanes.entry(conv).or_default();
-            // Storage retry is catch-up even when the failed arrival began live.
-            // Ordinary bounded continuation yields keep their original provenance.
-            if matches!(
-                &error,
-                NodeError::Log(LogError::Io(_) | LogError::Database(_) | LogError::Storage(_))
-            ) && let Some((arrival, _)) = &mut lane.continuation
-            {
-                *arrival = super::reception_effects::ArrivalKind::CatchUp;
-            }
-            let delay = lane.delay_ms.max(1000);
-            lane.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
-            lane.delay_ms = (delay * 2).min(30_000);
+            let delayed = lane.record_failure(&error, std::time::Instant::now());
             self.channel_recovery_notify.notify_one();
-            log::warn!("channel reception deferred after storage failure: {error}");
+            if delayed {
+                log::warn!("channel reception deferred after storage failure: {error}");
+            }
         }
     }
 
@@ -1547,6 +1559,18 @@ impl Node {
     }
 
     #[cfg(test)]
+    pub(in crate::node) fn channel_plaintext_pending_for_test(
+        &self,
+        channel: ConversationId,
+    ) -> bool {
+        self.pending_channel_plaintext
+            .lock()
+            .expect("channel retry lock")
+            .lanes
+            .contains_key(&channel)
+    }
+
+    #[cfg(test)]
     pub(in crate::node) fn channel_plaintext_retry_pending_for_test(
         &self,
         channel: ConversationId,
@@ -1604,21 +1628,11 @@ impl Node {
                         .lock()
                         .expect("channel retry lock");
                     let lane = pending.lanes.entry(channel).or_default();
-                    // Storage retry is catch-up even when the failed arrival began live.
-                    // Ordinary bounded continuation yields keep their original provenance.
-                    if matches!(
-                        &error,
-                        NodeError::Log(
-                            LogError::Io(_) | LogError::Database(_) | LogError::Storage(_)
-                        )
-                    ) && let Some((arrival, _)) = &mut lane.continuation
-                    {
-                        *arrival = super::reception_effects::ArrivalKind::CatchUp;
+                    if lane.record_failure(&error, std::time::Instant::now()) {
+                        log::warn!("channel recovery deferred after storage failure: {error}");
+                    } else {
+                        self.channel_recovery_notify.notify_one();
                     }
-                    let delay = lane.delay_ms.max(1000);
-                    lane.retry_at = Some(std::time::Instant::now() + Duration::from_millis(delay));
-                    lane.delay_ms = (delay * 2).min(30_000);
-                    log::warn!("channel recovery deferred after storage failure: {error}");
                 }
                 self.process_file_events_reception(channel, "catch_up");
             }
@@ -1913,6 +1927,54 @@ impl Node {
         })();
         if let Err(error) = result {
             log::warn!("emit_new_messages deferred after storage failure: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod channel_plaintext_retry_tests {
+    use super::*;
+    use crate::node::reception_effects::ArrivalKind;
+
+    #[test]
+    fn source_revision_continuation_preserves_arrival_and_storage_backoff() {
+        let now = std::time::Instant::now();
+        let stale = NodeError::Log(LogError::StaleCursor);
+        let mut lane = ChannelPlaintextRetry {
+            continuation: Some((ArrivalKind::Live, false)),
+            ..Default::default()
+        };
+        for _ in 0..16 {
+            assert!(!lane.record_failure(&stale, now));
+        }
+        assert!(lane.retry_at.is_none());
+        assert_eq!(lane.delay_ms, 0);
+        assert!(matches!(
+            lane.continuation,
+            Some((ArrivalKind::Live, false))
+        ));
+
+        let failures = [
+            NodeError::Log(LogError::Io(std::io::Error::other("retry test"))),
+            NodeError::Log(LogError::Database(Box::new(std::io::Error::other(
+                "retry test",
+            )))),
+            NodeError::Log(LogError::Storage(
+                crate::storage::errors::StorageError::KeyDerivationFailed,
+            )),
+        ];
+        for (error, seconds) in failures.iter().zip([1, 2, 4]) {
+            assert!(lane.record_failure(error, now));
+            let deadline = now + Duration::from_secs(seconds);
+            assert_eq!(lane.retry_at, Some(deadline));
+            assert_eq!(lane.delay_ms, seconds * 2000);
+            assert!(matches!(
+                lane.continuation,
+                Some((ArrivalKind::CatchUp, false))
+            ));
+            assert!(!lane.record_failure(&stale, now));
+            assert_eq!(lane.retry_at, Some(deadline));
+            assert_eq!(lane.delay_ms, seconds * 2000);
         }
     }
 }

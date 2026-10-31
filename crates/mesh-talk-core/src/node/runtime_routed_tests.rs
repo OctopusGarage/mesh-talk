@@ -193,16 +193,32 @@ async fn runtime_manual_endpoint_probe_uses_the_same_query_protocol() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_node_or_privacy_initialization_joins_already_started_names_writer() {
+    struct ReleaseNames(Option<std::sync::mpsc::Sender<()>>);
+    impl Drop for ReleaseNames {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
     for failure_path in ["messages.log", "privacy.policy"] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("accounts").join("owner");
-        std::fs::create_dir_all(directory.join(failure_path)).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        // Regular paths pass source validation. The corrupt content fails in
+        // the actual Node/privacy initializer after names work has started.
+        std::fs::write(
+            directory.join(failure_path),
+            b"invalid legacy source header",
+        )
+        .unwrap();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut release = ReleaseNames(Some(release_tx));
         NAMES_OPEN_HOOKS.lock().unwrap().insert(
             directory.join("names.log"),
             Box::new(move || {
-                entered_tx.send(()).unwrap();
+                let _ = entered_tx.send(());
                 release_rx.recv().unwrap();
             }),
         );
@@ -225,12 +241,23 @@ async fn failed_node_or_privacy_initialization_joins_already_started_names_write
             finished_tx.send(()).unwrap();
             result
         });
-        entered_rx.await.unwrap();
+        let entered = tokio::time::timeout(Duration::from_secs(5), entered_rx).await;
+        if entered.is_err() {
+            // Release before removing the hook: it may have just started and
+            // still hold the hook-map lock while waiting on this channel.
+            drop(release);
+            NAMES_OPEN_HOOKS
+                .lock()
+                .unwrap()
+                .remove(&directory.join("names.log"));
+            panic!("the valid source paths must reach the names initializer");
+        }
+        entered.unwrap().unwrap();
         let returned_while_writer_blocked =
             tokio::time::timeout(Duration::from_millis(150), &mut finished_rx)
                 .await
                 .is_ok();
-        release_tx.send(()).unwrap();
+        release.0.take().unwrap().send(()).unwrap();
         assert!(startup.await.unwrap().is_err());
         assert!(
             !returned_while_writer_blocked,
