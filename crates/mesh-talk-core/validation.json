@@ -2592,7 +2592,7 @@
         ]
       },
       "escalation": [
-        "Modern-channel causal preparation still requires the shared resumable checkpoint boundary; native/frontend adoption and removal of legacy collecting views require their own consumer checks before an end-to-end bounded-reaction claim."
+        "Modern-channel causal preparation resumes through the shared checkpoint with a finite work budget and retains Ready authority until a later source-fenced hydration turn. Its exact same-channel revision fence remains conservative under continuous appends. Native/frontend adoption and removal of legacy collecting views require their own consumer checks before an end-to-end bounded-reaction claim."
       ]
     }
   ]

@@ -266,8 +266,12 @@ control generation, deletion visibility and relevant source revisions. A pending
 response is empty and includes its continuation. Key/byte admission precedes
 retained-body reads and summary-string allocation; unchanged completed queries
 reuse the persisted result, and ordinary message tails preserve the reaction
-source token. Modern-channel causal preparation still depends on the shared
-checkpoint's resumable query integration. Legacy collecting view APIs remain for
+source token. `reactions/selected/preparation.rs` retains one source-bound
+checkpoint query and its Ready fact lease. Discovery, causal work and body reads
+use separate turns; target pages in the same channel share raw decode progress.
+Unfinished or stale authority never advances the selected event's decode cursor.
+The checkpoint's exact revision fence remains conservative under continuous
+same-channel appends. Legacy collecting view APIs remain for
 the pending native/frontend cutover, so this query prefix alone does not establish
 an end-to-end bounded reaction UI or change the account-document startup owner.
 
