@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 mod historical;
 pub(crate) mod indexed;
 mod receiving;
+mod retention;
 pub(crate) mod scopes;
 mod work;
 

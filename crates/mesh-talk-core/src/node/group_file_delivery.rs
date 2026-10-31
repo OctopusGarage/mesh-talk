@@ -142,13 +142,13 @@ impl Node {
             };
             let mut peers = Vec::new();
             for peer in members {
-                if peer != self.identity.public() && self.group_member(&peer)? {
-                    if let Some(proof) = self
+                if peer != self.identity.public()
+                    && self.group_member(&peer)?
+                    && let Some(proof) = self
                         .historical_author(&peer.ed25519_pub)
                         .filter(|proof| proof.public() == peer)
-                    {
-                        peers.push(proof);
-                    }
+                {
+                    peers.push(proof);
                 }
             }
             Ok(peers)

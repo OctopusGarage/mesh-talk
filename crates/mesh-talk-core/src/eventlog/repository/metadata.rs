@@ -42,6 +42,19 @@ pub(crate) struct DomainChargeMetadata {
     pub estimated_bytes: u64,
 }
 impl EventRepository {
+    /// Exact retained kind cardinality, without fetching encrypted event bodies.
+    pub(crate) fn count_kind(
+        &self,
+        conv: &ConversationId,
+        kind: EventKind,
+    ) -> Result<u64, LogError> {
+        self.database.read(|c| {
+            self.require_active_on(c, conv)?;
+            let count: i64 = c.prepare_cached("SELECT count(*) FROM retained_events INDEXED BY retained_events_kind_author WHERE domain=?1 AND conversation=?2 AND kind=?3")?.query_row(params![self.domain.0.as_slice(),conv.as_bytes().as_slice(),kind as i64],|r|r.get(0))?;
+            Ok(nonnegative(count)? as u64)
+        })
+    }
+
     /// A covering kind index answers capability admission without event bodies.
     pub(crate) fn has_kind(
         &self,

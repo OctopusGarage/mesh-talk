@@ -362,24 +362,6 @@ impl IndexedFileMessageIdentities {
             Ok(Some(EventId::new(blob(row,3)?)))
         })
     }
-    pub(crate) fn visit(
-        &self,
-        mut visit: impl FnMut(Event) -> Result<(), LogError>,
-    ) -> Result<(), LogError> {
-        let mut cursor = None;
-        loop {
-            let events = self.page(cursor, 128)?;
-            if events.is_empty() {
-                return Ok(());
-            }
-            for event in events {
-                let identity =
-                    decode(&event).ok_or_else(|| invalid("invalid selected file identity"))?;
-                cursor = Some((identity.host(), identity.logical));
-                visit(event)?;
-            }
-        }
-    }
     pub(crate) fn page(
         &self,
         after: Option<(ConversationId, EventId)>,

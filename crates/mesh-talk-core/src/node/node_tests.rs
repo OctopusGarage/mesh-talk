@@ -6541,6 +6541,10 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
     let alice = DeviceIdentity::generate();
     let bob = DeviceIdentity::generate();
     let dir = tempfile::tempdir().unwrap();
+    let alice_dir = dir.path().join("alice");
+    let bob_dir = dir.path().join("bob");
+    std::fs::create_dir(&alice_dir).unwrap();
+    std::fs::create_dir(&bob_dir).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bob_addr = listener.local_addr().unwrap();
     let alice_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6565,8 +6569,8 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
         a_dm,
         a_ch,
         a_f,
-        &dir.path().join("a.log"),
-        &dir.path().join("a-sent.log"),
+        &alice_dir.join("a.log"),
+        &alice_dir.join("a-sent.log"),
         "pw",
     )
     .unwrap();
@@ -6576,8 +6580,8 @@ async fn two_nodes_transfer_a_multi_chunk_file_over_loopback_tcp() {
         b_dm,
         b_ch,
         b_f,
-        &dir.path().join("b.log"),
-        &dir.path().join("b-sent.log"),
+        &bob_dir.join("b.log"),
+        &bob_dir.join("b-sent.log"),
         "pw",
     )
     .unwrap();

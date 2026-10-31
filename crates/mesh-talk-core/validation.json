@@ -1928,6 +1928,7 @@
       "paths": [
         "crates/mesh-talk-core/src/node/network_cost.rs",
         "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/files/chunks.rs",
         "crates/mesh-talk-core/src/node/file_completion.rs",
         "crates/mesh-talk-core/src/node/media_store.rs",
         "crates/mesh-talk-core/src/node/media_store/**",
@@ -2293,6 +2294,7 @@
         "crates/mesh-talk-core/src/node/delivery_runtime.rs",
         "crates/mesh-talk-core/src/node/delivery_store.rs",
         "crates/mesh-talk-core/src/node/files.rs",
+        "crates/mesh-talk-core/src/node/files/chunks.rs",
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
         "crates/mesh-talk-core/src/node/serving.rs",
         "crates/mesh-talk-core/src/node/participant_runtime.rs"
@@ -2306,6 +2308,8 @@
             "node::file_consent::",
             "node::file_consent_store::",
             "node::file_completion::",
+            "file_retention_",
+            "indexed_file_payload_tests",
             "node::opaque_relay::",
             "retained_relay_file_exchange_rechecks_signed_consent_and_relay_role",
             "relay_file_worker_preserves_progress_across_slow_mailbox_exchanges",

@@ -879,6 +879,11 @@ restart. The prior `attachment-consent.log` and `file-consent-controls.log` sour
 publish once through the existing participant source owner (auxiliary kinds 17 and 18).
 Current receive policy, signed revisions and authenticated direct observations then live
 on that same encrypted database, qualified by the authenticated account namespace.
+Opaque exchanges retain at most eight consent offer IDs, selected through an
+account-scoped durable rotating cursor. Each send rechecks the current signed
+controls (at most 16 KiB), so failed exchanges retry without growing a payload
+backlog or retaining obsolete permission. The cursor is discovery progress only;
+returning accounts resume their own offers and stale handles remain fenced.
 Warm open does not decrypt historical consent frames. Selected controls enforce the
 existing signed-format byte limit before allocation; persisted counters retain the
 existing admission quotas. Account adoption preserves the previous account's decisions
@@ -908,8 +913,20 @@ blocking pool. A retained managed-media copy can be exported after pruning;
 every export verifies its size and checksum and synchronizes its output. Group
 and own-device media use retained signed manifest/local-row references only for
 local export, never for a historical network probe or a delivery receipt. Legacy
-v1 exports keep their prior in-memory path and retain chunks rather than creating
-new completion proofs.
+v1 exports also stream, and retain chunks rather than creating new completion proofs.
+Progress uses retained kind counts. Save and completion validation traverse fixed
+32-row header pages and admit at most one signed event under a 4 MiB allocation
+budget before fetching its body; a legal larger event returns the required budget
+without being discarded. Inline reads share the existing 64 MiB media limit;
+larger files remain available through streaming saves. Receive-complete media is
+encrypted into a temporary prepared object, then its exact size/checksum and
+current accepted manifest are rechecked before publication under the file-row
+reference lock. Neither chunk IDs nor ciphertexts are collected for a whole file.
+Channel replica retention projects each accepted offer's fixed presentation and
+clock metadata in the same FILES transaction. Its current per-file index supplies
+32 candidates at a time in newest-first order; erasing an offer updates that order
+transactionally. Reclamation counts selected chunk headers and fences the source
+before dropping a whole file. The existing 64 MiB greedy retention policy is unchanged.
 
 Actual chat, Favorites and account-document media use a derived filename inventory
 on the same profile database. Initial import streams regular directory entries once;

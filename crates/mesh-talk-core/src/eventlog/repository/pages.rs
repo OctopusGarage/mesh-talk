@@ -225,8 +225,6 @@ impl EventRepository {
         while let Some(row) = rows.next()? {
             let header = read_header(row)?;
             let cost = match order {
-                #[cfg(test)]
-                #[cfg(test)]
                 PageOrder::Headers => std::mem::size_of::<EventHeader>(),
                 PageOrder::Bodies => header
                     .stored_bytes

@@ -226,33 +226,6 @@ impl IndexedFileBook {
             Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM file_book_offers WHERE account=?1 AND event=?2 AND file=?3)",params![self.account.as_slice(),event.as_bytes().as_slice(),file.as_bytes().as_slice()],|r|r.get(0))?)
         })
     }
-    pub(crate) fn authors_page(
-        &self,
-        file: ConversationId,
-        after: Option<crate::eventlog::Author>,
-        rows: usize,
-        bytes: usize,
-    ) -> Result<Vec<crate::eventlog::Author>, LogError> {
-        let limit = page_limit(rows, bytes, 32)?;
-        self.profile.database().read(|c| {
-            self.check(c)?;
-            let mut statement=c.prepare_cached("SELECT DISTINCT author FROM file_book_offers WHERE account=?1 AND file=?2 AND author>coalesce(?3,x'') ORDER BY author LIMIT ?4")?;
-            let mut rows=statement.query(params![self.account.as_slice(),file.as_bytes().as_slice(),after.as_ref().map(|author|author.ed25519_pub().as_slice()),limit])?;
-            let mut result=Vec::new();
-            while let Some(row)=rows.next()? { result.push(crate::eventlog::Author::from_ed25519(blob(row,0)?)); }
-            Ok(result)
-        })
-    }
-    pub(crate) fn revoke_ordinal(&self, ordinal: i64) -> Result<(), LogError> {
-        self.profile.database().transaction(|c| {
-            self.check(c)?;
-            c.execute(
-                "DELETE FROM file_book_offers WHERE account=?1 AND ordinal=?2",
-                params![self.account.as_slice(), ordinal],
-            )?;
-            Ok(())
-        })
-    }
     pub(crate) fn mark_processed(&self, event: EventId) -> Result<(), LogError> {
         self.profile.database().transaction(|c| {
             self.check(c)?;
@@ -393,6 +366,7 @@ impl IndexedFileBook {
             }
             let account = active(c)?;
             super::historical::initialize_on(c)?;
+            super::retention::initialize_on(c)?;
             super::receiving::initialize_on(c, &account)?;
             // Only the initial account may import the old unnamespaced source.
             // A newly adopted account starts with no offers.
@@ -572,6 +546,7 @@ pub(crate) fn install_on(
             original.author.ed25519_pub().as_slice()
         ],
     )? != 0;
+    super::retention::record_on(c, &account, ordinal, entry.wall_clock, &manifest)?;
     if fresh {
         super::work::enqueue_on(c, manifest.file_conv())?;
     }
@@ -694,6 +669,130 @@ mod tests {
             )?;
             install_on(c, entry, original)
         }
+    }
+
+    #[test]
+    fn file_retention_current_order_survives_upgrade_and_rolls_back_erasure() {
+        let f = Fixture::new();
+        let (first, original, manifest) = f.fixture(71);
+        let alias = Event::new(
+            &f.device,
+            original.conversation_id,
+            2,
+            vec![],
+            2,
+            u64::MAX,
+            EventKind::FileManifest,
+            vec![99],
+        );
+        let mut latest = first.clone();
+        latest.event_id = alias.id;
+        latest.wall_clock = u64::MAX;
+        let profile = f.book.profile.clone();
+        profile.database().transaction(|c| {
+            Fixture::install(c, &first, &original)?;
+            Fixture::install(c, &latest, &alias)?;
+            c.execute_batch("DROP TRIGGER file_book_retention_added; DROP TRIGGER file_book_retention_removed; DROP TABLE file_book_retention; DROP TABLE file_book_offer_retention;")?;
+            Ok(())
+        }).unwrap();
+        let upgraded = IndexedFileBook::open(profile.clone()).unwrap();
+        let page = upgraded.retention_page(None).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(
+            (page[0].file, page[0].newest, page[0].chunks),
+            (manifest.file_conv(), u64::MAX, 1)
+        );
+        assert!(
+            upgraded
+                .retention_page(Some((u64::MAX, manifest.file_conv())))
+                .unwrap()
+                .is_empty()
+        );
+        let failed: Result<(), LogError> = profile.database().transaction(|c| {
+            c.execute(
+                "DELETE FROM transcript_rows WHERE row_key=?1",
+                [latest.event_id.as_bytes().as_slice()],
+            )?;
+            Err(invalid("injected later retirement failure"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            upgraded
+                .retention_for(manifest.file_conv())
+                .unwrap()
+                .unwrap()
+                .newest,
+            u64::MAX
+        );
+        profile
+            .database()
+            .transaction(|c| {
+                c.execute(
+                    "DELETE FROM transcript_rows WHERE row_key=?1",
+                    [latest.event_id.as_bytes().as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            upgraded
+                .retention_for(manifest.file_conv())
+                .unwrap()
+                .unwrap()
+                .newest,
+            42
+        );
+        // A warm open uses only projected metadata. A corrupt selected body is
+        // still rejected by the body owner, rather than decoded during startup.
+        profile.database().transaction(|c| {
+            c.execute("UPDATE transcript_bodies SET plaintext=zeroblob(length(plaintext)) WHERE ordinal IN (SELECT ordinal FROM transcript_rows WHERE row_key=?1)", [first.event_id.as_bytes().as_slice()])?;
+            Ok(())
+        }).unwrap();
+        let warm = IndexedFileBook::open(profile.clone()).unwrap();
+        assert_eq!(warm.retention_page(None).unwrap().len(), 1);
+        assert!(warm.manifest(manifest.file_conv()).is_err());
+        profile
+            .database()
+            .transaction(|c| {
+                c.execute(
+                    "DELETE FROM transcript_rows WHERE row_key=?1",
+                    [first.event_id.as_bytes().as_slice()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(warm.retention_page(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_retention_upgrade_rejects_changed_binding_atomically() {
+        let f = Fixture::new();
+        let (entry, original, _) = f.fixture(72);
+        let profile = f.book.profile.clone();
+        profile.database().transaction(|c| {
+            Fixture::install(c, &entry, &original)?;
+            c.execute_batch("DROP TRIGGER file_book_retention_added; DROP TRIGGER file_book_retention_removed; DROP TABLE file_book_retention; DROP TABLE file_book_offer_retention; UPDATE file_book_bindings SET digest=zeroblob(32);")?;
+            Ok(())
+        }).unwrap();
+        assert!(IndexedFileBook::open(profile.clone()).is_err());
+        let published: bool = profile
+            .database()
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_book_retention')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(
+            !published,
+            "failed derived migration must roll back its schema"
+        );
+        assert!(
+            f.records.entry(entry.event_id).unwrap().is_some(),
+            "authoritative body survives a failed derived migration"
+        );
     }
 
     #[test]
