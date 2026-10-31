@@ -112,10 +112,6 @@ impl FavoriteStore {
 }
 
 impl PortableFavorites<'_> {
-    pub(in crate::node) fn len(&self) -> usize {
-        self.records.len()
-    }
-
     pub(in crate::node) fn portable_records<'a>(
         &'a self,
         account_id: &'a str,

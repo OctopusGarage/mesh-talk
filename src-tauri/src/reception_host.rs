@@ -203,39 +203,55 @@ pub(crate) async fn native_alerts<R: tauri::Runtime>(
         }
         first = false;
         changes.borrow_and_update();
-        let observed = authority.current(|_| {
-            let head = node.reception_head()?;
-            if head == cursor {
-                return Ok::<_, mesh_talk_core::node::NodeError>((head, None));
-            }
-            let page = node.reception_page(
-                cursor,
-                Some(head),
-                ReceptionLimit {
-                    rows: 8,
-                    ..Default::default()
-                },
-            );
-            Ok((head, Some(page)))
-        });
-        let Ok(Ok((head, page))) = observed else {
+        if authority.current(|_| ()).is_err() {
+            return;
+        }
+        // This registered host task owns its synchronous read through completion.
+        // No session guard crosses the bounded SQL observation or native dispatch.
+        let Ok(head) = node.reception_head() else {
             return;
         };
+        if head == cursor {
+            continue;
+        }
+        let page = node.reception_page(
+            cursor,
+            Some(head),
+            ReceptionLimit {
+                rows: 8,
+                ..Default::default()
+            },
+        );
         cursor = head;
-        let Some(Ok(page)) = page else { continue };
-        for receipt in page.receipts {
-            if matches!(&receipt,HostReception::DirectMessage(dm) if dm.from_account.as_deref()==Some(node.account_id().as_str()) || dm.from==node.user_id())
-            {
-                continue;
-            }
-            if authority
-                .current(|_| {
-                    crate::events::notify_reception(&app, authority.lease.owner(), receipt)
-                })
-                .is_err()
-            {
-                return;
-            }
+        let Ok(page) = page else {
+            continue;
+        };
+        let own_account = node.account_id();
+        let own_device = node.user_id();
+        let receipts: Vec<_> = page.receipts.into_iter().filter(|receipt| {
+            !matches!(receipt, HostReception::DirectMessage(dm)
+                if dm.from_account.as_deref() == Some(own_account.as_str()) || dm.from == own_device)
+        }).collect();
+        if receipts.is_empty() {
+            continue;
+        }
+        let owner = authority.lease.owner().to_owned();
+        let completion =
+            match crate::events::dispatch_runtime_presentation(&app, &authority, move |app| {
+                for receipt in receipts {
+                    crate::events::notify_reception(app, &owner, receipt);
+                }
+            }) {
+                Ok(completion) => completion,
+                Err(error) => {
+                    log::warn!("Unable to queue reception notifications: {error}");
+                    return;
+                }
+            };
+        // Main-thread congestion cannot accumulate notification payload batches.
+        // A cancelled observer does not revoke the queued task's authority guard.
+        if completion.wait().await.is_err() {
+            return;
         }
     }
 }

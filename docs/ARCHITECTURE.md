@@ -1741,8 +1741,12 @@ IPC. The received-avatar cache admits at most 1,024 values and 64 MiB of UTF-16
 payload charge, preserving the own-account value where it fits. Owner replacement
 and newer local edits fence delayed startup reads.
 Native alerts start at launch high-water, sample at most eight live observations
-per second and intentionally coalesce excess alarms. They never retire durable
-unread work or replay old unread backlog as live notifications.
+per second and intentionally coalesce excess alarms. One queued main-thread batch
+waits for actual execution before another batch is admitted. Queued callbacks hold
+only weak access to the payload: retiring the observer releases its content even
+while the main thread is busy. Execution rechecks exact runtime authority; no
+session guard crosses SQL observation or a main-thread dispatch. Native alerts
+never retire durable unread work or replay old unread backlog as live notifications.
 
 CLI output and autosave enroll before either consumer starts. Output ACKs its
 printed prefix independently. Autosave keeps at most 32 pending file cards and

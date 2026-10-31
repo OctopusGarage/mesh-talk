@@ -1,13 +1,14 @@
 //! Current sending chains are selected by channel and epoch from the leased
 //! profile database. Source 8 independently authenticates and publishes legacy
 //! MTCSND snapshots before its small downgrade barrier becomes authoritative.
-//! Standalone compatibility retains the legacy collecting owner. Production
-//! Nodes load only the current epoch, preserving sender positions across restart.
+//! Legacy snapshot fixtures preserve migration compatibility. Production Nodes
+//! load only the current epoch, preserving sender positions across restart.
 
 use crate::eventlog::LogError;
 use crate::eventlog::event::ConversationId;
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -22,11 +23,12 @@ struct SenderRecord {
 }
 
 /// Device-local sending keys. Production uses exact indexed epoch reads;
-/// standalone callers retain the explicit legacy snapshot owner.
+/// legacy migration fixtures retain the explicit snapshot writer.
 pub struct ChannelSenderStore {
     backend: Backend,
 }
 enum Backend {
+    #[cfg(test)]
     Legacy {
         file: EncryptedRecordLog<SenderRecord>,
         latest: HashMap<String, Vec<(u64, Vec<u8>)>>,
@@ -63,6 +65,7 @@ impl ChannelSenderStore {
         })
     }
     /// Standalone legacy compatibility. Normal Nodes use the published SQL source.
+    #[cfg(test)]
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::<SenderRecord>::open(path, password, MAGIC)?;
         let mut latest = HashMap::new();
@@ -148,6 +151,7 @@ impl ChannelSenderStore {
     ) -> Result<Option<Vec<u8>>, LogError> {
         use rusqlite::OptionalExtension;
         match &self.backend {
+            #[cfg(test)]
             Backend::Legacy { latest, .. } => Ok(latest
                 .get(&hex::encode(channel.as_bytes()))
                 .and_then(|senders| {
@@ -177,6 +181,7 @@ impl ChannelSenderStore {
         senders: &[(u64, Vec<u8>)],
     ) -> Result<(), LogError> {
         match &mut self.backend {
+            #[cfg(test)]
             Backend::Legacy { file, latest } => {
                 let channel = hex::encode(channel.as_bytes());
                 file.append_durable(&SenderRecord {

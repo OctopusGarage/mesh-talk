@@ -150,6 +150,7 @@ impl ReceptionLimit {
 
 #[derive(Debug)]
 pub(crate) struct ReceptionFact {
+    #[cfg(test)]
     pub sequence: u64,
     pub source: ReceptionSource,
     pub metadata: ReceptionMetadata,

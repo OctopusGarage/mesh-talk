@@ -62,7 +62,7 @@ impl ReceptionEffects {
                     #[cfg(test)] self.body_reads.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
                     Some(ReceivedEntry {event_id:source.event_id,conversation:source.conversation,from:from.to_owned(),wall_clock,plaintext:plaintext.to_vec()})
                 };
-                result.rows.push(ReceptionFact {sequence,source,metadata,entry});
+                result.rows.push(ReceptionFact {#[cfg(test)] sequence,source,metadata,entry});
                 result.body_bytes=next_body; result.serialized_bound=next_serialized; result.next.sequence=sequence; examined+=1;
             }
             // A fixed scan budget includes hidden rows. An empty follow-up page

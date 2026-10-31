@@ -143,6 +143,7 @@ impl IndexedAccountSuppression {
     pub(super) fn len(&self) -> Result<usize, LogError> {
         self.repository.count(None)
     }
+    #[cfg(test)]
     pub(super) fn marker_bytes(&self) -> Result<u64, LogError> {
         self.repository
             .usage()?

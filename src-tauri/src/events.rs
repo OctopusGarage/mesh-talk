@@ -9,13 +9,66 @@ use tauri_plugin_notification::NotificationExt;
 /// How many characters of a message body we surface in a notification preview.
 const PREVIEW_LEN: usize = 80;
 
-#[cfg(test)]
+/// Native presentation starts on the main thread before acquiring session
+/// authority. The completion receiver lets bounded producers keep one queued
+/// batch until actual execution, including rejection of a retired authority.
+pub(crate) fn dispatch_runtime_presentation<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    authority: &crate::chat_commands::RuntimeAuthority,
+    present: impl FnOnce(&tauri::AppHandle<R>) + Send + 'static,
+) -> Result<PresentationCompletion, tauri::Error> {
+    let queued_app = app.clone();
+    queue_runtime_presentation(
+        authority.clone(),
+        move || present(&queued_app),
+        |task| app.run_on_main_thread(task),
+    )
+}
+
+type PendingPresentation = Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>;
+
+pub(crate) struct PresentationCompletion {
+    completion: tokio::sync::oneshot::Receiver<()>,
+    pending: PendingPresentation,
+}
+impl PresentationCompletion {
+    pub(crate) async fn wait(mut self) -> Result<(), tokio::sync::oneshot::error::RecvError> {
+        (&mut self.completion).await
+    }
+}
+impl Drop for PresentationCompletion {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.take();
+        }
+    }
+}
+
 fn queue_runtime_presentation<E>(
     authority: crate::chat_commands::RuntimeAuthority,
     present: impl FnOnce() + Send + 'static,
     enqueue: impl FnOnce(Box<dyn FnOnce() + Send>) -> Result<(), E>,
-) -> Result<(), E> {
-    enqueue(Box::new(authority.queued_current(present)))
+) -> Result<PresentationCompletion, E> {
+    let (finished, completion) = tokio::sync::oneshot::channel();
+    let pending: PendingPresentation = Arc::new(std::sync::Mutex::new(Some(Box::new(
+        authority.queued_current(present),
+    ))));
+    let queued = Arc::downgrade(&pending);
+    enqueue(Box::new(move || {
+        // The runtime task owns the payload until actual execution. Cancelling
+        // that task frees it immediately, even while the main thread is busy.
+        let present = queued
+            .upgrade()
+            .and_then(|pending| pending.lock().ok()?.take());
+        if let Some(present) = present {
+            present();
+        }
+        let _ = finished.send(());
+    }))?;
+    Ok(PresentationCompletion {
+        completion,
+        pending,
+    })
 }
 
 #[derive(Clone, Default)]
@@ -685,7 +738,7 @@ mod notification_policy_tests {
             .with_owner(|owner| {
                 assert_eq!(owner, Some("fixture-owner"));
                 let worker = thread::spawn(move || {
-                    queue_runtime_presentation(
+                    let completion = queue_runtime_presentation(
                         authority,
                         move || {
                             assert_eq!(thread::current().id(), main_thread);
@@ -694,7 +747,7 @@ mod notification_policy_tests {
                         |task| queued_tx.send(task),
                     )
                     .unwrap();
-                    returned_tx.send(()).unwrap();
+                    assert!(returned_tx.send(completion).is_ok());
                 });
                 let queued = queued_rx.recv_timeout(Duration::from_secs(2));
                 let returned = returned_rx.recv_timeout(Duration::from_secs(2));
@@ -707,6 +760,7 @@ mod notification_policy_tests {
             returned.is_ok(),
             "runtime callback must not wait for main-thread execution"
         );
+        let _completion = returned.unwrap();
         assert!(!presented.load(std::sync::atomic::Ordering::SeqCst));
         queued.expect("presentation must queue without acquiring the Session mutex")();
         assert!(presented.load(std::sync::atomic::Ordering::SeqCst));
@@ -719,7 +773,7 @@ mod notification_policy_tests {
             let mut queued = None;
             let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let observed = presented.clone();
-            queue_runtime_presentation(
+            let _completion = queue_runtime_presentation(
                 authority.clone(),
                 move || {
                     observed.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -753,6 +807,71 @@ mod notification_policy_tests {
                 "stale {replacement} must not notify or emit private events"
             );
         }
+    }
+
+    #[test]
+    fn notification_presentation_completion_tracks_actual_execution_and_stale_rejection() {
+        use tokio::sync::oneshot::error::TryRecvError;
+        for retire in [false, true] {
+            let (session, _node, authority) = presentation_authority();
+            let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = presented.clone();
+            let mut queued = None;
+            let mut completion = queue_runtime_presentation(
+                authority,
+                move || observed.store(true, std::sync::atomic::Ordering::SeqCst),
+                |task| {
+                    queued = Some(task);
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+            assert_eq!(completion.completion.try_recv(), Err(TryRecvError::Empty));
+            if retire {
+                session.clear();
+            }
+            queued.unwrap()();
+            assert_eq!(completion.completion.try_recv(), Ok(()));
+            assert_eq!(presented.load(std::sync::atomic::Ordering::SeqCst), !retire);
+        }
+    }
+
+    #[test]
+    fn notification_presentation_cancellation_releases_queued_payload_before_execution() {
+        let (_, _, authority) = presentation_authority();
+        let payload = Arc::new(vec![0u8; 8192]);
+        let retained = Arc::downgrade(&payload);
+        let mut queued = None;
+        let completion = queue_runtime_presentation(
+            authority,
+            move || {
+                drop(payload);
+                panic!("cancelled presentation must not execute");
+            },
+            |task| {
+                queued = Some(task);
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
+        assert!(retained.upgrade().is_some());
+        drop(completion);
+        assert!(
+            retained.upgrade().is_none(),
+            "retired runtime releases payload while main thread remains blocked"
+        );
+        queued.unwrap()();
+    }
+
+    #[test]
+    fn notification_presentation_propagates_enqueue_failure() {
+        let (_, _, authority) = presentation_authority();
+        let result = queue_runtime_presentation(
+            authority,
+            || panic!("failed enqueue must not execute presentation"),
+            |_| Err("main thread unavailable"),
+        );
+        assert!(matches!(result, Err("main thread unavailable")));
     }
 
     #[test]

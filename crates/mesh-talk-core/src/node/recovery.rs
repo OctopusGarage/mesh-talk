@@ -347,7 +347,7 @@ impl Node {
             if !existing_contacts.is_empty() {
                 return Err(SnapshotError::Conflict);
             }
-            super::recovered_sent_ids::RecoveredSentIds::open(
+            super::recovered_sent_ids::IndexedRecoveredSentIds::initialize_recovery_source(
                 &staging_dir.join("recovery-sent-ids.log"),
                 new_password,
             )

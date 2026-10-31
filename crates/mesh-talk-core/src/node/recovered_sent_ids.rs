@@ -8,6 +8,7 @@ use crate::node::sentlog::SentEntry;
 use crate::storage::record_log::EncryptedRecordLog;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -38,11 +39,13 @@ struct RecoveredSentId {
     id: EventId,
 }
 
+#[cfg(test)]
 pub struct RecoveredSentIds {
     file: EncryptedRecordLog<RecoveredSentId>,
     ids: HashMap<SentFingerprint, EventId>,
 }
 
+#[cfg(test)]
 impl RecoveredSentIds {
     pub fn open(path: &Path, password: &str) -> Result<Self, LogError> {
         let (file, records) = EncryptedRecordLog::<RecoveredSentId>::open(path, password, MAGIC)?;
@@ -83,6 +86,22 @@ pub(crate) struct IndexedRecoveredSentIds {
 }
 const INDEX_SCHEMA: &str = "CREATE TABLE recovered_sent_ids(conversation BLOB NOT NULL CHECK(length(conversation)=32), sequence BLOB NOT NULL CHECK(length(sequence)=8), clock BLOB NOT NULL CHECK(length(clock)=8), plaintext_sha256 BLOB NOT NULL CHECK(length(plaintext_sha256)=32), id BLOB NOT NULL CHECK(length(id)=32), PRIMARY KEY(conversation,sequence,clock,plaintext_sha256)) WITHOUT ROWID;";
 impl IndexedRecoveredSentIds {
+    /// Recovery prepares an empty legacy source before the indexed Node opens.
+    /// Existing rows indicate a reused staging source and must not be accepted.
+    pub(crate) fn initialize_recovery_source(path: &Path, password: &str) -> Result<(), LogError> {
+        let writer = EncryptedRecordLog::<RecoveredSentId>::open_with_visitor(
+            path,
+            password,
+            MAGIC,
+            |_| {
+                Err(LogError::CorruptFile(
+                    "recovery identity source is not empty".into(),
+                ))
+            },
+        )?;
+        writer.sync()
+    }
+
     pub(crate) fn authenticate_legacy(
         profile: &crate::storage::profile::context::ProfileStorage,
         path: &Path,
@@ -197,6 +216,7 @@ impl IndexedRecoveredSentIds {
             .database()
             .transaction(|c| Self::insert_on(c, &fingerprint, id, false))
     }
+    #[cfg(test)]
     pub(crate) fn id_for(&self, entry: &SentEntry) -> Result<Option<EventId>, LogError> {
         let fingerprint = SentFingerprint::of(entry);
         self.source
