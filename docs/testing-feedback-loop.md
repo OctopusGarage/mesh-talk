@@ -117,6 +117,15 @@ roster refresh before asserting absence. A sleep shorter or longer than a pollin
 period proves neither of those operation boundaries; delayed-consumption and
 paused-polling controls must still exercise expiry, recovery and reappearance.
 
+Custody propagation fixtures first settle the newly created channel's signed
+inventory/control heads and the exact linked routes. Readiness observed before
+channel creation does not cover that new work. Hold a real authenticated inventory
+response to verify that setup remains pending until release; accept authenticated
+superseding heads so an obsolete captured version cannot strand the fixture.
+Keep the existing custody observation budget, real network exchange, offline-holder
+and restart assertions. This setup boundary does not establish a production latency
+guarantee or a dependency between independent mandatory/optional worker lanes.
+
 ## Validation stages and agent responsibilities
 
 Validation depth and business capability are separate dimensions. Use the same
