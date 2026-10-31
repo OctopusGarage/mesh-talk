@@ -154,18 +154,23 @@ test("scrolling away and returning to latest reuses media without changing row h
     () =>
       (window as unknown as ProbeWindow).__mediaScroll.reads["scroll-image-59"],
   );
-  // Page through history with real reader input. Large wheel deltas are
-  // normalized differently across engines, and Home differs across platforms.
+  // This fixture owns a cache-remount boundary, not browser paging behavior.
+  // Let trusted input reach React's reader handler, then set that boundary in
+  // the same event task so queued layout corrections cannot consume the intent.
   await log.focus();
   await expect(log).toBeFocused();
-  for (let pages = 0; pages < 100; pages += 1) {
-    const before = await log.evaluate((element) => element.scrollTop);
-    if (before === 0) break;
-    await log.press("PageUp");
-    await expect
-      .poll(() => log.evaluate((element) => element.scrollTop))
-      .toBeLessThan(before);
-  }
+  await log.evaluate((scroller) => {
+    window.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.target !== scroller || event.key !== "Home") return;
+        event.preventDefault();
+        scroller.scrollTo({ top: 0, behavior: "instant" });
+      },
+      { once: true },
+    );
+  });
+  await log.press("Home");
   await expect.poll(() => log.evaluate((element) => element.scrollTop)).toBe(0);
   await expect(row).toHaveCount(0);
   await page.getByTestId("jump-to-latest").click();

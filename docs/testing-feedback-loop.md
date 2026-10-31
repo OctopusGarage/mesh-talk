@@ -101,12 +101,15 @@ Four processes reduce that accumulation without increasing the job deadline,
 retrying failed scenarios or establishing a product latency guarantee.
 
 A media-cache/virtualization fixture must establish both reader intent and the
-observed navigation boundary. Focus the scrollable history and use bounded
-PageUp input with observed scroll progress before asserting that the latest row
-unmounted. A large wheel delta can be normalized to one page, Home behavior
-differs across platforms, and a bare programmatic scroll can be treated
-as layout correction by the viewport owner. Retain the explicit live-edge setup,
-unmount, return-to-latest, row geometry and media URL reuse assertions.
+observed navigation boundary. Its trusted Home key reaches React's reader handler
+before a one-shot window bubble listener prevents default and sets the history
+start in the same event task. This fixture owns that cache-remount boundary;
+it does not assert browser paging semantics. Large wheel deltas are normalized,
+Home behavior differs across platforms, and requiring every PageUp to make
+monotonic progress adds an unrelated native-navigation assumption. A bare
+programmatic scroll can instead be treated as layout correction. The missing-reader
+negative control must fail. Retain explicit live-edge setup, exact history-start
+position, unmount, return-to-latest, row geometry and media URL reuse assertions.
 
 Presence expiry fixtures observe consumption of the distinctive lease source
 before failing subsequent reads. Deleted-contact fixtures await the post-change
