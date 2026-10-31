@@ -382,7 +382,13 @@
     "reEdit": "再編集",
     "mentionedYou": "あなたへのメンション",
     "reactionAdd": "{{emoji}} のリアクションを追加",
-    "reactionRemove": "自分の {{emoji}} リアクションを削除"
+    "reactionRemove": "自分の {{emoji}} リアクションを削除",
+    "reactionsTitle": "リアクション",
+    "reactionsDescription": "このメッセージのリアクション数です。選択して自分のリアクションを追加・削除できます。",
+    "reactionsEmpty": "リアクションはありません",
+    "reactionsStart": "最初から表示",
+    "reactionsNext": "次のページ",
+    "reactionsMore": "その他のリアクション"
   },
   "transfer": {
     "preparing": "ファイルを準備中…",

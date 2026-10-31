@@ -382,7 +382,13 @@
     "reEdit": "重新編輯",
     "mentionedYou": "提及了你",
     "reactionAdd": "加入 {{emoji}} 表情回應",
-    "reactionRemove": "移除你的 {{emoji}} 表情回應"
+    "reactionRemove": "移除你的 {{emoji}} 表情回應",
+    "reactionsTitle": "回應",
+    "reactionsDescription": "此訊息的回應數量。選擇回應可新增或移除自己的回應。",
+    "reactionsEmpty": "尚無回應",
+    "reactionsStart": "從頭查看",
+    "reactionsNext": "下一頁",
+    "reactionsMore": "更多回應"
   },
   "transfer": {
     "preparing": "正在準備檔案…",

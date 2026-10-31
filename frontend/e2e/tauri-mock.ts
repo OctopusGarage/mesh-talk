@@ -418,7 +418,7 @@ export const test = base.extend({
       };
       let mid = 100;
       const msg = (over: Partial<Msg>): Msg => ({
-        id: `m${++mid}`,
+        id: (++mid).toString(16).padStart(64, "0"),
         from_me: false,
         who: BOB.device_id,
         text: "",
@@ -491,6 +491,18 @@ export const test = base.extend({
         string,
         Array<{ target: string; emoji: string; who: string[] }>
       > = {};
+
+      if (dataMode === "reactions-paged") {
+        reacts[`acc:${BOB.account_id}`] = Array.from(
+          { length: 200 },
+          (_, index) => ({
+            target: msgs[`acc:${BOB.account_id}`][0].id!,
+            emoji: `reaction-${index.toString().padStart(3, "0")}`,
+            who:
+              index === 199 ? [BOB.account_id, SELF.account] : [BOB.account_id],
+          }),
+        );
+      }
 
       const protectedBodies: Record<string, string> = {};
       const protectedModes: Record<string, string> = {};
@@ -1533,6 +1545,32 @@ export const test = base.extend({
           },
 
           // reactions
+          owner_reaction_summaries: (a) => {
+            const selected = new Set(a.targets as string[]);
+            if (selected.size > 64) throw new Error("reaction target limit");
+            const rows = (
+              reacts[`${a.kind === "account" ? "acc" : "ch"}:${a.target}`] ?? []
+            )
+              .filter((row) => selected.has(row.target))
+              .sort(
+                (left, right) =>
+                  left.target.localeCompare(right.target) ||
+                  left.emoji.localeCompare(right.emoji),
+              );
+            const offset = a.cursor ? Number(String(a.cursor).slice(5)) : 0;
+            return {
+              items: rows.slice(offset, offset + 128).map((row) => ({
+                target: row.target,
+                emoji: row.emoji,
+                count: row.who.length,
+                from_me:
+                  row.who.includes(SELF.account) ||
+                  row.who.includes(SELF.device),
+              })),
+              next: offset + 128 < rows.length ? `mock:${offset + 128}` : null,
+              pending: false,
+            };
+          },
           reactions: (a) => reacts[`dm:${a.peer}`] ?? [],
           account_reactions: (a) => reacts[`acc:${a.account}`] ?? [],
           channel_reactions: (a) => reacts[`ch:${a.channelId}`] ?? [],
