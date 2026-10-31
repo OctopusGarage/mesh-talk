@@ -60,12 +60,29 @@ async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
                 .announcement
                 .is_none()
         );
-        assert_eq!(chain.nodes[1].retry_group_metadata().unwrap(), vec![group]);
+        let mut released = Vec::new();
+        for _ in 0..128 {
+            released = chain.nodes[1].retry_group_metadata().unwrap();
+            if !released.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(released, vec![group]);
         chain.round(2, 1, group).await;
+        let mut metadata = None;
+        for _ in 0..128 {
+            let value = chain.nodes[2].channel_metadata(group).unwrap();
+            if !value.query_pending {
+                metadata = Some(value);
+                break;
+            }
+            assert!(value.announcement.is_none());
+            tokio::task::yield_now().await;
+        }
         assert_eq!(
-            chain.nodes[2]
-                .channel_metadata(group)
-                .unwrap()
+            metadata
+                .expect("selected metadata must finish")
                 .announcement
                 .unwrap()
                 .content

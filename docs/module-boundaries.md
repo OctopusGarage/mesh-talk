@@ -881,6 +881,18 @@ durable clear tombstones. It reuses channel authority and causal ownership
 validation; private account documents never grant authority over shared group
 content. Group sync capability gating and event-log retention preserve this
 contract across replay, offline recovery and accepted-member bootstrap.
+Its `group_metadata/indexed.rs` child owns selected publication/release facts and
+resumable cursors in the existing encrypted profile database. It reuses
+`join_history/indexed.rs` for canonical and causal owner checks. The last 20 valid
+announcement publications are selected before decryption; an unavailable key
+cannot pull an older publication into that window. Recipient release lookups
+match both device keys. Incomplete queries expose `query_pending`, separately
+from a validated current publication awaiting its content key. Its local
+`indexed/preparation.rs` retains bounded caller continuations for existing owner,
+ancestry and causal queries; it introduces no parallel authorization reducer.
+Unfinished active slots are retained under capacity backpressure, while completed
+plaintext summaries use the existing bounded cache. The channel cleanup owner
+can retire the index with a counted caller-supplied row allowance.
 
 `src-tauri/src/chat_commands/channel_metadata.rs` owns exact owner/account/runtime
 admission for reads and edits. Channel summaries project validated current content

@@ -129,7 +129,8 @@ impl ChannelCheckpointStore {
             causal::initialize(c, !present)?;
             super::graph::preparing::initialize(c)?;
             file_preview::initialize(c)?;
-            crate::node::join_history::initialize_indexed(c, !present)
+            crate::node::join_history::initialize_indexed(c, !present)?;
+            crate::node::group_metadata::initialize_indexed(c)
         })?;
         let (account, generation, owner) = profile.database().read(|c| {
             let account = active_account_on(c)?;
