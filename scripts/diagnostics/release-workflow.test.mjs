@@ -8,6 +8,26 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
+test("native release inspection uses the shared pinned toolchain and a real NSIS health regression", () => {
+  for (const job of ["build-release", "verify-release", "publish-release"]) {
+    const body = workflow.split(`  ${job}:\n`)[1]?.split(/^  [\w-]+:\n/m)[0];
+    assert.ok(body, job);
+    assert.match(body, /python scripts\/release\/sevenzip\.py install/, job);
+    assert.doesNotMatch(body, /apt-get install[^\n]*\b7zip\b/, "Ubuntu's package must not select the release decoder");
+  }
+  const health = readFileSync(new URL("../../.github/workflows/check-health.yml", import.meta.url), "utf8");
+  const toolchain = health.split("      - name: Install pinned native inspection toolchain\n")[1]?.split("      - ")[0];
+  assert.ok(toolchain, "all three portable platforms must execute the tool bootstrap before merge");
+  assert.doesNotMatch(toolchain, /if:/);
+  assert.match(toolchain, /python scripts\/release\/sevenzip\.py install/);
+  const native = health.split("      - name: Native release inspection regression\n")[1]?.split("      - ")[0];
+  assert.ok(native, "portable health must exercise a genuine plugin installer");
+  assert.match(native, /if: runner\.os == 'Linux'/);
+  assert.match(native, /apt-get install[^\n]*\bnsis\b/);
+  const smoke = health.split("      - name: Verify native NSIS payload equivalence\n")[1]?.split("      - ")[0];
+  assert.match(smoke || "", /python scripts\/release\/test_native_nsis\.py -v/);
+});
+
 test("Linux release builds retain the Ubuntu 22.04 runtime baseline across architectures", () => {
   assert.equal(workflow.match(/runner: (\S+)\n\s+target: x86_64-unknown-linux-gnu/)?.[1], "ubuntu-22.04");
   assert.equal(workflow.match(/runner: (\S+)\n\s+target: aarch64-unknown-linux-gnu/)?.[1], "ubuntu-22.04-arm");
