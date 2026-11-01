@@ -1,0 +1,53 @@
+now this project app is so boring, can you see : https://showheyohtaki.github.io/motion-prompt/, all the content , and analyze ,is there any motion can use to this project , to make the app 更加动感和丝滑，注意要仔细结合app分析所有内容，看看有哪些合适的效果可以参考来实现
+
+---
+
+optimise with all your recommendation
+
+---
+
+verify on real machine and do AI evals
+
+---
+
+why not verify all of them !!!!
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"可以，提示出现时我来确认","question":"完整验证设备配对成功动效需要两次真实 macOS 身份认证（生成配对码、接收方加入）。代码使用 Touch ID 或 Mac 登录密码，测试账号密码不能代替。你能在系统提示出现时完成 Touch ID/密码确认吗？请不要把密码发给我。其他原生验证会继续进行。","questionItemId":"[\"request_user_input_async\",\"call_76c9b22443fb49019460e1670f498b3e\",0]"}]
+</send_user_message_question_reply>
+
+---
+
+可以，提示出现时我来确认. continue;  continue; continue; continue; continue; continue;
+
+---
+
+<send_user_message_question_reply>
+[{"answer":"可以，提示出现时我来确认","question":"完整验证设备配对成功动效需要两次真实 macOS 身份认证（生成配对码、接收方加入）。代码使用 Touch ID 或 Mac 登录密码，测试账号密码不能代替。你能在系统提示出现时完成 Touch ID/密码确认吗？请不要把密码发给我。其他原生验证会继续进行。","questionItemId":"[\"request_user_input_async\",\"call_76c9b22443fb49019460e1670f498b3e\",0]"}]
+</send_user_message_question_reply>
+
+---
+
+可以，提示出现时我来确认. continue;  continue; continue; continue; continue; continue;
+
+---
+
+now re-check this project app ,  see : https://showheyohtaki.github.io/motion-prompt/, all the content , and analyze ,is there any motion can use to this project , to make the app 更加动感和丝滑，注意要仔细结合app分析所有内容，看看有哪些合适的效果可以参考来实现, 重新客观看看还有什么值得加的，没有的话不要强加
+
+---
+
+continue optimise with your recommendation
+
+---
+
+if all finish ,commit and push
+
+---
+
+"视频冷启动仍偶有掉帧，尚未完全解决。" why not optimise this???
+
+---
+
+unlock now
