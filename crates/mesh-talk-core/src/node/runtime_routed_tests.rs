@@ -72,13 +72,28 @@ async fn runtime_automatically_queries_a_host_supplied_routed_candidate() {
     b.stop().await;
 }
 
+fn reserve_dual_discovery_port() -> (tokio::net::UdpSocket, tokio::net::UdpSocket) {
+    for _ in 0..32 {
+        let ipv4 = crate::transport::net::discovery_socket(0).unwrap();
+        match routed_ipv6_socket(ipv4.local_addr().unwrap().port()) {
+            Ok(ipv6) => return (ipv4, ipv6),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("reserve the routed discovery fixture: {error}"),
+        }
+    }
+    panic!("reserve a discovery port available in both address families");
+}
+
 #[tokio::test]
 async fn runtime_automatically_queries_ipv6_candidate_when_ipv6_is_available() {
-    let Ok(reserve) = routed_ipv6_socket(0) else {
+    let Ok(available) = routed_ipv6_socket(0) else {
         return;
     };
-    let b_port = reserve.local_addr().unwrap().port();
-    drop(reserve);
+    drop(available);
+    // IPv6-only allocation does not reserve the IPv4 port the runtime binds
+    // first. Retain both compatible reuse sockets until startup owns them.
+    let b_reservation = reserve_dual_discovery_port();
+    let b_port = b_reservation.0.local_addr().unwrap().port();
     let root = tempfile::tempdir().unwrap();
     let b = NodeRuntime::start(
         root.path(),
@@ -94,9 +109,9 @@ async fn runtime_automatically_queries_ipv6_candidate_when_ipv6_is_available() {
     )
     .await
     .unwrap();
-    let reserve = routed_ipv6_socket(0).unwrap();
-    let a_port = reserve.local_addr().unwrap().port();
-    drop(reserve);
+    drop(b_reservation);
+    let a_reservation = reserve_dual_discovery_port();
+    let a_port = a_reservation.0.local_addr().unwrap().port();
     let source = Arc::new(FixedCandidates(std::net::SocketAddr::from((
         std::net::Ipv6Addr::LOCALHOST,
         b_port,
@@ -121,6 +136,7 @@ async fn runtime_automatically_queries_ipv6_candidate_when_ipv6_is_available() {
     )
     .await
     .unwrap();
+    drop(a_reservation);
     tokio::time::timeout(Duration::from_secs(4), async {
         while !a
             .peers()

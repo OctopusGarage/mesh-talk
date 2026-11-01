@@ -669,6 +669,20 @@ fn custody_linked_routes_ready(source: &Node, sibling: &Node) -> bool {
         })
 }
 
+// Post-create custody needs these exact authenticated routes and the selected
+// channel heads, not completion of unrelated optional document continuations.
+fn custody_linked_capabilities_ready(source: &Node, sibling: &Node) -> bool {
+    [(source, sibling), (sibling, source)]
+        .into_iter()
+        .all(|(node, peer)| {
+            node.account_group_versions
+                .lock()
+                .unwrap()
+                .get(&peer.user_id())
+                .is_some_and(|support| support.public == peer.identity.public())
+        })
+}
+
 fn custody_channel_setup_keys(
     source: &Node,
     channel: crate::eventlog::ConversationId,
@@ -696,27 +710,69 @@ async fn wait_custody_channel_setup(
     // the independent eight-second automatic-custody observation.
     let keys = custody_channel_setup_keys(source, channel);
     let mut required = None;
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let mut imported = false;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if required.is_none() {
-                required = keys.iter().map(|key| source.account_document_meta(key)).collect::<Option<Vec<_>>>();
+                required = keys
+                    .iter()
+                    .map(|key| source.account_document_meta(key))
+                    .collect::<Option<Vec<_>>>();
             }
-            let imported = required.as_ref().is_some_and(|heads| heads.iter().all(|head| {
-                sibling.account_document(&head.key).ok().flatten().is_some_and(|document| {
-                    let meta = &document.meta;
-                    // Match the store's signed LWW order. A newer authentic
-                    // publication must not leave setup waiting for an obsolete
-                    // exact captured version forever.
-                    !meta.tombstone && meta.valid(&source.account.public().ed25519_pub)
-                        && meta.writer_device == head.writer_device && meta.order() >= head.order()
+            imported = required.as_ref().is_some_and(|heads| {
+                heads.iter().all(|head| {
+                    sibling
+                        .account_document(&head.key)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|document| {
+                            let meta = &document.meta;
+                            // Match the store's signed LWW order. A newer authentic
+                            // publication must not leave setup waiting for an obsolete
+                            // exact captured version forever.
+                            !meta.tombstone
+                                && meta.valid(&source.account.public().ed25519_pub)
+                                && meta.writer_device == head.writer_device
+                                && meta.order() >= head.order()
+                        })
                 })
-            }));
-            if imported && custody_linked_routes_ready(source, sibling) {
+            });
+            if imported && custody_linked_capabilities_ready(source, sibling) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-    }).await.expect("the new channel's signed inventory/control heads and original linked routes must settle before the custody scenario");
+    })
+    .await;
+    if result.is_err() {
+        let routes = [(source, sibling), (sibling, source)].map(|(node, peer)| {
+            let capability = node
+                .account_group_versions
+                .lock()
+                .unwrap()
+                .get(&peer.user_id())
+                .is_some_and(|support| support.public == peer.identity.public());
+            let status = node
+                .device_sync_status()
+                .into_iter()
+                .find(|status| status.device_id == peer.user_id());
+            (
+                capability,
+                status.map(|status| {
+                    (
+                        status.document_phase,
+                        status.document_error.is_some(),
+                        status.document_requires_upgrade,
+                    )
+                }),
+            )
+        });
+        eprintln!(
+            "custody setup required-heads={} imported={imported} routes(capability,phase,error,upgrade)={routes:?}",
+            required.as_ref().map_or(0, Vec::len)
+        );
+    }
+    result.expect("the new channel's signed inventory/control heads and exact bidirectional capabilities must be ready before the custody scenario");
 }
 
 #[tokio::test]
@@ -728,7 +784,10 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
     use futures_util::FutureExt;
     use std::{
         net::IpAddr,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         time::Duration,
     };
     use tokio::{
@@ -739,6 +798,12 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
     impl Drop for ReleaseOnDrop {
         fn drop(&mut self) {
             self.0.close();
+        }
+    }
+    struct ActiveHold(Arc<AtomicUsize>);
+    impl Drop for ActiveHold {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
         }
     }
     let dir = tempfile::tempdir().unwrap();
@@ -783,6 +848,10 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
     }
     let release = Arc::new(Semaphore::new(0));
     let _release_on_drop = ReleaseOnDrop(release.clone());
+    let optional_release = Arc::new(Semaphore::new(0));
+    let _optional_release_on_drop = ReleaseOnDrop(optional_release.clone());
+    let optional_paid = Arc::new(AtomicBool::new(false));
+    let optional_active = Arc::new(AtomicUsize::new(0));
     let observed = std::panic::AssertUnwindSafe(async {
         tokio::time::timeout(Duration::from_secs(30), async {
             while !custody_linked_routes_ready(&source, &sibling) {
@@ -791,15 +860,50 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
         }).await.expect("the original pre-create readiness boundary is satisfied");
         let (arrived, held) = oneshot::channel();
         let arrived = Arc::new(Mutex::new(Some(arrived)));
+        let (optional_arrived, optional_held) = oneshot::channel();
+        let optional_arrived = Arc::new(Mutex::new(Some(optional_arrived)));
         let exact_sibling = sibling.identity.public();
+        *sibling.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let exact_source = source.identity.public();
+            let optional_paid = optional_paid.clone();
+            move |peer, phase| {
+                // page_end reports the next domain after a real successful
+                // page. The worker publishes this pending cursor before it
+                // dispatches GroupActivity, so an old UpToDate projection
+                // cannot masquerade as the held optional continuation.
+                if peer == exact_source
+                    && phase.starts_with("page_end ")
+                    && phase.contains("outcome=ok ")
+                    && phase.contains("domain=GroupActivity pending=true ")
+                {
+                    optional_paid.store(true, Ordering::Release);
+                }
+            }
+        }));
         *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
             let release = release.clone();
+            let optional_release = optional_release.clone();
+            let optional_paid = optional_paid.clone();
+            let optional_active = optional_active.clone();
             move |peer, frame| {
                 let release = release.clone();
                 let arrived = arrived.clone();
+                let optional_release = optional_release.clone();
+                let optional_arrived = optional_arrived.clone();
+                let optional_paid = optional_paid.clone();
+                let optional_active = optional_active.clone();
                 let exact_sibling = exact_sibling.clone();
                 Box::pin(async move {
-                    if peer == exact_sibling && matches!(frame, AccountHistoryFrame::DocumentsRequest { ref body } if wire::DocumentRequest::decode(body).is_some_and(|request| request.domain == AccountDocumentDomain::GroupInventory)) {
+                    if peer != exact_sibling {
+                        return;
+                    }
+                    let AccountHistoryFrame::DocumentsRequest { body } = frame else {
+                        return;
+                    };
+                    let Some(request) = wire::DocumentRequest::decode(&body) else {
+                        return;
+                    };
+                    if request.domain == AccountDocumentDomain::GroupInventory {
                         let signal = arrived.lock().unwrap().take();
                         if let Some(signal) = signal {
                             let _ = signal.send(());
@@ -807,6 +911,16 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
                         // A replacement request must retain the hold too; a
                         // historical first-arrival signal is not a live gate.
                         let _ = release.acquire().await;
+                    } else if request.domain == AccountDocumentDomain::GroupActivity
+                        && optional_paid.load(Ordering::Acquire)
+                    {
+                        optional_active.fetch_add(1, Ordering::AcqRel);
+                        let _active = ActiveHold(optional_active);
+                        let signal = optional_arrived.lock().unwrap().take();
+                        if let Some(signal) = signal {
+                            let _ = signal.send(());
+                        }
+                        let _ = optional_release.acquire().await;
                     }
                 })
             }
@@ -823,18 +937,55 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
             }
         }).await.expect("the real source must publish both new channel heads while its inventory response is held");
         assert!(sibling.account_document_meta(&keys[0]).is_none(), "the withheld source head must not already have been imported");
-        let setup = wait_custody_channel_setup(&source, &sibling, channel);
-        tokio::pin!(setup);
-        assert!(futures_util::poll!(setup.as_mut()).is_pending(), "a completed pre-create bootstrap must not admit message/custody work while this channel's real inventory is held");
+        {
+            // This observation only proves that a missing selected head blocks
+            // setup. Drop its timer before observing the independent hold.
+            let setup = wait_custody_channel_setup(&source, &sibling, channel);
+            tokio::pin!(setup);
+            assert!(futures_util::poll!(setup.as_mut()).is_pending(), "a completed pre-create bootstrap must not admit message/custody work while this channel's real inventory is held");
+        }
         release.close();
-        setup.await;
-        *source.account_session_test_hook.lock().unwrap() = None;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            optional_held.await.expect("a paid optional continuation must reach the independent live hold");
+            loop {
+                let imported = source_heads.iter().all(|head| {
+                    sibling.account_document(&head.key).unwrap().is_some_and(|document| {
+                        let meta = &document.meta;
+                        !meta.tombstone
+                            && meta.valid(&source.account.public().ed25519_pub)
+                            && meta.writer_device == head.writer_device
+                            && meta.order() >= head.order()
+                    })
+                });
+                let optional_pending = sibling.device_sync_status().into_iter().any(|status| {
+                    status.device_id == source.user_id()
+                        && status.document_phase == crate::node::SyncPhase::CatchingUp
+                        && status.document_error.is_none()
+                        && !status.document_requires_upgrade
+                });
+                if imported && custody_linked_capabilities_ready(&source, &sibling) && optional_pending {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("real authenticated head floors and capabilities must arrive while optional work is still pending");
+        assert!(optional_paid.load(Ordering::Acquire));
+        assert!(optional_active.load(Ordering::Acquire) > 0);
+        assert!(!optional_release.is_closed());
+        assert!(!custody_linked_routes_ready(&source, &sibling), "the old all-lane criterion rejects ready channel heads while unrelated optional work is held");
+        // This is a new readiness observation, with its own actively polled
+        // 30-second watchdog after the old aggregate criterion was rejected.
+        wait_custody_channel_setup(&source, &sibling, channel).await;
+        assert!(optional_active.load(Ordering::Acquire) > 0, "setup must complete while an authenticated optional request is still held");
+        assert!(!optional_release.is_closed());
         source_heads.into_iter().all(|head| {
             sibling.account_document_meta(&head.key).is_some_and(|imported| imported.order() >= head.order())
         })
     }).catch_unwind().await;
     release.close();
+    optional_release.close();
     *source.account_session_test_hook.lock().unwrap() = None;
+    *sibling.account_client_test_hook.lock().unwrap() = None;
     for current in [&source, &sibling, &external] {
         current.runtime_work.close();
     }

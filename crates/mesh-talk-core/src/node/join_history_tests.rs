@@ -791,12 +791,61 @@ async fn join_history_round_trip_over_noise_loopback_preserves_silent_provenance
         );
     }
     assert!(bob.channel_history(channel, 10).unwrap().is_empty());
+    let phases = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let phase_started = std::time::Instant::now();
+    for (label, node) in [("alice", &alice), ("bob", &bob)] {
+        let phases = phases.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            if !phase.starts_with("channel_recovery_") && !phase.starts_with("dial_") {
+                return;
+            }
+            let mut phases = phases.lock().unwrap();
+            if phases.len() == 256 {
+                phases.pop_front();
+            }
+            phases.push_back((
+                phase_started.elapsed().as_millis(),
+                label,
+                peer.user_id(),
+                tokio::task::try_id(),
+                phase,
+            ));
+        }));
+    }
     bob.accept_channel_invite(channel).await.unwrap();
     alice.retry_channel_controls().await;
-    let message = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let receive_started = phase_started.elapsed();
+    // This loopback checks complete silent/protected history semantics. Use
+    // the functional fixture watchdog independently of each exchange deadline;
+    // dedicated notification-driven gossip keeps its latency assertion.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), received.recv()).await;
+    for node in [&alice, &bob] {
+        *node.account_client_test_hook.lock().unwrap() = None;
+    }
+    if result.is_err() {
+        for (label, node) in [("alice", &alice), ("bob", &bob)] {
+            let counts = {
+                let log = node.log.lock().unwrap();
+                let repository = log.repository().unwrap();
+                [
+                    EventKind::ChannelJoinHistory,
+                    EventKind::ChannelDeviceInheritance,
+                ]
+                .map(|kind| repository.count_kind(&channel, kind))
+            };
+            eprintln!(
+                "join recovery {label}: signed_history_counts={counts:?} local_history_idle={} runtime_ticket={:?} session_capacity={:?}",
+                node.join_history_work.lock().unwrap().is_idle(),
+                node.channel_checkpoints.next_runtime(None),
+                node.sessions.test_capacity_snapshot(),
+            );
+        }
+        eprintln!(
+            "join recovery receive_started={receive_started:?} bounded phases={:?}",
+            phases.lock().unwrap(),
+        );
+    }
+    let message = result.unwrap().unwrap();
     assert_eq!(message.text, b"earlier over loopback");
     assert_eq!(message.arrival_kind, "history_sync");
     let history = bob.channel_history(channel, 10).unwrap();

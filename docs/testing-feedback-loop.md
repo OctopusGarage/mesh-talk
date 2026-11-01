@@ -235,6 +235,22 @@ relax thresholds or infer a speedup or zero omissions from a small sample.
 
 Private account-action fixtures follow the [account/device ownership contract](module-boundaries.md#account-and-device-ownership): source commit, durable requester adoption and public member receipt are separate observations. The generic History-off/signed-provenance functional fixture uses a thirty-second watchdog around source and requester commitment, exact effect IDs and durable private projections. This is a functional completion bound, not an eight-second business latency guarantee. Dedicated request/result and held-traffic performance fixtures retain their independent eight-second assertions. Verify public receipt afterward through the existing authenticated sync owner, retaining original signature, author, sealed payload and reduction assertions. Never install an event or decrypted body directly to make receipt pass. Dedicated automatic-fanout fixtures retain coverage for scheduling, backpressure, delayed work and real member delivery.
 
+Selected-source fixtures retain the eight-second foreground receipt assertion.
+After releasing held traffic, complete public fanout, signed background rows and
+both preserved comparisons under the existing thirty-second recovery watchdog.
+Require exact continuation replay and pair retirement throughout this recovery;
+paid background pages retain their ordinary cross-peer scheduling priority.
+Silent join-history loopbacks use a thirty-second functional receive watchdog
+while preserving authority, protected-content filtering and provenance checks.
+The dedicated notification-driven gossip fixture retains its two-second latency
+assertion.
+
+Post-create custody setup requires the selected channel's authenticated inventory
+and control head floors plus exact bidirectional device capabilities within its
+thirty-second watchdog. Unrelated Optional continuations can keep aggregate
+document status catching up; they do not gate this selected-channel observation.
+The custody scenario's independent eight-second assertions remain unchanged.
+
 When a reference-device fixture requires a synchronous capability-cache override
 and admission on one current-thread runtime, keep that requester and its watchers
 there. Run the other simulated devices' complete accept/background owners on
@@ -957,6 +973,13 @@ Each consumer validates and uploads its partial LCOV plus source/inventory/diges
 receipts. Both consumer checks and the producer are directly required; a skipped
 consumer after a failed build cannot certify acceptance. Diagnostic timing keeps
 machine-readable events separate from successful-test phase output.
+
+Consumers persist expected inventory before extraction, validated selected
+inventory before execution, and timestamped child phases plus streamed output
+during listing, execution and reporting. Cancellation preserves this partial
+diagnostic evidence and terminates the owned child tree. Only successful complete
+execution and coverage validation produce an acceptance receipt; partial output
+never certifies a shard. Each output stream remains bounded to 128 MiB.
 
 The producer executes a tiny real archive/consumer CLI regression before expensive
 workspace compilation or accepting the full archive. Its local Git fixture, both partitions, runtime and compiled

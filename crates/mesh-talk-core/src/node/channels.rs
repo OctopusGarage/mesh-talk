@@ -562,9 +562,21 @@ impl Node {
                     Err(_) => break,
                 }
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_maintenance_begin".into()
+            });
             self.maintain_account_channels(&mut account_maintenance)
                 .await;
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_maintenance_done".into()
+            });
             self.retry_channel_plaintext();
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_plaintext_done".into()
+            });
             match self.retry_join_history_new() {
                 Ok(channels) => {
                     for channel in channels {
@@ -574,6 +586,10 @@ impl Node {
                 }
                 Err(error) => log::warn!("channel history recovery deferred: {error}"),
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_join_history_done".into()
+            });
             match self.retry_group_metadata() {
                 Ok(channels) => {
                     for channel in channels {
@@ -583,12 +599,20 @@ impl Node {
                 }
                 Err(error) => log::warn!("channel metadata recovery deferred: {error}"),
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_group_metadata_done".into()
+            });
             if let Err(error) = self.auto_enroll_one_channel_sibling().await {
                 log::warn!("linked channel invitation failed; will retry: {error}");
             }
             if let Err(error) = self.auto_accept_one_linked_invite().await {
                 log::warn!("linked channel acceptance failed; will retry: {error}");
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_membership_done".into()
+            });
             let targets = {
                 let mut pending = self
                     .channel_recovery_pending
@@ -611,12 +635,25 @@ impl Node {
                 fallback_at =
                     fallback_at.min(tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL);
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                format!("channel_recovery_targets_begin count={}", targets.len())
+            });
             stream::iter(targets)
                 .for_each_concurrent(CHANNEL_RECOVERY_GROUP_CONCURRENCY, |channel| async move {
                     node.pull_channel_from_members(channel, cursor, false).await;
                 })
                 .await;
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_targets_done".into()
+            });
             if discovered || tokio::time::Instant::now() >= fallback_at {
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_fallback_begin".into()
+                });
+
                 let batch = self.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH);
                 let start = cursor;
                 cursor = cursor.wrapping_add(batch);
@@ -630,8 +667,16 @@ impl Node {
                     (now_millis() ^ u64::from(self.identity.public().ed25519_pub[0])) as u8;
                 fallback_at = tokio::time::Instant::now() + backoff.next_delay(jitter);
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_fallback_done".into()
+            });
             // Custody and failed plaintext retain their existing retry clock.
             if custody_tick {
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_custody_begin".into()
+                });
                 if let Some((channel, event, peer)) = self
                     .retry_one_channel_custody(custody_cursor, &mut retry_after, &mut retry_cycle)
                     .await
@@ -650,6 +695,10 @@ impl Node {
                     .await;
                 }
                 custody_cursor = custody_cursor.wrapping_add(1);
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_custody_done".into()
+                });
             }
         }
     }
@@ -2825,9 +2874,17 @@ impl Node {
                 .cloned()
                 .collect::<Vec<_>>()
         };
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("channel_recovery_local_begin channel={channel:?}")
+        });
         // Local projection repair is independent of a reachable remote holder.
         self.process_channel_reception(*channel_id, "catch_up");
         self.process_file_events_reception(*channel_id, "catch_up");
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!("channel_recovery_local_done channel={channel:?}")
+        });
         let peers: Vec<_> = members
             .iter()
             .filter(|member| member.user_id() != me)
@@ -2853,11 +2910,19 @@ impl Node {
             .map(|offset| {
                 let peer = &peers[(start + offset) % peers.len()];
                 async move {
+                    #[cfg(test)]
+                    self.trace_account_client(&peer.public, || {
+                        format!("channel_recovery_peer_begin channel={channel:?}")
+                    });
                     let result = tokio::time::timeout(CHANNEL_RECOVERY_PEER_TIMEOUT, async {
                         let Ok(mut conn) = self.privacy_sync_dial(peer.addr, &peer.public).await
                         else {
                             return None;
                         };
+                        #[cfg(test)]
+                        self.trace_account_client(&peer.public, || {
+                            format!("channel_recovery_connection_ready channel={channel:?}")
+                        });
                         // Recovery fetches retained history; it must not turn an
                         // outbound connection into a sharing-preference bypass.
                         let sharing = match self.shares_replica(channel_id) {
@@ -2872,6 +2937,10 @@ impl Node {
                         } else {
                             self.pull_sync_store(conn.peer_identity())
                         };
+                        #[cfg(test)]
+                        self.trace_account_client(&peer.public, || {
+                            format!("channel_recovery_sync_begin channel={channel:?}")
+                        });
                         let report = match request_round(&mut conn, &store, *channel_id).await {
                             Ok(report) => report,
                             Err(error) => {
@@ -2879,10 +2948,23 @@ impl Node {
                                 return None;
                             }
                         };
+                        #[cfg(test)]
+                        self.trace_account_client(&peer.public, || {
+                            format!("channel_recovery_sync_done channel={channel:?}")
+                        });
                         self.recycle_sync_channel(conn);
                         Some((report.applied, report.rejected.is_empty()))
                     })
                     .await;
+                    #[cfg(test)]
+                    self.trace_account_client(&peer.public, || {
+                        let outcome = match &result {
+                            Ok(Some(_)) => "complete",
+                            Ok(None) => "failed",
+                            Err(_) => "timeout",
+                        };
+                        format!("channel_recovery_peer_end channel={channel:?} outcome={outcome}")
+                    });
                     if let Ok(Some((applied, clean))) = result {
                         self.process_channel_reception(*channel_id, "catch_up");
                         self.process_file_events_reception(*channel_id, "catch_up");
@@ -2908,6 +2990,12 @@ impl Node {
             }
         }
         drop(exchanges);
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            format!(
+                "channel_recovery_group_done channel={channel:?} checked={checked} clean={clean}"
+            )
+        });
         self.record_channel_recovery(
             channel,
             if !checked {

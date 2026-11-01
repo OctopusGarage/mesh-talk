@@ -1854,7 +1854,11 @@ async fn private_file_restart_batch(delay: FilePeerDelay, count: usize) {
         } else if count == 1 {
             10
         } else {
-            60
+            // This fixed 24-file aggregate checks eventual completion, with
+            // ASan overhead on every authenticated exchange. Its watchdog is
+            // separate from the unchanged 20s first-progress fairness check
+            // and each production exchange deadline.
+            120
         }),
         async {
             if !first_progress {

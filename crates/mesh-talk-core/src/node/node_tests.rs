@@ -5008,7 +5008,32 @@ async fn large_channel_member_forwards_to_peer_without_author_route() {
         .await
         .unwrap();
     dana_node.pull_one_channel_from_member(0).await;
-    assert_eq!(dana_node.channel_history(channel, 10).unwrap().len(), 2);
+    // A pull admits bounded receive work; the live recovery owner completes it.
+    // Keep the topology unchanged and wait for that exact second delivery.
+    let history = tokio::time::timeout(Duration::from_secs(8), async {
+        let delivered = loop {
+            let event = dana_rx.recv().await.expect("Dana's channel stream open");
+            if !event.reception_only {
+                break event;
+            }
+        };
+        assert!(
+            delivered.text == b"Bob does not relay",
+            "the exact second message must be delivered",
+        );
+        loop {
+            match dana_node.channel_history(channel, 10) {
+                Ok(history) => break history,
+                Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(_) => panic!("forwarded channel history must remain readable"),
+            }
+        }
+    })
+    .await
+    .expect("Dana's pull and bounded receive work deliver the second message within 8s");
+    assert_eq!(history.len(), 2);
     bob_task.abort();
     dana_task.abort();
 }
@@ -5348,6 +5373,16 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         .create_channel_invited("general", vec![bob_pub])
         .await
         .unwrap();
+    // This case proves sender-chain isolation, without an independently
+    // authorized pre-join history copy from the invitation's default policy.
+    alice_node
+        .set_channel_history_policy(channel, crate::channel::HistoryPolicy::Off)
+        .await
+        .unwrap();
+    assert_eq!(
+        alice_node.channel_history_policy(channel).unwrap(),
+        crate::channel::HistoryPolicy::Off,
+    );
     assert!(
         alice_node
             .transfer_channel_owner(channel, &bob_uid)
@@ -5423,6 +5458,17 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
     assert!(
         std::iter::from_fn(|| c_ch_r.try_recv().ok()).all(|event| event.reception_only),
         "carol must not receive the pre-join epoch-0 message"
+    );
+
+    assert_eq!(
+        alice_node
+            .log
+            .lock()
+            .unwrap()
+            .count_kind(&channel, EventKind::ChannelJoinHistory)
+            .unwrap(),
+        0,
+        "the isolation fixture must not publish an authorized history-copy exception",
     );
 
     // Owner-only membership: Bob is a member but NOT the owner. His attempts to change
@@ -9733,9 +9779,17 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     );
 
     let (ed25519_secret, x25519_secret) = a2_node.identity.secret_bytes();
+    // Cancelling the accept loop does not cancel admitted blocking storage work.
+    // Retire it before the same exclusive profile is opened again.
+    a2_node.runtime_work.close();
+    a2_node.clear_delivery_observations();
     a2_task.abort();
     let _ = a2_task.await;
-    drop(a2_node);
+    a2_node.sessions.clear();
+    tokio::time::timeout(Duration::from_secs(5), a2_node.runtime_work.drain())
+        .await
+        .expect("the old sibling's admitted storage work must retire");
+    a2_node.close_profile().unwrap();
     let (reopen_dm, _reopen_dm_rx) = mpsc::unbounded_channel();
     let (reopen_ch, _reopen_ch_rx) = mpsc::unbounded_channel();
     let (reopen_file, _reopen_file_rx) = mpsc::unbounded_channel();
