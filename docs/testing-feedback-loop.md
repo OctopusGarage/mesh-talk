@@ -1196,6 +1196,9 @@ is diagnostic history, not evidence that a particular request is still active.
 Check the intended held task again inside the operation-admission callback, then
 retain the scenario's permitted preemption, continuation and receipt assertions.
 Natural origin, protection and wake hints remain independent attributes.
+Bounded observation ledgers retire inactive history before live task evidence.
+If every retained entry still belongs to a live task, new evidence is refused;
+capacity pressure cannot certify retirement or authorize a synthetic hold.
 The local-maintenance isolation fixture holds the requester at an existing
 publication boundary outside shared journal, document, member and log guards before genuine operation admission. It requires
 the exact demand's child request preparation while that boundary is held, then
@@ -1227,6 +1230,15 @@ access-only scope fixtures use an inbound-only authenticated provider and retain
 positive-role and operation-exclusion checks. Separate live-provider tests retain
 mid-page mutation, retry and re-comparison coverage. Provider teardown closes
 admission, aborts its owned connections and drains actual work under one watchdog.
+Preparation of the queued-source fixture uses an instance-scoped test-only
+client gate after the genuine authenticated acknowledgement and before read
+clocks begin. The exact request nonce receives an explicit server hold or pass
+decision; cancellation and dropped decisions release pending preparation. The
+gate opens permanently before operation admission. A real protocol control
+advances the test clock beyond the unchanged read budget to distinguish an
+ordinary timed-out read from a preparation hold followed by a fresh read.
+The production read deadlines and eight-second operation receipt bound remain
+unchanged.
 
 ## Measure feedback before tuning capacity
 
