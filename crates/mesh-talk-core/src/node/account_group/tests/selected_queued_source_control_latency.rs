@@ -120,6 +120,24 @@ fn queued_source_requires_current_settlement_after_retired_request_publication()
     assert!(readiness.ready());
 }
 
+// First relevant setup transitions survive unrelated traffic and recovery.
+fn record_setup_milestone(
+    trace: &BTrace,
+    clock: std::time::Instant,
+    milestone: &'static str,
+    details: String,
+) {
+    let mut rows = trace.lock().unwrap();
+    if rows.len() < 8 && !rows.iter().any(|row| row.1 == milestone) {
+        rows.push_back((
+            clock.elapsed().as_millis(),
+            milestone,
+            tokio::task::try_id(),
+            details,
+        ));
+    }
+}
+
 struct ReleaseQueuedReads(Arc<Semaphore>);
 impl Drop for ReleaseQueuedReads {
     fn drop(&mut self) {
@@ -323,6 +341,8 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     let b_retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let recovery_changed = Arc::new(Notify::new());
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let setup_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
     // Independent bounded owner rings keep frequent requester maintenance from
     // evicting the executor's last stalled phase. Snapshot before recovery.
     let executor_owner_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -452,7 +472,15 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let b_readiness = b_readiness.clone();
         let demand_dispatch = demand_dispatch.clone();
         let owner_trace = requester_owner_trace.clone();
+        let setup_trace = setup_trace.clone();
+        let first_held_task = first_held_task.clone();
         move |peer, phase| {
+            if peer == peer_a
+                && let Some(task) = *first_held_task.lock().unwrap()
+                && phase.starts_with(&format!("control_cancel task={task:?} "))
+            {
+                record_setup_milestone(&setup_trace, clock, "first_A_cancel", phase.clone());
+            }
             if admitted.load(std::sync::atomic::Ordering::Acquire)
                 && (phase.starts_with("operation_owner ")
                     || phase.starts_with("operation_publication_owner "))
@@ -557,6 +585,20 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                 && phase.starts_with("page_end")
                 && phase.contains("pending=true after=true")
             {
+                if let Some(page) = pages.lock().unwrap().task(tokio::task::id()) {
+                    record_setup_milestone(
+                        &setup_trace,
+                        clock,
+                        "first_B_partial",
+                        format!(
+                            "task={:?} nonce={} request_checkpoint={:?} origin={} validated={phase}",
+                            page.task,
+                            hex::encode(page.request.operation.as_ref().unwrap().nonce),
+                            effective_after(&page.request),
+                            page.origin
+                        ),
+                    );
+                }
                 b_partial.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             if peer == peer_b
@@ -582,6 +624,8 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let resumed_task = resumed_task.clone();
         let retired_request_rejected = retired_request_rejected.clone();
         let rejected_tx = rejected_tx.clone();
+        let setup_trace = setup_trace.clone();
+        let first_held_task = first_held_task.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let release = release.clone();
@@ -596,6 +640,8 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             let resumed_task = resumed_task.clone();
             let retired_request_rejected = retired_request_rejected.clone();
             let rejected_tx = rejected_tx.clone();
+            let setup_trace = setup_trace.clone();
+            let first_held_task = first_held_task.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
@@ -668,6 +714,18 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                 let first = first_tx.lock().unwrap().take();
                 if let Some(first) = first {
                     assert!(effective_after(&request).is_none());
+                    *first_held_task.lock().unwrap() = Some(page.task);
+                    record_setup_milestone(
+                        &setup_trace,
+                        clock,
+                        "first_A_held",
+                        format!(
+                            "task={:?} nonce={} origin={}",
+                            page.task,
+                            hex::encode(request.operation.as_ref().unwrap().nonce),
+                            page.origin
+                        ),
+                    );
                     let _ = first.send(page.task);
                     let _ = release.acquire().await;
                 } else if b_partial.load(std::sync::atomic::Ordering::Relaxed)
@@ -681,6 +739,21 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                         let _ = resumed.send(());
                         let _ = release.acquire().await;
                     }
+                } else if dispatch.resumed && !dispatch.replacement && dispatch.protected {
+                    // The preceding capture condition rejected this eligible
+                    // resume because no B partial had yet been observed.
+                    record_setup_milestone(
+                        &setup_trace,
+                        clock,
+                        "early_A_resume_ignored",
+                        format!(
+                            "task={:?} nonce={} request_checkpoint={:?} origin={}",
+                            page.task,
+                            hex::encode(request.operation.as_ref().unwrap().nonce),
+                            effective_after(&request),
+                            page.origin
+                        ),
+                    );
                 }
             })
         }
@@ -829,10 +902,22 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         pages.lock().unwrap().is_active(first_task),
         "the exact natural A hold must remain live at canonical B publication"
     );
+    record_setup_milestone(
+        &setup_trace,
+        clock,
+        "B66_publication_begin",
+        format!("first_A_task={first_task:?}"),
+    );
     let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
+    record_setup_milestone(
+        &setup_trace,
+        clock,
+        "B66_publication_end",
+        format!("first_A_task={first_task:?}"),
+    );
     super::cold_account_setup(resume_rx)
         .await
-        .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}; phases={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary(), trace.lock().unwrap()))
+        .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}; setup={:?}; phases={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary(), setup_trace.lock().unwrap(), trace.lock().unwrap()))
         .unwrap();
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));
     let saved = saved_after
@@ -963,8 +1048,9 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     // Recovery can make a late terminal look timely. Preserve each owner's
     // bounded body-free phase history at the original receipt boundary.
     eprintln!(
-        "queued_owner_at_receipt_deadline gate_terminal={gate_terminal} delay_retired_request={delay_retired_request} receipt_ok={} executor={:?} requester={:?}",
+        "queued_owner_at_receipt_deadline gate_terminal={gate_terminal} delay_retired_request={delay_retired_request} receipt_ok={} setup={:?} executor={:?} requester={:?}",
         receipt.is_ok(),
+        setup_trace.lock().unwrap().clone(),
         executor_owner_trace.lock().unwrap().clone(),
         requester_owner_trace.lock().unwrap().clone(),
     );
