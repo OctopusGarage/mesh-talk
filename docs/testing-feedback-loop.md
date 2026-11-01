@@ -1217,6 +1217,17 @@ abort or panic without calling fixture code during destruction. The delayed-serv
 regression uses a real signed sibling publication to retire an older request and
 requires a fresh live request before measuring the existing receipt deadline.
 
+### Protocol fixture response epochs
+
+Wire-scope fixtures that require exact digest equality own a stable provider
+epoch and validate the received signed headers and payloads through the canonical
+store. A later source publication belongs to another epoch; comparing its live
+digest with an earlier completion is not response-integrity evidence. The v5
+access-only scope fixtures use an inbound-only authenticated provider and retain
+positive-role and operation-exclusion checks. Separate live-provider tests retain
+mid-page mutation, retry and re-comparison coverage. Provider teardown closes
+admission, aborts its owned connections and drains actual work under one watchdog.
+
 ## Measure feedback before tuning capacity
 
 For hosted CI, run `node scripts/ci/timing-report.mjs OWNER/REPO COMMIT_SHA --history 30`, or add `--json` to preserve the raw API snapshot

@@ -512,6 +512,7 @@
             "only_remote_dial_timeout_allows_wake_recovery",
             "known_role_patch_preserves_64_row_pages_and_repairs_roles_changed_between_pages",
             "access_only_v5_keeps_its_role_scope_when_operation_rows_exist",
+            "completed_v5_role_digest_retains_received_epoch_after_source_publication",
             "completed_control_scope_recompares_a_selected_role_that_grew_after_its_snapshot"
           ]
         }
@@ -520,6 +521,10 @@
         "summary": "Synchronize typed private drafts, exact read receipts, customization assets, authenticated DM controls and account-personal conversation removal through existing certified account sessions.",
         "guide": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization",
         "invariants": [
+          {
+            "name": "Access-only v5 scope fixtures validate actual received signed role metadata and payloads against their completion digest inside an authenticated stable-provider epoch; later source publication belongs to another epoch. Live-provider mutation retains its cursor re-comparison contract.",
+            "reference": "docs/testing-feedback-loop.md#protocol-fixture-response-epochs"
+          },
           {
             "name": "Certified same-account authority, bounded versioned records and deletion tombstones preserve convergence without exposing private records to other group members",
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
