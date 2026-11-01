@@ -14,6 +14,46 @@ const scriptCommand = text => [powershell, "-NoProfile", "-NonInteractive", "-En
 const run = (command, options = {}) => execute(command, { cwd: process.cwd(), env: process.env, onOutput() {}, ...options });
 const leader = fileURLToPath(new URL("./fixtures/windows-native-leader.ps1", import.meta.url));
 
+// These portable cases exercise the actual parent bridge and an actual child
+// process. They validate receipt rejection, not Windows kernel retirement.
+for (const mode of ["missing", "malformed", "stale", "unconfirmed"]) {
+  test(`command owner rejects ${mode} retirement evidence despite helper exit zero`, async t => {
+    const { executeWindows } = await import("../validation/windows-process-owner.mjs");
+    const { spawn } = await import("node:child_process");
+    const directory = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-receipt-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const app = path.join(directory, "target.exe");
+    await writeFile(app, "Protocol fixture; no native target is launched.\n");
+    const fixture = `
+      const fs = require('node:fs');
+      let input = '';
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', chunk => {
+        input += chunk;
+        const end = input.indexOf('\\n');
+        if (end < 0) return;
+        const request = JSON.parse(input.slice(0, end));
+        const mode = process.argv[1];
+        if (mode !== 'missing') fs.writeFileSync(request.receipt, mode === 'malformed' ? '{' : JSON.stringify({
+          schema: 1,
+          nonce: mode === 'stale' ? request.nonce + '-previous' : request.nonce,
+          result: { retired: mode !== 'unconfirmed', exitCode: 0 },
+        }));
+        process.exit(0);
+      });
+    `;
+    const result = await executeWindows([app], {
+      cwd: process.cwd(), env: process.env, onOutput() {},
+      spawnOwner(_program, _args, options) {
+        return spawn(process.execPath, ["-e", fixture, mode], options);
+      },
+    });
+    assert.notEqual(result.code, 0);
+    assert.equal(result.cleanupUnverified, true);
+    assert.match(result.error, /retirement.*receipt|unverified/i);
+  });
+}
+
 async function nativeWorker(t, { hold = false } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "mesh-windows-owner-"));
   const ready = path.join(directory, "leaf-ready.json");

@@ -240,6 +240,7 @@
         "scripts/diagnostics/changed-validation.test.mjs",
         "scripts/diagnostics/validation-selectors.test.mjs",
         "scripts/diagnostics/validation-stage.test.mjs",
+        "scripts/diagnostics/windows-process-owner.test.mjs",
         "scripts/diagnostics/pr-platform.test.mjs",
         "scripts/diagnostics/pr-preflight-output.test.mjs",
         "scripts/diagnostics/backend-eval-report.test.mjs",
@@ -268,6 +269,7 @@
         ]
       },
       "escalation": [
+        "Windows execution changes require real windows-process-owner.test.mjs execution on Windows: portable receipt-rejection controls alone do not establish native job membership or retirement. Preserve creation-time job ownership, argument/environment/byte-stream fidelity, cancellation and output/log failure cleanup, helper-death quarantine, unrelated-process isolation and declared-input cache invalidation. Hosted Windows Health remains required before merge.",
         "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI. Supervisor Rust thread-policy changes also require full workspace consumers and the real Cargo thread-policy fixture; preserve explicit Windows/sanitizer caller limits."
       ]
     },
@@ -298,6 +300,7 @@
         "scripts/diagnostics/prepare-pr.test.mjs",
         "scripts/diagnostics/pr-platform.test.mjs",
         "scripts/diagnostics/pr-scenarios.test.mjs",
+        "scripts/diagnostics/pr-preflight-output.test.mjs",
         "scripts/validation/native-build.mjs",
         "scripts/diagnostics/native-build.test.mjs"
       ],

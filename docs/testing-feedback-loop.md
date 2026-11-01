@@ -53,8 +53,15 @@ its descendants retired. Shared runners use the validation stage's process owner
 rather than creating an independent nested process group. On POSIX, the outer
 owner retains termination escalation and resource leases through verified group
 retirement, including ignored-stdio descendants and ordinary leader exit.
-Nested cancellation notifies that owner. Windows tree termination must be awaited
-and cleanup failures must remain visible. Cancelled or unverifiably retired work
+Nested cancellation notifies that owner. Windows commands join a private native
+job at process creation, before the first target instruction, with no breakaway
+or inherited job handle. The owning adapter preserves argv, environment, working
+directory and byte streams; its private control pipe never reaches target stdin.
+Retirement requires an empty job, a signaled retained leader handle and drained
+output. The parent accepts only the current invocation's nonce-bound receipt;
+helper exit or kill-on-close containment alone cannot certify cleanup. Job
+retirement, output drain and error recovery share one bounded cleanup budget
+inside the parent's missing-receipt backstop. Cancelled or unverifiably retired work
 cannot admit another suite, fallback build or transport operation, or create a
 successful reusable receipt. Platform evidence must distinguish cancellation from
 an incomplete or mismatched test inventory; success still requires every selected
@@ -830,14 +837,19 @@ recover locks whose nested owner was terminated.
 POSIX cleanup confirms that the managed group has no runnable descendants after
 escalation; unreaped zombies do not count as running work. Dead nested owners
 cannot release a lease while their group still runs. If process-state inspection
-is unavailable or Windows `taskkill /T /F` fails, termination is unverified:
+is unavailable or the Windows owner cannot provide verified retirement,
+termination is unverified:
 the cancelled attempt produces no successful receipt and its locks remain
 quarantined. Inspect the attempt log and the lock's `owner.json`, establish that
 all descendants have stopped, and remove only those quarantined lock directories
-to recover. Automatic dead-owner recovery never clears quarantine. A Windows
-taskkill success is OS process-tree evidence, not a native UI acceptance test.
-It relies on the OS command's result; it does not independently enumerate and
-verify every terminated Windows descendant.
+to recover. Automatic dead-owner recovery never clears quarantine. Windows locks
+also retain `windowsRetirementRequired`; a dead owner PID cannot release them
+without proof. Establish retirement from native evidence or an OS restart before
+removing only the affected lock directories. Native job tests use a real native
+leader: Node/libuv's own child-job cleanup can conceal an inherited-descendant
+defect. Portable receipt-rejection tests prove the parent protocol, not Windows
+kernel retirement or native UI acceptance. Declared-input receipt identities
+include all three Windows adapter source files on Windows.
 Tool versions and mutable configuration digests are rechecked after queueing,
 before reuse and after execution; changes invalidate evidence rather than
 publishing success under the earlier identity.
