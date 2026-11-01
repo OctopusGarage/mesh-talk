@@ -8,6 +8,59 @@ import test from "node:test";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 
+test("manual packages exclude updater payloads while the signed manifest binds standalone roles", { skip: process.platform === "win32" }, () => {
+  const checksumStep = workflow.split(/^      - /m).find((step) => step.startsWith("name: Generate SHA256 checksums"));
+  const packageStep = workflow.split(/^      - /m).find((step) => step.startsWith("name: Package and sign artifacts"));
+  const commands = (step) => step.split("        run: |\n")[1].split("\n")
+    .filter((line) => /^ {10}/.test(line) || /^\s*$/.test(line)).map((line) => line.replace(/^ {10}/, "")).join("\n");
+  for (const [target, platform, extensions] of [
+    ["aarch64-apple-darwin", "macos_arm64", ["dmg"]],
+    ["x86_64-apple-darwin", "macos_x86_64", ["dmg"]],
+    ["aarch64-pc-windows-msvc", "windows_arm64", ["exe", "msi"]],
+    ["x86_64-pc-windows-msvc", "windows_x86_64", ["exe", "msi"]],
+    ["aarch64-unknown-linux-gnu", "linux_aarch64", ["AppImage", "deb", "rpm"]],
+    ["x86_64-unknown-linux-gnu", "linux_x86_64", ["AppImage", "deb", "rpm"]],
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "mesh-talk-lean-package-"));
+    try {
+      mkdirSync(join(root, "release"));
+      const files = new Map(extensions.map((extension) => [`installer with spaces.${extension}`, Buffer.from(`native ${extension}`)]));
+      const suffix = platform.startsWith("macos_") ? "app.tar.gz" : platform.startsWith("windows_") ? "nsis.exe" : "AppImage";
+      const full = `mesh-talk-update_v0.1.5_${platform}.${suffix}`;
+      const raw = full.replace("mesh-talk-update_", "mesh-talk-update-raw_");
+      const standalone = [full, `${full}.sig`, ...(platform.startsWith("linux_") ? [] :
+        [`${full}.delta.json`, `${full}.delta.json.sig`, raw, `${raw}.sig`, `mesh-talk-patch_v0.1.5_${platform}_from-v0.1.4.zst`])];
+      for (const name of standalone) files.set(name, Buffer.from(`standalone ${name}`));
+      for (const [name, bytes] of files) writeFileSync(join(root, "release", name), bytes);
+      execFileSync("bash", ["-c", commands(checksumStep)], { cwd: root, stdio: "pipe" });
+      // Only the external OIDC signing service is replaced; execute the actual
+      // checksum and packaging commands against real files and ZIPs.
+      const packageScript = commands(packageStep).replaceAll("${{ matrix.target }}", target)
+        .replace('node scripts/release/sign-blob.mjs "$ZIP_NAME" "$BUNDLE_FILE"', 'test -s "$ZIP_NAME"');
+      execFileSync("bash", ["-c", packageScript], { cwd: root, env: { ...process.env, ARTIFACT_TAG: "v0.1.5" }, stdio: "pipe" });
+      const archive = join(root, "release_zips", `mesh-talk_v0.1.5_${platform}.zip`);
+      const members = execFileSync("unzip", ["-Z1", archive], { encoding: "utf8" }).trim().split(/\r?\n/);
+      assert.deepEqual(members.sort(), [...extensions.map((extension) => `release/installer with spaces.${extension}`), "release/SHA256SUMS", "release/UPDATER_SHA256SUMS"].sort(), platform);
+      const manifest = execFileSync("unzip", ["-p", archive, "release/SHA256SUMS"], { encoding: "utf8" });
+      assert.equal(manifest.trim().split(/\r?\n/).length, extensions.length, "manual installer checksums must remain self-contained");
+      const updaterManifest = execFileSync("unzip", ["-p", archive, "release/UPDATER_SHA256SUMS"], { encoding: "utf8" });
+      const manual = join(root, "manual");
+      mkdirSync(manual);
+      execFileSync("unzip", ["-q", archive, "-d", manual]);
+      execFileSync("shasum", ["-a", "256", "-c", "SHA256SUMS"], { cwd: join(manual, "release"), stdio: "pipe" });
+      for (const name of standalone) {
+        assert.deepEqual(readFileSync(join(root, "release_zips", name)), files.get(name));
+        assert.ok(updaterManifest.includes(`${createHash("sha256").update(files.get(name)).digest("hex")}  ./${name}`), name);
+      }
+      execFileSync("zip", [archive, `release/${full}`], { cwd: root, stdio: "pipe" });
+      execFileSync("bash", ["-c", packageScript], { cwd: root, env: { ...process.env, ARTIFACT_TAG: "v0.1.5" }, stdio: "pipe" });
+      assert.deepEqual(execFileSync("unzip", ["-Z1", archive], { encoding: "utf8" }).trim().split(/\r?\n/).sort(), members.sort(), "repackaging must discard stale ZIP entries");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("native release inspection uses the shared pinned toolchain and a real NSIS health regression", () => {
   for (const job of ["build-release", "verify-release", "publish-release"]) {
     const body = workflow.split(`  ${job}:\n`)[1]?.split(/^  [\w-]+:\n/m)[0];

@@ -165,11 +165,31 @@ keeps manual-only publication; configuring only one fails the build. Local updat
 provide the same public-key environment value to compile the trust root into the host.
 
 Each platform publishes `mesh-talk-update_<tag>_<platform>.app.tar.gz`, `.nsis.exe` or `.AppImage`
-and its `.sig`. The same bytes are included in the platform ZIP and its checksum manifest. The
-existing cosign/provenance gate verifies that ZIP; the aggregate verifier requires a complete
-updater platform matrix and byte-for-byte equality between embedded and standalone assets.
+and its `.sig` as standalone assets. The platform ZIP contains native installers and a
+`SHA256SUMS` manifest for those installers, plus a small `UPDATER_SHA256SUMS` when updates
+are enabled. It never embeds canonical updater payloads, raw reconstruction targets,
+delta catalogs, patches or updater signatures. The updater manifest records hashes for every
+standalone updater role belonging to that platform. Manual checksum verification stays
+self-contained: `shasum -a 256 -c SHA256SUMS` checks only files in the downloaded ZIP.
+The existing Cosign/provenance gate authenticates the ZIP and both manifests.
+The aggregate verifier requires the complete updater platform matrix, the exact manifest role
+set and a matching hash for every standalone file, plus each file's exact-source provenance.
+Native installer/updater equivalence and incremental reconstruction checks remain required.
 Existing draft/source checks, immutability and explicit Stable publication remain required.
 The same signing key authenticates canonical full packages and optional incremental preparation; both reach the existing native installer.
+
+### Manual package size budgets
+
+Manual downloads carry no updater payload bytes. Their signed checksum manifests are limited
+to 64 KiB each, and their installer formats remain an exact platform-specific set. macOS DMGs and
+their outer ZIPs each have a 24 MiB limit, enforced independently before native inspection by
+`scripts/release/verify_assets.py`. The measured ARM64 DMG was about 15.8 MB when this budget
+was introduced; the limit leaves headroom for architecture variation and ordinary growth while
+rejecting the 61.6 MB ZIP that duplicated update representations. A highly compressible oversized
+DMG still fails its own limit. Future budget changes require a reviewed change to this owning
+rule and its regression tests; do not bypass acceptance or drop signature/provenance checks.
+These limits govern manual packages, not standalone raw targets, whose existing reconstruction
+limits remain unchanged. Binary-size optimization must separately preserve native behavior.
 
 ## Download verification and installation
 
@@ -183,7 +203,8 @@ runtime before the complete upgrade chain is considered verified. See Tauri's
 [AppImage compatibility guidance](https://v2.tauri.app/distribute/appimage/).
 
 The app saves the compatible ZIP to Downloads. The ZIP contains platform installers and
-`SHA256SUMS` (and updater payloads when enabled). The app streams it to a temporary file, checks the published size and SHA-256
+`SHA256SUMS` (plus `UPDATER_SHA256SUMS` when enabled), without duplicate updater payloads.
+The app streams it to a temporary file, checks the published size and SHA-256
 digest from GitHub's Releases API, and only then shows **Show in Downloads**. Canceling or
 failing a download removes the temporary file. An existing ZIP is reused only if its size and
 digest still match. Download requests re-fetch the exact selected release and enforce its channel,
@@ -211,6 +232,13 @@ An exhausted discovery bound is reported explicitly. Public download links are a
 artifact access or a GitHub login.
 
 ## Public website downloads
+
+Release notes lead with direct desktop ZIP links for each of the six platform/architecture
+targets, resolved against the exact repository and immutable release tag. Headless relay links
+and verification instructions are separate collapsible sections. Users choose their computer
+from the download table rather than finding installers among automatic-update and audit assets.
+The template owner is `.github/release-notes.md`; `scripts/release/render-notes.mjs` applies
+the existing source identity and Stable/Nightly rules to every link and verification command.
 
 The project site requests GitHub's latest Stable release metadata and presents
 its desktop ZIP packages directly. It accepts only published full releases,

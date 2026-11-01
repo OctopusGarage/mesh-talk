@@ -40,7 +40,8 @@ done
 
 # Optional delta roles and canonical standalone updater artifacts must carry the
 # same exact-source hosted provenance as their ZIP. The Python complete-set
-# verifier below rejects unknown names and binds every standalone byte to it.
+# verifier below rejects unknown names and binds every standalone byte to the
+# checksum manifest inside its signed ZIP, without embedding duplicate payloads.
 shopt -s nullglob
 standalone_assets=("$asset_dir"/mesh-talk-update_* "$asset_dir"/mesh-talk-update-raw_* "$asset_dir"/mesh-talk-patch_*)
 for asset in "${standalone_assets[@]}"; do
