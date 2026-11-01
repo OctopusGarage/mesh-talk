@@ -1,0 +1,69 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6B436JF2Q1MN6Z5V904WR05",
+  "strategy": "manual-commit",
+  "branch": "fix/frontend-motion-polish",
+  "checkpoints_count": 6,
+  "files_touched": [
+    "frontend/DESIGN.md",
+    "frontend/e2e/composer-preview-layout.spec.ts",
+    "frontend/e2e/file-send-progress.spec.ts",
+    "frontend/e2e/fixtures/video-metadata.json",
+    "frontend/e2e/history-motion.spec.ts",
+    "frontend/e2e/login-layout.spec.ts",
+    "frontend/e2e/ui-visual-regression.spec.ts",
+    "frontend/e2e/video-player-layout.spec.ts",
+    "frontend/src/components/ui/tabs.test.ts",
+    "frontend/src/components/ui/tabs.tsx",
+    "frontend/src/features/chat/ComposerImagePreview.tsx",
+    "frontend/src/features/chat/ConversationView.tsx",
+    "frontend/src/features/chat/LinkDeviceDialog.test.ts",
+    "frontend/src/features/chat/LinkDeviceDialog.tsx",
+    "frontend/src/features/chat/MediaPreview.test.ts",
+    "frontend/src/features/chat/MediaPreview.tsx",
+    "frontend/src/features/chat/MessageBubble.tsx",
+    "frontend/src/features/chat/ReceiveProgress.tsx",
+    "frontend/src/features/chat/TransferBar.tsx",
+    "frontend/src/features/chat/mediaFile.tsx",
+    "frontend/src/index.css",
+    "frontend/validation.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 531467,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 68302336,
+    "output_tokens": 167066,
+    "api_call_count": 358,
+    "subagent_tokens": {
+      "input_tokens": 245116,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 6346624,
+      "output_tokens": 25265,
+      "api_call_count": 130
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 58833,
+    "layers": {
+      "betterleaks": 0,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 58833,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  }
+}
