@@ -1205,7 +1205,9 @@ impl Node {
             }
         }
         if !self.install_current_channel_metadata(conv)? {
-            self.channel_checkpoints.finish_runtime(conv, None)?;
+            if self.channel_checkpoints.finish_runtime(conv, None)? {
+                self.channel_recovery_notify.notify_one();
+            }
             return Ok(true);
         }
         // The canonical step already consumed this turn's allowance. Do not
@@ -1591,8 +1593,12 @@ impl Node {
                     });
             }
         }
-        self.channel_checkpoints
-            .finish_runtime(conv, Some(&source))?;
+        if self
+            .channel_checkpoints
+            .finish_runtime(conv, Some(&source))?
+        {
+            self.channel_recovery_notify.notify_one();
+        }
         pending.lanes.remove(&conv);
         Ok(())
     }
@@ -1673,6 +1679,26 @@ impl Node {
                 }
                 self.process_file_events_reception(channel, "catch_up");
             }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                let pending = self
+                    .pending_channel_plaintext
+                    .lock()
+                    .expect("channel retry lock");
+                let now = std::time::Instant::now();
+                let next = self.channel_checkpoints.next_runtime(pending.cursor);
+                let next_id = next.as_ref().ok().and_then(|row| row.as_ref().map(|row| row.0));
+                let global_delayed = pending.retry_at.is_some_and(|at| now < at);
+                let next_delayed = next_id.is_some_and(|id| {
+                    pending.lanes.get(&id).and_then(|lane| lane.retry_at)
+                        .is_some_and(|at| now < at)
+                });
+                format!(
+                    "channel_recovery_runtime_queue selected={:?} cursor={:?} next={:?} global_delayed={} next_delayed={} read_error={} lanes={} discovery_more={} bootstrap_more={}",
+                    channel.map(|row| row.0), pending.cursor, next_id,
+                    global_delayed, next_delayed, next.is_err(), pending.lanes.len(), more, bootstrap
+                )
+            });
             Ok(())
         };
         if let Err(error) = turn() {

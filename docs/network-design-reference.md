@@ -693,8 +693,13 @@ checkpoint/presentation progress or its mandatory Directory publication. The
 maintenance owner retains one state and uses independent broadcast/watch receivers
 plus the existing three-second Skip clock; it never consumes local recovery or
 roster Notify permits. Each bounded turn yields, and parent cancellation drops
-both futures. Other recovery network exchanges retain their existing ordering and
-bounds; this separation does not promise to isolate every peer wait.
+both futures. During an ordinary recovery network turn, the same parent polls its
+existing local-work notification alongside the pinned network future. Each local
+wake advances one bounded checkpoint/presentation turn and yields. The network
+turn retains its original leases, cursors, ordering and deadlines. If local work
+consumed a notification, replay one coalesced wake after the network turn completes
+so queued network targets retain their next turn. No extra worker or queue owns
+this progress, and parent cancellation drops the active exchange.
 
 New account-group creation gives invitation-target verification one twenty-second
 deadline across the complete selected account set and its device routes. Every

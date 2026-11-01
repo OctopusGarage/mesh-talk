@@ -710,7 +710,24 @@ impl Node {
     }
 
     fn publish_group_inventory_groups(&self, ids: &[ConversationId]) {
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "inventory_publication_begin".into()
+        });
         if let Err(error) = self.try_publish_group_inventory_groups(ids) {
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                let outcome = match &error {
+                    NodeError::Log(LogError::StaleCursor) => "source_pending",
+                    NodeError::Log(LogError::Io(error))
+                        if error.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        "directory_pending"
+                    }
+                    _ => "error",
+                };
+                format!("inventory_publication_deferred outcome={outcome}")
+            });
             log::debug!("group inventory publication deferred: {error}");
         }
     }

@@ -578,6 +578,38 @@ impl Node {
         }
     }
 
+    fn prepare_local_channel_recovery_turn(&self) {
+        self.retry_channel_plaintext();
+        #[cfg(test)]
+        self.trace_account_client(&self.identity.public(), || {
+            "channel_recovery_plaintext_done".into()
+        });
+    }
+
+    /// Keep one remote turn and its leases alive while notified local work advances.
+    /// The outer selection is inactive here, so this Notify has one consumer.
+    async fn complete_channel_recovery_turn(
+        &self,
+        mut remote: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+    ) {
+        let mut consumed_notification = false;
+        loop {
+            tokio::select! {
+                () = remote.as_mut() => break,
+                () = self.channel_recovery_notify.notified() => {
+                    consumed_notification = true;
+                    self.prepare_local_channel_recovery_turn();
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        // A local notification may also own a pending network target. Preserve
+        // one outer turn without restarting the active exchange or adding a queue.
+        if consumed_notification {
+            self.channel_recovery_notify.notify_one();
+        }
+    }
+
     async fn run_local_channel_recovery_loop(
         self: Arc<Self>,
         changes: Arc<Notify>,
@@ -620,135 +652,142 @@ impl Node {
                     Err(_) => break,
                 }
             }
-            self.retry_channel_plaintext();
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_plaintext_done".into()
-            });
-            match self.retry_join_history_new() {
-                Ok(channels) => {
-                    for channel in channels {
-                        let members = self.channel_members(channel);
-                        self.distribute_channel(channel, &members).await;
+            self.prepare_local_channel_recovery_turn();
+            let remote = async {
+                match self.retry_join_history_new() {
+                    Ok(channels) => {
+                        for channel in channels {
+                            let members = self.channel_members(channel);
+                            self.distribute_channel(channel, &members).await;
+                        }
                     }
+                    Err(error) => log::warn!("channel history recovery deferred: {error}"),
                 }
-                Err(error) => log::warn!("channel history recovery deferred: {error}"),
-            }
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_join_history_done".into()
-            });
-            match self.retry_group_metadata() {
-                Ok(channels) => {
-                    for channel in channels {
-                        let members = self.channel_members(channel);
-                        self.distribute_channel(channel, &members).await;
-                    }
-                }
-                Err(error) => log::warn!("channel metadata recovery deferred: {error}"),
-            }
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_group_metadata_done".into()
-            });
-            if let Err(error) = self.auto_enroll_one_channel_sibling().await {
-                log::warn!("linked channel invitation failed; will retry: {error}");
-            }
-            if let Err(error) = self.auto_accept_one_linked_invite().await {
-                log::warn!("linked channel acceptance failed; will retry: {error}");
-            }
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_membership_done".into()
-            });
-            let targets = {
-                let mut pending = self
-                    .channel_recovery_pending
-                    .lock()
-                    .expect("recovery queue not poisoned");
-                let mut targets: Vec<_> = pending.iter().copied().collect();
-                targets.sort_unstable_by_key(|id| *id.as_bytes());
-                targets.truncate(CHANNEL_RECOVERY_WAKE_BATCH);
-                for channel in &targets {
-                    pending.remove(channel);
-                }
-                if !pending.is_empty() {
-                    self.channel_recovery_notify.notify_one();
-                }
-                targets
-            };
-            let active = discovered || !targets.is_empty();
-            if active {
-                backoff.reset();
-                fallback_at =
-                    fallback_at.min(tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL);
-            }
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                format!("channel_recovery_targets_begin count={}", targets.len())
-            });
-            stream::iter(targets)
-                .for_each_concurrent(CHANNEL_RECOVERY_GROUP_CONCURRENCY, |channel| async move {
-                    node.pull_channel_from_members(channel, cursor, false).await;
-                })
-                .await;
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_targets_done".into()
-            });
-            // Notification-only tests exclude discovery-triggered repair as well.
-            if periodic && (discovered || tokio::time::Instant::now() >= fallback_at) {
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
-                    "channel_recovery_fallback_begin".into()
+                    "channel_recovery_join_history_done".into()
                 });
-
-                let batch = self.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH);
-                let start = cursor;
-                cursor = cursor.wrapping_add(batch);
-                stream::iter(start..start.saturating_add(batch))
-                    .for_each_concurrent(CHANNEL_RECOVERY_GROUP_CONCURRENCY, |index| async move {
-                        node.pull_one_channel_from_member(index).await;
+                match self.retry_group_metadata() {
+                    Ok(channels) => {
+                        for channel in channels {
+                            let members = self.channel_members(channel);
+                            self.distribute_channel(channel, &members).await;
+                        }
+                    }
+                    Err(error) => log::warn!("channel metadata recovery deferred: {error}"),
+                }
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_group_metadata_done".into()
+                });
+                if let Err(error) = self.auto_enroll_one_channel_sibling().await {
+                    log::warn!("linked channel invitation failed; will retry: {error}");
+                }
+                if let Err(error) = self.auto_accept_one_linked_invite().await {
+                    log::warn!("linked channel acceptance failed; will retry: {error}");
+                }
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    "channel_recovery_membership_done".into()
+                });
+                let targets = {
+                    let mut pending = self
+                        .channel_recovery_pending
+                        .lock()
+                        .expect("recovery queue not poisoned");
+                    let mut targets: Vec<_> = pending.iter().copied().collect();
+                    targets.sort_unstable_by_key(|id| *id.as_bytes());
+                    targets.truncate(CHANNEL_RECOVERY_WAKE_BATCH);
+                    for channel in &targets {
+                        pending.remove(channel);
+                    }
+                    if !pending.is_empty() {
+                        self.channel_recovery_notify.notify_one();
+                    }
+                    targets
+                };
+                let active = discovered || !targets.is_empty();
+                if active {
+                    backoff.reset();
+                    fallback_at =
+                        fallback_at.min(tokio::time::Instant::now() + CHANNEL_RECOVERY_INTERVAL);
+                }
+                #[cfg(test)]
+                self.trace_account_client(&self.identity.public(), || {
+                    format!("channel_recovery_targets_begin count={}", targets.len())
+                });
+                stream::iter(targets)
+                    .for_each_concurrent(CHANNEL_RECOVERY_GROUP_CONCURRENCY, |channel| async move {
+                        node.pull_channel_from_members(channel, cursor, false).await;
                     })
                     .await;
-                // Independent bounded jitter prevents synchronized idle repair bursts.
-                let jitter =
-                    (now_millis() ^ u64::from(self.identity.public().ed25519_pub[0])) as u8;
-                fallback_at = tokio::time::Instant::now() + backoff.next_delay(jitter);
-            }
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_fallback_done".into()
-            });
-            // Custody and failed plaintext retain their existing retry clock.
-            if custody_tick {
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
-                    "channel_recovery_custody_begin".into()
+                    "channel_recovery_targets_done".into()
                 });
-                if let Some((channel, event, peer)) = self
-                    .retry_one_channel_custody(custody_cursor, &mut retry_after, &mut retry_cycle)
-                    .await
-                {
-                    // No replication exchange used this turn. Repair only the
-                    // missing report with the existing exact durable-have query.
-                    self.recheck_channel_custody_peer(channel, event, &peer)
+                // Notification-only tests exclude discovery-triggered repair as well.
+                if periodic && (discovered || tokio::time::Instant::now() >= fallback_at) {
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        "channel_recovery_fallback_begin".into()
+                    });
+
+                    let batch = self.joined_channel_count().min(CHANNEL_RECOVERY_WAKE_BATCH);
+                    let start = cursor;
+                    cursor = cursor.wrapping_add(batch);
+                    stream::iter(start..start.saturating_add(batch))
+                        .for_each_concurrent(
+                            CHANNEL_RECOVERY_GROUP_CONCURRENCY,
+                            |index| async move {
+                                node.pull_one_channel_from_member(index).await;
+                            },
+                        )
                         .await;
+                    // Independent bounded jitter prevents synchronized idle repair bursts.
+                    let jitter =
+                        (now_millis() ^ u64::from(self.identity.public().ed25519_pub[0])) as u8;
+                    fallback_at = tokio::time::Instant::now() + backoff.next_delay(jitter);
                 }
-                if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
-                    self.recheck_one_channel_custody(
-                        custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS,
-                        &mut recheck_after,
-                        &mut recheck_cycle,
-                    )
-                    .await;
-                }
-                custody_cursor = custody_cursor.wrapping_add(1);
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
-                    "channel_recovery_custody_done".into()
+                    "channel_recovery_fallback_done".into()
                 });
-            }
+                // Custody and failed plaintext retain their existing retry clock.
+                if custody_tick {
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        "channel_recovery_custody_begin".into()
+                    });
+                    if let Some((channel, event, peer)) = self
+                        .retry_one_channel_custody(
+                            custody_cursor,
+                            &mut retry_after,
+                            &mut retry_cycle,
+                        )
+                        .await
+                    {
+                        // No replication exchange used this turn. Repair only the
+                        // missing report with the existing exact durable-have query.
+                        self.recheck_channel_custody_peer(channel, event, &peer)
+                            .await;
+                    }
+                    if custody_cursor.is_multiple_of(CHANNEL_CUSTODY_RECHECK_TICKS) {
+                        self.recheck_one_channel_custody(
+                            custody_cursor / CHANNEL_CUSTODY_RECHECK_TICKS,
+                            &mut recheck_after,
+                            &mut recheck_cycle,
+                        )
+                        .await;
+                    }
+                    custody_cursor = custody_cursor.wrapping_add(1);
+                    #[cfg(test)]
+                    self.trace_account_client(&self.identity.public(), || {
+                        "channel_recovery_custody_done".into()
+                    });
+                }
+            };
+            tokio::pin!(remote);
+            self.complete_channel_recovery_turn(remote.as_mut()).await;
             // Notify can remain immediately ready after bounded local work.
             // Yield so the sibling maintenance future can always be polled.
             tokio::task::yield_now().await;

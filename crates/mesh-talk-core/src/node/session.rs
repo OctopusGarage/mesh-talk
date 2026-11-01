@@ -177,6 +177,20 @@ pub(in crate::node) fn round_request_conversation(bytes: &[u8]) -> Option<Conver
 }
 
 #[cfg(test)]
+pub(in crate::node) fn fingerprint_request_conversation(bytes: &[u8]) -> Option<ConversationId> {
+    match decode(bytes) {
+        Ok(
+            SyncWire::FpRequest(request)
+            | SyncWire::FpRequestV2(request)
+            | SyncWire::FpRequestV3(request)
+            | SyncWire::FpRequestV4(request)
+            | SyncWire::FpRequestV5(request),
+        ) => Some(request.conversation),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 pub(super) fn sticker_test_frame(bytes: &[u8], file: ConversationId) -> (bool, usize) {
     let (proof, events) = match decode(bytes) {
         Ok(SyncWire::StickerFileConsentRequest { headers, .. }) => (true, headers),

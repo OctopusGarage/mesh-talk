@@ -2458,3 +2458,24 @@ fn indexed_book_preserves_acceptance_retry_ticket_and_sender_position() {
     assert!(installed.export_my_senders().is_empty());
     assert!(book.pending_acceptances(&own).is_empty());
 }
+
+#[test]
+fn runtime_completion_hands_off_only_removed_work_with_a_remaining_lane() {
+    let fixture = Fixture::new(0);
+    let first = fixture.channel;
+    let second = ConversationId::new([33; 32]);
+    let absent = ConversationId::new([44; 32]);
+    assert!(fixture.store.next_runtime(None).unwrap().is_none());
+    fixture.store.queue_runtime(first).unwrap();
+    fixture.store.queue_runtime(second).unwrap();
+    assert!(!fixture.store.finish_runtime(absent, None).unwrap());
+    assert!(fixture.store.finish_runtime(first, None).unwrap());
+    assert_eq!(
+        fixture.store.next_runtime(None).unwrap().map(|row| row.0),
+        Some(second)
+    );
+    assert!(!fixture.store.finish_runtime(first, None).unwrap());
+    assert!(!fixture.store.finish_runtime(second, None).unwrap());
+    assert!(fixture.store.next_runtime(None).unwrap().is_none());
+    assert!(!fixture.store.finish_runtime(second, None).unwrap());
+}

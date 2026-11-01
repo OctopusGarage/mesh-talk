@@ -4386,6 +4386,338 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
 }
 
 #[tokio::test]
+async fn group_inventory_publication_progresses_while_unrelated_peer_sync_is_held() {
+    use crate::{
+        channel::{ChannelMeta, new_channel_id},
+        discovery::{Announce, DiscoveryVisibility},
+        eventlog::{Event, EventKind, LogError},
+        node::{NodeError, account_devices::AccountDevice},
+    };
+    use futures_util::FutureExt;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::net::TcpListener;
+    struct Held(Arc<AtomicBool>);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let peer_account = Account::generate();
+    let source_path = dir.path().join("source");
+    let target_path = dir.path().join("target");
+    let peer_path = dir.path().join("peer");
+    let source = node(&source_path, &account);
+    let target = node(&target_path, &account);
+    let peer = node(&peer_path, &peer_account);
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_proof = Announce::new_with_account(
+        &source.identity,
+        &account,
+        "source",
+        source_listener.local_addr().unwrap().port(),
+    );
+    let target_proof = Announce::new_with_account(
+        &target.identity,
+        &account,
+        "target",
+        target_listener.local_addr().unwrap().port(),
+    );
+    let peer_proof = Announce::new_with_account(
+        &peer.identity,
+        &peer_account,
+        "peer",
+        peer_listener.local_addr().unwrap().port(),
+    );
+    for (node, path, proof) in [
+        (&source, &source_path, &source_proof),
+        (&target, &target_path, &target_proof),
+        (&peer, &peer_path, &peer_proof),
+    ] {
+        node.configure_privacy(path, "pw", proof, Arc::new(DiscoveryVisibility::default()))
+            .unwrap();
+    }
+    for (node, other) in [(&source, &target), (&target, &source)] {
+        node.account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: other.identity.public(),
+                certificate: account.certify(&other.identity.public().ed25519_pub),
+            })
+            .unwrap();
+        for category in [
+            SyncCategory::History,
+            SyncCategory::Attachments,
+            SyncCategory::Appearance,
+            SyncCategory::Contacts,
+            SyncCategory::Profile,
+        ] {
+            node.set_device_sync_category(category, false).unwrap();
+        }
+    }
+    for (node, proof) in [
+        (&source, &target_proof),
+        (&target, &source_proof),
+        (&source, &peer_proof),
+        (&peer, &source_proof),
+    ] {
+        node.roster
+            .lock()
+            .unwrap()
+            .update(proof, "127.0.0.1".parse().unwrap(), &node.user_id());
+    }
+    let held_group = new_channel_id();
+    let initial = Event::new(
+        &peer.identity,
+        held_group,
+        1,
+        vec![],
+        1,
+        1,
+        EventKind::MembershipChange,
+        ChannelMeta {
+            name: "unrelated peer recovery".into(),
+            members: vec![source.identity.public(), peer.identity.public()],
+            epoch: 0,
+            owner: peer.user_id(),
+        }
+        .encode(),
+    );
+    source.log.lock().unwrap().append_durable(initial).unwrap();
+    // Only the unrelated group's existing source is prepared before the worker.
+    // The later new group must be prepared and published by the live owner.
+    source.await_channel_metadata(held_group).await.unwrap();
+    let active = Arc::new(AtomicBool::new(false));
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let mut tasks = tokio::task::JoinSet::new();
+    let held = active.clone();
+    let peer_server = peer.clone();
+    let expected_source = source.identity.public();
+    tasks.spawn(async move {
+        loop {
+            let (stream, _) = peer_listener.accept().await.unwrap();
+            let Ok(mut channel) = peer_server.privacy_accept(stream).await else {
+                continue;
+            };
+            assert_eq!(channel.peer_identity(), &expected_source);
+            let Ok(first) = channel.recv().await else {
+                continue;
+            };
+            if super::super::session::fingerprint_request_conversation(&first) != Some(held_group) {
+                // A separate metadata query cannot satisfy the sync hold.
+                continue;
+            }
+            held.store(true, Ordering::Release);
+            let _held = Held(held);
+            let _ = entered.send(());
+            // Hold this authenticated response until the fixture parent cancels
+            // it; no response, grant or history body is fabricated.
+            std::future::pending::<()>().await;
+            drop(channel);
+            break;
+        }
+    });
+    let new_group = new_channel_id();
+    let key = AccountDocumentKey::GroupInventory {
+        channel: hex::encode(new_group.as_bytes()),
+        source_device: source.user_id(),
+    };
+    let armed = Arc::new(AtomicBool::new(false));
+    let turns = Arc::new(AtomicUsize::new(0));
+    let first_pending = Arc::new(AtomicBool::new(false));
+    let peer_ends = Arc::new(AtomicUsize::new(0));
+    let phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let started = std::time::Instant::now();
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let weak = Arc::downgrade(&source);
+        let armed = armed.clone();
+        let turns = turns.clone();
+        let first_pending = first_pending.clone();
+        let peer_ends = peer_ends.clone();
+        let phases = phases.clone();
+        let end = format!("channel_recovery_peer_end channel={held_group:?}");
+        move |_, phase| {
+            if phase.starts_with(&end) {
+                peer_ends.fetch_add(1, Ordering::Relaxed);
+            }
+            if armed.load(Ordering::Acquire)
+                && phase == "channel_recovery_plaintext_done"
+                && turns.fetch_add(1, Ordering::Relaxed) == 0
+            {
+                let node = weak.upgrade().unwrap();
+                let pending = match node.channel_checkpoints.source_binding(new_group) {
+                    Ok(None) | Err(LogError::StaleCursor) => true,
+                    Ok(Some(_)) => false,
+                    Err(_) => panic!("first local turn failed outside bounded preparation"),
+                };
+                first_pending.store(pending, Ordering::Relaxed);
+            }
+            if phase.starts_with("channel_recovery_") || phase.starts_with("inventory_publication_")
+            {
+                let mut phases = phases.lock().unwrap();
+                if phases.len() == 64 {
+                    phases.pop_front();
+                }
+                phases.push_back((started.elapsed().as_millis(), phase));
+            }
+        }
+    }));
+    source.schedule_channel_recovery(held_group);
+    tasks.spawn(source.clone().run_accept_loop(source_listener));
+    tasks.spawn(target.clone().run_accept_loop(target_listener));
+    let observed = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(30), entry)
+            .await
+            .expect("the unrelated authenticated sync request must enter its real peer hold")
+            .unwrap();
+        assert!(active.load(Ordering::Acquire));
+        assert_eq!(peer_ends.load(Ordering::Relaxed), 0);
+        let event = Event::new(
+            &peer.identity,
+            new_group,
+            1,
+            vec![],
+            1,
+            1,
+            EventKind::MembershipChange,
+            ChannelMeta {
+                name: "new local inventory during peer hold".into(),
+                members: vec![source.identity.public(), peer.identity.public()],
+                epoch: 0,
+                owner: peer.user_id(),
+            }
+            .encode(),
+        );
+        // The source is a legacy member, never the owner: its certified sibling
+        // receives descriptive Directory state without automatic membership.
+        assert!(event.verify_signature() && event.verify_integrity());
+        source.log.lock().unwrap().append_durable(event).unwrap();
+        assert!(
+            source
+                .channel_checkpoints
+                .source_binding(new_group)
+                .unwrap()
+                .is_none()
+        );
+        assert!(source.account_document_meta(&key).is_none());
+        assert!(target.account_document_meta(&key).is_none());
+        armed.store(true, Ordering::Release);
+        // One retained-input notification, with no manual local or network turn.
+        source.channel_recovery_notify.notify_one();
+        let delivered = tokio::time::timeout(Duration::from_secs(8), async {
+            let mut required = None;
+            loop {
+                if required.is_none() {
+                    required = source.account_document_meta(&key);
+                }
+                let imported = required.as_ref().is_some_and(|head| {
+                    !head.tombstone
+                        && head.writer_device == source.user_id()
+                        && head.valid(&account.public().ed25519_pub)
+                        && target
+                            .account_document(&key)
+                            .unwrap()
+                            .is_some_and(|document| document.meta == *head)
+                });
+                let presented = match target.list_channels() {
+                    Ok(rows) => rows.iter().any(|row| {
+                        row.id == new_group
+                            && row.name == "new local inventory during peer hold"
+                            && row.archived
+                    }),
+                    Err(NodeError::Log(LogError::StaleCursor)) => false,
+                    Err(error) => panic!("Directory presentation failed: {error}"),
+                };
+                if imported && presented {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            active.load(Ordering::Acquire),
+            "the unrelated peer response must remain held"
+        );
+        assert_eq!(
+            peer_ends.load(Ordering::Relaxed),
+            0,
+            "peer timeout or completion cannot rescue local publication"
+        );
+        delivered.expect(
+            "new signed Directory publication must not wait for an unrelated peer sync response",
+        );
+        assert!(
+            first_pending.load(Ordering::Relaxed),
+            "the first bounded local turn must leave the new source unfinished"
+        );
+        assert!(
+            turns.load(Ordering::Relaxed) > 1,
+            "new local preparation must resume across bounded turns"
+        );
+    })
+    .catch_unwind()
+    .await;
+    eprintln!(
+        "held peer publication turns={} first_pending={} peer_ends={} held={} source_head={} target_head={} policy_ready={} phases={:?}",
+        turns.load(Ordering::Relaxed),
+        first_pending.load(Ordering::Relaxed),
+        peer_ends.load(Ordering::Relaxed),
+        active.load(Ordering::Acquire),
+        source.account_document_meta(&key).is_some(),
+        target.account_document_meta(&key).is_some(),
+        source
+            .channel_checkpoints
+            .prepared_history_policy(new_group)
+            .is_ok(),
+        phases.lock().unwrap()
+    );
+    *source.account_client_test_hook.lock().unwrap() = None;
+    for node in [&source, &target, &peer] {
+        node.runtime_work.close();
+        node.sessions.clear();
+    }
+    tasks.abort_all();
+    let failures = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut failures = 0;
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                failures += 1;
+            }
+        }
+        for node in [&source, &target, &peer] {
+            node.runtime_work.drain().await;
+        }
+        failures
+    })
+    .await
+    .expect("all held-peer fixture owners must join");
+    assert_eq!(
+        failures, 0,
+        "a worker panic must not masquerade as blocked local publication"
+    );
+    assert!(
+        !active.load(Ordering::Acquire),
+        "parent cancellation must drop the held peer response"
+    );
+    if let Err(panic) = observed {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
 async fn group_inventory_worker_shares_two_legacy_groups_without_owner_and_survives_restart() {
     group_inventory_worker_scenario(false).await;
 }
@@ -4517,9 +4849,21 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
         &source.user_id(),
     );
     let source_phase = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let publication_trace =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let publication_started = std::time::Instant::now();
     *source.account_client_test_hook.lock().unwrap() = Some(std::sync::Arc::new({
         let phase = source_phase.clone();
+        let trace = publication_trace.clone();
         move |_, event| {
+            if event.starts_with("channel_recovery_") || event.starts_with("inventory_publication_")
+            {
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 64 {
+                    trace.pop_front();
+                }
+                trace.push_back((publication_started.elapsed().as_millis(), event.clone()));
+            }
             let value = match event.as_str() {
                 "channel_recovery_maintenance_begin" => 1,
                 "channel_recovery_maintenance_done" => 2,
@@ -4578,6 +4922,23 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
                 })
             })
             .collect::<Vec<_>>();
+        let prepared = ids
+            .iter()
+            .map(|id| {
+                let policy = match source.channel_checkpoints.prepared_history_policy(*id) {
+                    Ok(_) => 1,
+                    Err(crate::eventlog::LogError::StaleCursor) => 2,
+                    Err(_) => 3,
+                };
+                let projection = match source.channel_checkpoints.published_projection(*id) {
+                    Ok(Some(_)) => 1,
+                    Ok(None) => 0,
+                    Err(crate::eventlog::LogError::StaleCursor) => 2,
+                    Err(_) => 3,
+                };
+                (policy, projection)
+            })
+            .collect::<Vec<_>>();
         let routes = target
             .device_sync_status()
             .into_iter()
@@ -4591,8 +4952,9 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
             })
             .collect::<Vec<_>>();
         eprintln!(
-            "inventory progress source_phase={} selected(checkpoint,meta,body,presentation)={rows:?} target_routes(phase,error,upgrade)={routes:?}",
-            source_phase.load(std::sync::atomic::Ordering::Relaxed)
+            "inventory progress source_phase={} selected(checkpoint,meta,body,presentation)={rows:?} prepared(policy,projection)={prepared:?} target_routes(phase,error,upgrade)={routes:?} phases={:?}",
+            source_phase.load(std::sync::atomic::Ordering::Relaxed),
+            publication_trace.lock().unwrap()
         );
     }
     *source.account_client_test_hook.lock().unwrap() = None;

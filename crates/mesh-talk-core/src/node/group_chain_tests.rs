@@ -1084,6 +1084,13 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     }
     let initialized = Arc::new(Mutex::new([false; 6]));
     let initial_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let initial_started = std::time::Instant::now();
+    let fixture_peers = Arc::new(
+        chain.nodes[..6]
+            .iter()
+            .map(|node| node.identity.public())
+            .collect::<Vec<_>>(),
+    );
     let mut listeners = Vec::with_capacity(6);
     for index in 0..6 {
         let node = &chain.nodes[index];
@@ -1091,9 +1098,11 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
             let initialized = initialized.clone();
             let trace = initial_trace.clone();
+            let fixture_peers = fixture_peers.clone();
             let completed =
                 format!("channel_recovery_group_done channel={group:?} checked=true clean=true");
             move |peer, phase| {
+                let peer_index = fixture_peers.iter().position(|known| *known == peer);
                 if let Some(previous) = &previous {
                     previous(peer, phase.clone());
                 }
@@ -1105,7 +1114,12 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                     if trace.len() == 64 {
                         trace.pop_front();
                     }
-                    trace.push_back((index, phase));
+                    trace.push_back((
+                        initial_started.elapsed().as_millis(),
+                        index,
+                        peer_index,
+                        phase,
+                    ));
                 }
             }
         }));
@@ -1122,7 +1136,9 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
             chain.nodes[index].clone().run_accept_loop(listener),
         ));
     }
-    let prepared = tokio::time::timeout(Duration::from_secs(5), async {
+    // Cold authenticated setup can use the existing fifteen-second peer exchange.
+    // Its watchdog is separate from the unchanged post-send notification window.
+    let prepared = tokio::time::timeout(Duration::from_secs(30), async {
         while !initialized.lock().unwrap().iter().all(|ready| *ready) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

@@ -1214,88 +1214,123 @@ fn remote_have_budget_is_global_fail_fast_and_holds_conversion_overlap() {
 
 #[tokio::test]
 async fn indexed_relay_and_legacy_real_tcp_converge_both_directions_with_budget() {
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        for sql_requests in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let owner_identity = DeviceIdentity::generate();
-            let profile = crate::storage::profile::context::ProfileStorage::open_relay(
-                crate::storage::profile::ProfileStorageLease::acquire(dir.path()).unwrap(),
-                &owner_identity.public(),
-                &dir.path().join("relay.log"),
-                "pw",
-                crate::postoffice::network::unix_now(),
+    let preparation_started = std::time::Instant::now();
+    let mut fixtures = Vec::new();
+    // Seed the complete, real durable inventories before timing their exchange.
+    // Keep 1501 base events: the protocol's Have chunk holds only 1500 IDs.
+    for sql_requests in [false, true] {
+        let orientation_started = std::time::Instant::now();
+        let dir = tempfile::tempdir().unwrap();
+        let owner_identity = DeviceIdentity::generate();
+        let profile = crate::storage::profile::context::ProfileStorage::open_relay(
+            crate::storage::profile::ProfileStorageLease::acquire(dir.path()).unwrap(),
+            &owner_identity.public(),
+            &dir.path().join("relay.log"),
+            "pw",
+            crate::postoffice::network::unix_now(),
+        )
+        .unwrap();
+        let state = Arc::new(
+            crate::postoffice::storage::role::IndexedRelayState::from_profile(
+                profile,
+                crate::postoffice::storage::role::RelayAdmission::LegacyCompatible,
             )
-            .unwrap();
-            let state = Arc::new(
-                crate::postoffice::storage::role::IndexedRelayState::from_profile(
-                    profile,
-                    crate::postoffice::storage::role::RelayAdmission::LegacyCompatible,
-                )
-                .unwrap(),
-            );
-            let budget = RemoteHaveBudget::default();
-            let server_budget = budget.clone();
-            let signer = DeviceIdentity::generate();
-            let conversation = ConversationId::new([7; 32]);
-            let mut log = EventLog::default();
-            let mut parent = None;
-            let mut missing_roots = Vec::new();
-            // More than one Have chunk. SQL-only roots are inserted opposite
-            // canonical clock priority; their child has an inverted signed clock.
-            for seq in 1..=1501 {
-                let event = Event::new(
-                    &signer,
-                    conversation,
-                    seq,
-                    vec![],
-                    2000 - seq,
-                    0,
-                    EventKind::Message,
-                    vec![],
-                );
-                state
-                    .record(&event, crate::postoffice::network::unix_now(), None)
-                    .unwrap();
-                if seq <= 2 {
-                    missing_roots.push(event.id);
-                } else {
-                    log.append(event.clone()).unwrap();
-                }
-                parent = Some(event.id);
-            }
-            let sql_extra = Event::new(
+            .unwrap(),
+        );
+        let budget = RemoteHaveBudget::default();
+        let signer = DeviceIdentity::generate();
+        let conversation = ConversationId::new([7; 32]);
+        let mut log = EventLog::default();
+        let mut parent = None;
+        let mut missing_roots = Vec::new();
+        // More than one Have chunk. SQL-only roots are inserted opposite
+        // canonical clock priority; their child has an inverted signed clock.
+        for seq in 1..=1501 {
+            let event = Event::new(
                 &signer,
                 conversation,
-                1502,
-                missing_roots,
-                0,
-                0,
-                EventKind::Message,
-                vec![1],
-            );
-            let legacy_extra = Event::new(
-                &signer,
-                conversation,
-                1503,
-                parent.into_iter().collect(),
-                1,
+                seq,
+                vec![],
+                2000 - seq,
                 0,
                 EventKind::Message,
-                vec![2],
+                vec![],
             );
             state
-                .record(&sql_extra, crate::postoffice::network::unix_now(), None)
+                .record(&event, crate::postoffice::network::unix_now(), None)
                 .unwrap();
-            log.append(legacy_extra.clone()).unwrap();
-            let sql = Arc::new(Mutex::new(crate::postoffice::IndexedPostOffice {
-                state: state.clone(),
-            }));
-            let legacy = Arc::new(Mutex::new(log));
+            if seq <= 2 {
+                missing_roots.push(event.id);
+            } else {
+                log.append(event.clone()).unwrap();
+            }
+            parent = Some(event.id);
+        }
+        let sql_extra = Event::new(
+            &signer,
+            conversation,
+            1502,
+            missing_roots,
+            0,
+            0,
+            EventKind::Message,
+            vec![1],
+        );
+        let legacy_extra = Event::new(
+            &signer,
+            conversation,
+            1503,
+            parent.into_iter().collect(),
+            1,
+            0,
+            EventKind::Message,
+            vec![2],
+        );
+        state
+            .record(&sql_extra, crate::postoffice::network::unix_now(), None)
+            .unwrap();
+        log.append(legacy_extra.clone()).unwrap();
+        let sql = Arc::new(Mutex::new(crate::postoffice::IndexedPostOffice {
+            state: state.clone(),
+        }));
+        let legacy = Arc::new(Mutex::new(log));
+        eprintln!(
+            "mixed paged/legacy prepared sql_requests={sql_requests} sql_events=1502 legacy_events=1500 elapsed_ms={}",
+            orientation_started.elapsed().as_millis(),
+        );
+        fixtures.push((
+            dir,
+            sql_requests,
+            state,
+            budget,
+            conversation,
+            sql,
+            legacy,
+            sql_extra,
+            legacy_extra,
+        ));
+    }
+    let preparation_elapsed = preparation_started.elapsed();
+    let phase = std::cell::Cell::new((false, "not started"));
+    let exchange_started = std::time::Instant::now();
+    let mut servers = tokio::task::JoinSet::new();
+    // One unchanged sixty-second exchange watchdog covers BOTH orientations.
+    // The directories and their leases remain alive until every server retires.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        for (_, sql_requests, state, budget, conversation, sql, legacy, sql_extra, legacy_extra) in
+            &fixtures
+        {
+            let sql_requests = *sql_requests;
+            let conversation = *conversation;
+            let sql = sql.clone();
+            let legacy = legacy.clone();
+            let server_budget = budget.clone();
+            phase.set((sql_requests, "TCP bind"));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let server_sql = sql.clone();
             let server_legacy = legacy.clone();
-            let server = tokio::spawn(async move {
+            servers.spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut channel = SecureChannel::accept(stream, &DeviceIdentity::generate())
                     .await
@@ -1312,6 +1347,7 @@ async fn indexed_relay_and_legacy_real_tcp_converge_both_directions_with_budget(
                     }
                 }
             });
+            phase.set((sql_requests, "TCP/Noise connect"));
             let mut channel = SecureChannel::connect(
                 tokio::net::TcpStream::connect(address).await.unwrap(),
                 &DeviceIdentity::generate(),
@@ -1319,8 +1355,9 @@ async fn indexed_relay_and_legacy_real_tcp_converge_both_directions_with_budget(
             )
             .await
             .unwrap();
+            phase.set((sql_requests, "request round"));
             if sql_requests {
-                request_round_budgeted(&mut channel, &sql, conversation, &budget)
+                request_round_budgeted(&mut channel, &sql, conversation, budget)
                     .await
                     .unwrap();
             } else {
@@ -1329,6 +1366,7 @@ async fn indexed_relay_and_legacy_real_tcp_converge_both_directions_with_budget(
                     .unwrap();
             }
             if !sql_requests {
+                phase.set((sql_requests, "durable Have"));
                 assert!(
                     request_durable_have(&mut channel, conversation, legacy_extra.id)
                         .await
@@ -1336,7 +1374,9 @@ async fn indexed_relay_and_legacy_real_tcp_converge_both_directions_with_budget(
                 );
             }
             drop(channel);
-            server.await.unwrap();
+            phase.set((sql_requests, "server completion"));
+            servers.join_next().await.unwrap().unwrap();
+            phase.set((sql_requests, "convergence assertions"));
             assert!(
                 state
                     .durable_have_at(
@@ -1349,8 +1389,23 @@ async fn indexed_relay_and_legacy_real_tcp_converge_both_directions_with_budget(
             assert!(legacy.lock().unwrap().get(&sql_extra.id).is_some());
         }
     })
-    .await
-    .expect("mixed paged/legacy TCP exchange timed out");
+    .await;
+    servers.abort_all();
+    while let Some(joined) = servers.join_next().await {
+        if let Err(error) = joined {
+            assert!(error.is_cancelled(), "mixed TCP server panicked: {error}");
+        }
+    }
+    eprintln!(
+        "mixed paged/legacy complete setup_ms={} exchange_ms={} phase={:?}",
+        preparation_elapsed.as_millis(),
+        exchange_started.elapsed().as_millis(),
+        phase.get(),
+    );
+    result.unwrap_or_else(|error| panic!(
+        "mixed paged/legacy TCP exchange timed out: {error:?}; setup_ms={} exchange_ms={} phase={:?}",
+        preparation_elapsed.as_millis(), exchange_started.elapsed().as_millis(), phase.get(),
+    ));
 }
 
 #[tokio::test]

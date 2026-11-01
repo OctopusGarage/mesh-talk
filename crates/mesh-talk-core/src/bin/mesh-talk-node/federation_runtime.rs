@@ -129,6 +129,47 @@ pub(super) async fn run_federation_loop(
     network: Option<RelayNetwork>,
     endpoint: IndexedRelayEndpoint,
 ) -> Result<(), IndexedRelayError> {
+    run_federation_loop_inner(
+        roster,
+        seeds,
+        identity,
+        store,
+        directory,
+        network,
+        endpoint,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct LoopObservations {
+    successful_rounds: Vec<usize>,
+    dirty_turns: usize,
+    fallback_turns: usize,
+    quiescent_dirty_baseline: Option<usize>,
+}
+
+#[cfg(test)]
+struct LoopTestControl {
+    disable_fallback: bool,
+    observations: tokio::sync::watch::Sender<LoopObservations>,
+}
+
+// The eighth argument exists only in test builds to observe and disable idle fallback.
+#[cfg_attr(test, allow(clippy::too_many_arguments))]
+async fn run_federation_loop_inner(
+    roster: Arc<Mutex<Roster>>,
+    seeds: Vec<FederationSeed>,
+    identity: DeviceIdentity,
+    store: IndexedPostOffice,
+    directory: FederationDirectory,
+    network: Option<RelayNetwork>,
+    endpoint: IndexedRelayEndpoint,
+    #[cfg(test)] control: Option<Arc<LoopTestControl>>,
+) -> Result<(), IndexedRelayError> {
     let mut mail = store.subscribe_changes();
     let mut presence = directory.subscribe_changes();
     let mut routes = roster
@@ -166,6 +207,12 @@ pub(super) async fn run_federation_loop(
     let mut idle_rounds = 0u32;
     let mut fallback_at = tokio::time::Instant::now() + jittered_delay(5);
     let identity = Arc::new(identity);
+    #[cfg(not(test))]
+    let fallback_enabled = true;
+    #[cfg(test)]
+    let fallback_enabled = !control
+        .as_ref()
+        .is_some_and(|control| control.disable_fallback);
     loop {
         // Snapshot fair due work before spawning. Pending/active state is owned
         // exclusively here; notifications cannot create duplicate workers.
@@ -230,6 +277,27 @@ pub(super) async fn run_federation_loop(
                 )
             });
         }
+        // Publish readiness only after consuming every initial wake and due edge.
+        #[cfg(test)]
+        if let Some(control) = &control
+            && exchanges.is_empty()
+            && edges.values().all(|edge| !edge.active && !edge.pending)
+            && dirty_at.is_none()
+            && !mail.has_changed().unwrap_or(true)
+            && !presence.has_changed().unwrap_or(true)
+            && !routes.has_changed().unwrap_or(true)
+        {
+            control.observations.send_if_modified(|observed| {
+                if observed.quiescent_dirty_baseline.is_none()
+                    && observed.successful_rounds.last() == Some(&0)
+                {
+                    observed.quiescent_dirty_baseline = Some(observed.dirty_turns);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
         let next_retry = edges
             .values()
             .filter(|edge| edge.pending && !edge.active && edge.retry_at > now)
@@ -252,6 +320,13 @@ pub(super) async fn run_federation_loop(
                 match result {
                     Ok(count) => {
                         edge.succeeded(count, Instant::now());
+                        #[cfg(test)]
+                        if let Some(control) = &control {
+                            control.observations.send_modify(|observed| {
+                                assert!(observed.successful_rounds.len() < 32, "bounded federation round observation capacity exceeded");
+                                observed.successful_rounds.push(count);
+                            });
+                        }
                     }
                     Err(error) => {
                         if store.requires_reopen() { return Err(error); }
@@ -290,6 +365,10 @@ pub(super) async fn run_federation_loop(
             _ = routes.changed() => { observe_roster(&roster, &trusted, &mut edges, network.is_some()); }
             _ = tokio::time::sleep_until(dirty_at.unwrap_or_else(tokio::time::Instant::now)), if dirty_at.is_some() => {
                 dirty_at = None;
+                #[cfg(test)]
+                if let Some(control) = &control {
+                    control.observations.send_modify(|observed| observed.dirty_turns += 1);
+                }
                 idle_rounds = 0;
                 // A new presence registration must shorten an old idle timer,
                 // otherwise its first propagated lease could expire before renewal.
@@ -297,7 +376,11 @@ pub(super) async fn run_federation_loop(
                 for edge in edges.values_mut() { edge.pending = true; }
             }
             _ = tokio::time::sleep_until(retry_at.unwrap_or_else(tokio::time::Instant::now)), if retry_at.is_some() => {}
-            _ = tokio::time::sleep_until(fallback_at) => {
+            _ = tokio::time::sleep_until(fallback_at), if fallback_enabled => {
+                #[cfg(test)]
+                if let Some(control) = &control {
+                    control.observations.send_modify(|observed| observed.fallback_turns += 1);
+                }
                 for edge in edges.values_mut() { edge.pending = true; }
                 for probe in probes.values_mut() { probe.pending = true; }
                 let ceiling = if directory.has_live_presence() { 5 } else { 5u64.saturating_mul(1u64 << idle_rounds.min(4)).min(60) };
@@ -324,6 +407,18 @@ mod tests {
         directory: FederationDirectory,
         network: Option<RelayNetwork>,
     ) {
+        run_federation_loop_with_control(roster, seeds, identity, store, directory, network, None)
+            .await;
+    }
+    async fn run_federation_loop_with_control(
+        roster: Arc<Mutex<Roster>>,
+        seeds: Vec<FederationSeed>,
+        identity: DeviceIdentity,
+        store: IndexedPostOffice,
+        directory: FederationDirectory,
+        network: Option<RelayNetwork>,
+        control: Option<Arc<LoopTestControl>>,
+    ) {
         let trust = network.clone().map(IndexedRelayTrust::Network).or_else(|| {
             Some(IndexedRelayTrust::Pinned(Arc::new(
                 seeds.iter().map(|s| s.id.clone()).collect(),
@@ -332,7 +427,7 @@ mod tests {
         let endpoint = IndexedRelayEndpoint::new(store.clone(), Some(directory.clone()), trust);
         let (_stop, rx) = tokio::sync::watch::channel(false);
         tokio::select! {
-            result=super::run_federation_loop(roster,seeds,identity,store.clone(),directory,network,endpoint)=>{result.unwrap();}
+            result=super::run_federation_loop_inner(roster,seeds,identity,store.clone(),directory,network,endpoint,control)=>{result.unwrap();}
             result=store.run_maintenance(rx)=>{result.unwrap();}
         }
     }
@@ -583,19 +678,6 @@ mod tests {
                 unreachable.send_to(b"invalid", source).await.unwrap();
             }
         });
-        let runner = tokio::spawn(run_federation_loop(
-            Arc::new(Mutex::new(roster)),
-            vec![FederationSeed {
-                id: remote_id,
-                discovery,
-            }],
-            identity,
-            store.clone(),
-            FederationDirectory::new(),
-            None,
-        ));
-        // Give the initial empty round time to enter its idle wait.
-        tokio::time::sleep(Duration::from_millis(300)).await;
         let sender = DeviceIdentity::generate();
         let inner = Event::new(
             &sender,
@@ -616,24 +698,89 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let ids = events.iter().map(|event| event.id).collect::<Vec<_>>();
+        let (observations, mut observed) = tokio::sync::watch::channel(LoopObservations::default());
+        let control = Arc::new(LoopTestControl {
+            disable_fallback: true,
+            observations,
+        });
+        let runner = tokio::spawn(run_federation_loop_with_control(
+            Arc::new(Mutex::new(roster)),
+            vec![FederationSeed {
+                id: remote_id,
+                discovery,
+            }],
+            identity,
+            store.clone(),
+            FederationDirectory::new(),
+            None,
+            Some(control),
+        ));
+        // Observe the actual drained initial exchange before publishing new mail.
+        // A disabled dirty branch cannot borrow progress from initial or idle work.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let initial = tokio::time::timeout_at(deadline, async {
+            loop {
+                if let Some(baseline) = observed.borrow().quiescent_dirty_baseline {
+                    break baseline;
+                }
+                observed.changed().await.unwrap();
+            }
+        })
+        .await;
+        if initial.is_err() {
+            runner.abort();
+            server.abort();
+            reject.abort();
+            let _ = runner.await;
+            let _ = server.await;
+            let _ = reject.await;
+            panic!("initial empty federation round must become fully quiescent before ingestion");
+        }
+        let dirty_baseline = initial.unwrap();
+        // No await separates the quiescent observation from synchronous ingestion.
         {
             let mut office = store.clone();
             for event in events {
                 office.ingest(event).unwrap();
             }
         }
-        let delivered = tokio::time::timeout(Duration::from_secs(2), async {
-            while !ids.iter().all(|id| target.lock().unwrap().has(id)) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let delivered = tokio::time::timeout_at(deadline, async {
+            loop {
+                let observation = observed.borrow().clone();
+                let target_complete = ids.iter().all(|id| target.lock().unwrap().has(id));
+                if target_complete
+                    && observation.dirty_turns > dirty_baseline
+                    && observation
+                        .successful_rounds
+                        .contains(&MAX_MAILBOXES_PER_EXCHANGE)
+                    && observation
+                        .successful_rounds
+                        .last()
+                        .is_some_and(|count| *count < MAX_MAILBOXES_PER_EXCHANGE)
+                    && observation.successful_rounds.len() >= 3
+                {
+                    break;
+                }
+                observed.changed().await.unwrap();
             }
         })
         .await;
+        let observation = observed.borrow().clone();
         runner.abort();
         server.abort();
         reject.abort();
+        let _ = runner.await;
+        let _ = server.await;
+        let _ = reject.await;
+        assert_eq!(
+            observation.fallback_turns, 0,
+            "this fixture must never schedule fallback work"
+        );
         assert!(
             delivered.is_ok(),
-            "durable ingestion and full-batch continuation must precede the five-second fallback"
+            "durable ingestion must wake full-batch federation and drain all20 IDs without fallback: rounds={:?} dirty_turns={}",
+            observation.successful_rounds,
+            observation.dirty_turns
         );
     }
 

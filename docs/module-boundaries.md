@@ -222,6 +222,13 @@ channels. Source-revision invalidation resumes the same bounded reception lane
 without increasing its persistence retry deadline or changing live provenance.
 I/O, database and encrypted-storage failures retain catch-up provenance and the
 existing exponential retry schedule.
+The recovery parent polls its existing local-work notification while a pinned
+network turn awaits a peer. Each wake advances one bounded reception turn and
+yields; it preserves one coalesced outer wake for pending network targets. The
+checkpoint owner and network exchange retain their existing authority and budgets.
+Completing a queued runtime identity reports remaining demand from the same
+transaction. Its caller hands back one coalesced wake only when an actual removal
+leaves another identity; repeated completion and an empty queue remain quiet.
 Startup restores validated current metadata and the active sending epoch;
 new signed controls resume after account adoption rather than draining in open.
 Fresh authority and recall-readiness checks remain separate from display state.

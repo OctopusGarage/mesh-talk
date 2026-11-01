@@ -318,6 +318,37 @@ recovery, resend, or roster change is allowed. The fixture also rejects fallback
 or custody-tick work during propagation. Its recorded two-second comparison is a
 performance observation, not an end-to-end latency SLA; disabling periodic rescue
 proves notification-driven progress directly instead of inferring it from timing.
+All listeners must be bound before cold exchanges start. Initial authenticated
+recovery has a separate thirty-second setup watchdog, accommodating the existing
+fifteen-second peer exchange; it does not consume or extend the post-send window.
+Keep the bounded phase trace with elapsed time and fixture peer indices so a
+setup failure identifies the unfinished exchange without logging identities.
+
+Mixed indexed/legacy TCP compatibility fixtures prepare both complete durable
+inventories before their one shared sixty-second exchange watchdog. Preserve the
+1501-event inventory that crosses the 1500-ID Have chunk, both request directions,
+durable Have and convergence assertions. Record setup separately from exchange
+time and join or cancel all server tasks before dropping profile leases. This
+functional exchange bound does not impose a durable fixture-ingestion SLA.
+Local recovery scheduling requires a real authenticated peer response held after
+its exact group fingerprint request. Append a different signed group only after
+that hold enters, notify the existing producer once, and require multiple bounded
+local turns, source-authenticated Directory publication and exact sibling import
+within the original eight-second watchdog. Keep the peer held throughout; peer
+timeout, completion, manual preparation and optional-history transfer cannot
+satisfy the test. Join every owned task before reporting a failure. Pair this
+regression with quiet/deduplication, network wake/backoff, maintenance isolation,
+plaintext storage-failure and custody-denial coverage.
+Verify completion handoff with two queued identities, repeated completion of a
+missing identity and an empty queue. A coalesced wake consumed by a completed
+identity must continue the remaining durable work without creating an idle loop.
+The federation notification fixture observes a completed empty exchange and
+quiescence before ingesting its twenty preconstructed envelopes. Disable idle
+fallback for that invocation, then require a new dirty turn, a full mailbox
+batch, a drained continuation and every exact target ID under one thirty-second
+functional watchdog. A fixed startup sleep or a shorter wall-clock timeout does
+not prove notification ownership. Removing mail-change scheduling must fail this
+oracle; keep ordinary jitter and continuation pacing in the other fixtures.
 
 Post-create custody setup requires the selected channel's authenticated inventory
 and control head floors plus exact bidirectional device capabilities within its

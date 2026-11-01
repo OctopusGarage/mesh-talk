@@ -93,17 +93,28 @@ impl ChannelCheckpointStore {
         &self,
         channel: ConversationId,
         source: Option<&ChannelSource>,
-    ) -> Result<(), LogError> {
+    ) -> Result<bool, LogError> {
         self.profile.database().transaction(|c| {
             self.check_account_on(c)?;
             if let Some(source) = source {
                 self.check_source_on(c, source)?;
             }
-            c.execute(
+            let removed = c.execute(
                 "DELETE FROM channel_runtime_work WHERE channel=?1",
                 [channel.as_bytes().as_slice()],
             )?;
-            Ok(())
+            // Notify is coalesced across channels. Completing this queued lane
+            // may have consumed another lane's continuation; hand it back once.
+            // Repeated completion of an absent lane must remain quiet.
+            if removed == 0 {
+                return Ok(false);
+            }
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM channel_runtime_work)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
         })
     }
     pub(in crate::node) fn next_runtime(
