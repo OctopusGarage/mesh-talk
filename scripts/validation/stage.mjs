@@ -8,6 +8,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { executeWindows } from "./windows-process-owner.mjs";
 import { inputGroup, inputIdentity, frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -88,6 +89,9 @@ async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
     try {
       await mkdir(directory);
       const owner = { pid: process.pid, started: Date.now() };
+      // PID death cannot prove a crashed Windows job owner retired its work.
+      // Only the live owner with its receipt may release these leases.
+      if (process.platform === "win32") owner.windowsRetirementRequired = true;
       if (process.platform !== "win32" && process.env.MESH_VALIDATION_PROCESS_GROUP_OWNER) {
         const probe = spawnSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" });
         const group = Number(probe.stdout?.trim());
@@ -104,7 +108,7 @@ async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
         const owner = JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8"));
         try { process.kill(owner.pid, 0); }
         catch (probe) {
-          if (probe.code === "ESRCH" && !owner.quarantined) {
+          if (probe.code === "ESRCH" && !owner.quarantined && !owner.windowsRetirementRequired) {
             // One reaper rechecks ownership, so a second waiter cannot remove a new lock.
             const reaper = `${directory}.reaper`;
             let acquired = false;
@@ -113,7 +117,7 @@ async function lock(directory, { log, signal, timeoutMs = 7_200_000 }) {
               const current = JSON.parse(await readFile(path.join(directory, "owner.json"), "utf8"));
               try { process.kill(current.pid, 0); }
               catch (check) {
-                if (check.code === "ESRCH" && !current.quarantined &&
+                if (check.code === "ESRCH" && !current.quarantined && !current.windowsRetirementRequired &&
                     (!current.group || !processGroupRunning(current.group)))
                   await rm(directory, { recursive: true, force: true });
               }
@@ -151,6 +155,7 @@ function supervisorAncestor(owner) {
 }
 export async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream, onOutput = chunk => process.stdout.write(chunk), detached = true, notifyOwnerOnAbort = false }) {
   signal?.throwIfAborted();
+  if (process.platform === "win32") return executeWindows(executableCommand(command, env), { cwd, env, logPath, signal, createLogStream, onOutput });
   if (process.platform !== "win32" && !detached && !env.MESH_VALIDATION_PROCESS_GROUP_OWNER)
     throw Error("Non-detached execution requires an existing managed process-group owner");
   return new Promise(resolve => {
@@ -176,16 +181,7 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
     const abort = () => {
       if (cleanup) return;
       if (!child.pid) { cleanup = Promise.resolve(); return; }
-      if (process.platform === "win32") {
-        cleanup = new Promise(done => {
-          const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-          killer.on("error", failure => { error = `Process tree cleanup failed: ${failure.message}`; cleanupUnverified = true; child.kill(); });
-          killer.on("close", code => {
-            if (code !== 0) { cleanupUnverified = true; error ||= "Windows process-tree termination could not be verified"; child.kill(); }
-            done();
-          });
-        });
-      } else if (nestedGroup) {
+      if (nestedGroup) {
         // The owner signals and escalates the whole group. Keep this stage's
         // leases until it kills us too: a closed command leader does not prove
         // ignored-stdio descendants have exited. Dead-owner locks are reaped
