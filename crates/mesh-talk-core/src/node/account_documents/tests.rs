@@ -829,6 +829,16 @@ async fn wait_custody_channel_setup(
     channel: crate::eventlog::ConversationId,
     observation: &CustodySetupObservation<'_>,
 ) {
+    wait_custody_channel_setup_at_floor(source, sibling, channel, observation, None).await;
+}
+
+async fn wait_custody_channel_setup_at_floor(
+    source: &Node,
+    sibling: &Node,
+    channel: crate::eventlog::ConversationId,
+    observation: &CustodySetupObservation<'_>,
+    bootstrap_floor: Option<Vec<AccountDocumentMeta>>,
+) {
     // Channel creation dirties both directory/control and optional document
     // lanes. Observe its actual signed source heads before the message starts
     // the independent eight-second automatic-custody observation.
@@ -838,7 +848,9 @@ async fn wait_custody_channel_setup(
     // and its admission cooldown in the same lane. This bootstrap is global;
     // the signed heads below separately establish this channel's readiness.
     // Directory remains independent; never substitute aggregate device status.
-    let mut required = None;
+    // A held Directory lane may prevent importing later display-only inventory
+    // publications. Retain its already authenticated pre-hold bootstrap floor.
+    let mut required = bootstrap_floor;
     let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if required.is_none() {
@@ -1246,21 +1258,22 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         let keys = custody_channel_setup_keys(&source, channel);
         let prerequisite = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let imported = keys.iter().all(|key| source.account_document_meta(key).is_some_and(|head| {
-                    sibling.account_document(key).ok().flatten().is_some_and(|document| {
+                let heads = keys.iter().map(|key| source.account_document_meta(key)).collect::<Option<Vec<_>>>();
+                let imported = heads.as_ref().is_some_and(|heads| heads.iter().all(|head| {
+                    sibling.account_document(&head.key).ok().flatten().is_some_and(|document| {
                         let meta = &document.meta;
                         !meta.tombstone && meta.valid(&account.public().ed25519_pub)
                             && meta.writer_device == head.writer_device && meta.order() >= head.order()
                     })
                 }));
-                if imported && custody_linked_capabilities_ready(&source, &sibling) && observation.ready() { break; }
+                if imported && custody_linked_capabilities_ready(&source, &sibling) && observation.ready() && observation.optional_ready() { break heads.unwrap(); }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await;
         if prerequisite.is_err() {
             eprintln!("independent directory prerequisite timeout caps={} custody={:?} heads={:?} source_status={:?} sibling_status={:?} phases={:?}", custody_linked_capabilities_ready(&source, &sibling), observation.settled.lock().unwrap(), keys.iter().map(|key| (source.account_document_meta(key), sibling.account_document_meta(key))).collect::<Vec<_>>(), source.device_sync_status(), sibling.device_sync_status(), observation.phases.lock().unwrap());
         }
-        prerequisite.expect("signed channel heads, exact reciprocal capability and real settled custody must progress while directory is held");
+        let bootstrap_floor = prerequisite.expect("signed channel heads, exact reciprocal capability and real settled custody must progress before directory is held");
         armed.store(true, std::sync::atomic::Ordering::SeqCst);
         source.set_device_hostname(Some("held-directory-update")).unwrap();
         tokio::time::timeout(Duration::from_secs(30), held).await.expect("real authenticated hostname refresh must enter the directory hold after cold prerequisites").unwrap();
@@ -1277,7 +1290,27 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         assert!(!custody_linked_routes_ready(&source, &sibling), "the old aggregate predicate still includes the held unrelated directory lane");
         assert!(!release.is_closed());
         assert_ne!(sibling.device_hostnames().unwrap().get(&source.user_id()).map(String::as_str), Some("held-directory-update"), "the real directory update must remain unimported before measured work");
-        wait_custody_channel_setup(&source, &sibling, channel, &observation).await;
+        // Advance actual descriptive inventory after the Directory lane is
+        // parked on hostname. This later display publication must not move the
+        // already authenticated channel-bootstrap barrier.
+        source.set_profile_display_name("post-hold inventory display").unwrap();
+        source.publish_group_inventory_for(channel);
+        let later_inventory = source.account_document_meta(&keys[0]).unwrap();
+        assert!(later_inventory.order() > bootstrap_floor[0].order(), "the owning publisher must advance the real signed inventory after the hold");
+        assert!(sibling.account_document_meta(&keys[0]).unwrap().order() < later_inventory.order(), "the held Directory lane must retain its already imported bootstrap inventory");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !observation.ready() || !observation.optional_ready() || !custody_linked_capabilities_ready(&source, &sibling) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("independent Optional/custody bootstrap must settle after the display update while Directory is held");
+        assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        let latest_setup = wait_custody_channel_setup(&source, &sibling, channel, &observation);
+        tokio::pin!(latest_setup);
+        assert!(futures_util::poll!(latest_setup.as_mut()).is_pending(), "recapturing a later source floor must remain blocked by the live Directory hold");
+        let setup = wait_custody_channel_setup_at_floor(&source, &sibling, channel, &observation, Some(bootstrap_floor));
+        tokio::pin!(setup);
+        assert!(futures_util::poll!(setup.as_mut()).is_ready(), "the authenticated pre-hold bootstrap floor must allow setup while later Directory publication is held");
+        assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0);
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "the sibling must have no route for an independent external-holder query");
         source.send_channel_message(channel, b"independent custody progress").await.unwrap();
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "public send must not teach the sibling an external-holder route");

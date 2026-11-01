@@ -151,7 +151,13 @@ channel-specific heads establish post-create freshness; do not require an extra
 periodic bootstrap pass or manually warm the data path.
 Aggregate document status includes independent lanes and is not this setup proof.
 After actual startup, a held Directory/DeviceHostname update must allow setup and
-fresh message/custody progress without releasing the unrelated handler; retire the
+fresh message/custody progress without releasing the unrelated handler. Capture and
+authenticate the channel's immutable inventory/control bootstrap floor before
+arming that hold, and retain the same floor afterward. Later descriptive inventory
+publications must not move an already satisfied barrier into the held Directory
+lane. A controlled post-hold profile display update through the owning inventory
+publisher must leave latest-head setup pending while the captured-floor setup
+completes immediately, with the handler still actively held. Retire the
 external holder after its real receipt so a direct query cannot replace proof of
 the source-authored sibling import.
 Keep the existing custody observation budget, real network exchange, offline-holder
