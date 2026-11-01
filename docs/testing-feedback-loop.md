@@ -915,6 +915,14 @@ needed. A manual Health dispatch runs its portable/static responsibilities.
 The protected `Full Linux UI regression` name remains the coverage merge job,
 which rejects failed, skipped or incomplete dependencies.
 
+Each CodeQL matrix job validates the local SARIF directory returned by its actual
+analysis action after uploading results. Upload success alone does not certify
+zero findings. Reject every finding, including warning/note results, and missing
+or malformed reports; keep Rust, JavaScript/TypeScript and Actions analysis and
+the reviewed query configuration. This enforces the release owner's existing
+zero-open-alert policy before merge, without requiring an extra API permission
+or waiting for findings to appear on main. Hosted analysis remains required.
+
 Portable validation reuses Health's existing Node, Python and frontend dependency
 setup. Native CI no longer waits for frontend unit tests, help audits or diagnostic
 regressions before starting Clippy and workspace builds. Health uploads frontend
