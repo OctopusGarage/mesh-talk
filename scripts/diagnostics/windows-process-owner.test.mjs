@@ -85,6 +85,28 @@ test("Windows native leader success retires surviving ignored-stdio descendants"
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 });
 
+test("Windows nested runner jobs retire a native descendant before outer success", { skip: !windows, timeout: 20000 }, async t => {
+  const f = await nativeWorker(t);
+  const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
+  const program = `
+    import { runCommand } from ${JSON.stringify(guest)};
+    const result = await runCommand(${JSON.stringify(f.command[0])}, ${JSON.stringify(f.command.slice(1))});
+    if (result.code === 0 || result.cleanupUnverified || !/descendant/i.test(result.error || ''))
+      throw Error('Nested native ownership failed: ' + JSON.stringify(result));
+    process.stdout.write('nested retired');
+  `;
+  const output = [];
+  const result = await run([process.execPath, "--input-type=module", "-e", program], {
+    signal: t.signal,
+    onOutput(chunk) { output.push(chunk); },
+  });
+  assert.equal(result.code, 0, result.error);
+  assert.equal(result.cleanupUnverified, false);
+  assert.equal(Buffer.concat(output).toString(), "nested retired");
+  const { pid } = JSON.parse(await readFile(f.ready, "utf8"));
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+});
+
 test("Windows command preserves exit status and invocation bytes", { skip: !windows, timeout: 15000 }, async () => {
   assert.equal((await run([process.execPath, "-e", "process.exit(23)"])).exitCode, 23);
   const args = ["", "a b", "😀中文", 'a"b', "tail\\", 'slash\\\\"quote'];
