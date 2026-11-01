@@ -323,6 +323,16 @@ Post-create custody setup requires the selected channel's authenticated inventor
 and control head floors plus exact bidirectional device capabilities within its
 thirty-second watchdog. Unrelated Optional continuations can keep aggregate
 document status catching up; they do not gate this selected-channel observation.
+Before taking a real holder offline or changing its certificate binding, observe
+the exact positive source custody count within a separate thirty-second setup
+watchdog. A send makes one bounded attempt and does not promise custody; the
+existing peer exchange may itself use fifteen seconds. This setup observer uses
+only custody-change notifications and reads, without manual recovery or warmup.
+An authenticated custody-response hold keeps the exact source observation absent
+on the sibling until the real holder has stopped and drained; the sibling has no
+independent holder route. Release that hold only at the offline cut, then require
+the source's valid signed observation at the captured or newer order under the
+original custody deadline. Independent held document lanes stay held throughout.
 The custody scenario's independent eight-second assertions remain unchanged.
 The group-forwarding loopback completes profile and signed-membership setup
 under a thirty-second setup watchdog before its existing twenty-second

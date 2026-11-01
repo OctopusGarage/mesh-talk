@@ -890,6 +890,97 @@ fn custody_channel_setup_keys(
     ]
 }
 
+// Preserve an existing independent-lane hold while preventing this fresh
+// source custody observation from reaching the sibling before the offline cut.
+struct CustodyTransferHold<'a> {
+    source: &'a Node,
+    previous: Option<std::sync::Arc<crate::node::account_session::AccountSessionTestHook>>,
+    release: std::sync::Arc<tokio::sync::Semaphore>,
+    entered: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl<'a> CustodyTransferHold<'a> {
+    fn new(source: &'a Node, sibling: &Node) -> Self {
+        let previous = source.account_session_test_hook.lock().unwrap().clone();
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let (arrived, entered) = tokio::sync::oneshot::channel();
+        let arrived = std::sync::Arc::new(std::sync::Mutex::new(Some(arrived)));
+        let peer = sibling.identity.public();
+        *source.account_session_test_hook.lock().unwrap() = Some(std::sync::Arc::new({
+            let release = release.clone();
+            let previous = previous.clone();
+            move |observed, frame| {
+                let release = release.clone();
+                let arrived = arrived.clone();
+                let previous = previous.clone();
+                let peer = peer.clone();
+                Box::pin(async move {
+                    if observed == peer
+                        && matches!(&frame, crate::node::account_sync_wire::AccountHistoryFrame::DocumentsRequest { body }
+                            if wire::DocumentRequest::decode(body).is_some_and(|request| request.domain == AccountDocumentDomain::ChannelCustody))
+                    {
+                        if let Some(arrived) = arrived.lock().unwrap().take() {
+                            let _ = arrived.send(());
+                        }
+                        let _ = release.acquire().await;
+                    }
+                    if let Some(previous) = previous {
+                        previous(observed, frame).await;
+                    }
+                })
+            }
+        }));
+        Self {
+            source,
+            previous,
+            release,
+            entered: Some(entered),
+        }
+    }
+
+    async fn wait_entered(&mut self, deadline: tokio::time::Instant) {
+        tokio::time::timeout_at(deadline, self.entered.take().unwrap())
+            .await
+            .expect("a real authenticated custody request must reach the offline-cut hold")
+            .expect("the custody provider must remain alive until the offline cut");
+    }
+}
+
+impl Drop for CustodyTransferHold<'_> {
+    fn drop(&mut self) {
+        *self.source.account_session_test_hook.lock().unwrap() = self.previous.take();
+        self.release.close();
+    }
+}
+
+// Observes the real owner's durable confirmation without driving network work.
+// Register before the read: a publication between the read and await must wake us.
+async fn wait_custody_source_count(
+    source: &Node,
+    channel: crate::eventlog::ConversationId,
+    event: crate::eventlog::EventId,
+    expected: usize,
+    deadline: tokio::time::Instant,
+) -> Result<(), tokio::time::error::Elapsed> {
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            let changed = source.delivery_status_notify.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let observed = source.channel_custody_count(channel, event).unwrap();
+            if observed == Some(expected) {
+                break;
+            }
+            assert!(
+                observed.is_none_or(|count| count < expected),
+                "custody source setup exceeded its exact expected count"
+            );
+            changed.await;
+        }
+    })
+    .await
+}
+
 async fn wait_custody_channel_setup(
     source: &Node,
     sibling: &Node,
@@ -1372,9 +1463,12 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         assert_ne!(sibling.device_hostnames().unwrap().get(&source.user_id()).map(String::as_str), Some("held-directory-update"), "the real directory update must remain unimported before measured work");
         wait_custody_channel_setup(&source, &sibling, channel, &observation).await;
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "the sibling must have no route for an independent external-holder query");
+        let mut custody_hold = CustodyTransferHold::new(&source, &sibling);
         source.send_channel_message(channel, b"independent custody progress").await.unwrap();
         assert!(sibling.routing_peer(&external.user_id()).is_none(), "public send must not teach the sibling an external-holder route");
         let event = source.channel_history(channel, 10).unwrap()[0].id;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        wait_custody_source_count(&source, channel, event, 1, deadline).await.expect("the real external holder must confirm while the independent directory remains held");
         assert_eq!(source.channel_custody_count(channel, event).unwrap(), Some(1));
         assert!(external.channel_history(channel, 10).unwrap().iter().any(|row| row.id == event));
         let external_head = source.channel_custody_observations(channel, event).into_iter().find(|meta| {
@@ -1382,6 +1476,9 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
                 && matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if *holder == external.user_id())
                 && !meta.tombstone
         }).expect("the source must publish its actual authenticated external-holder observation");
+        assert!(external_head.valid(&account.public().ed25519_pub));
+        custody_hold.wait_entered(deadline).await;
+        assert!(sibling.account_document_meta(&external_head.key).is_none(), "the new source observation must remain unimported while the holder is online");
         // Preserve the original offline-holder proof and prevent a competing
         // sibling-authored observation from replacing the source's signed row.
         external_server.take().unwrap().abort();
@@ -1389,6 +1486,9 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         tokio::time::timeout(Duration::from_secs(5), external.runtime_work.drain()).await.expect("external holder must retire before custody observation");
         source.roster.lock().unwrap().forget(&external.identity.public());
         sibling.roster.lock().unwrap().forget(&external.identity.public());
+        assert!(sibling.routing_peer(&external.user_id()).is_none());
+        assert!(sibling.account_document_meta(&external_head.key).is_none(), "the source observation must still be absent at the actual offline cut");
+        drop(custody_hold);
         tokio::time::timeout(Duration::from_secs(8), async {
             while !ready_history(sibling.channel_history(channel, 10))
                 .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me)) {
@@ -1461,7 +1561,11 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         for observer in [&a, &sibling, &bob] {
-            if observer.user_id() != current.user_id() {
+            if observer.user_id() != current.user_id()
+                && !(external_online
+                    && current.user_id() == bob.user_id()
+                    && observer.user_id() == sibling.user_id())
+            {
                 observer.roster.lock().unwrap().update(
                     &Announce::new_with_account(
                         &current.identity,
@@ -1550,6 +1654,14 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         bob.runtime_work.drain().await;
         a.roster.lock().unwrap().forget(&bob.identity.public());
     }
+    let mut custody_hold = external_online.then(|| {
+        assert!(
+            sibling.routing_peer(&bob.user_id()).is_none(),
+            "the sibling must have no independent holder route, including cached routes"
+        );
+        CustodyTransferHold::new(&a, &sibling)
+    });
+    let mut required_source_observation = None;
     a.trace_account_client(&sibling.identity.public(), || "fixture_before_send".into());
     a.send_channel_message(channel, b"synthetic custody fixture")
         .await
@@ -1563,7 +1675,44 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                 .iter()
                 .any(|row| row.id == event)
         );
+        // A successful send does not promise a completed durable-have probe.
+        // Establish the exact receipt while its real holder is still online;
+        // the independent post-stop eight-second observations start afterward.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let confirmed = wait_custody_source_count(&a, channel, event, 1, deadline).await;
+        if confirmed.is_err() {
+            eprintln!(
+                "online holder custody setup count={:?} workers_finished={:?} omitted={} phases={:?}",
+                a.channel_custody_count(channel, event).unwrap(),
+                servers
+                    .iter()
+                    .map(|server| server.as_ref().map(|server| server.is_finished()))
+                    .collect::<Vec<_>>(),
+                custody_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+                custody_trace.lock().unwrap()
+            );
+        }
+        confirmed.expect(
+            "the online external holder must confirm this exact message before going offline",
+        );
         assert_eq!(a.channel_custody_count(channel, event).unwrap(), Some(1));
+        let key = AccountDocumentKey::ChannelCustody {
+            channel: hex::encode(channel.as_bytes()),
+            event: event.to_hex(),
+            holder: bob.user_id(),
+        };
+        let head = a.account_document_meta(&key).unwrap();
+        assert!(
+            !head.tombstone
+                && head.writer_device == a.user_id()
+                && head.valid(&account.public().ed25519_pub)
+        );
+        custody_hold.as_mut().unwrap().wait_entered(deadline).await;
+        assert!(
+            sibling.account_document_meta(&key).is_none(),
+            "the exact source observation must remain unimported while the holder is online"
+        );
+        assert!(sibling.routing_peer(&bob.user_id()).is_none());
         let server = servers[2].take().unwrap();
         server.abort();
         let _ = server.await;
@@ -1574,6 +1723,13 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .lock()
             .unwrap()
             .forget(&bob.identity.public());
+        assert!(sibling.routing_peer(&bob.user_id()).is_none());
+        assert!(
+            sibling.account_document_meta(&key).is_none(),
+            "the source observation must still be absent at the actual offline cut"
+        );
+        required_source_observation = Some(head);
+        drop(custody_hold.take());
     }
     a.trace_account_client(&sibling.identity.public(), || {
         "fixture_holder_offline".into()
@@ -1621,7 +1777,23 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     let custody_observation_offset = custody_trace_started.elapsed().as_millis();
     let custody_observation_started = std::time::Instant::now();
     let actual = tokio::time::timeout(Duration::from_secs(8), async {
-        while sibling.channel_custody_count(channel, event).unwrap() != Some(expected) {
+        loop {
+            let imported_source_observation =
+                required_source_observation.as_ref().is_none_or(|required| {
+                    sibling
+                        .account_document_meta(&required.key)
+                        .is_some_and(|meta| {
+                            !meta.tombstone
+                                && meta.writer_device == a.user_id()
+                                && meta.valid(&account.public().ed25519_pub)
+                                && meta.order() >= required.order()
+                        })
+                });
+            if sibling.channel_custody_count(channel, event).unwrap() == Some(expected)
+                && imported_source_observation
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -4109,6 +4281,15 @@ async fn channel_custody_refreshes_holder_certificates_and_deduplicates_explicit
         .await
         .unwrap();
     let event = source.channel_history(channel, 10).unwrap()[0].id;
+    wait_custody_source_count(
+        &source,
+        channel,
+        event,
+        2,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect("both real legacy holders must confirm before their certificate bindings change");
     assert_eq!(
         source.channel_custody_count(channel, event).unwrap(),
         Some(2),
