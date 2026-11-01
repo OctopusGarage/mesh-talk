@@ -45,7 +45,7 @@ export async function runCommand(program, args, { cwd, env = process.env, timeou
       output += chunk.toString();
       if (Buffer.byteLength(output) > maxOutputBytes) output = output.slice(-Math.floor(maxOutputBytes / 4));
     } });
-    return { code: controller.signal.aborted && !timedOut ? 130 : result.error && result.exitCode === 0 ? 1 : result.exitCode, timedOut, output, error: failure || result.error, signal: result.signal, cleanupUnverified: result.cleanupUnverified, cancelled: controller.signal.aborted && !timedOut && !failure, elapsedMs: Date.now() - started };
+    return { code: controller.signal.aborted && !timedOut ? 130 : result.error && result.exitCode === 0 ? 1 : result.exitCode, timedOut, output, error: failure || result.error, signal: result.signal, cleanupUnverified: result.cleanupUnverified, forcedRetirement: !!result.forcedRetirement, cancelled: controller.signal.aborted && !timedOut && !failure, elapsedMs: Date.now() - started };
   } catch (error) {
     return { code: controller.signal.aborted ? 130 : null, timedOut, output, error: error.message, cancelled: controller.signal.aborted && !timedOut, elapsedMs: Date.now() - started };
   } finally {
@@ -144,7 +144,7 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
     }
     const count = step.kind === "rust" ? rustTestCount(result.output) : undefined;
     const error = result.error || uiError || (result.cleanupUnverified ? "Descendant retirement could not be verified" : result.cancelled ? "Platform execution cancelled" : result.timedOut ? "Command timed out" : result.code !== 0 ? `Command exited ${result.code}` : step.kind === "rust" && count === 0 ? "Selector ran zero Rust tests" : undefined);
-    results.push({ name: step.name, kind: step.kind, program: step.program, args: step.args, code: result.code, timedOut: !!result.timedOut, cancelled: !!result.cancelled, cleanupUnverified: !!result.cleanupUnverified, testCount: count, ui, ok: !error, error, elapsedMs: result.elapsedMs, outputTail: result.output.slice(-4000) });
+    results.push({ name: step.name, kind: step.kind, program: step.program, args: step.args, code: result.code, timedOut: !!result.timedOut, cancelled: !!result.cancelled, cleanupUnverified: !!result.cleanupUnverified, forcedRetirement: !!result.forcedRetirement, testCount: count, ui, ok: !error, error, elapsedMs: result.elapsedMs, outputTail: result.output.slice(-4000) });
     if (result.cancelled || result.cleanupUnverified) break;
   }
   return { schema: 1, sourceSha: plan.sourceSha, archiveSha: plan.archiveSha, platform: process.platform, architecture: os.arch(), cancelled: results.some(result => result.cancelled), cleanupUnverified: results.some(result => result.cleanupUnverified), scope: "Affected workflow diagnostics, selected Rust package lint/tests and explicitly selected browser specs; no ASan or native UI certification", ok: results.every(result => result.ok), elapsedMs: Date.now() - started, results };

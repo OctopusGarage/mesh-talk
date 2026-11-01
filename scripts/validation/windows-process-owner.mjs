@@ -56,7 +56,7 @@ export async function executeWindows(command, { cwd = process.cwd(), env = proce
   let app;
   try { app = await executable(command[0], cwd, entries); }
   catch (error) {
-    const result = { code: 1, exitCode: null, error: error.message, failureKind: ["ENOENT", "EACCES"].includes(error.code) ? "unavailable" : "failed", cleanupUnverified: false };
+    const result = { code: 1, exitCode: null, error: error.message, failureKind: ["ENOENT", "EACCES"].includes(error.code) ? "unavailable" : "failed", cleanupUnverified: false, forcedRetirement: false };
     // runStage hashes the declared log for failed launches too. Preserve that
     // artifact contract even when resolution proves no helper can be admitted.
     if (logPath) {
@@ -108,9 +108,8 @@ export async function executeWindows(command, { cwd = process.cwd(), env = proce
     const verified = result?.retired === true;
     const error = failure || helperFailure?.message || result?.error ||
       (!verified ? "Windows command retirement receipt is missing or unverified" :
-        result.survivors ? "Command leader exited while owned descendants remained runnable" :
-          status.code !== 0 ? "Windows command owner failed" : undefined);
+        status.code !== 0 ? "Windows command owner failed" : undefined);
     return { code: signal?.aborted ? 130 : error ? 1 : result.exitCode, exitCode: result?.exitCode ?? null,
-      error, failureKind: error ? "failed" : undefined, cleanupUnverified: !verified && !!child.pid, signal: status.helperSignal };
+      error, failureKind: error ? "failed" : undefined, forcedRetirement: verified && result.forcedRetirement === true, cleanupUnverified: !verified && !!child.pid, signal: status.helperSignal };
   } finally { await rm(directory, { recursive: true, force: true }); }
 }

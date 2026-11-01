@@ -13,6 +13,7 @@ public class OwnerResult
     public long exitCode=-1;
     public bool retired=false;
     public bool survivors=false;
+    public bool forcedRetirement=false;
     public bool cancelled=false;
     public string error;
     public long startupMs;
@@ -258,6 +259,7 @@ public static class WindowsCommandOwner
                     result.cancelled=true;
                     cleanup=System.Diagnostics.Stopwatch.StartNew();
                     Check(TerminateJobObject(job,130));
+                    result.forcedRetirement=true;
                     break;
                 }
             }
@@ -265,7 +267,11 @@ public static class WindowsCommandOwner
             if(!result.cancelled)
             {
                 result.survivors=HasRunnableMembers(job);
-                if(result.survivors) Check(TerminateJobObject(job,1));
+                if(result.survivors)
+                {
+                    Check(TerminateJobObject(job,1));
+                    result.forcedRetirement=true;
+                }
             }
             // Job emptiness closes descendant admission. The signaled leader
             // handle separately proves its exit; these observations can race.
@@ -283,7 +289,7 @@ public static class WindowsCommandOwner
             result.error=e.Message;
             if(launched && job!=IntPtr.Zero)
             {
-                TerminateJobObject(job,1);
+                result.forcedRetirement=TerminateJobObject(job,1) || result.forcedRetirement;
                 if(cleanup==null) cleanup=System.Diagnostics.Stopwatch.StartNew();
                 try
                 {

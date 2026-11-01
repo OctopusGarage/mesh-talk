@@ -54,7 +54,7 @@ for (const mode of ["missing", "malformed", "stale", "unconfirmed"]) {
   });
 }
 
-async function nativeWorker(t, { hold = false } = {}) {
+async function nativeWorker(t, { hold = false, exitCode = 0 } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "mesh-windows-owner-"));
   const ready = path.join(directory, "leaf-ready.json");
   const leaf = path.join(directory, "leaf.mjs");
@@ -70,7 +70,7 @@ async function nativeWorker(t, { hold = false } = {}) {
   });
   // Native leader avoids Node/libuv's own nested kill-on-close child job,
   // which would conceal the runner's missing descendant ownership.
-  const command = scriptCommand(`& ([ScriptBlock]::Create([IO.File]::ReadAllText(${literal(leader)}))) -Directory ${literal(directory)} -Token ${literal(directory)} -Node ${literal(process.execPath)} ${hold ? "-Hold" : ""}`);
+  const command = scriptCommand(`& ([ScriptBlock]::Create([IO.File]::ReadAllText(${literal(leader)}))) -Directory ${literal(directory)} -Token ${literal(directory)} -Node ${literal(process.execPath)} ${hold ? "-Hold" : ""} -ExitCode ${exitCode}`);
   return { directory, ready, command };
 }
 
@@ -78,21 +78,35 @@ test("Windows native leader success retires surviving ignored-stdio descendants"
   const f = await nativeWorker(t);
   const result = await run(f.command);
   const { pid } = JSON.parse(await readFile(f.ready, "utf8"));
-  assert.notEqual(result.code, 0, "leader success cannot certify a surviving native descendant");
+  assert.equal(result.code, 0, result.error);
+  assert.equal(result.forcedRetirement, true);
   assert.equal(result.exitCode, 0);
   assert.equal(result.cleanupUnverified, false);
-  assert.match(result.error, /descendant/i);
+  assert.equal(result.error, undefined);
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 });
 
 test("Windows nested runner jobs retire a native descendant before outer success", { skip: !windows, timeout: 20000 }, async t => {
   const f = await nativeWorker(t);
   const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
+  const planModule = new URL("../pr-platform/plan.mjs", import.meta.url).href;
   const program = `
-    import { runCommand } from ${JSON.stringify(guest)};
-    const result = await runCommand(${JSON.stringify(f.command[0])}, ${JSON.stringify(f.command.slice(1))});
-    if (result.code === 0 || result.cleanupUnverified || !/descendant/i.test(result.error || ''))
-      throw Error('Nested native ownership failed: ' + JSON.stringify(result));
+    import { runCommand, executePlan } from ${JSON.stringify(guest)};
+    import { buildPlan, parseFlags } from ${JSON.stringify(planModule)};
+    import { readFileSync } from 'node:fs';
+    const plan = { ...buildPlan(parseFlags([]), []), sourceSha: 'a'.repeat(40), archiveSha: 'b'.repeat(64) };
+    let admitted = 0;
+    const report = await executePlan(plan, { run: async (program, args, options) => {
+      // The first provider step is this real native fixture. Later steps use
+      // the actual planned tool and may only enter after its leaf is dead.
+      if (admitted++ === 0) return runCommand(${JSON.stringify(f.command[0])}, ${JSON.stringify(f.command.slice(1))}, options);
+      const { pid } = JSON.parse(readFileSync(${JSON.stringify(f.ready)}, 'utf8'));
+      try { process.kill(pid, 0); throw Error('live retired leaf reached next admission'); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
+      return runCommand(program, args, options);
+    } });
+    if (!report.ok || report.cleanupUnverified || report.results[0].forcedRetirement !== true || admitted !== 3)
+      throw Error('Nested native ownership report failed: ' + JSON.stringify(report));
     process.stdout.write('nested retired');
   `;
   const output = [];
@@ -398,4 +412,38 @@ test("Windows Git launcher completion is not a runnable-descendant failure", { s
   assert.equal(result.exitCode, 0);
   assert.equal(result.cleanupUnverified, false);
   assert.match(Buffer.concat(output).toString(), /^git version /u);
+});
+
+test("Windows cold and cached Cargo commands finish real tests after owned-scope retirement", { skip: !windows, timeout: 60000 }, async t => {
+  const { mkdir } = await import("node:fs/promises");
+  const { runCommand } = await import("../pr-platform/guest.mjs");
+  const root = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-cargo-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, "src"));
+  await writeFile(path.join(root, "Cargo.toml"), '[package]\nname="owned-command-fixture"\nversion="0.1.0"\nedition="2024"\n');
+  await writeFile(path.join(root, "src/lib.rs"), '#[test]\nfn owned_actual_assertion() { assert_eq!(2 + 2, 4); }\n');
+  const env = { ...process.env, CARGO_HOME: path.join(root, "cargo"), CARGO_TARGET_DIR: path.join(root, "target") };
+  for (const phase of ["cold", "cached"]) {
+    const result = await runCommand("cargo", ["test", "--offline", "--message-format=json"], { cwd: root, env, signal: t.signal });
+    assert.equal(result.code, 0, `${phase}: ${result.error || result.output}`);
+    assert.equal(result.cleanupUnverified, false);
+    assert.equal(result.error, undefined);
+    assert.equal(typeof result.forcedRetirement, "boolean");
+    t.diagnostic(`${phase}: forcedRetirement=${result.forcedRetirement}, cleanupUnverified=${result.cleanupUnverified}`);
+    assert.match(result.output, /test result: ok\. 1 passed; 0 failed;/u);
+    const build = result.output.split(/\r?\n/u).filter(line => line.startsWith('{')).map(line => JSON.parse(line)).find(row => row.reason === "build-finished");
+    assert.equal(build?.success, true);
+  }
+});
+
+test("Windows nonzero leader status survives verified descendant retirement", { skip: !windows, timeout: 20000 }, async t => {
+  const { runCommand } = await import("../pr-platform/guest.mjs");
+  const f = await nativeWorker(t, { exitCode: 7 });
+  const result = await runCommand(f.command[0], f.command.slice(1), { signal: t.signal });
+  assert.equal(result.code, 7);
+  assert.equal(result.error, undefined);
+  assert.equal(result.cleanupUnverified, false);
+  assert.equal(result.forcedRetirement, true);
+  const { pid } = JSON.parse(await readFile(f.ready, "utf8"));
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 });

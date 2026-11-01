@@ -1,4 +1,4 @@
-param([string]$Directory,[string]$Token,[string]$Node,[switch]$Hold)
+param([string]$Directory,[string]$Token,[string]$Node,[switch]$Hold,[int]$ExitCode=0)
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 Add-Type -TypeDefinition @'
@@ -40,4 +40,4 @@ while ($true) {
 }
 [System.IO.File]::WriteAllText((Join-Path $Directory 'leader-ready.json'),(@{token=$Token;pid=$PID;leafPid=$leafId}|ConvertTo-Json -Compress))
 if($Hold){while($true){Start-Sleep -Seconds 1}}
-exit 0
+exit $ExitCode
