@@ -5,6 +5,7 @@
       "id": "core-account-group-operations",
       "paths": [
         "crates/mesh-talk-core/src/node/account_group/",
+        "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/account_documents/group_control.rs",
         "crates/mesh-talk-core/src/node/account_documents/store.rs",
         "crates/mesh-talk-core/src/node/delivery_store.rs",
@@ -32,6 +33,7 @@
         "crates/mesh-talk-core/src/node/reaction_store.rs",
         "crates/mesh-talk-core/src/node/reactions.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/delivery_store/group_file.rs",
         "crates/mesh-talk-core/src/node/channels/account_self_control.rs",
@@ -43,6 +45,9 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
+            "node::account_documents::group_operations::input_tests::",
+            "node::account_sync::local_maintenance::",
+            "node::runtime_work::",
             "control_task_lifetime_scope_restores_outer_witness_after_panic",
             "local_cancel_ack_during_remote_commit_rolls_forward_without_action_required",
             "owner_decision_rejects_stale_rejoined_lifetime_with_current_acceptance",
@@ -192,7 +197,7 @@
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick or a held mandatory directory response. Control, directory, optional document and history/favorites work retain independent cursors and one reserved worker each within the existing four-worker and shared TCP budgets; optional document progress preserves its category and entitlement checks independently of held archive responses.",
+            "name": "Authenticated body-free sibling invalidations remain active when all optional history, attachment, appearance and contact categories are disabled; mandatory group control latency does not depend on the periodic repair tick, a held mandatory directory response, or unrelated local maintenance outside shared storage guards. One admitted local storage turn runs independently of document dispatch, coalesces real changes without a completion-driven loop, and retains actual-work retirement. Attachment selection rechecks current reservations on handoff and preserves durable rotating scans; failed exact-source fanout refresh defers its original revision. Ordinary and legacy operation publishers serialize each projection and signed merge through their feature-owned per-Node unit gate, including invitation completion; no publication gate spans network work. Control, directory, optional document and history/favorites work retain independent cursors and one reserved worker each within the existing four-worker and shared TCP budgets; optional document progress preserves its category and entitlement checks independently of held archive responses.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
@@ -246,6 +251,7 @@
         "crates/mesh-talk-core/src/node/account_documents/inventory.rs",
         "crates/mesh-talk-core/src/node/node.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/queries.rs",
         "crates/mesh-talk-core/src/node/channels.rs"
       ],
@@ -542,6 +548,7 @@
       "id": "core-account-file-availability",
       "paths": [
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/account_sync/selection_tests.rs",
         "crates/mesh-talk-core/src/node/account_session.rs",
         "crates/mesh-talk-core/src/node/account_sync_wire.rs"
@@ -1794,6 +1801,7 @@
         "crates/mesh-talk-core/src/node/session_pool.rs",
         "crates/mesh-talk-core/src/node/privacy_sync.rs",
         "crates/mesh-talk-core/src/node/account_sync.rs",
+        "crates/mesh-talk-core/src/node/account_sync/local_maintenance.rs",
         "crates/mesh-talk-core/src/node/opaque_relay.rs",
         "crates/mesh-talk-core/src/node/recovery.rs",
         "crates/mesh-talk-core/src/recovery/snapshot.rs",

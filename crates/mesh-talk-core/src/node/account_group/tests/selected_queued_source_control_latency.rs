@@ -193,6 +193,42 @@ impl Drop for ReleaseQueuedReads {
         self.0.close();
     }
 }
+// This gate runs only after the local maintenance helpers have returned and
+// released their journal, document, log and membership guards. It isolates the
+// parent scheduler's wait dependency from contention on shared storage locks.
+#[derive(Default)]
+struct LocalMaintenanceGate {
+    armed: std::sync::atomic::AtomicBool,
+    entered: Notify,
+    released: (Mutex<bool>, std::sync::Condvar),
+}
+impl LocalMaintenanceGate {
+    fn hold_if_armed(&self) {
+        if !self.armed.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let (released, changed) = &self.released;
+        let mut released = released.lock().unwrap();
+        self.entered.notify_one();
+        while !*released {
+            released = changed.wait(released).unwrap();
+        }
+    }
+    fn release(&self) {
+        let (released, changed) = &self.released;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
+    }
+    fn held(&self) -> bool {
+        !*self.released.0.lock().unwrap()
+    }
+}
+struct ReleaseLocalMaintenance(Arc<LocalMaintenanceGate>);
+impl Drop for ReleaseLocalMaintenance {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
 fn effective_after(request: &DocumentRequest) -> Option<crate::node::AccountDocumentKey> {
     use crate::node::AccountDocumentKey;
     request
@@ -260,28 +296,106 @@ fn install_owner_group(owner: &Node, external: &Node, group: ConversationId) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page() {
-    Box::pin(run_queued_source(false, false, false)).await;
+    Box::pin(run_queued_source(false, false, false, false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newer_terminal_reuses_completed_background_before_stale_foreground_suffix() {
-    Box::pin(run_queued_source(true, false, false)).await;
+    Box::pin(run_queued_source(true, false, false, false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queued_source_ignores_retired_natural_request_before_capturing_live_resume() {
-    Box::pin(run_queued_source(true, true, false)).await;
+    Box::pin(run_queued_source(true, true, false, false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queued_source_retains_live_natural_hold_through_forced_early_cancellation() {
-    Box::pin(run_queued_source(false, false, true)).await;
+    Box::pin(run_queued_source(false, false, true, false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn selected_queued_source_dispatches_while_unrelated_local_maintenance_is_held() {
+    Box::pin(run_queued_source(false, false, false, true)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_scheduler_retains_blocked_local_maintenance_until_actual_retirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = node(&dir.path().join("source"), &Account::generate());
+    let gate = Arc::new(LocalMaintenanceGate::default());
+    let _release = ReleaseLocalMaintenance(gate.clone());
+    gate.armed.store(true, std::sync::atomic::Ordering::Release);
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let gate = gate.clone();
+        move |_, phase| {
+            if phase.starts_with("operation_owner phase=legacy_publication_end ") {
+                gate.hold_if_armed();
+            }
+        }
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let worker = tokio::spawn(source.clone().run_accept_loop(listener));
+    super::cold_account_setup(gate.entered.notified())
+        .await
+        .unwrap();
+    source.runtime_work.close();
+    worker.abort();
+    // Closed admission can retire a supervised arm before abort is observed.
+    // Either route must still retain the actual blocked storage admission.
+    if let Err(error) = worker.await {
+        assert!(
+            error.is_cancelled(),
+            "accept owner failed while retiring: {error}"
+        );
+    }
+    let drained = source.runtime_work.drain();
+    tokio::pin!(drained);
+    assert!(
+        futures_util::poll!(drained.as_mut()).is_pending(),
+        "cancelling the scheduler cannot retire its still-blocked local storage closure"
+    );
+    gate.release();
+    super::cold_account_setup(drained).await.unwrap();
+    *source.account_client_test_hook.lock().unwrap() = None;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_maintenance_panic_propagates_through_actual_accept_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = node(&dir.path().join("source"), &Account::generate());
+    *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(|_, phase| {
+        if phase.starts_with("operation_owner phase=legacy_publication_end ") {
+            panic!("injected local maintenance panic");
+        }
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let worker = tokio::spawn(source.clone().run_accept_loop(listener));
+    let failure = super::cold_account_setup(worker)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        failure.is_panic(),
+        "storage worker panic cannot become normal accept-owner completion"
+    );
+    let panic = failure.into_panic();
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"injected local maintenance panic")
+    );
+    source.runtime_work.close();
+    super::cold_account_setup(source.runtime_work.drain())
+        .await
+        .unwrap();
+    *source.account_client_test_hook.lock().unwrap() = None;
 }
 
 async fn run_queued_source(
     gate_terminal: bool,
     delay_retired_request: bool,
     force_early_cancel: bool,
+    gate_local_maintenance: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
@@ -398,6 +512,10 @@ async fn run_queued_source(
     let origins = Arc::new(Mutex::new(Vec::new()));
     let b_retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let recovery_changed = Arc::new(Notify::new());
+    let local_maintenance = Arc::new(LocalMaintenanceGate::default());
+    let _release_local_maintenance = ReleaseLocalMaintenance(local_maintenance.clone());
+    let (held_dispatch_tx, held_dispatch_rx) = oneshot::channel();
+    let held_dispatch_tx = Arc::new(Mutex::new(Some(held_dispatch_tx)));
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let setup_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
@@ -509,6 +627,9 @@ async fn run_queued_source(
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let peer_a = a.identity.public();
         let peer_b = b.identity.public();
+        let own = reference.identity.public();
+        let local_maintenance = local_maintenance.clone();
+        let held_dispatch_tx = held_dispatch_tx.clone();
         let requester = Arc::downgrade(&reference);
         let retired_publication_key = crate::node::AccountDocumentKey::GroupLegacyOperation {
             channel: hex::encode([1u8; 32]),
@@ -558,6 +679,12 @@ async fn run_queued_source(
             {
                 record_b_trace(&owner_trace, clock, "requester_owner", phase.clone());
             }
+            if gate_local_maintenance
+                && peer == own
+                && phase.starts_with("operation_owner phase=legacy_publication_end ")
+            {
+                local_maintenance.hold_if_armed();
+            }
             if peer == peer_a || peer == peer_b {
                 pages.lock().unwrap().observe(&phase);
             }
@@ -569,6 +696,12 @@ async fn run_queued_source(
                     .unwrap()
                     .is_some_and(|id| page.contains_demand(id))
             {
+                if gate_local_maintenance
+                    && local_maintenance.held()
+                    && let Some(sender) = held_dispatch_tx.lock().unwrap().take()
+                {
+                    let _ = sender.send(());
+                }
                 // Open the window at the exact committed-demand dispatch.
                 // Later recovery pages remain observable after it completes.
                 demand_dispatch
@@ -1033,6 +1166,23 @@ async fn run_queued_source(
         .new_account_group_operation_id(&account.account_id())
         .unwrap();
     *operation.lock().unwrap() = Some(id);
+    if gate_local_maintenance {
+        local_maintenance
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
+        reference.account_sync_notify.notify_one();
+        super::cold_account_setup(local_maintenance.entered.notified())
+            .await
+            .expect(
+                "requester maintenance outside shared storage guards is held before B admission",
+            );
+        record_b_trace(
+            &trace,
+            clock,
+            "fixture",
+            "requester_local_maintenance_held".into(),
+        );
+    }
     record_b_trace(&trace, clock, "fixture", "B_admission_begin".into());
     b_retired.store(false, std::sync::atomic::Ordering::Relaxed);
     let accepted = reference
@@ -1060,7 +1210,24 @@ async fn run_queued_source(
     record_b_trace(&trace, clock, "fixture", "B_admitted".into());
     assert_eq!(accepted.executions.len(), 1);
     assert_eq!(accepted.executions[0].device_id, b.user_id());
-    let receipt = tokio::time::timeout(Duration::from_secs(8), async {
+    let receipt_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let held_dispatch = if gate_local_maintenance {
+        let observed = tokio::time::timeout_at(receipt_deadline, held_dispatch_rx).await;
+        local_maintenance.release();
+        record_b_trace(
+            &trace,
+            clock,
+            "fixture",
+            format!(
+                "requester_local_maintenance_released dispatch_while_held={}",
+                matches!(&observed, Ok(Ok(())))
+            ),
+        );
+        Some(observed)
+    } else {
+        None
+    };
+    let receipt = tokio::time::timeout_at(receipt_deadline, async {
         let mut executor_committed_observed = false;
         let mut requester_committed_observed = false;
         loop {
@@ -1185,6 +1352,13 @@ async fn run_queued_source(
         tokio::time::timeout(Duration::from_secs(5), node.runtime_work.drain())
             .await
             .expect("all queued-source owners drain");
+    }
+    if let Some(observed) = held_dispatch {
+        assert!(
+            matches!(observed, Ok(Ok(()))),
+            "the exact selected B request must dispatch while unrelated local maintenance outside shared storage guards remains held; phases={:?}",
+            trace.lock().unwrap()
+        );
     }
     assert!(
         recovered.is_ok(),

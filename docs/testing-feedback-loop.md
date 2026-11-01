@@ -1196,6 +1196,22 @@ is diagnostic history, not evidence that a particular request is still active.
 Check the intended held task again inside the operation-admission callback, then
 retain the scenario's permitted preemption, continuation and receipt assertions.
 Natural origin, protection and wake hints remain independent attributes.
+The local-maintenance isolation fixture holds the requester at an existing
+publication boundary outside shared journal, document, member and log guards before genuine operation admission. It requires
+the exact demand's child request preparation while that boundary is held, then
+retains the original authenticated receipt, signature and checkpoint assertions.
+This proves scheduler independence from unrelated local work; it does not identify
+the cause of a historical hosted timeout. The same absolute receipt deadline
+bounds the witness, and drop-safe release and actual runtime drain precede any
+failure assertion. Attachment handoff and fanout-cursor tests separately cover
+capacity changes, durable skipped work and concurrent retry-floor rewinds.
+The operation-head overlap fixture coordinates actual runtime publishers around
+an older captured projection, commits the original signed request through the
+source owner without publishing, and requires the final signed head to retain
+that current terminal. Publication contention is an observed unit-lock
+`WouldBlock`, not a claim of FIFO queueing. A guard-disabled control must expose
+the higher-revision stale head; publication-unit poison tests keep underlying
+journal and document owners unpoisoned.
 Lifetime observation is scoped to synchronous test hooks and expires on return,
 abort or panic without calling fixture code during destruction. The delayed-server
 regression uses a real signed sibling publication to retire an older request and

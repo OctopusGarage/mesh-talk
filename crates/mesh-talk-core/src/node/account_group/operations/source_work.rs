@@ -133,15 +133,21 @@ impl Node {
             AccountGroupDataWork::File(work) => self.execute_account_group_file_work(*work).await,
             AccountGroupDataWork::Invitation { id, group, target } => {
                 let assets = self.prepare_invitation_assets(group, &target).await?;
-                if let Some(group) =
-                    self.execute_source_control_with_invitation(id, Some(assets))?
-                {
-                    self.publish_account_group_access_for(group);
-                    self.publish_group_inventory_for(group);
-                }
-                self.publish_account_group_operations();
-                self.account_sync_notify.notify_one();
-                Ok(())
+                // Network preparation has released its transport owners. Keep
+                // the complete durable local transition and signed publication
+                // off the async scheduler, including publication contention.
+                self.account_blocking(move |node| {
+                    if let Some(group) =
+                        node.execute_source_control_with_invitation(id, Some(assets))?
+                    {
+                        node.publish_account_group_access_for(group);
+                        node.publish_group_inventory_for(group);
+                    }
+                    node.publish_account_group_operations();
+                    node.account_sync_notify.notify_one();
+                    Ok(())
+                })
+                .await
             }
         }
     }
