@@ -339,12 +339,16 @@ continuations and the original total pull bound, and require both full settlemen
 and the complete exact source metadata set. Failure diagnostics should report
 body-free cursor flags and metadata-class differences rather than message bodies.
 
-Growing-history fixtures observe exact durable IDs without blocking their
-current-thread network runtime on repeated full history projections. Once those
-IDs are present, retain the public history projection and exact original-ID
-assertion within the same watchdog. Preserve the original corpus, source appends,
-continuation-page requirement and legacy protocol coverage. Forward progress
-through a changing archive does not require its moving digest to settle.
+Growing-history fixtures observe exact durable IDs through the existing admitted
+blocking-work owner. Lossy `try_lock` polling can miss short writer gaps even
+when the original prefix is durable; synchronous reads can block the current-thread
+network runtime behind storage. A held-writer regression must keep the observation
+pending while an async timer remains live, then require the exact durable prefix
+after release. Run the final public history projection through the same blocking
+owner and retain its exact original-ID assertion within the same watchdog.
+Preserve the original corpus, source appends, continuation-page requirement and
+legacy protocol coverage. Forward progress through a changing archive does not
+require its moving digest to settle.
 
 Explicit custody-page fixtures follow the production cursor's local-admission
 contract. A typed local-capacity rejection exchanges no bytes: preserve the same

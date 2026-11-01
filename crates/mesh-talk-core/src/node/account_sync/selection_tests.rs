@@ -2349,6 +2349,90 @@ async fn archive_authorization_transition_rebuilds_cached_membership_selection()
     assert_eq!(source.account_archive_cache.lock().unwrap().builds, 2);
 }
 
+// Exact-ID observation belongs off the current-thread network runtime. The
+// observation must wait for a current writer rather than miss its short gaps.
+async fn original_history_received(
+    receiver: &Arc<Node>,
+    original: Arc<HashSet<crate::eventlog::EventId>>,
+) -> bool {
+    receiver
+        .account_blocking(move |node| {
+            let received = node
+                .received
+                .lock()
+                .expect("received history mutex not poisoned");
+            Ok(original.iter().all(|id| received.entry(*id).is_some()))
+        })
+        .await
+        .expect("the admitted history observation completes on the blocking owner")
+}
+
+#[tokio::test]
+async fn original_history_observation_waits_for_writer_without_blocking_network_runtime() {
+    let (_dir, source, receiver) = sibling_nodes();
+    source
+        .enqueue_to_account(&source.account_id(), b"durable original", None)
+        .await
+        .unwrap();
+    let original: Arc<HashSet<_>> = Arc::new(
+        source
+            .account_history(&source.account_id(), 10)
+            .into_iter()
+            .map(|row| row.id)
+            .collect(),
+    );
+    assert_eq!(
+        original.len(),
+        1,
+        "the contention control needs an actual original record"
+    );
+    let (records, _, _) = source.export_sync_records(
+        &receiver.identity.public(),
+        None,
+        true,
+        false,
+        AccountSyncVersion::V2,
+    );
+    receiver
+        .apply_account_history_page(&records, AccountSyncVersion::V2)
+        .unwrap();
+    assert!(original_history_received(&receiver, original.clone()).await);
+
+    let (entered, held) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::channel();
+    let held_receiver = receiver.clone();
+    let writer = tokio::task::spawn_blocking(move || {
+        let _writing = held_receiver.received.lock().unwrap();
+        entered.send(()).unwrap();
+        // A bounded real thread also retires if the observation assertion fails.
+        let _ = gate.recv_timeout(Duration::from_secs(5));
+    });
+    tokio::time::timeout(Duration::from_secs(5), held)
+        .await
+        .unwrap()
+        .unwrap();
+    let observation = original_history_received(&receiver, original);
+    tokio::pin!(observation);
+    assert!(
+        futures_util::poll!(observation.as_mut()).is_pending(),
+        "a busy writer must queue the exact-ID read, not report a false missing prefix"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), observation.as_mut())
+            .await
+            .is_err(),
+        "the current-thread network runtime must remain live while the exact-ID read waits for the writer"
+    );
+    release.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), observation)
+            .await
+            .unwrap(),
+        "the actual durable original must be observed after releasing the writer"
+    );
+    writer.await.unwrap();
+}
+
 #[tokio::test]
 async fn account_history_worker_reaches_original_archive_while_source_keeps_appending() {
     use tokio::net::TcpListener;
@@ -2363,11 +2447,13 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
             .await
             .unwrap();
     }
-    let original: HashSet<_> = source
-        .account_history(&source.account_id(), 200)
-        .into_iter()
-        .map(|row| row.id)
-        .collect();
+    let original: Arc<HashSet<_>> = Arc::new(
+        source
+            .account_history(&source.account_id(), 200)
+            .into_iter()
+            .map(|row| row.id)
+            .collect(),
+    );
     assert_eq!(original.len(), 96);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     sibling_peer(&receiver, &source, listener.local_addr().unwrap());
@@ -2408,24 +2494,18 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
     let progress_started = std::time::Instant::now();
     let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            // Durable imports own this mutex while syncing each record. A full
-            // history projection on every poll blocks this current-thread runtime
-            // behind those writes and repeatedly rebuilds the growing history.
-            // Observe the exact committed IDs without waiting on the writer, then
-            // retain the public projection as the final acceptance assertion.
-            let ready = match receiver.received.try_lock() {
-                Ok(received) => original.iter().all(|id| received.entry(*id).is_some()),
-                Err(std::sync::TryLockError::WouldBlock) => false,
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    panic!("received history mutex poisoned")
-                }
-            };
+            let ready = original_history_received(&receiver, original.clone()).await;
             if ready {
                 let imported: HashSet<_> = receiver
-                    .account_history(&receiver.account_id(), 20_000)
-                    .into_iter()
-                    .map(|row| row.id)
-                    .collect();
+                    .account_blocking(move |node| {
+                        Ok(node
+                            .account_history(&node.account_id(), 20_000)
+                            .into_iter()
+                            .map(|row| row.id)
+                            .collect())
+                    })
+                    .await
+                    .expect("the public history projection completes off the network runtime");
                 if original.is_subset(&imported) {
                     break;
                 }
@@ -2441,10 +2521,11 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
             .count()
     });
     eprintln!(
-        "growing history: elapsed_ms={} pages={} original_count={} imported_original_count={imported_originals:?}",
+        "growing history: elapsed_ms={} pages={} original_count={} history_revision={} imported_original_count={imported_originals:?}",
         progress_started.elapsed().as_millis(),
         pages.load(std::sync::atomic::Ordering::SeqCst),
         original.len(),
+        receiver.account_history_revision(),
     );
     worker.abort();
     server.abort();
