@@ -1032,9 +1032,8 @@ async fn file_result_roundtrip(mode: u8) {
             .cloned()
             .collect::<Vec<_>>();
         panic!(
-            "{}; public_fanout_sequence={:?}; public_trace={trace:?}",
+            "{}; public_trace={trace:?}",
             initial_file_result_timeout_stage(&origin, &source, &external, &account, id),
-            source.account_group_fanout_sequence(group),
         )
     });
     let event_id = status.primary_event.unwrap();
