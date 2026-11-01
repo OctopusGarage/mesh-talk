@@ -9,6 +9,9 @@ import {
 } from "./helpers/browser-error-details";
 import { enterChat } from "./helpers/session";
 
+// Full Chromium acceptance extracts evidence from successful scenarios too.
+test.use({ trace: "on" });
+
 test("browser evidence retains nested causes and preserves the strict error gate", async ({
   page,
   browser,

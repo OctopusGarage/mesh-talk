@@ -47,9 +47,16 @@ each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritativ
 core scenario paths from each of four shards, copies and validates screenshots,
 success traces and raw scenario metadata, then validates the exact once-only
 union using the current source/run/attempt/platform identity. Missing, failed,
-flaky or skipped portable scenarios fail acceptance. Windows uses the same
-`windows-latest` runner as the full suite; Chromium context settings match the
-standalone portable configuration. The collector reopens evidence on Linux with
+flaky or skipped portable scenarios fail acceptance.
+
+Portable specs must explicitly enable `trace: "on"` under the full-suite
+configuration, which otherwise retains traces only on failure. Validate changed
+portable scenarios through the full configuration and evidence extraction as
+well as standalone portable execution; its global trace setting can hide a
+missing spec-level declaration.
+
+Windows uses the same `windows-latest` runner as the full suite; Chromium context
+settings match the standalone portable configuration. The collector reopens evidence on Linux with
 an explicit expected source platform, rather than trusting a producer verdict.
 Linux and desktop shards call one reusable `ui-shards.yml` implementation: four
 Linux plus eight macOS/Windows runners. Linux coverage depends on its own shards
