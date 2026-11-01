@@ -318,9 +318,9 @@ fn actual_dedicated_callgraph_has_one_indexed_constructor_and_shared_endpoint() 
         );
     }
     let federation = include_str!("../src/bin/mesh-talk-node/federation_runtime.rs")
-        .split("#[cfg(test)]")
-        .next()
-        .unwrap();
+        .split_once("\n#[cfg(test)]\nmod tests {")
+        .expect("federation source retains its explicit test-module boundary")
+        .0;
     assert!(!federation.contains("Mutex<PostOffice>"));
     assert!(federation.contains("sync_with_relay_checked"));
 }
