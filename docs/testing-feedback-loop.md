@@ -75,6 +75,14 @@ successful reusable receipt. Platform evidence must distinguish cancellation fro
 an incomplete or mismatched test inventory; success still requires every selected
 step and its positive test counts.
 
+Keep stdout and stderr distinct through command capture. Cargo JSON, test
+inventories and executed-case summaries consume complete stdout; the interleaved
+log remains diagnostic output. Both raw channel captures share one byte budget,
+and truncation invalidates machine evidence. Preserve original launch,
+cancellation and cleanup errors when capture validation also fails. Fixture
+program bodies stay static; pass paths, module URLs and configuration as argv or
+environment data rather than interpolating serialized values into program text.
+
 Intentional timeout, cancellation and output-limit fixtures declare their own
 execution scope so their faults cannot cancel the real validation caller.
 Verify these fixtures beneath a real managed supervisor as well as directly;

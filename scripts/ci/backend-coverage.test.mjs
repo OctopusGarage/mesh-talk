@@ -18,9 +18,9 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
     const lines = workflow.split("\n").map(line => line.trim());
     const commands = lines.filter(line => line.startsWith("cargo ") && line.includes("--test large_directory_enqueue "));
     assert.equal(commands.length, 1, "owning large-folder command must be unique");
-    assert.equal(lines[lines.indexOf(commands[0]) - 1], "set -o pipefail", "failed Cargo execution must survive tee");
-    assert.match(commands[0], / 2>&1 \| tee "\$RUNNER_TEMP\/backend-eval-results\/large-folder\.log"$/u, "retain both stdout and stderr");
-    const args = commands[0].split(" 2>&1 | tee ")[0].split(/\s+/u).slice(1);
+    assert.ok(lines.includes("set -o pipefail"), "failed Cargo execution must survive tee");
+    assert.match(commands[0], / 2> "\$RUNNER_TEMP\/backend-eval-results\/large-folder\.stderr\.log" \| tee /u, "machine evidence must exclude stderr");
+    const args = commands[0].split(" 2> ")[0].split(/\s+/u).slice(1);
     assert.ok(args.includes("--locked"));
     assert.equal(args[args.indexOf("--test") + 2], LARGE_FOLDER_SCENARIO);
     assert.deepEqual(args.slice(args.indexOf("--") + 1), ["--exact", "--ignored", "--test-threads=1"]);
@@ -41,7 +41,7 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
   const run = args => {
     const result = spawnSync("cargo", args, { cwd: root, env, encoding: "utf8", timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
     assert.equal(result.status, 0, `${args.join(" ")}\n${result.error ?? ""}\n${result.stdout}\n${result.stderr}`);
-    return result.stdout + result.stderr;
+    return result.stdout;
   };
   run(["generate-lockfile", "--offline"]);
   assert.match(run(["llvm-cov", "--lib", "--locked", "--lcov", "--output-path", "unit.lcov"]), /1 passed; 0 failed/);
@@ -60,4 +60,27 @@ test("the real coverage CLI accumulates workspace and ignored backend execution"
   assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*normal_truth/m, "earlier workspace coverage must survive the ignored pass");
   assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*ignored_truth/m, "ignored backend execution must contribute coverage");
   assert.match(coverage, /^FNDA:[1-9]\d*,[^\n]*large_folder_truth/m, "the separate ignored integration target must contribute coverage");
+});
+
+test("large-folder workflow commands preserve stdout evidence and actual Cargo failure", { skip: process.platform === "win32" }, t => {
+  const root = mkdtempSync(join(tmpdir(), "mesh-folder-streams-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "bin"));
+  mkdirSync(join(root, "backend-eval-results"));
+  writeFileSync(join(root, "bin/cargo"), "#!/usr/bin/env bash\nprintf 'diagnostic-prefix' >&2\nprintf '%s\\n' 'test large_directory_enqueue_uses_compact_manifest_instead_of_frame_error ... ok' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'\nexit \"$MESH_FIXTURE_CARGO_EXIT\"\n", { mode: 0o755 });
+  for (const workflowName of ["ci.yml", "e2e-backend.yml"]) {
+    const workflow = readFileSync(new URL(`../../.github/workflows/${workflowName}`, import.meta.url), "utf8");
+    const step = workflow.split(/^      - /m).find(value => value.includes("--test large_directory_enqueue "));
+    const block = step.split("        run: |\n")[1].replace(/^          /gm, "");
+    for (const code of [0, 37]) {
+      const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", block], {
+        cwd: fileURLToPath(new URL("../../", import.meta.url)), encoding: "utf8", timeout: 15000,
+        env: { ...process.env, RUNNER_TEMP: root, PATH: `${join(root, "bin")}:${process.env.PATH}`, MESH_FIXTURE_CARGO_EXIT: String(code) },
+      });
+      assert.equal(result.status, code, `${workflowName}: ${result.stderr}`);
+      assert.match(result.stderr, /diagnostic-prefix/);
+      assert.doesNotMatch(readFileSync(join(root, "backend-eval-results/large-folder.log"), "utf8"), /diagnostic-prefix/);
+      if (code !== 0) assert.doesNotMatch(result.stdout, /Large-folder acceptance/);
+    }
+  }
 });
