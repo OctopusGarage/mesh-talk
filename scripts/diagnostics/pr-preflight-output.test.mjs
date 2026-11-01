@@ -1,17 +1,24 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, realpathSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, realpathSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-test("separate browser stages isolate server ports, results and HTML reports", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "mesh-preflight-output-"));
+// Keep the real local runner closure together as its existing owners evolve.
+function browserFixture(prefix) {
+  const root = mkdtempSync(path.join(tmpdir(), prefix));
   try {
-    for (const directory of ["scripts/validation", "scripts/pr-platform", "frontend/node_modules/playwright"])
-      mkdirSync(path.join(root, directory), { recursive: true });
-    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs", "pr-platform/rust-packages.mjs"])
-      copyFileSync(new URL(`../${filename}`, import.meta.url), path.join(root, "scripts", filename));
+    for (const directory of ["validation", "pr-platform"])
+      cpSync(new URL(`../${directory}/`, import.meta.url), path.join(root, "scripts", directory), { recursive: true });
+    mkdirSync(path.join(root, "frontend/node_modules/playwright"), { recursive: true });
+    return root;
+  } catch (error) { rmSync(root, { recursive: true, force: true }); throw error; }
+}
+
+test("separate browser stages isolate server ports, results and HTML reports", () => {
+  const root = browserFixture("mesh-preflight-output-");
+  try {
     const trace = path.join(root, "trace.jsonl");
     writeFileSync(path.join(root, "frontend/node_modules/playwright/cli.js"), `
       const fs = require('node:fs');
@@ -48,12 +55,8 @@ test("separate browser stages isolate server ports, results and HTML reports", (
 
 // A process timeout must remain distinct from a UI assertion failure.
 test("browser wrapper exposes timeout diagnostics and never writes success evidence", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "mesh-browser-timeout-"));
+  const root = browserFixture("mesh-browser-timeout-");
   try {
-    for (const directory of ["scripts/validation", "scripts/pr-platform", "frontend/node_modules/playwright"])
-      mkdirSync(path.join(root, directory), { recursive: true });
-    for (const filename of ["validation/browser.mjs", "pr-platform/guest.mjs", "pr-platform/plan.mjs", "pr-platform/rust-packages.mjs"])
-      copyFileSync(new URL(`../${filename}`, import.meta.url), path.join(root, "scripts", filename));
     writeFileSync(path.join(root, "frontend/node_modules/playwright/cli.js"), "setTimeout(() => {}, 3000);\n");
     const result = spawnSync(process.execPath, [path.join(root, "scripts/validation/browser.mjs"), "full"], {
       cwd: path.join(root, "frontend"), env: { ...process.env, MESH_BROWSER_TIMEOUT_SECONDS: "1" }, encoding: "utf8", timeout: 10_000,
