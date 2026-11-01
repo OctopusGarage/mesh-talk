@@ -128,7 +128,7 @@ test("committed archive includes export-ignored harness without changing reposit
 });
 
 test("bounded child execution reports timeout rather than a successful empty run", async () => {
-  const result = await runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeoutMs: 30 });
+  const result = await runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeoutMs: 30, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
   assert.equal(result.timedOut, true);
   assert.notEqual(result.code, 0);
 });

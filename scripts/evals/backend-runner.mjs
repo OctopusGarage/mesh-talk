@@ -32,9 +32,9 @@ export function backendCargoArgs(target, coverage = false) {
   return [...(coverage ? ["llvm-cov", "--no-report"] : ["test"]), "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--ignored", "--test-threads=1", "--nocapture"];
 }
 
-export async function runCargo(target, { command = ["cargo", ...backendCargoArgs(target, process.env.EVAL_COVERAGE === "1")], maxOutputBytes = 16 * 1024 * 1024, timeoutMs = 20 * 60 * 1000, signal } = {}) {
+export async function runCargo(target, { env = process.env, command = ["cargo", ...backendCargoArgs(target, env.EVAL_COVERAGE === "1")], maxOutputBytes = 16 * 1024 * 1024, timeoutMs = 20 * 60 * 1000, signal } = {}) {
   const result = await runCommand(command[0], command.slice(1), {
-    env: { ...process.env, CARGO_TERM_COLOR: "never" }, timeoutMs, maxOutputBytes, outputLimitIsFailure: true, signal,
+    env: { ...env, CARGO_TERM_COLOR: "never" }, timeoutMs, maxOutputBytes, outputLimitIsFailure: true, signal,
   });
   return { ...result, failure: result.timedOut ? `Backend suite timeout: ${target}` : result.cancelled ? "Backend evaluation cancelled" : result.error };
 }
