@@ -1,6 +1,7 @@
 //! A queued pre-operation suffix does not witness a newly admitted request.
 use super::selected_same_source_control_latency::{
-    BTrace, ControlTestPages, record_b_trace, record_control_frame, result_snapshot,
+    BTrace, ColdControlScope, ControlTestPages, record_b_trace, record_control_frame,
+    result_snapshot,
 };
 use super::*;
 use crate::node::account_documents::wire::DocumentRequest;
@@ -75,6 +76,48 @@ async fn queued_recovery_observes_retirement_before_its_deadline_between_periodi
         observed.is_ok(),
         "completed recovery inside its existing deadline must not wait for a later periodic check"
     );
+}
+
+#[test]
+fn queued_source_requires_current_settlement_after_retired_request_publication() {
+    let mut readiness = ColdControlScope::default();
+    readiness.observe("control_task paired=false protected=false", true);
+    readiness.observe("document_scope_settled scope=Control", true);
+    assert!(readiness.ready());
+    readiness.invalidate();
+    assert!(
+        !readiness.ready(),
+        "publication invalidates readiness before its wake arrives"
+    );
+    // The retired-request publication starts another comparison. The original
+    // empty settlement cannot authorize capturing A while B still owes work.
+    readiness.observe("control_task paired=true protected=true", false);
+    assert!(!readiness.ready(), "the old empty B settlement is stale");
+    readiness.observe("document_scope_settled scope=Control", false);
+    assert!(
+        !readiness.ready(),
+        "B1 must actually be present on the requester"
+    );
+    readiness.observe("document_scope_settled scope=Control", true);
+    assert!(
+        !readiness.ready(),
+        "a complete prefix cannot pay the parked comparison"
+    );
+    readiness.observe("control_pair_retired", true);
+    assert!(readiness.ready());
+    readiness.observe("control_task paired=false protected=false", true);
+    assert!(
+        !readiness.ready(),
+        "every new comparison invalidates prior settlement"
+    );
+    readiness.observe("control_cancel task=Id(1) reason=same_source", true);
+    readiness.observe("document_scope_settled scope=Control", true);
+    assert!(
+        !readiness.ready(),
+        "a late child completion cannot pay new pair debt"
+    );
+    readiness.observe("control_pair_retired", true);
+    assert!(readiness.ready());
 }
 
 struct ReleaseQueuedReads(Arc<Semaphore>);
@@ -284,7 +327,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     let operation = Arc::new(Mutex::new(None));
     let pages = Arc::new(Mutex::new(ControlTestPages::default()));
     let demand_dispatch = Arc::new(Mutex::new(None));
-    let b_unpaired_settled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let b_readiness = Arc::new(Mutex::new(ColdControlScope::default()));
     let first_foreground = Arc::new(Mutex::new(None::<tokio::task::Id>));
     let foreground_after = Arc::new(Mutex::new(None::<crate::node::AccountDocumentKey>));
     let release_intent = Arc::new(Semaphore::new(0));
@@ -374,6 +417,12 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     *reference.account_client_test_hook.lock().unwrap() = Some(Arc::new({
         let peer_a = a.identity.public();
         let peer_b = b.identity.public();
+        let requester = Arc::downgrade(&reference);
+        let retired_publication_key = crate::node::AccountDocumentKey::GroupLegacyOperation {
+            channel: hex::encode([1u8; 32]),
+            source_device: b.user_id(),
+        };
+        let delayed_once = delayed_once.clone();
         let origins = origins.clone();
         let b_partial = b_partial.clone();
         let b_retired = b_retired.clone();
@@ -388,7 +437,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let wake_changed = wake_changed.clone();
         let pages = pages.clone();
         let operation = operation.clone();
-        let b_unpaired_settled = b_unpaired_settled.clone();
+        let b_readiness = b_readiness.clone();
         let demand_dispatch = demand_dispatch.clone();
         move |peer, phase| {
             if peer == peer_a || peer == peer_b {
@@ -409,17 +458,14 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                     .unwrap()
                     .get_or_insert(page.dispatched_at);
             }
-            if peer == peer_b
-                && phase.starts_with("page_end")
-                && phase.contains("outcome=ok")
-                && phase.contains("pending=false after=false")
-                && pages
-                    .lock()
-                    .unwrap()
-                    .task(tokio::task::id())
-                    .is_some_and(|page| page.origin.starts_with("control_task paired=false "))
-            {
-                b_unpaired_settled.store(true, std::sync::atomic::Ordering::Release);
+            if peer == peer_b {
+                let corpus_present = !delay_retired_request
+                    || !delayed_once.load(std::sync::atomic::Ordering::Acquire)
+                    || requester.upgrade().is_some_and(|node| {
+                        node.account_document_meta(&retired_publication_key)
+                            .is_some()
+                    });
+                b_readiness.lock().unwrap().observe(&phase, corpus_present);
             }
             if gate_terminal && peer == peer_b {
                 if phase.starts_with("control_task ")
@@ -511,7 +557,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let b_partial = b_partial.clone();
         let a_requests = a_requests.clone();
         let pages = pages.clone();
-        let b_unpaired_settled = b_unpaired_settled.clone();
+        let b_readiness = b_readiness.clone();
         let delayed_once = delayed_once.clone();
         let publisher = Arc::downgrade(&b);
         let resumed_task = resumed_task.clone();
@@ -525,7 +571,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             let b_partial = b_partial.clone();
             let a_requests = a_requests.clone();
             let pages = pages.clone();
-            let b_unpaired_settled = b_unpaired_settled.clone();
+            let b_readiness = b_readiness.clone();
             let delayed_once = delayed_once.clone();
             let publisher = publisher.clone();
             let resumed_task = resumed_task.clone();
@@ -545,7 +591,11 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                 };
                 let first_pending = first_tx.lock().unwrap().is_some();
                 if first_pending
-                    && (!b_unpaired_settled.load(std::sync::atomic::Ordering::Acquire)
+                    && (!b_readiness.lock().unwrap().ready()
+                        || (delay_retired_request
+                            && delayed_once.load(std::sync::atomic::Ordering::Acquire)
+                            && !retired_request_rejected
+                                .load(std::sync::atomic::Ordering::Acquire))
                         || !pages.lock().unwrap().request(&request).is_some_and(|page| {
                             page.dispatch()
                                 .is_some_and(|dispatch| !dispatch.paired && !dispatch.protected)
@@ -563,6 +613,9 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                     // client while its acknowledged server callback is delayed.
                     // The head is one of the same 66 later published below.
                     let publisher = publisher.upgrade().unwrap();
+                    // The earlier empty B scope is no longer current, even if
+                    // this publication's authenticated wake has not arrived yet.
+                    b_readiness.lock().unwrap().invalidate();
                     crate::node::account_documents::sync::publish_legacy_control_page_for_test(
                         &publisher, 1,
                     );
@@ -596,7 +649,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                 let first = first_tx.lock().unwrap().take();
                 if let Some(first) = first {
                     assert!(effective_after(&request).is_none());
-                    let _ = first.send(());
+                    let _ = first.send(page.task);
                     let _ = release.acquire().await;
                 } else if b_partial.load(std::sync::atomic::Ordering::Relaxed)
                     && dispatch.resumed
@@ -739,13 +792,13 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         }
     }));
     reference.account_sync_notify.notify_one();
-    super::cold_account_setup(async {
-        first_rx.await?;
+    let first_task = super::cold_account_setup(async {
+        let task = first_rx.await?;
         if delay_retired_request { rejected_rx.await?; }
-        Ok::<(), oneshot::error::RecvError>(())
+        Ok::<_, oneshot::error::RecvError>(task)
     })
         .await
-        .unwrap_or_else(|error| panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={} B_partial={}; pages={:?}", b_unpaired_settled.load(std::sync::atomic::Ordering::Acquire), b_partial.load(std::sync::atomic::Ordering::Acquire), pages.lock().unwrap().summary()))
+        .unwrap_or_else(|error| panic!("natural A read must precede real B publication: {error:?}; B_unpaired_settled={} B_partial={}; pages={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), pages.lock().unwrap().summary()))
         .unwrap();
     if delay_retired_request {
         assert!(
@@ -753,10 +806,14 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             "the delayed historical request is rejected before canonical publication"
         );
     }
+    assert!(
+        pages.lock().unwrap().is_active(first_task),
+        "the exact natural A hold must remain live at canonical B publication"
+    );
     let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
     super::cold_account_setup(resume_rx)
         .await
-        .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}", b_unpaired_settled.load(std::sync::atomic::Ordering::Acquire), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary()))
+        .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}; phases={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary(), trace.lock().unwrap()))
         .unwrap();
     assert!(b_partial.load(std::sync::atomic::Ordering::Relaxed));
     let saved = saved_after

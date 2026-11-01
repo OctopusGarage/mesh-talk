@@ -194,22 +194,25 @@ struct ColdControlCorpus {
 }
 
 #[derive(Default)]
-struct ColdControlScope {
+pub(super) struct ColdControlScope {
     settled: bool,
     paired: bool,
     settled_corpus: Option<ColdControlCorpus>,
 }
 impl ColdControlScope {
-    fn observe(&mut self, event: &str, corpus_present: bool) {
+    pub(super) fn invalidate(&mut self) {
+        self.settled = false;
+    }
+    pub(super) fn observe(&mut self, event: &str, corpus_present: bool) {
         if event.starts_with("control_task ") {
-            self.settled = false;
+            self.invalidate();
             // The parent can cancel before the child's first trace. Only an
             // explicit retirement clears the announced comparison debt.
             self.paired |= event.starts_with("control_task paired=true ");
         } else if event.starts_with("control_cancel ") && event.ends_with("reason=same_source") {
             // The child can finish before abort takes effect. Its late scope
             // completion cannot pay the pair the parent is about to create.
-            self.settled = false;
+            self.invalidate();
             self.paired = true;
         } else if event == "document_scope_settled scope=Control" {
             self.settled = corpus_present;
@@ -217,7 +220,7 @@ impl ColdControlScope {
             self.paired = false;
         }
     }
-    fn ready(&self) -> bool {
+    pub(super) fn ready(&self) -> bool {
         self.settled && !self.paired
     }
     fn observe_corpus(&mut self, event: &str, corpus: Option<ColdControlCorpus>) {

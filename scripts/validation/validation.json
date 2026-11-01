@@ -24,9 +24,7 @@
       "rust": [
         {
           "package": "mesh-talk-core",
-          "filters": [
-            "node::forwarding::"
-          ]
+          "filters": ["node::forwarding::"]
         }
       ],
       "capability": {
@@ -65,9 +63,7 @@
         "scripts/e2e-network-handoff.py",
         "scripts/README.md"
       ],
-      "node": [
-        "scripts/diagnostics/post-office-installer.test.mjs"
-      ],
+      "node": ["scripts/diagnostics/post-office-installer.test.mjs"],
       "escalation": [
         "Network membership mode validates public policy/certificate before installation mutation and persists public files without authority private keys. Policy changes/renewal require restart; startup must bind the certificate to the existing device identity. Windows installer changes require native PowerShell execution in addition to macOS fixtures. Managed services must use main TCP 47479. Managed service discovery must use dedicated UDP 47478 and shared LAN UDP 47474 on all hosts; reject other installer values before mutation. Preserve mesh identity, credentials, custody data and service configuration during updates. macOS local-build updates must retain the installed code-signing identifier and verify the staged signature before replacement; publisher-issued signatures remain intact. See docs/post-office-macos-service.md. Validate real service restart, LAN multicast and routed discovery on the affected host; fixture tests and listener checks do not establish local-network access. Interface handoff changes require the opt-in Docker network-namespace harness: queued and new messages must converge with authenticated receipts without process restart or manual rescan; namespace evidence is separate from physical Wi-Fi hardware."
       ]
@@ -164,8 +160,16 @@
             "reference": "docs/updates.md#manual-release-preparation"
           },
           {
-            "name": "Optional free updater signing binds the full logical build version; standalone native payloads and signatures must match the verified ZIP and form a complete platform matrix. Missing keys keep the manual path; partial signing configuration fails closed.",
+            "name": "Optional free updater signing binds the full logical build version; every standalone updater role must match the checksum manifest inside its platform's signed ZIP and form a complete platform matrix, with exact-source provenance and native equivalence. Missing keys keep the manual path; partial signing configuration fails closed.",
             "reference": "docs/updates.md#free-updater-signing-setup"
+          },
+          {
+            "name": "Manual ZIPs contain only native installers, self-contained SHA256SUMS and optional UPDATER_SHA256SUMS manifests of at most 64 KiB each, never duplicate updater payloads. Both macOS ZIP and DMG sizes must independently stay within the reviewed 24 MiB budget.",
+            "reference": "docs/updates.md#manual-package-size-budgets"
+          },
+          {
+            "name": "Release notes provide direct exact-tag desktop downloads for all six platform targets before product highlights; headless relay downloads and verification are separate collapsible sections.",
+            "reference": "docs/updates.md#public-website-downloads"
           },
           {
             "name": "Native producers and acceptance share a checksum-verified pinned decoder; real plugin/uninstaller NSIS fixtures preserve known-size complete-payload acceptance and detect decoder incompatibility before publication builds.",
@@ -399,11 +403,7 @@
     },
     {
       "id": "public-help",
-      "paths": [
-        "tools/help/",
-        "docs/help/",
-        ".github/workflows/pages.yml"
-      ],
+      "paths": ["tools/help/", "docs/help/", ".github/workflows/pages.yml"],
       "node": [
         "tools/help/corpus.test.mjs",
         "tools/help/help.test.mjs",
@@ -430,9 +430,7 @@
         "scripts/test-ai-eval.mjs",
         "docs/evals/desktop-updates-ai-eval-suite.json"
       ],
-      "node": [
-        "scripts/test-ai-eval.mjs"
-      ],
+      "node": ["scripts/test-ai-eval.mjs"],
       "escalation": [
         "Context selection integrity checks validate rubric inputs; they do not execute the evaluated capabilities or establish native evidence."
       ]
@@ -440,6 +438,8 @@
     {
       "id": "portable-browser-reporting",
       "paths": [
+        "frontend/e2e/browser-error-evidence.spec.ts",
+        "frontend/e2e/helpers/browser-error-details.ts",
         "frontend/e2e/portable-core.spec.ts",
         "frontend/e2e/automatic-delivery.spec.ts",
         "frontend/e2e/media-scroll.spec.ts",
@@ -466,7 +466,7 @@
         "scripts/diagnostics/trace-evidence.test.mjs"
       ],
       "escalation": [
-        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete authoritative core inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Dedicated WebKit and Firefox core acceptance are required on ordinary candidates; scheduled/manual extended Chromium and Firefox retain complete extended inventories. Fixture navigation must observe an actual boundary using browser-supported input rather than assume a wheel delta equals a scroll offset; retain genuine virtualized unmount, cache reuse and geometry assertions. Standalone Windows portable-runner batches remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
+        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete authoritative core inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Portable specs must explicitly retain successful traces under the full-suite configuration; verify changed scenarios with that configuration and evidence extraction as well as standalone portable execution, whose global trace setting can mask an omitted spec-level declaration. Dedicated WebKit and Firefox core acceptance are required on ordinary candidates; scheduled/manual extended Chromium and Firefox retain complete extended inventories. Fixture navigation must observe an actual boundary using browser-supported input rather than assume a wheel delta equals a scroll offset; retain genuine virtualized unmount, cache reuse and geometry assertions. Browser-side error evidence preserves bounded stacks and nested causes before protocol serialization, across navigation and disposal, while the unchanged strict error gate rejects uncaught/recovered errors. Validate early error/rejection, cycle/depth/string/event limits and the real-browser negative gate control. Standalone Windows portable-runner batches derive from complete inventory and remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
       ]
     },
     {

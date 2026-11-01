@@ -850,18 +850,32 @@ async fn reference_forwarding(role: crate::node::AccountGroupRole) {
         vec![first_id],
         "only the first admitted forwarding leg may be published before its terminal result"
     );
-    let published = reference
-        .account_document(&crate::node::AccountDocumentKey::GroupOperation {
-            channel: hex::encode(group.as_bytes()),
-            source_device: reference.user_id(),
-        })
-        .unwrap()
-        .unwrap();
-    let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
-        published.payload(),
-        &account.public().ed25519_pub,
-    )
-    .expect("actual stored publication retains its verified signature");
+    // Durable admission wakes asynchronous publication; it does not await it.
+    // Wait for the real signed export while peer reads stay gated. Accept the
+    // first nonempty frame so an incorrectly exported later leg still fails.
+    let frame = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(published) = reference
+                .account_document(&crate::node::AccountDocumentKey::GroupOperation {
+                    channel: hex::encode(group.as_bytes()),
+                    source_device: reference.user_id(),
+                })
+                .unwrap()
+            {
+                let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
+                    published.payload(),
+                    &account.public().ed25519_pub,
+                )
+                .expect("actual stored publication retains its verified signature");
+                if !frame.projection.requests.is_empty() {
+                    break frame;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the background owner must publish the gated forwarding request");
     assert_eq!(
         frame
             .projection

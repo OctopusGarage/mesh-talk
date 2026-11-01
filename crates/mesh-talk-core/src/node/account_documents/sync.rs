@@ -830,6 +830,17 @@ impl Node {
         let started = {
             let enabled = self.account_client_test_hook.lock().unwrap().is_some();
             enabled.then(|| {
+                // Invalidate fixture bootstrap readiness for the whole Optional
+                // pass, including work before custody. Retries before the first
+                // completed page may repeat this marker; no page was imported.
+                if cursor.scope == DocumentSyncScope::Optional
+                    && cursor.visited == 0
+                    && cursor.after.is_none()
+                {
+                    self.trace_account_client(&peer.public, || {
+                        "document_scope_started scope=Optional".into()
+                    });
+                }
                 self.trace_account_client(&peer.public, || {
                     format!("page_begin {}", cursor.client_trace_state())
                 });
@@ -843,7 +854,9 @@ impl Node {
                 && cursor.page_completed
                 && matches!(
                     cursor.scope,
-                    DocumentSyncScope::Control | DocumentSyncScope::Directory
+                    DocumentSyncScope::Control
+                        | DocumentSyncScope::Directory
+                        | DocumentSyncScope::Optional
                 )
                 && cursor.status(self.device_sync_policy())
                     == (super::super::SyncPhase::UpToDate, None, false)
