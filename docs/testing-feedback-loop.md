@@ -60,6 +60,12 @@ successful reusable receipt. Platform evidence must distinguish cancellation fro
 an incomplete or mismatched test inventory; success still requires every selected
 step and its positive test counts.
 
+Intentional timeout, cancellation and output-limit fixtures declare their own
+execution scope so their faults cannot cancel the real validation caller.
+Verify these fixtures beneath a real managed supervisor as well as directly;
+require positive executed-case counts, since a nested test-driver context can
+otherwise suppress execution while returning success.
+
 Timers remain appropriate for explicit watchdogs, protocol deadlines, bounded
 state polling, termination grace periods and tests of time-dependent behavior.
 Their expiry signals failure or triggers escalation; elapsed time alone never
