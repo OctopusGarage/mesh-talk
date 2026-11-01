@@ -27,6 +27,7 @@ export default defineConfig({
   testDir: "./e2e",
   timeout: process.platform === "win32" ? 120_000 : 30_000,
   testMatch: [
+    "browser-error-evidence.spec.ts",
     "portable-core.spec.ts",
     "automatic-delivery.spec.ts",
     "media-scroll.spec.ts",

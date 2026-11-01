@@ -34,14 +34,29 @@ inventories with Playwright discovery without launching browsers. Register new
 scenarios in `requiredBrowserPaths` and additional spec files in the owning
 validation contract. Discovery checks do not replace executed browser evidence.
 
+Portable evidence captures bounded browser-side stacks and nested causes before
+browser protocols can discard them; failures also print a bounded cause sample
+in job logs. A secondary-page control proves early error
+and rejection capture, navigation/disposal retention, limits and rejection by the
+shared strict error gate; the primary page still enters the real React app.
+Captured causes are diagnostics: a recovered React error still fails acceptance,
+and richer evidence alone does not establish a product fix.
+
 PR Chromium portable core acceptance reuses the complete full-suite execution on
 each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritative
 core scenario paths from each of four shards, copies and validates screenshots,
 success traces and raw scenario metadata, then validates the exact once-only
 union using the current source/run/attempt/platform identity. Missing, failed,
-flaky or skipped portable scenarios fail acceptance. Windows uses the same
-`windows-latest` runner as the full suite; Chromium context settings match the
-standalone portable configuration. The collector reopens evidence on Linux with
+flaky or skipped portable scenarios fail acceptance.
+
+Portable specs must explicitly enable `trace: "on"` under the full-suite
+configuration, which otherwise retains traces only on failure. Validate changed
+portable scenarios through the full configuration and evidence extraction as
+well as standalone portable execution; its global trace setting can hide a
+missing spec-level declaration.
+
+Windows uses the same `windows-latest` runner as the full suite; Chromium context
+settings match the standalone portable configuration. The collector reopens evidence on Linux with
 an explicit expected source platform, rather than trusting a producer verdict.
 Linux and desktop shards call one reusable `ui-shards.yml` implementation: four
 Linux plus eight macOS/Windows runners. Linux coverage depends on its own shards
@@ -88,14 +103,15 @@ through `scripts/evals/portable-runner.mjs`. Scheduled/manual extended runs add
 Chromium and Firefox extended inventories. Firefox uses the same complete evidence
 validator and existing job budget in both modes; browser-specific core regressions
 must be detected before source acceptance, rather than first by the next scheduled run.
-Windows uses four sequential Playwright shards with separate browser/dev-server
-lifetimes; other platforms use one. Each shard writes a unique nested evidence
+Windows derives sequential process count from the actual inventory, retaining at
+least four processes and at most 20 scenarios per process; other platforms use one.
+Browser/dev-server lifetimes remain separate. Each shard writes a unique nested evidence
 root and must exit successfully. The runner merges every outcome and validates
 the unchanged full scenario inventory before the existing screenshot/trace
 validator runs. Missing, duplicate, skipped, flaky or failed cases remain failures.
-The current 79-case core and 80-case extended inventories keep each Windows
-process to at most 20 scenarios; discovery regressions verify this bound and the
-exact once-only union. Two 38-case processes exceeded the 20-minute hosted job
+The current 80-case core uses four Windows processes and the 81-case extended
+inventory uses five; discovery regressions verify the per-process bound and exact
+once-only union. The full Chromium workflow retains its separate four-shard contract. Two 38-case processes exceeded the 20-minute hosted job
 deadline after 75 of 76 scenarios passed, with later page loads slowing down.
 Four processes reduce that accumulation without increasing the job deadline,
 retrying failed scenarios or establishing a product latency guarantee.
@@ -133,14 +149,32 @@ failure or cancellation cannot reuse an earlier success. Readiness observed befo
 channel creation does not cover that new work. Hold a real authenticated inventory
 response to verify that setup remains pending until release; accept authenticated
 superseding heads so an obsolete captured version cannot strand the fixture.
+The Optional bootstrap must also be currently settled in both directions: a new
+pass clears that observation, and only full UpToDate completion restores it. A
+completed Custody page can precede unfinished DmRecall work and its backoff in the
+same lane. Hold a real authenticated DmRecall response after a prior empty baseline
+to prove the earlier setup predicates cannot admit the observation window. The
+channel-specific heads establish post-create freshness; do not require an extra
+periodic bootstrap pass or manually warm the data path.
 Aggregate document status includes independent lanes and is not this setup proof.
 After actual startup, a held Directory/DeviceHostname update must allow setup and
-fresh message/custody progress without releasing the unrelated handler; retire the
+fresh message/custody progress without releasing the unrelated handler. Capture and
+authenticate the channel's immutable inventory/control bootstrap floor before
+arming that hold, and retain the same floor afterward. Later descriptive inventory
+publications must not move an already satisfied barrier into the held Directory
+lane. A controlled post-hold profile display update through the owning inventory
+publisher must leave latest-head setup pending while the captured-floor setup
+completes immediately, with the handler still actively held. Retire the
 external holder after its real receipt so a direct query cannot replace proof of
 the source-authored sibling import.
 Keep the existing custody observation budget, real network exchange, offline-holder
 and restart assertions. This setup boundary does not establish a production latency
 guarantee or a dependency between independent mandatory/optional worker lanes.
+
+Forwarding fixtures await the first nonempty authenticated export from the real
+background publisher while peer reads remain held. Durable admission does not
+await publication. Assert the exact first-leg contents immediately on that first
+export; polling until the expected contents appear could conceal an invalid leg.
 
 Keep intentional blob corruption separate from automatic custody propagation.
 A real sibling read during a missing-blob interval can change its protocol retry
@@ -327,12 +361,16 @@ continuations and the original total pull bound, and require both full settlemen
 and the complete exact source metadata set. Failure diagnostics should report
 body-free cursor flags and metadata-class differences rather than message bodies.
 
-Growing-history fixtures observe exact durable IDs without blocking their
-current-thread network runtime on repeated full history projections. Once those
-IDs are present, retain the public history projection and exact original-ID
-assertion within the same watchdog. Preserve the original corpus, source appends,
-continuation-page requirement and legacy protocol coverage. Forward progress
-through a changing archive does not require its moving digest to settle.
+Growing-history fixtures observe exact durable IDs through the existing admitted
+blocking-work owner. Lossy `try_lock` polling can miss short writer gaps even
+when the original prefix is durable; synchronous reads can block the current-thread
+network runtime behind storage. A held-writer regression must keep the observation
+pending while an async timer remains live, then require the exact durable prefix
+after release. Run the final public history projection through the same blocking
+owner and retain its exact original-ID assertion within the same watchdog.
+Preserve the original corpus, source appends, continuation-page requirement and
+legacy protocol coverage. Forward progress through a changing archive does not
+require its moving digest to settle.
 
 Explicit custody-page fixtures follow the production cursor's local-admission
 contract. A typed local-capacity rejection exchanges no bytes: preserve the same
@@ -589,6 +627,18 @@ advance the same signed tail key within the existing setup bound. Stop preparati
 once a live hold is captured; never retry the measured operation. The fault
 regression must prove cancellation, retirement and capture of a distinct live
 request before admission.
+
+Queued-source fixtures that publish a real head to retire an old natural request
+must invalidate the earlier empty-source settlement before publication. Reuse the
+shared `ColdControlScope` observation: every new Control task invalidates prior
+settlement, and a completed prefix cannot pay outstanding comparison-pair debt.
+Before capturing the next unpaired natural hold, require the exact published
+source key on the requester, current Control settlement, pair retirement and
+rejection of the retired callback by its exact request identity and child lifetime.
+Carry the captured hold's task identity through setup and verify that child is
+still live when the canonical partial-page corpus is published. These observations
+stay within the existing cold budget and issue no extra requests; preserve the
+real signed exchange, protected-resume checks and operation/recovery deadlines.
 
 Once the original operation is admitted, or the external possession proof starts,
 the existing eight-second progress assertions remain unchanged. The same applies

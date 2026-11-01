@@ -5,10 +5,11 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { requiredBrowserPaths, validateBrowserReport } from "./browser-report.mjs";
 
-export function portableShards(platform) {
-  // The 76-case core inventory exceeded the hosted job deadline in two
-  // 38-case processes. Restart before Windows page-load latency accumulates.
-  return platform === "win32" ? 4 : 1;
+export function portableShards(platform, scenarioCount = requiredBrowserPaths("core").length) {
+  assert.ok(Number.isSafeInteger(scenarioCount) && scenarioCount > 0, "Missing portable scenario inventory");
+  // Restart before Windows page-load latency accumulates. Keep at least the
+  // existing four processes and derive extra capacity from the actual inventory.
+  return platform === "win32" ? Math.min(scenarioCount, Math.max(4, Math.ceil(scenarioCount / 20))) : 1;
 }
 
 /** Preserve every outcome and identity; the full inventory remains authoritative. */
@@ -32,13 +33,16 @@ export function mergePortableReports(reports) {
   };
 }
 
-export async function runPortable({ shards = portableShards(process.platform) } = {}) {
-  assert.ok([1, 2, 4].includes(shards), "Portable execution requires one, two or four bounded shards");
+export async function runPortable({ shards } = {}) {
   const browser = process.env.EVAL_BROWSER ?? "chromium", tier = process.env.EVAL_TIER ?? "core";
   assert.ok(["chromium", "webkit", "firefox"].includes(browser), "Unsupported portable browser");
   assert.ok(["core", "extended"].includes(tier), "Unsupported portable tier");
+  const expectedPaths = requiredBrowserPaths(tier);
+  const count = shards ?? portableShards(process.platform, expectedPaths.length);
+  assert.ok(Number.isSafeInteger(count) && count > 0 && count <= expectedPaths.length, "Portable execution requires bounded nonempty shards");
+  if (process.platform === "win32") assert.ok(Math.ceil(expectedPaths.length / count) <= 20, "Windows portable processes must contain at most 20 scenarios");
   const root = resolve(process.env.EVAL_EVIDENCE_ROOT ?? `eval-results/portable/${browser}/${tier}`);
-  const count = shards, reports = [];
+  const reports = [];
   const cli = resolve("node_modules/@playwright/test/cli.js");
   for (let shard = 1; shard <= count; shard++) {
     const evidence = resolve(root, "shards", String(shard));
@@ -49,7 +53,7 @@ export async function runPortable({ shards = portableShards(process.platform) } 
     assert.equal(result.status, 0, `Portable shard ${shard}/${count} did not pass`);
     reports.push(JSON.parse(await readFile(resolve(evidence, "results.json"), "utf8")));
   }
-  const report = mergePortableReports(reports), expectedPaths = requiredBrowserPaths(tier);
+  const report = mergePortableReports(reports);
   validateBrowserReport(report, { count: expectedPaths.length, browser, expectedPaths });
   await mkdir(root, { recursive: true });
   await writeFile(resolve(root, "results.json"), JSON.stringify(report));

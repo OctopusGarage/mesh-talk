@@ -21,6 +21,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.entries = {}
+        self.standalone = {}
         for platform, extensions in {
             "macos_arm64": ["dmg"], "macos_x86_64": ["dmg"],
             "windows_x86_64": ["exe", "msi"],
@@ -30,6 +31,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         }.items():
             entries = {f"release/installer 0.1.5.{ext}": b"installer bytes" for ext in extensions}
             self.entries[platform] = entries
+            self.standalone[platform] = {}
             self.write_archive(platform)
             (self.root / (self.name(platform) + ".bundle")).write_text('{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}')
             self.write_post_office_archive(platform)
@@ -40,14 +42,18 @@ class ReleaseAssetsTests(unittest.TestCase):
     def name(platform):
         return f"mesh-talk_v0.1.5_{platform}.zip"
 
-    def write_archive(self, platform, checksums=None):
+    def write_archive(self, platform, checksums=None, updater_checksums=None):
         entries = self.entries[platform]
         if checksums is None:
             checksums = "".join(f"{hashlib.sha256(data).hexdigest()}  ./{name.removeprefix('release/')}\n" for name, data in entries.items() if name.count("/") == 1)
-        with zipfile.ZipFile(self.root / self.name(platform), "w") as archive:
+        with zipfile.ZipFile(self.root / self.name(platform), "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name, data in entries.items():
                 archive.writestr(name, data)
             archive.writestr("release/SHA256SUMS", checksums)
+            if self.standalone[platform]:
+                if updater_checksums is None:
+                    updater_checksums = "".join(f"{hashlib.sha256(data).hexdigest()}  ./{name.removeprefix('release/')}\n" for name, data in self.standalone[platform].items())
+                archive.writestr("release/UPDATER_SHA256SUMS", updater_checksums)
 
     @staticmethod
     def post_office_name(platform):
@@ -92,16 +98,99 @@ class ReleaseAssetsTests(unittest.TestCase):
             data = b"signed updater payload" if platform.startswith("macos_") else b"installer bytes"
             for file, data in ((name, data), (name + ".sig", b"version-bound signature")):
                 (self.root / file).write_bytes(data)
-                self.entries[platform]["release/" + file] = data
+                self.standalone[platform]["release/" + file] = data
             self.write_archive(platform)
 
-    def test_updater_assets_must_match_the_verified_archive(self):
+    def test_standalone_updater_assets_must_match_the_signed_checksum_manifest(self):
         self.add_updater_assets()
         self.assertEqual(len(self.verify()), 12)
         path = next(self.root.glob("mesh-talk-update_*.sig"))
         path.write_bytes(b"substituted signature")
-        with self.assertRaisesRegex(ValueError, "updater.*match"):
+        with self.assertRaisesRegex(ValueError, "updater checksum mismatch"):
             self.verify()
+
+    def test_updater_payloads_must_not_be_duplicated_in_manual_installers(self):
+        self.add_updater_assets()
+        platform = "macos_arm64"
+        name, data = next(iter(self.standalone[platform].items()))
+        self.entries[platform][name] = data
+        self.write_archive(platform)
+        with self.assertRaisesRegex(ValueError, "unexpected installer set"):
+            self.verify()
+
+    def test_standalone_roles_cannot_be_omitted_from_the_signed_manifest(self):
+        self.add_updater_assets()
+        platform = "macos_arm64"
+        self.standalone[platform].clear()
+        self.write_archive(platform)
+        with self.assertRaisesRegex(ValueError, "checksum manifest"):
+            self.verify()
+
+    def test_updater_manifest_requires_exact_bounded_role_entries(self):
+        self.add_updater_assets()
+        platform = "macos_arm64"
+        lines = [f"{hashlib.sha256(data).hexdigest()}  ./{name.removeprefix('release/')}\n" for name, data in self.standalone[platform].items()]
+        for manifest in ("", lines[0], "".join(lines + [lines[0]]), "".join(lines) + "0" * 64 + "  ./unknown\n", "x" * (64 * 1024 + 1)):
+            with self.subTest(manifest_length=len(manifest)):
+                self.write_archive(platform, updater_checksums=manifest)
+                with self.assertRaisesRegex(ValueError, "checksum"):
+                    self.verify()
+
+    def test_windows_and_linux_updaters_still_match_the_native_installer(self):
+        for platform in ("windows_x86_64", "windows_arm64", "linux_x86_64", "linux_aarch64"):
+            with self.subTest(platform=platform):
+                self.add_updater_assets()
+                name = next(name for name in self.standalone[platform] if not name.endswith(".sig"))
+                data = b"different but consistently checksummed native installer"
+                self.standalone[platform][name] = data
+                (self.root / name.removeprefix("release/")).write_bytes(data)
+                self.write_archive(platform)
+                with self.assertRaisesRegex(ValueError, "updater must match native installer"):
+                    self.verify()
+
+    def test_macos_manual_package_budget_rejects_oversized_compressible_installers(self):
+        self.entries["macos_arm64"] = {"release/installer.dmg": b"\0" * (24 * 1024**2 + 1)}
+        self.write_archive("macos_arm64")
+        with self.assertRaisesRegex(ValueError, "macOS .*size budget"):
+            self.verify()
+
+    def test_macos_outer_zip_and_checksum_manifest_have_independent_budgets(self):
+        path = self.root / self.name("macos_x86_64")
+        with path.open("ab") as archive:
+            archive.write(b"\0" * (24 * 1024**2))
+        with self.assertRaisesRegex(ValueError, "macOS ZIP exceeds size budget"):
+            self.verify()
+        self.write_archive("macos_x86_64")
+        self.write_archive("macos_arm64", "x" * (64 * 1024 + 1))
+        with self.assertRaisesRegex(ValueError, "checksum manifest exceeds size limit"):
+            self.verify()
+
+    def test_macos_standalone_updater_remains_bound_to_the_dmg_executable(self):
+        from unittest.mock import patch
+        self.add_updater_assets()
+        def native(path, extension, version, platform):
+            return {"macho": "expected"} if extension == "dmg" else {"elf": "expected"}
+        def updater(source, version, platform):
+            self.assertEqual(source.read(), b"signed updater payload")
+            return {"macho": "expected"}
+        with patch("verify_assets.native_metadata", side_effect=native), patch("verify_assets.verify_post_office_archive"), patch("verify_assets.mac_updater_metadata", side_effect=updater):
+            self.assertEqual(len(verify_directory(self.root, "v0.1.5", "0.1.5")), 12)
+        with patch("verify_assets.native_metadata", side_effect=native), patch("verify_assets.verify_post_office_archive"), patch("verify_assets.mac_updater_metadata", return_value={"macho": "different"}):
+            with self.assertRaisesRegex(ValueError, "updater/versioned DMG executable mismatch"):
+                verify_directory(self.root, "v0.1.5", "0.1.5")
+
+    def test_all_standalone_role_bytes_are_authenticated_by_the_signed_manifest(self):
+        self.add_delta_assets()
+        for name, original in self.standalone["macos_arm64"].items():
+            with self.subTest(role=name):
+                path = self.root / name.removeprefix("release/")
+                path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                try:
+                    with self.assertRaises(ValueError):
+                        self.verify()
+                finally:
+                    path.write_bytes(original)
+        self.assertEqual(len(self.verify()), 12)
 
     def test_updater_assets_require_the_complete_platform_matrix(self):
         self.add_updater_assets()
@@ -258,7 +347,7 @@ class ReleaseAssetsTests(unittest.TestCase):
             self.verify()
 
     def test_duplicate_archive_member(self):
-        with zipfile.ZipFile(self.root / self.name("windows_x86_64"), "a") as archive:
+        with self.assertWarnsRegex(UserWarning, "Duplicate name"), zipfile.ZipFile(self.root / self.name("windows_x86_64"), "a") as archive:
             archive.writestr("release/SHA256SUMS", "bad")
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.verify()
@@ -456,7 +545,7 @@ class ReleaseAssetsTests(unittest.TestCase):
         platform = "macos_arm64"
         full = "mesh-talk-update_v0.1.5_macos_arm64.app.tar.gz"
         payload = b"full" * (1024 * 1024)
-        self.entries[platform]["release/" + full] = payload
+        self.standalone[platform]["release/" + full] = payload
         (self.root / full).write_bytes(payload)
         raw = full.replace("mesh-talk-update_", "mesh-talk-update-raw_")
         patch = "mesh-talk-patch_v0.1.5_macos_arm64_from-v0.1.4.zst"
@@ -465,11 +554,11 @@ class ReleaseAssetsTests(unittest.TestCase):
         catalog = {"schema": 1, "role": "mesh-talk-delta", "algorithm": "zstd-prefix-v1", "tag": "v0.1.5", "release_kind": "stable", "os": "macos", "arch": "aarch64", "fallback": artifact(full, payload), "target": artifact(raw, b"raw native"), "bases": [{"tag": "v0.1.4", "size": 123, "sha256": "a" * 64, "patch": artifact(patch, b"patch")}]}
         for name, data in ((raw, b"raw native"), (raw + ".sig", b"signature"), (full + ".delta.json", json.dumps(catalog).encode()), (full + ".delta.json.sig", b"signature"), (patch, b"patch")):
             (self.root / name).write_bytes(data)
-            self.entries[platform]["release/" + name] = data
+            self.standalone[platform]["release/" + name] = data
         self.write_archive(platform)
         return catalog
 
-    def test_complete_optional_delta_set_is_verified_and_bound_to_zip(self):
+    def test_complete_optional_delta_set_is_bound_to_the_signed_manifest_without_payload_duplication(self):
         self.add_delta_assets()
         self.assertEqual(len(self.verify()), 12)
         next(self.root.glob("mesh-talk-patch_*")).write_bytes(b"other")
@@ -491,7 +580,7 @@ class ReleaseAssetsTests(unittest.TestCase):
             mutate(candidate)
             data = json.dumps(candidate).encode()
             path.write_bytes(data)
-            self.entries["macos_arm64"]["release/" + path.name] = data
+            self.standalone["macos_arm64"]["release/" + path.name] = data
             self.write_archive("macos_arm64")
             with self.assertRaisesRegex(ValueError, "delta"):
                 self.verify()

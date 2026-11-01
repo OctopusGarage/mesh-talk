@@ -32,6 +32,10 @@ PLATFORMS = {
     "linux_aarch64": ("deb", "rpm", "AppImage"),
 }
 MAX_UNCOMPRESSED = 2 * 1024**3
+# The measured ARM64 manual download contains a roughly 16 MB DMG. Budget both layers
+# independently so compression cannot conceal an oversized installer.
+MACOS_MANUAL_SIZE_LIMIT = 24 * 1024**2
+MAX_CHECKSUM_MANIFEST = 64 * 1024
 
 
 def require(condition, message):
@@ -256,6 +260,8 @@ def delta_asset_set(root, tag, platform):
 
 
 def verify_archive(path, platform, version, check_installers, updater=None, delta_files=None):
+    if platform.startswith("macos_"):
+        require(path.stat().st_size <= MACOS_MANUAL_SIZE_LIMIT, "macOS ZIP exceeds size budget (24 MiB)")
     with zipfile.ZipFile(path) as archive:
         members = archive.infolist()
         names = [entry.filename for entry in members]
@@ -272,40 +278,46 @@ def verify_archive(path, platform, version, check_installers, updater=None, delt
             if not entry.is_dir():
                 files[name] = entry
         top = {name.removeprefix("release/"): entry for name, entry in files.items() if name.count("/") == 1}
-        require("SHA256SUMS" in top, "missing checksum manifest")
-        manifest = archive.read(top.pop("SHA256SUMS")).decode("utf8")
-        checksums = {}
-        for line in manifest.splitlines():
-            match = re.fullmatch(r"([a-fA-F0-9]{64}) [ *](?:\./)?([^/\\]+)", line)
-            require(match is not None, "invalid checksum line")
-            digest, name = match.groups()
-            require(name not in checksums, "duplicate checksum entry")
-            checksums[name] = digest.lower()
-        require(checksums and set(checksums) == set(top), "incomplete checksum manifest")
+        def read_checksums(manifest_name):
+            require(manifest_name in top, "missing checksum manifest: " + manifest_name)
+            require(top[manifest_name].file_size <= MAX_CHECKSUM_MANIFEST, "checksum manifest exceeds size limit")
+            manifest = archive.read(top.pop(manifest_name)).decode("utf8")
+            checksums = {}
+            for line in manifest.splitlines():
+                match = re.fullmatch(r"([a-fA-F0-9]{64}) [ *](?:\./)?([^/\\]+)", line)
+                require(match is not None, "invalid checksum line")
+                digest, name = match.groups()
+                require(name not in checksums, "duplicate checksum entry")
+                checksums[name] = digest.lower()
+            require(checksums, "empty checksum manifest")
+            return checksums
+        checksums = read_checksums("SHA256SUMS")
         updater_files = ({updater, updater + ".sig"} if updater else set()) | (delta_files or set())
-        require(len(top) == len(PLATFORMS[platform]) + len(updater_files) and updater_files <= set(top), "unexpected installer set")
+        updater_checksums = read_checksums("UPDATER_SHA256SUMS") if updater_files else {}
+        # The signed ZIP authenticates the manifest, which binds standalone
+        # updater roles by digest without duplicating their bytes in downloads.
+        require(len(top) == len(PLATFORMS[platform]) and not updater_files.intersection(top), "unexpected installer set")
+        require(set(checksums) == set(top) and set(updater_checksums) == updater_files, "incomplete checksum manifest")
+        checksums.update(updater_checksums)
         for name in updater_files:
-            require(top[name].file_size > 0, "empty updater payload")
-            if name.endswith(".sig"):
-                require(top[name].file_size <= 16 * 1024, "updater signature exceeds size limit")
-            embedded_hash = hashlib.sha256()
-            with archive.open(top[name]) as source:
-                for block in iter(lambda: source.read(1024 * 1024), b""):
-                    embedded_hash.update(block)
-            require(embedded_hash.hexdigest() == checksums[name], "updater checksum mismatch")
             standalone = path.parent / name
+            require(standalone.is_file() and not standalone.is_symlink() and 0 < standalone.stat().st_size <= MAX_UNCOMPRESSED, "invalid standalone updater file")
+            if name.endswith(".sig"):
+                require(standalone.stat().st_size <= 16 * 1024, "updater signature exceeds size limit")
             standalone_hash = hashlib.sha256()
             with standalone.open("rb") as source:
                 for block in iter(lambda: source.read(1024 * 1024), b""):
                     standalone_hash.update(block)
-            require(standalone.stat().st_size == top[name].file_size and standalone_hash.hexdigest() == checksums[name], "standalone updater must match verified archive")
-        installers = {name: entry for name, entry in top.items() if name not in updater_files}
+            require(standalone_hash.hexdigest() == checksums[name], "standalone updater checksum mismatch")
+        installers = top
         installer_metadata = {}
         for extension in PLATFORMS[platform]:
             matches = [name for name in installers if name.endswith("." + extension)]
             require(len(matches) == 1, "missing or duplicate installer format")
             name = matches[0]
             require(top[name].file_size > 0, "empty installer")
+            if platform.startswith("macos_"):
+                require(top[name].file_size <= MACOS_MANUAL_SIZE_LIMIT, "macOS DMG exceeds size budget (24 MiB)")
             digest = hashlib.sha256()
             with archive.open(top[name]) as source:
                 for block in iter(lambda: source.read(1024 * 1024), b""):
@@ -320,7 +332,7 @@ def verify_archive(path, platform, version, check_installers, updater=None, delt
         if delta_files and check_installers:
             equivalent(path.parent / updater, path.parent / updater.replace("mesh-talk-update_", "mesh-talk-update-raw_", 1), "macos" if platform.startswith("macos_") else "windows")
         if updater and platform.startswith("macos_") and check_installers:
-            with archive.open(top[updater]) as source:
+            with (path.parent / updater).open("rb") as source:
                 metadata = mac_updater_metadata(source, version, platform)
             require(metadata == installer_metadata["dmg"], "updater/versioned DMG executable mismatch")
         if updater and not platform.startswith("macos_"):
