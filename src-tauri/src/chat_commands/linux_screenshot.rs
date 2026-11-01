@@ -296,7 +296,24 @@ mod tests {
 
     fn helper(directory: &Path, script: &str) -> PathBuf {
         let path = directory.join("capture helper");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        // A parallel parent fork must never inherit a writable executable FD.
+        // The single-threaded producer opens it only after exec; wait for that
+        // producer to exit before making the completed helper executable.
+        let output = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                r#"printf '#!/bin/sh\n%s\n' "$2" > "$1""#,
+                "screenshot-test-helper",
+            ])
+            .arg(&path)
+            .arg(script)
+            .output()
+            .expect("screenshot fixture producer must start");
+        assert!(
+            output.status.success(),
+            "screenshot fixture producer failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
     }
