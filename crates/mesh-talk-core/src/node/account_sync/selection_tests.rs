@@ -2521,11 +2521,10 @@ async fn account_history_worker_reaches_original_archive_while_source_keeps_appe
             .count()
     });
     eprintln!(
-        "growing history: elapsed_ms={} pages={} original_count={} history_revision={} imported_original_count={imported_originals:?}",
+        "growing history: elapsed_ms={} pages={} original_count={} imported_original_count={imported_originals:?}",
         progress_started.elapsed().as_millis(),
         pages.load(std::sync::atomic::Ordering::SeqCst),
         original.len(),
-        receiver.account_history_revision(),
     );
     worker.abort();
     server.abort();
