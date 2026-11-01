@@ -59,11 +59,11 @@ for (const mode of ["output cap", "timeout"]) test(`backend ${mode} retires igno
   const { join } = await import("node:path");
   const { spawnSync } = await import("node:child_process");
   const directory = await mkdtemp(join(tmpdir(), "mesh-backend-tree-"));
-  const marker = join(directory, "ready"); let pid;
+  const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n"); let pid;
   t.after(async () => { if (pid) try { process.kill(pid, "SIGKILL"); } catch {} await rm(directory, { recursive: true, force: true }); });
-  const leaf = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));process.send('ready');setInterval(()=>{},1000)`;
-  const leader = `process.on('SIGTERM',()=>process.exit(0));const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>process.stdout.write('x'.repeat(2048)));setInterval(()=>{},1000)`;
-  const result = await runCargo("two_node_cli", { command: [process.execPath, "-e", leader], maxOutputBytes: mode === "output cap" ? 1024 : 4096, timeoutMs: 1500, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  const leaf = "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));process.send('ready');setInterval(()=>{},1000)";
+  const leader = "process.on('SIGTERM',()=>process.exit(0));const c=require('node:child_process').spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>process.stdout.write('x'.repeat(2048)));setInterval(()=>{},1000)";
+  const result = await runCargo("two_node_cli", { command: [process.execPath, "-e", leader, leaf, marker], maxOutputBytes: mode === "output cap" ? 1024 : 4096, timeoutMs: 1500, env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
   pid = Number(await readFile(marker, "utf8"));
   assert.match(result.failure, mode === "output cap" ? /output.*limit/i : /timeout/i);
   const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();

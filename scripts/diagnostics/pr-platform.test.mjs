@@ -346,11 +346,12 @@ for (const signal of ["SIGTERM", "SIGINT"]) test(`guest cancellation ${signal} r
   const { join } = await import("node:path");
   const { setTimeout: pause } = await import("node:timers/promises");
   const directory = await mkdtemp(join(tmpdir(), "mesh-guest-cancel-"));
-  const marker = join(directory, "ready");
-  const leaf = `process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000)`;
-  const leader = `process.on('SIGTERM',()=>process.exit(0));process.on('SIGINT',()=>process.exit(0));require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:'ignore'});setInterval(()=>{},1000)`;
+  const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n");
+  const leaf = "process.on('SIGTERM',()=>{});process.on('SIGINT',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)";
+  const leader = "process.on('SIGTERM',()=>process.exit(0));process.on('SIGINT',()=>process.exit(0));require('node:child_process').spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{stdio:'ignore'});setInterval(()=>{},1000)";
   const module = new URL("../pr-platform/guest.mjs", import.meta.url).href;
-  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", `import {runCommand} from ${JSON.stringify(module)};const result=await runCommand(process.execPath,['-e',${JSON.stringify(leader)}]);process.exitCode=result.code;`], { stdio: "ignore", env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  const program = "const {runCommand}=await import(process.argv[1]);const result=await runCommand(process.execPath,['-e',process.argv[2],process.argv[3],process.argv[4]]);process.exitCode=result.code;";
+  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", program, module, leader, leaf, marker], { stdio: "ignore", env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
   let pid;
   t.after(async () => { supervisor.kill("SIGKILL"); if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } await rm(directory, { recursive: true, force: true }); });
   for (let i = 0; i < 300; i++) { try { pid = Number(await readFile(marker, "utf8")); break; } catch {} await pause(10); }
@@ -369,13 +370,13 @@ test("a nested guest timeout notifies its existing stage owner and retires the g
   const { join } = await import("node:path");
   const { setTimeout: pause } = await import("node:timers/promises");
   const directory = await mkdtemp(join(tmpdir(), "mesh-nested-guest-"));
-  const marker = join(directory, "ready");
-  const leaf = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000)`;
+  const marker = join(directory, "ready-quote\"-apostrophe'-中文-\n");
+  const leaf = "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)";
   const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
   const stage = new URL("../validation/stage.mjs", import.meta.url).href;
-  const inner = `import {runCommand} from ${JSON.stringify(guest)};console.log('GROUP='+process.pid);await runCommand(process.execPath,['-e',${JSON.stringify(leaf)}],{timeoutMs:1500});`;
-  const outer = `import {execute} from ${JSON.stringify(stage)};const controller=new AbortController();process.on('SIGTERM',()=>controller.abort());const r=await execute([process.execPath,'--input-type=module','-e',${JSON.stringify(inner)}],{env:process.env,signal:controller.signal});process.exitCode=r.code;`;
-  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", outer], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
+  const inner = "const {runCommand}=await import(process.argv[1]);console.log('GROUP='+process.pid);await runCommand(process.execPath,['-e',process.argv[2],process.argv[3]],{timeoutMs:1500});";
+  const outer = "const {execute}=await import(process.argv[1]);const controller=new AbortController();process.on('SIGTERM',()=>controller.abort());const r=await execute([process.execPath,'--input-type=module','-e',process.argv[2],process.argv[3],process.argv[4],process.argv[5]],{env:process.env,signal:controller.signal});process.exitCode=r.code;";
+  const supervisor = spawn(process.execPath, ["--input-type=module", "-e", outer, stage, inner, guest, leaf, marker], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" } });
   let group, pid;
   supervisor.stdout.on("data", chunk => { const match = chunk.toString().match(/GROUP=(\d+)/); if (match) group = Number(match[1]); });
   t.after(async () => { supervisor.kill("SIGKILL"); if (group) try { process.kill(-group, "SIGKILL"); } catch {} if (pid) try { process.kill(pid, "SIGKILL"); } catch {} await rm(directory, { recursive: true, force: true }); });
