@@ -221,15 +221,11 @@ pub(super) async fn accept_reference_control_page(
     }
 }
 
-/// Role-page publication can invalidate the authenticated page mid-transfer.
-/// Retain the cursor and retry only that precise transport interruption; other
-/// errors remain fixture failures, and operation execution keeps its own budget.
-pub(super) async fn pull_reference_action_control(
-    target: &Arc<Node>,
+fn reference_control_peer(
+    target: &Node,
     source: &Node,
     address: std::net::SocketAddr,
-    group: crate::eventlog::ConversationId,
-) {
+) -> crate::discovery::roster::PeerRecord {
     target.roster.lock().unwrap().update(
         &Announce::new_with_account(
             &source.identity,
@@ -243,6 +239,141 @@ pub(super) async fn pull_reference_action_control(
     let peer = target.routing_peer(&source.user_id()).unwrap();
     assert_eq!(peer.public, source.identity.public());
     assert!(target.certified_sibling(&peer.public));
+    peer
+}
+
+fn reference_control_protocol_ready(
+    target: &Node,
+    source: &Node,
+    kind: Option<AccountGroupOperationKind>,
+) -> bool {
+    let public = source.identity.public();
+    target.certified_sibling(&public)
+        && target
+            .account_group_versions
+            .lock()
+            .unwrap()
+            .get(&source.user_id())
+            .is_some_and(|support| support.public == public)
+        && super::has_account_group_operation_support(target, source, kind)
+}
+
+struct ColdReferenceTrace<'a> {
+    target: &'a Node,
+    previous: Option<Arc<crate::node::account_session::AccountClientTestHook>>,
+    installed: Arc<crate::node::account_session::AccountClientTestHook>,
+    events: Arc<Mutex<std::collections::VecDeque<String>>>,
+}
+impl<'a> ColdReferenceTrace<'a> {
+    fn install(target: &'a Node, source: &Node) -> Self {
+        let events = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let mut owner = target.account_client_test_hook.lock().unwrap();
+        let previous = owner.clone();
+        let installed: Arc<crate::node::account_session::AccountClientTestHook> = Arc::new({
+            let exact = source.identity.public();
+            let previous = previous.clone();
+            let events = events.clone();
+            move |peer, event| {
+                if peer == exact
+                    && (event.starts_with("negotiation_")
+                        || event.starts_with("dial_")
+                        || event.starts_with("session_")
+                        || event.starts_with("page_"))
+                {
+                    let mut events = events.lock().unwrap();
+                    if events.len() == 32 {
+                        events.pop_front();
+                    }
+                    events.push_back(event.chars().take(256).collect());
+                }
+                // An incumbent callback can block: forward only after all local
+                // trace/installation guards have been released.
+                if let Some(previous) = &previous {
+                    previous(peer, event);
+                }
+            }
+        });
+        *owner = Some(installed.clone());
+        drop(owner);
+        Self {
+            target,
+            previous,
+            installed,
+            events,
+        }
+    }
+}
+impl Drop for ColdReferenceTrace<'_> {
+    fn drop(&mut self) {
+        let mut owner = self.target.account_client_test_hook.lock().unwrap();
+        if owner
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &self.installed))
+        {
+            *owner = self.previous.take();
+        }
+        drop(owner);
+        let events = self.events.lock().unwrap().clone();
+        eprintln!("cold reference Control phases: {events:?}");
+    }
+}
+
+// Inbound-only fixtures have no autonomous producer to observe. Drive only the
+// required real Control exchange inside the caller's existing cold setup budget.
+// A genuinely proven exact source is a no-op, including no additional RPC.
+pub(super) async fn prepare_inbound_reference_control_protocol(
+    target: &Arc<Node>,
+    source: &Node,
+    address: std::net::SocketAddr,
+    kind: Option<AccountGroupOperationKind>,
+) {
+    let peer = reference_control_peer(target, source, address);
+    if reference_control_protocol_ready(target, source, kind) {
+        return;
+    }
+    let _trace = ColdReferenceTrace::install(target, source);
+    eprintln!(
+        "cold reference Control begin: source={} kind={kind:?}",
+        source.user_id()
+    );
+    let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::control();
+    let mut interruptions = 0;
+    loop {
+        let result = target.pull_account_documents_page(&peer, &mut cursor).await;
+        let complete = accept_reference_control_page(
+            target,
+            source,
+            &peer,
+            &cursor,
+            result,
+            &mut interruptions,
+        )
+        .await;
+        if complete && reference_control_protocol_ready(target, source, kind) {
+            break;
+        }
+        if complete {
+            // Retain the same cursor and existing short domain cooldown, as in
+            // the warm proof; never turn a no-I/O pending page into a busy loop.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    eprintln!(
+        "cold reference Control complete: source={} kind={kind:?}",
+        source.user_id()
+    );
+}
+
+/// Role-page publication can invalidate the authenticated page mid-transfer.
+/// Retain the cursor and retry only that precise transport interruption; other
+/// errors remain fixture failures, and operation execution keeps its own budget.
+pub(super) async fn pull_reference_action_control(
+    target: &Arc<Node>,
+    source: &Node,
+    address: std::net::SocketAddr,
+    group: crate::eventlog::ConversationId,
+) {
+    let peer = reference_control_peer(target, source, address);
     let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::control();
     let mut interruptions = 0;
     let mut updates = target.subscribe_account_documents();
@@ -1236,6 +1367,138 @@ async fn reference_member_recall_pins_original_author_over_ready_sibling_with_hi
     reference_message_action(true).await;
 }
 
+#[tokio::test]
+async fn cold_inbound_control_proves_capabilities_before_the_warm_role_clock() {
+    use futures_util::FutureExt;
+    use std::{future::Future, panic::AssertUnwindSafe, task::Poll};
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let target = node(&dir.path().join("target"), &account);
+    link(&source, &target);
+    link(&target, &source);
+    let group = source
+        .create_channel("Cold inbound role", vec![])
+        .await
+        .unwrap();
+    source.publish_account_group_access_for(group);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    configure(&source, &dir.path().join("source"), address.port());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let _release = ReleaseActionControlOnDrop(release.clone());
+    let server_ready = Arc::new(tokio::sync::Notify::new());
+    let client_ready = Arc::new(tokio::sync::Notify::new());
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let exact = target.identity.public();
+        let ready = server_ready.clone();
+        let release = release.clone();
+        let requests = requests.clone();
+        move |peer, frame| {
+            let exact = exact.clone();
+            let ready = ready.clone();
+            let release = release.clone();
+            let requests = requests.clone();
+            Box::pin(async move {
+                if peer == exact
+                    && matches!(frame, crate::node::account_sync_wire::AccountHistoryFrame::DocumentsRequest { ref body }
+                        if crate::node::account_documents::wire::DocumentRequest::decode(body)
+                            .is_some_and(|request| request.domain == AccountDocumentDomain::GroupControl))
+                {
+                    requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ready.notify_one();
+                    let _ = release.acquire().await;
+                }
+            })
+        }
+    }));
+    *target.account_document_read_test_hook.lock().unwrap() = Some(Arc::new({
+        let exact = source.identity.public();
+        let ready = client_ready.clone();
+        move |peer, request| {
+            let exact = exact.clone();
+            let ready = ready.clone();
+            Box::pin(async move {
+                if peer == exact && request.domain == AccountDocumentDomain::GroupControl {
+                    ready.notify_one();
+                }
+            })
+        }
+    }));
+    let server = inbound_server(source.clone(), listener);
+    let attempt =
+        AssertUnwindSafe(pull_group_control(&target, &source, address, group)).catch_unwind();
+    tokio::pin!(attempt);
+    let early = super::cold_account_setup(async {
+        tokio::select! {
+            result = &mut attempt => Some(result),
+            _ = async { server_ready.notified().await; client_ready.notified().await; } => None,
+        }
+    })
+    .await
+    .expect("both real authenticated Ready owners must reach cold preparation");
+    let (pending_after_stimulus, outcome) = if let Some(result) = early {
+        (false, result)
+    } else {
+        tokio::time::pause();
+        // Explicitly cross the existing warm 3s budget while the genuine first
+        // response is withheld, still below the unchanged production read clock.
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        let observed = std::future::poll_fn(|cx| Poll::Ready(attempt.as_mut().poll(cx))).await;
+        tokio::time::resume();
+        release.close();
+        match observed {
+            Poll::Pending => (true, attempt.await),
+            Poll::Ready(result) => (false, result),
+        }
+    };
+    release.close();
+    let before = requests.load(std::sync::atomic::Ordering::SeqCst);
+    let repeated = if outcome.is_ok() {
+        Some(
+            AssertUnwindSafe(pull_group_control(&target, &source, address, group))
+                .catch_unwind()
+                .await,
+        )
+    } else {
+        None
+    };
+    let after = requests.load(std::sync::atomic::Ordering::SeqCst);
+    *target.account_document_read_test_hook.lock().unwrap() = None;
+    *source.account_session_test_hook.lock().unwrap() = None;
+    source.runtime_work.close();
+    target.runtime_work.close();
+    server.abort();
+    let _ = server.await;
+    super::cold_account_setup(async {
+        source.runtime_work.drain().await;
+        target.runtime_work.drain().await;
+    })
+    .await
+    .expect("the inbound role fixture must retire its actual work");
+    assert!(
+        repeated.is_some_and(|outcome| outcome.is_ok()),
+        "the genuinely warm source must remain ready"
+    );
+    assert_eq!(
+        before, after,
+        "proven exact capabilities and role need no additional RPC"
+    );
+    assert!(
+        pending_after_stimulus,
+        "the first authenticated response belongs to cold setup, not the warm role clock"
+    );
+    assert!(
+        outcome.is_ok(),
+        "real cold capabilities and the exact signed role must complete after release"
+    );
+    assert_eq!(
+        target.account_group_access(group).unwrap().role,
+        AccountGroupRole::Owner
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn role_bootstrap_returns_when_the_authenticated_source_row_is_durable_before_a_held_tail() {
     use crate::node::{AccountDocumentKey, account_documents::sync::DocumentSyncCursor};
@@ -1389,7 +1652,7 @@ async fn role_bootstrap_refreshes_the_requested_group_after_a_real_owner_transfe
     source.publish_account_group_access(&mut None);
     let server = inbound_server(source.clone(), listener);
     let group = desired.conversation_id;
-    pull_reference_action_control(&target, &source, address, group).await;
+    pull_group_control(&target, &source, address, group).await;
     assert_eq!(
         target.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner

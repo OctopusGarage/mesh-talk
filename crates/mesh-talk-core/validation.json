@@ -106,6 +106,7 @@
             "node::channel::tests::a_rejoined_account_owner_revocation_cannot_reuse_an_older_departure_route",
             "selected_source_receipt_overtakes_another_siblings_held_control_over_noise",
             "selected_source_cold_capability_setup_precedes_role_page_budget",
+            "cold_inbound_control_proves_capabilities_before_the_warm_role_clock",
             "account_fixture_health_snapshot_precedes_real_peer_shutdown",
             "incoming_selected_source_request_overtakes_another_siblings_held_control_over_noise",
             "incoming_request_overtakes_a_naturally_hinted_control_and_repays_its_background_turn",
@@ -147,6 +148,10 @@
         "summary": "Apply one account group role across certified devices while preserving public signer authority and explicit execution availability.",
         "guide": "docs/module-boundaries.md#account-and-device-ownership",
         "invariants": [
+          {
+            "name": "Inbound-only role fixtures establish actual exact-source access and operation capabilities under cold setup before the unchanged warm signed-role and admitted-operation deadlines; already-proven capabilities add no RPC.",
+            "reference": "docs/testing-feedback-loop.md#windows-workspace-archives-and-slow-fixtures"
+          },
           {
             "name": "A legacy leave with a committed physical leg preserves roll-forward after another leg acknowledges cancellation; owner preparation requires each original physical lifetime, acceptance state and certified proof to match as one complete witness.",
             "reference": "docs/module-boundaries.md#account-and-device-ownership"

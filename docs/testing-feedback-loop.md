@@ -1189,6 +1189,16 @@ registered send/search wiring. Delivery timing spans distinguish card preparatio
 from restart fairness and transfer completion. These changes must retain timeout,
 resource-release, identity and immutable-byte assertions.
 
+Inbound-only Control fixtures explicitly drive their already-required real
+exchange under the existing cold setup watchdog before the warm signed-role
+proof. Readiness requires the same full authenticated source's access and
+operation capabilities; an already-proven source adds no RPC. Keep the same
+cursor and precise interruption/backpressure classification during preparation.
+The warm role proof and admitted operation retain their original deadlines.
+A held real SessionReady response plus virtual-clock stimulus distinguishes cold
+preparation from the warm role clock; stage traces retain only bounded body-free
+negotiation, Ready and completion diagnostics.
+
 Control scheduling fixtures bind each authenticated request nonce to its exact
 client task, immutable dispatch attributes and a non-owning lifetime witness.
 Live hold gates reject completed or cancelled tasks; the latest peer-level trace
