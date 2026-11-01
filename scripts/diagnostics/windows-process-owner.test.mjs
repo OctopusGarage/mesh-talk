@@ -357,3 +357,36 @@ test("Windows declared-input receipts bind every executor implementation file", 
     assert.equal(result.code, 0, result.error);
   }
 });
+
+test("unavailable command retains its declared diagnostic log without helper admission", async t => {
+  const { executeWindows } = await import("../validation/windows-process-owner.mjs");
+  const root = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-unavailable-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const logPath = path.join(root, "unavailable.log");
+  const result = await executeWindows([path.join(root, "missing.exe")], {
+    cwd: root, env: process.env, logPath,
+    spawnOwner() { assert.fail("unavailable target admitted helper work"); },
+  });
+  assert.equal(result.code, 1);
+  assert.equal(result.failureKind, "unavailable");
+  assert.equal(result.cleanupUnverified, false);
+  assert.equal(await readFile(logPath, "utf8"), "");
+});
+
+test("Windows runStage publishes structured unavailable evidence with its log", { skip: !windows, timeout: 15000 }, async t => {
+  const { runStage } = await import("../validation/stage.mjs");
+  const { createHash } = await import("node:crypto");
+  const root = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-unavailable-stage-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, ".gitignore"), "target/\n");
+  for (const args of [["init", "-q"], ["add", "."], ["-c", "commit.gpgsign=false", "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture"]]) {
+    assert.equal(spawnSync("git", args, { cwd: root }).status, 0);
+  }
+  const result = await runStage({ root, name: "unavailable-native", command: [path.join(root, "missing.exe")], log() {} });
+  assert.equal(result.code, 1);
+  assert.equal(result.failureKind, "unavailable");
+  assert.equal(result.cleanupUnverified, false);
+  const bytes = await readFile(result.logPath);
+  assert.equal(bytes.length, 0);
+  assert.equal(result.logDigest, createHash("sha256").update(bytes).digest("hex"));
+});

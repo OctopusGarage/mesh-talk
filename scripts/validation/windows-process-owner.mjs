@@ -55,7 +55,20 @@ export async function executeWindows(command, { cwd = process.cwd(), env = proce
   const entries = environmentEntries(env);
   let app;
   try { app = await executable(command[0], cwd, entries); }
-  catch (error) { return { code: 1, exitCode: null, error: error.message, failureKind: ["ENOENT", "EACCES"].includes(error.code) ? "unavailable" : "failed", cleanupUnverified: false }; }
+  catch (error) {
+    const result = { code: 1, exitCode: null, error: error.message, failureKind: ["ENOENT", "EACCES"].includes(error.code) ? "unavailable" : "failed", cleanupUnverified: false };
+    // runStage hashes the declared log for failed launches too. Preserve that
+    // artifact contract even when resolution proves no helper can be admitted.
+    if (logPath) {
+      const output = createLogStream(logPath);
+      await new Promise(resolve => {
+        const failed = failure => { result.error = failure.message; result.failureKind = "failed"; resolve(); };
+        output.on("error", failed);
+        output.end(failure => { if (failure) failed(failure); else resolve(); });
+      });
+    }
+    return result;
+  }
   signal?.throwIfAborted();
   const directory = await mkdtemp(path.join(tmpdir(), "mesh-command-owner-"));
   try {
