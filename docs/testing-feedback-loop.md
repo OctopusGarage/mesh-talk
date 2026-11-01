@@ -34,6 +34,14 @@ inventories with Playwright discovery without launching browsers. Register new
 scenarios in `requiredBrowserPaths` and additional spec files in the owning
 validation contract. Discovery checks do not replace executed browser evidence.
 
+Portable evidence captures bounded browser-side stacks and nested causes before
+browser protocols can discard them; failures also print a bounded cause sample
+in job logs. A secondary-page control proves early error
+and rejection capture, navigation/disposal retention, limits and rejection by the
+shared strict error gate; the primary page still enters the real React app.
+Captured causes are diagnostics: a recovered React error still fails acceptance,
+and richer evidence alone does not establish a product fix.
+
 PR Chromium portable core acceptance reuses the complete full-suite execution on
 each desktop OS. `scripts/evals/chromium-evidence.mjs` extracts the authoritative
 core scenario paths from each of four shards, copies and validates screenshots,
@@ -88,14 +96,15 @@ through `scripts/evals/portable-runner.mjs`. Scheduled/manual extended runs add
 Chromium and Firefox extended inventories. Firefox uses the same complete evidence
 validator and existing job budget in both modes; browser-specific core regressions
 must be detected before source acceptance, rather than first by the next scheduled run.
-Windows uses four sequential Playwright shards with separate browser/dev-server
-lifetimes; other platforms use one. Each shard writes a unique nested evidence
+Windows derives sequential process count from the actual inventory, retaining at
+least four processes and at most 20 scenarios per process; other platforms use one.
+Browser/dev-server lifetimes remain separate. Each shard writes a unique nested evidence
 root and must exit successfully. The runner merges every outcome and validates
 the unchanged full scenario inventory before the existing screenshot/trace
 validator runs. Missing, duplicate, skipped, flaky or failed cases remain failures.
-The current 79-case core and 80-case extended inventories keep each Windows
-process to at most 20 scenarios; discovery regressions verify this bound and the
-exact once-only union. Two 38-case processes exceeded the 20-minute hosted job
+The current 80-case core uses four Windows processes and the 81-case extended
+inventory uses five; discovery regressions verify the per-process bound and exact
+once-only union. The full Chromium workflow retains its separate four-shard contract. Two 38-case processes exceeded the 20-minute hosted job
 deadline after 75 of 76 scenarios passed, with later page loads slowing down.
 Four processes reduce that accumulation without increasing the job deadline,
 retrying failed scenarios or establishing a product latency guarantee.

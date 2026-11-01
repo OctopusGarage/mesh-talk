@@ -445,6 +445,8 @@
     {
       "id": "portable-browser-reporting",
       "paths": [
+        "frontend/e2e/browser-error-evidence.spec.ts",
+        "frontend/e2e/helpers/browser-error-details.ts",
         "frontend/e2e/portable-core.spec.ts",
         "frontend/e2e/automatic-delivery.spec.ts",
         "frontend/e2e/media-scroll.spec.ts",
@@ -471,7 +473,7 @@
         "scripts/diagnostics/trace-evidence.test.mjs"
       ],
       "escalation": [
-        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete authoritative core inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Dedicated WebKit and Firefox core acceptance are required on ordinary candidates; scheduled/manual extended Chromium and Firefox retain complete extended inventories. Fixture navigation must observe an actual boundary using browser-supported input rather than assume a wheel delta equals a scroll offset; retain genuine virtualized unmount, cache reuse and geometry assertions. Standalone Windows portable-runner batches remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
+        "Full Chromium shards on Linux, macOS and Windows produce portable core evidence once, with exact four-shard source/run/attempt/platform identity and complete authoritative core inventory. Revalidate PNGs, traces and scenario identity on collection, rejecting missing, duplicate, skipped or flaky cases. Dedicated WebKit and Firefox core acceptance are required on ordinary candidates; scheduled/manual extended Chromium and Firefox retain complete extended inventories. Fixture navigation must observe an actual boundary using browser-supported input rather than assume a wheel delta equals a scroll offset; retain genuine virtualized unmount, cache reuse and geometry assertions. Browser-side error evidence preserves bounded stacks and nested causes before protocol serialization, across navigation and disposal, while the unchanged strict error gate rejects uncaught/recovered errors. Validate early error/rejection, cycle/depth/string/event limits and the real-browser negative gate control. Standalone Windows portable-runner batches derive from complete inventory and remain at most 20 scenarios; run actual hosted Windows full shards to establish timing and acceptance. See docs/testing-feedback-loop.md."
       ]
     },
     {
