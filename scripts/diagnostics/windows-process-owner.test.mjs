@@ -390,3 +390,12 @@ test("Windows runStage publishes structured unavailable evidence with its log", 
   assert.equal(bytes.length, 0);
   assert.equal(result.logDigest, createHash("sha256").update(bytes).digest("hex"));
 });
+
+test("Windows Git launcher completion is not a runnable-descendant failure", { skip: !windows, timeout: 10000 }, async () => {
+  const output = [];
+  const result = await run(["git", "--version"], { onOutput(chunk) { output.push(chunk); } });
+  assert.equal(result.code, 0, result.error);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.cleanupUnverified, false);
+  assert.match(Buffer.concat(output).toString(), /^git version /u);
+});
