@@ -323,6 +323,10 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     let b_retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let recovery_changed = Arc::new(Notify::new());
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    // Independent bounded owner rings keep frequent requester maintenance from
+    // evicting the executor's last stalled phase. Snapshot before recovery.
+    let executor_owner_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let requester_owner_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let clock = std::time::Instant::now();
     let operation = Arc::new(Mutex::new(None));
     let pages = Arc::new(Mutex::new(ControlTestPages::default()));
@@ -345,7 +349,15 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let trace = trace.clone();
         let peer = reference.identity.public();
         let terminal_published = terminal_published.clone();
+        let owner_trace = executor_owner_trace.clone();
+        let admitted = admitted.clone();
         move |observed, phase| {
+            if admitted.load(std::sync::atomic::Ordering::Acquire)
+                && (phase.starts_with("operation_owner ")
+                    || phase.starts_with("operation_publication_owner "))
+            {
+                record_b_trace(&owner_trace, clock, "B_owner", phase.clone());
+            }
             if phase.starts_with("operation_local_published") {
                 if let Some(source) = source.upgrade() {
                     let snapshot = result_snapshot(&source, group_b, *operation.lock().unwrap());
@@ -439,7 +451,14 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let operation = operation.clone();
         let b_readiness = b_readiness.clone();
         let demand_dispatch = demand_dispatch.clone();
+        let owner_trace = requester_owner_trace.clone();
         move |peer, phase| {
+            if admitted.load(std::sync::atomic::Ordering::Acquire)
+                && (phase.starts_with("operation_owner ")
+                    || phase.starts_with("operation_publication_owner "))
+            {
+                record_b_trace(&owner_trace, clock, "requester_owner", phase.clone());
+            }
             if peer == peer_a || peer == peer_b {
                 pages.lock().unwrap().observe(&phase);
             }
@@ -872,6 +891,8 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     assert_eq!(accepted.executions.len(), 1);
     assert_eq!(accepted.executions[0].device_id, b.user_id());
     let receipt = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut executor_committed_observed = false;
+        let mut requester_committed_observed = false;
         loop {
             let local = reference
                 .account_group_operation_status(&account.account_id(), id)
@@ -879,6 +900,32 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             let remote = b
                 .account_group_operation_status(&account.account_id(), id)
                 .unwrap();
+            if !executor_committed_observed
+                && remote
+                    .as_ref()
+                    .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)
+            {
+                executor_committed_observed = true;
+                record_b_trace(
+                    &executor_owner_trace,
+                    clock,
+                    "fixture",
+                    "B_executor_committed_first_observed".into(),
+                );
+            }
+            if !requester_committed_observed
+                && local
+                    .as_ref()
+                    .is_some_and(|status| status.phase == AccountGroupOperationPhase::Committed)
+            {
+                requester_committed_observed = true;
+                record_b_trace(
+                    &requester_owner_trace,
+                    clock,
+                    "fixture",
+                    "B_requester_committed_first_observed".into(),
+                );
+            }
             if let (Some(local), Some(remote)) = (local, remote)
                 && local.phase == AccountGroupOperationPhase::Committed
                 && remote.phase == AccountGroupOperationPhase::Committed
@@ -912,6 +959,14 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             "B_deadline_expired"
         }
         .into(),
+    );
+    // Recovery can make a late terminal look timely. Preserve each owner's
+    // bounded body-free phase history at the original receipt boundary.
+    eprintln!(
+        "queued_owner_at_receipt_deadline gate_terminal={gate_terminal} delay_retired_request={delay_retired_request} receipt_ok={} executor={:?} requester={:?}",
+        receipt.is_ok(),
+        executor_owner_trace.lock().unwrap().clone(),
+        requester_owner_trace.lock().unwrap().clone(),
     );
     release_intent.close();
     intent_entered.close();
