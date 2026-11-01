@@ -66,6 +66,8 @@ returning the leader's exit status or releasing resources. This accommodates
 compiler auxiliary processes without process-name exceptions or breakaway.
 Record forced retirement separately from command status; it never substitutes
 for selected test counts, business assertions or complete output evidence.
+A Windows job-termination request also closes an empty job; the recorded flag
+does not by itself indicate leaked work.
 Job retirement, output drain and error recovery share one bounded cleanup budget
 inside the parent's missing-receipt backstop. Cancelled or unverifiably retired work
 cannot admit another suite, fallback build or transport operation, or create a
