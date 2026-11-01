@@ -470,6 +470,8 @@ for (const { editWhileQueued, managed } of [{ editWhileQueued: false }, { editWh
     configureCLI(f, "import test from 'node:test'; test('fixture', () => {});");
     const { readFile, mkdir, rm, access } = await import("node:fs/promises");
     const { createHash } = await import("node:crypto");
+    // This POSIX-only fixture intentionally excludes the Windows adapter: its
+    // native dependencies must load at the Windows execution boundary only.
     for (const name of ["stage.mjs", "stage-inputs.mjs"])
       f.write(`scripts/validation/${name}`, await readFile(new URL(`../validation/${name}`, import.meta.url), "utf8"));
     const manifest = "scripts/validation/validation.json";

@@ -8,7 +8,6 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { executeWindows } from "./windows-process-owner.mjs";
 import { inputGroup, inputIdentity, frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -155,7 +154,10 @@ function supervisorAncestor(owner) {
 }
 export async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream, onOutput = chunk => process.stdout.write(chunk), detached = true, notifyOwnerOnAbort = false }) {
   signal?.throwIfAborted();
-  if (process.platform === "win32") return executeWindows(executableCommand(command, env), { cwd, env, logPath, signal, createLogStream, onOutput });
+  if (process.platform === "win32") {
+    const { executeWindows } = await import("./windows-process-owner.mjs");
+    return executeWindows(executableCommand(command, env), { cwd, env, logPath, signal, createLogStream, onOutput });
+  }
   if (process.platform !== "win32" && !detached && !env.MESH_VALIDATION_PROCESS_GROUP_OWNER)
     throw Error("Non-detached execution requires an existing managed process-group owner");
   return new Promise(resolve => {
