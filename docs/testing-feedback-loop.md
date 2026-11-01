@@ -133,6 +133,13 @@ failure or cancellation cannot reuse an earlier success. Readiness observed befo
 channel creation does not cover that new work. Hold a real authenticated inventory
 response to verify that setup remains pending until release; accept authenticated
 superseding heads so an obsolete captured version cannot strand the fixture.
+The Optional bootstrap must also be currently settled in both directions: a new
+pass clears that observation, and only full UpToDate completion restores it. A
+completed Custody page can precede unfinished DmRecall work and its backoff in the
+same lane. Hold a real authenticated DmRecall response after a prior empty baseline
+to prove the earlier setup predicates cannot admit the observation window. The
+channel-specific heads establish post-create freshness; do not require an extra
+periodic bootstrap pass or manually warm the data path.
 Aggregate document status includes independent lanes and is not this setup proof.
 After actual startup, a held Directory/DeviceHostname update must allow setup and
 fresh message/custody progress without releasing the unrelated handler; retire the
@@ -141,6 +148,11 @@ the source-authored sibling import.
 Keep the existing custody observation budget, real network exchange, offline-holder
 and restart assertions. This setup boundary does not establish a production latency
 guarantee or a dependency between independent mandatory/optional worker lanes.
+
+Forwarding fixtures await the first nonempty authenticated export from the real
+background publisher while peer reads remain held. Durable admission does not
+await publication. Assert the exact first-leg contents immediately on that first
+export; polling until the expected contents appear could conceal an invalid leg.
 
 Keep intentional blob corruption separate from automatic custody propagation.
 A real sibling read during a missing-blob interval can change its protocol retry
