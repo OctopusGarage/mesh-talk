@@ -1986,6 +1986,255 @@ mod channel_metadata_wait_tests {
     }
 
     #[tokio::test]
+    async fn local_channel_directory_progresses_while_maintenance_is_held() {
+        use crate::{
+            channel::ChannelMeta,
+            discovery::{Announce, DiscoveryVisibility},
+            eventlog::{Event, EventKind},
+            node::{AccountDocumentKey, SyncCategory, account_devices::AccountDevice},
+        };
+        use futures_util::FutureExt;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct Held(Arc<AtomicBool>);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let account = Account::generate();
+        let source_identity = DeviceIdentity::generate();
+        let target_identity = DeviceIdentity::generate();
+        let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_proof = Announce::new_with_account(
+            &source_identity,
+            &account,
+            "Source",
+            source_listener.local_addr().unwrap().port(),
+        );
+        let target_proof = Announce::new_with_account(
+            &target_identity,
+            &account,
+            "Target",
+            target_listener.local_addr().unwrap().port(),
+        );
+        let source_path = directory.path().join("source");
+        let target_path = directory.path().join("target");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::create_dir_all(&target_path).unwrap();
+        let source = super::super::test_support::node_with_files(
+            &source_path,
+            source_identity,
+            Account::from_secret_bytes(account.secret_bytes()),
+            &target_proof,
+        )
+        .0;
+        let target = super::super::test_support::node_with_files(
+            &target_path,
+            target_identity,
+            Account::from_secret_bytes(account.secret_bytes()),
+            &source_proof,
+        )
+        .0;
+        for (node, peer, path, proof) in [
+            (&source, &target, &source_path, &source_proof),
+            (&target, &source, &target_path, &target_proof),
+        ] {
+            node.account_devices
+                .lock()
+                .unwrap()
+                .insert(AccountDevice {
+                    public: peer.identity.public(),
+                    certificate: account.certify(&peer.identity.public().ed25519_pub),
+                })
+                .unwrap();
+            node.configure_privacy(path, "pw", proof, Arc::new(DiscoveryVisibility::default()))
+                .unwrap();
+            for category in [
+                SyncCategory::History,
+                SyncCategory::Attachments,
+                SyncCategory::Appearance,
+                SyncCategory::Contacts,
+                SyncCategory::Profile,
+            ] {
+                node.set_device_sync_category(category, false).unwrap();
+            }
+        }
+        let channel = crate::channel::new_channel_id();
+        let key = AccountDocumentKey::GroupInventory {
+            channel: hex::encode(channel.as_bytes()),
+            source_device: source.user_id(),
+        };
+        let active = Arc::new(AtomicBool::new(false));
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let held = active.clone();
+        // This is an owned maintenance-future gate, not a simulated Capability
+        // RPC. Its lifetime cannot expire and accidentally rescue local work.
+        let maintenance = async move {
+            held.store(true, Ordering::Release);
+            let _held = Held(held);
+            let _ = entered.send(());
+            std::future::pending::<()>().await;
+        };
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(source.clone().run_channel_recovery_with_maintenance(
+            Arc::new(tokio::sync::Notify::new()),
+            false,
+            maintenance,
+        ));
+        let serving = source.clone();
+        tasks.spawn(async move { serving.accept_connections(source_listener).await });
+        tasks.spawn(source.clone().run_account_history_loop());
+        tasks.spawn(source.clone().run_account_wake_loop());
+        tasks.spawn(target.clone().run_accept_loop(target_listener));
+        let turns = Arc::new(AtomicUsize::new(0));
+        let first_pending = Arc::new(AtomicBool::new(false));
+        let observed = std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(Duration::from_secs(30), entry)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(active.load(Ordering::Acquire));
+            let event = Event::new(
+                &source.identity,
+                channel,
+                1,
+                vec![],
+                1,
+                1,
+                EventKind::MembershipChange,
+                ChannelMeta {
+                    name: "new local inventory".into(),
+                    members: vec![source.identity.public()],
+                    epoch: 0,
+                    owner: source.user_id(),
+                }
+                .encode(),
+            );
+            assert!(event.verify_signature() && event.verify_integrity());
+            source.log.lock().unwrap().append_durable(event).unwrap();
+            assert!(
+                source
+                    .channel_checkpoints
+                    .source_binding(channel)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(target.account_document_meta(&key).is_none());
+            let weak = Arc::downgrade(&source);
+            let counted = turns.clone();
+            let pending = first_pending.clone();
+            *source.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+                if phase == "channel_recovery_plaintext_done"
+                    && counted.fetch_add(1, Ordering::Relaxed) == 0
+                {
+                    let node = weak.upgrade().unwrap();
+                    let unfinished = match node.channel_checkpoints.source_binding(channel) {
+                        Ok(None) | Err(LogError::StaleCursor) => true,
+                        Ok(Some(_)) => false,
+                        Err(_) => panic!("first local turn failed outside bounded preparation"),
+                    };
+                    pending.store(unfinished, Ordering::Relaxed);
+                }
+            }));
+            // One retained-input demand; subsequent turns must come from the
+            // actual bounded owners. No manual projection/history driver runs.
+            source.channel_recovery_notify.notify_one();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                let mut required = None;
+                loop {
+                    if required.is_none() {
+                        required = source.account_document_meta(&key);
+                    }
+                    let imported = required.as_ref().is_some_and(|head| {
+                        target
+                            .account_document(&key)
+                            .unwrap()
+                            .is_some_and(|document| {
+                                !document.meta.tombstone
+                                    && document.meta.account_public == account.public().ed25519_pub
+                                    && &document.meta == head
+                            })
+                    });
+                    let presented = match target.list_channels() {
+                        Ok(rows) => rows.iter().any(|row| {
+                            row.id == channel && row.name == "new local inventory" && row.archived
+                        }),
+                        Err(NodeError::Log(LogError::StaleCursor)) => false,
+                        Err(_) => {
+                            panic!("Directory presentation failed outside bounded preparation")
+                        }
+                    };
+                    if imported && presented {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect(
+                "new signed Directory state must progress while account maintenance remains held",
+            );
+            assert!(
+                active.load(Ordering::Acquire),
+                "maintenance must still be held at publication"
+            );
+            assert!(
+                first_pending.load(Ordering::Relaxed),
+                "one local turn must not have completed the cold source"
+            );
+            assert!(
+                turns.load(Ordering::Relaxed) > 1,
+                "local preparation must resume across bounded turns"
+            );
+        })
+        .catch_unwind()
+        .await;
+        eprintln!(
+            "maintenance isolation local_turns={} first_pending={} held={} source_head={} target_head={}",
+            turns.load(Ordering::Relaxed),
+            first_pending.load(Ordering::Relaxed),
+            active.load(Ordering::Acquire),
+            source.account_document_meta(&key).is_some(),
+            target.account_document_meta(&key).is_some(),
+        );
+        *source.account_client_test_hook.lock().unwrap() = None;
+        for node in [&source, &target] {
+            node.runtime_work.close();
+            node.sessions.clear();
+        }
+        tasks.abort_all();
+        let worker_failures = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut failed = 0;
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result
+                    && !error.is_cancelled()
+                {
+                    failed += 1;
+                }
+            }
+            for node in [&source, &target] {
+                node.runtime_work.drain().await;
+            }
+            failed
+        })
+        .await
+        .expect("all composition fixture owners must join");
+        assert_eq!(
+            worker_failures, 0,
+            "a worker failure must not masquerade as blocked Directory progress"
+        );
+        assert!(
+            !active.load(Ordering::Acquire),
+            "parent cancellation must drop held maintenance"
+        );
+        if let Err(error) = observed {
+            std::panic::resume_unwind(error);
+        }
+    }
+
+    #[tokio::test]
     async fn public_send_resumes_a_source_change_before_metadata_installation() {
         let directory = tempfile::tempdir().unwrap();
         let node = node(directory.path());

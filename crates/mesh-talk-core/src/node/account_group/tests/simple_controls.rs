@@ -1,6 +1,7 @@
 //! Account controls must use the real public producer and durable operation owner.
 use super::*;
 use crate::{channel::HistoryPolicy, eventlog::ConversationId, node::AccountGroupOperation};
+use futures_util::FutureExt;
 
 type ControlFixtureTrace =
     Arc<std::sync::Mutex<std::collections::VecDeque<(u128, &'static str, String)>>>;
@@ -326,34 +327,22 @@ async fn assert_reference_controls(modern: bool) {
         trace_started,
     );
     owner.publish_account_group_access(&mut None);
-    pull_group_control(&reference, &owner, addresses[0], group).await;
-    // Establish the real reverse capability exchange before measuring an action.
-    // A reference may have no physical source head, so this page need not import one.
-    let peer = owner.routing_peer(&reference.user_id()).unwrap();
-    owner
-        .pull_account_documents_page(
-            &peer,
-            &mut crate::node::account_documents::sync::DocumentSyncCursor::default(),
-        )
-        .await
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !owner
-            .group_operation_versions
-            .lock()
-            .unwrap()
-            .contains_key(&reference.user_id())
-            || !reference
-                .group_operation_versions
-                .lock()
-                .unwrap()
-                .contains_key(&owner.user_id())
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("bidirectional operation capability is a fixture prerequisite");
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
+            [(&owner, &reference), (&reference, &owner)]
+                .into_iter()
+                .all(|(node, peer)| {
+                    [
+                        AccountGroupOperationKind::HistoryPolicy,
+                        AccountGroupOperationKind::Dissolve,
+                    ]
+                    .into_iter()
+                    .all(|kind| super::has_account_group_operation_support(node, peer, Some(kind)))
+                })
+        }),
+        pull_group_control(&reference, &owner, addresses[0], group),
+    )
+    .await;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Owner
@@ -551,76 +540,92 @@ async fn assert_private_publication_precedes_slow_fanout(operation: AccountGroup
     let mut tasks = tokio::task::JoinSet::new();
     let source = owner.clone();
     tasks.spawn(async move { source.maintain_account_group_operations().await });
-    let (_held_connection, _) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), stalled_listener.accept())
+    let observation = std::panic::AssertUnwindSafe(async {
+        let (_held_connection, _) = super::cold_account_setup(stalled_listener.accept())
             .await
             .expect("real fanout must reach the stalled member")
             .unwrap();
-    assert!(
-        tasks.try_join_next().is_none(),
-        "fanout must remain in progress"
-    );
-    let status = owner
-        .account_group_operation_status(&account.account_id(), id)
-        .unwrap()
+        assert!(
+            tasks.try_join_next().is_none(),
+            "fanout must remain in progress"
+        );
+        let status = owner
+            .account_group_operation_status(&account.account_id(), id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
+        let published = owner
+            .account_document(&crate::node::AccountDocumentKey::GroupOperation {
+                channel: hex::encode(group.as_bytes()),
+                source_device: owner.user_id(),
+            })
+            .unwrap()
+            .unwrap();
+        let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
+            published.payload(),
+            &account.public().ed25519_pub,
+        )
         .unwrap();
-    assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
-    let published = owner
-        .account_document(&crate::node::AccountDocumentKey::GroupOperation {
-            channel: hex::encode(group.as_bytes()),
-            source_device: owner.user_id(),
-        })
-        .unwrap()
-        .unwrap();
-    let frame = crate::node::account_group::operations::wire::OperationFrame::decode(
-        published.payload(),
-        &account.public().ed25519_pub,
-    )
-    .unwrap();
-    assert!(
-        frame
-            .projection
-            .results
-            .iter()
-            .any(|result| result.status == status),
-        "the exact durable result must be published before slow fanout"
-    );
-    let published = owner
-        .account_document(&crate::node::AccountDocumentKey::GroupInventory {
-            channel: hex::encode(group.as_bytes()),
-            source_device: owner.user_id(),
-        })
-        .unwrap()
-        .unwrap();
-    let inventory: crate::node::GroupInventoryReference =
-        serde_json::from_slice(published.payload()).unwrap();
-    match operation {
-        AccountGroupOperation::Rename { name } => assert_eq!(
-            inventory.name, name,
-            "canonical renamed inventory must precede slow fanout"
-        ),
-        AccountGroupOperation::SetHistoryPolicy { policy } => assert_eq!(
-            inventory.observed_history_policy(),
-            Some(policy),
-            "canonical policy inventory must precede slow fanout"
-        ),
-        AccountGroupOperation::Dissolve => {
-            assert!(
-                inventory.dissolved,
-                "canonical dissolved inventory must precede slow fanout"
-            );
-            let head = owner
-                .group_control_heads(group)
-                .into_iter()
-                .find(|head| head.proof.public() == owner.identity.public())
-                .unwrap();
-            assert_eq!(
-                head.access.source.role,
-                AccountGroupRole::Dissolved,
-                "canonical source authority must precede slow fanout"
-            );
+        assert!(
+            frame
+                .projection
+                .results
+                .iter()
+                .any(|result| result.status == status),
+            "the exact durable result must be published before slow fanout"
+        );
+        let published = owner
+            .account_document(&crate::node::AccountDocumentKey::GroupInventory {
+                channel: hex::encode(group.as_bytes()),
+                source_device: owner.user_id(),
+            })
+            .unwrap()
+            .unwrap();
+        let inventory: crate::node::GroupInventoryReference =
+            serde_json::from_slice(published.payload()).unwrap();
+        match operation {
+            AccountGroupOperation::Rename { name } => assert_eq!(
+                inventory.name, name,
+                "canonical renamed inventory must precede slow fanout"
+            ),
+            AccountGroupOperation::SetHistoryPolicy { policy } => assert_eq!(
+                inventory.observed_history_policy(),
+                Some(policy),
+                "canonical policy inventory must precede slow fanout"
+            ),
+            AccountGroupOperation::Dissolve => {
+                assert!(
+                    inventory.dissolved,
+                    "canonical dissolved inventory must precede slow fanout"
+                );
+                let head = owner
+                    .group_control_heads(group)
+                    .into_iter()
+                    .find(|head| head.proof.public() == owner.identity.public())
+                    .unwrap();
+                assert_eq!(
+                    head.access.source.role,
+                    AccountGroupRole::Dissolved,
+                    "canonical source authority must precede slow fanout"
+                );
+            }
+            _ => unreachable!(),
         }
-        _ => unreachable!(),
+    })
+    .catch_unwind()
+    .await;
+    owner.runtime_work.close();
+    owner.sessions.clear();
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        owner.runtime_work.drain(),
+    )
+    .await
+    .expect("the publication fixture must drain its actual admitted work");
+    if let Err(panic) = observation {
+        std::panic::resume_unwind(panic);
     }
 }
 
@@ -783,6 +788,15 @@ async fn an_awaiting_control_cannot_use_transferred_owner_authority() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consecutive_account_controls_progress_while_public_fanout_is_stalled() {
+    consecutive_control_fanout_fixture(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn consecutive_controls_establish_a_cold_public_hold_before_measuring_progress() {
+    consecutive_control_fanout_fixture(true).await;
+}
+
+async fn consecutive_control_fanout_fixture(delayed_responder: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let owner = node(&dir.path().join("owner"), &account);
@@ -832,134 +846,222 @@ async fn consecutive_account_controls_progress_while_public_fanout_is_stalled() 
         &owner.user_id(),
     );
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let (arrived, stalled_response) = tokio::sync::oneshot::channel();
+    let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct StopOnDrop(
+        Arc<tokio::sync::Semaphore>,
+        Arc<std::sync::atomic::AtomicBool>,
+    );
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.1.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.0.close();
+        }
+    }
+    let _stop_on_drop = StopOnDrop(release.clone(), stopping.clone());
+    let (arrived, stalled_response) = tokio::sync::oneshot::channel::<std::sync::Weak<()>>();
     let arrived = Arc::new(Mutex::new(Some(arrived)));
+    let (begin_response, response_may_start) = tokio::sync::oneshot::channel();
+    let responder_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(owner.clone().run_accept_loop(owner_listener));
     let peer = external.clone();
     let expected = owner.identity.public();
+    let peer_release = release.clone();
+    let peer_stopping = stopping.clone();
+    let started = responder_started.clone();
     tasks.spawn(async move {
+        if delayed_responder {
+            response_may_start.await.expect("the first committed effect must start the controlled responder");
+            // A genuine cold Noise/public request begins after the old 2s
+            // arrival window, without changing either source progress budget.
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        }
+        started.store(true, std::sync::atomic::Ordering::SeqCst);
         let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 incoming = external_listener.accept() => {
                     let (stream, _) = incoming.unwrap();
                     let peer = peer.clone();
-                    let release = release.clone();
+                    let release = peer_release.clone();
+                    let stopping = peer_stopping.clone();
                     let arrived = arrived.clone();
                     let expected = expected.clone();
-                    connections.spawn(async move {
-                        let mut channel = peer.privacy_accept(stream).await.unwrap();
+                    connections.spawn(Box::pin(async move {
+                        let mut channel = match peer.privacy_accept(stream).await {
+                            Ok(channel) => channel,
+                            Err(_) if stopping.load(std::sync::atomic::Ordering::SeqCst) => return,
+                            Err(error) => panic!("public fixture authentication failed before cleanup: {error}"),
+                        };
                         assert_eq!(channel.peer_identity(), &expected);
-                        let first = channel.recv().await.unwrap();
+                        let first = match channel.recv().await {
+                            Ok(first) => first,
+                            Err(_) if stopping.load(std::sync::atomic::Ordering::SeqCst) => return,
+                            Err(error) => panic!("public fixture request closed before cleanup: {error}"),
+                        };
                         if let Some(request) = crate::node::channel_account_bootstrap::AccountGroupRequest::decode(&first) {
-                            // Reuse the real capability owner; only public sync waits.
                             peer.serve_account_group_request(&mut channel, request).await;
                         } else {
                             assert!(crate::node::session::requests_response(&first),
                                 "the held authenticated stream must be a public sync response");
-                            if let Some(signal) = arrived.lock().unwrap().take() { let _ = signal.send(()); }
-                            let _held = release.acquire().await.unwrap();
+                            let live = Arc::new(());
+                            let signal = arrived.lock().unwrap().take();
+                            if let Some(signal) = signal { let _ = signal.send(Arc::downgrade(&live)); }
+                            tokio::select! {
+                                _ = release.acquire() => {}
+                                closed = channel.recv() => {
+                                    if !stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                                        let outcome = if closed.is_ok() { "unexpected frame" } else { "peer closed" };
+                                        panic!("the held public response retired before fixture cleanup: {outcome}");
+                                    }
+                                }
+                            }
+                            drop(live);
                         }
-                    });
+                    }));
                 }
-                _ = connections.join_next(), if !connections.is_empty() => {}
+                joined = connections.join_next(), if !connections.is_empty() => {
+                    joined.unwrap().expect("public response fixture connection must not panic");
+                }
             }
         }
     });
-    let first = owner
-        .new_account_group_operation_id(&account.account_id())
-        .unwrap();
-    owner
-        .submit_account_group_operation(
-            &account.account_id(),
-            first,
-            group,
-            AccountGroupOperation::Rename {
-                name: "First durable name".into(),
-            },
-        )
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(8), async {
-        while owner
-            .account_group_operation_status(&account.account_id(), first)
-            .unwrap()
-            .unwrap()
-            .phase
-            != AccountGroupOperationPhase::Committed
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the first source effect must be durably committed");
-    tokio::time::timeout(std::time::Duration::from_secs(2), stalled_response)
-        .await
-        .expect("a real authenticated public sync response must be held")
-        .unwrap();
-    let second = owner
-        .new_account_group_operation_id(&account.account_id())
-        .unwrap();
-    owner
-        .submit_account_group_operation(
-            &account.account_id(),
-            second,
-            group,
-            AccountGroupOperation::Rename {
-                name: "Second durable name".into(),
-            },
-        )
-        .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(8), async {
-        while owner
-            .account_group_operation_status(&account.account_id(), second)
-            .unwrap()
-            .unwrap()
-            .phase
-            != AccountGroupOperationPhase::Committed
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("a held public fanout must not block the next mandatory account control");
-    let effects: Vec<_> = owner
-        .log
-        .lock()
-        .unwrap()
-        .events(&group)
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.kind == EventKind::ChannelRename)
-        .collect();
-    assert_eq!(effects.len(), 2);
-    for (id, name) in [
-        (first, "First durable name"),
-        (second, "Second durable name"),
-    ] {
-        let status = owner
-            .account_group_operation_status(&account.account_id(), id)
-            .unwrap()
+    let observation = std::panic::AssertUnwindSafe(async {
+        let first = owner
+            .new_account_group_operation_id(&account.account_id())
             .unwrap();
-        assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
-        let event = effects
-            .iter()
-            .find(|event| event.ciphertext == name.as_bytes())
-            .unwrap();
-        assert_eq!(status.committed_events, vec![event.id]);
-        assert!(event.verify_integrity() && event.verify_signature());
-        assert_eq!(
-            event.author.ed25519_pub(),
-            &owner.identity.public().ed25519_pub
-        );
-    }
-    assert!(
         owner
-            .account_group_projection(group)
+            .submit_account_group_operation(
+                &account.account_id(),
+                first,
+                group,
+                AccountGroupOperation::Rename {
+                    name: "First durable name".into(),
+                },
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while owner
+                .account_group_operation_status(&account.account_id(), first)
+                .unwrap()
+                .unwrap()
+                .phase
+                != AccountGroupOperationPhase::Committed
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the first source effect must be durably committed");
+        if delayed_responder {
+            begin_response
+                .send(())
+                .expect("the delayed responder owner must remain live");
+        }
+        let held_stream = super::cold_account_setup(stalled_response)
+            .await
+            .expect("a real authenticated public sync response must be held")
+            .unwrap();
+        assert!(
+            !delayed_responder || responder_started.load(std::sync::atomic::Ordering::SeqCst),
+            "the controlled late responder must finish its actual startup before the public hold"
+        );
+        assert!(
+            held_stream.upgrade().is_some(),
+            "the first real public response must still be held before second admission"
+        );
+        let second = owner
+            .new_account_group_operation_id(&account.account_id())
+            .unwrap();
+        owner
+            .submit_account_group_operation(
+                &account.account_id(),
+                second,
+                group,
+                AccountGroupOperation::Rename {
+                    name: "Second durable name".into(),
+                },
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while owner
+                .account_group_operation_status(&account.account_id(), second)
+                .unwrap()
+                .unwrap()
+                .phase
+                != AccountGroupOperationPhase::Committed
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a held public fanout must not block the next mandatory account control");
+        assert!(
+            held_stream.upgrade().is_some(),
+            "the same real public response must remain held until the second committed effect"
+        );
+        let effects: Vec<_> = owner
+            .log
+            .lock()
             .unwrap()
-            .authority
-            .current_event()
-            .is_none(),
-        "public fanout isolation cannot manufacture a modern account grant"
-    );
+            .events(&group)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::ChannelRename)
+            .collect();
+        assert_eq!(effects.len(), 2);
+        for (id, name) in [
+            (first, "First durable name"),
+            (second, "Second durable name"),
+        ] {
+            let status = owner
+                .account_group_operation_status(&account.account_id(), id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.phase, AccountGroupOperationPhase::Committed);
+            let event = effects
+                .iter()
+                .find(|event| event.ciphertext == name.as_bytes())
+                .unwrap();
+            assert_eq!(status.committed_events, vec![event.id]);
+            assert!(event.verify_integrity() && event.verify_signature());
+            assert_eq!(
+                event.author.ed25519_pub(),
+                &owner.identity.public().ed25519_pub
+            );
+        }
+        // Committed is durable control completion; the final strict authority
+        // read independently requires this selected channel's current metadata.
+        owner.await_channel_metadata(group).await.unwrap();
+        assert!(
+            owner
+                .account_group_projection(group)
+                .unwrap()
+                .authority
+                .current_event()
+                .is_none(),
+            "public fanout isolation cannot manufacture a modern account grant"
+        );
+    })
+    .catch_unwind()
+    .await;
+    stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    release.close();
+    for current in [&owner, &external] {
+        current.runtime_work.close();
+        current.sessions.clear();
+    }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    for current in [&owner, &external] {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            current.runtime_work.drain(),
+        )
+        .await
+        .expect("the public hold fixture must drain its actual admitted work");
+    }
+    if let Err(panic) = observation {
+        std::panic::resume_unwind(panic);
+    }
 }

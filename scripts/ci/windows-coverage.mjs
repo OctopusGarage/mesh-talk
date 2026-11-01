@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const versions = Object.freeze({ nextest: "0.9.148", llvmCov: "0.8.7" });
+export const windowsPartitions = Object.freeze([1, 2, 3, 4]);
 const buildArgs = ["--workspace", "--locked"];
 const nextestArgs = ["--profile", "default", "--user-config-file", "none"];
 const canonical = value => JSON.stringify(value);
@@ -136,7 +137,7 @@ export function inventory(listing) {
 }
 
 export function verifyPartition(all, shards) {
-  assert.equal(shards.length, 2, "Expected two partitions");
+  assert.equal(shards.length, windowsPartitions.length, "Expected four partitions");
   assert.ok(all.length && all.some(row => !row.ignored), "Empty full partition inventory");
   assert.ok(all.every(row => row.selected === !row.ignored), "Full partition has hidden filters or changed ignored behavior");
   const stable = rows => rows.map(({ selected: _selected, ...rest }) => rest);
@@ -276,7 +277,7 @@ export async function produce(directory) {
   const metadata = readJson(metadataFile);
   const reuse = ["--binaries-metadata", binaryFile, "--cargo-metadata", metadataFile, "--target-dir-remap", path.join(probe, "target")];
   const listings = [await list(reuse)];
-  for (const shard of [1, 2]) listings.push(await list([...reuse, "--partition", `hash:${shard}/2`]));
+  for (const shard of windowsPartitions) listings.push(await list([...reuse, "--partition", `hash:${shard}/${windowsPartitions.length}`]));
   verifyTargets(listings[0], metadata);
   const inventories = listings.map(inventory);
   verifyPartition(inventories[0], inventories.slice(1));
@@ -288,14 +289,14 @@ export async function produce(directory) {
   }
   const featureResolutionSha256 = digest(canonical(metadata.resolve));
   verifyIdentity(before, await identity());
-  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256: await fileHash(archive), inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: 2, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
+  writeJson(path.join(directory, "manifest.json"), { schema: 1, identity: before, archiveSha256: await fileHash(archive), inventoryFiles: files, featureResolutionSha256, testCount: inventories[0].length, runnableCount: inventories[0].filter(row => row.selected).length, scheduling: { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" } });
   rmSync(probe, { recursive: true });
   rmSync(binaryFile);
-  console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across two verified serial shards.`);
+  console.log(`Archived ${inventories[0].length} tests; ${inventories[0].filter(row => row.selected).length} runnable across ${windowsPartitions.length} verified serial shards.`);
 }
 
 export async function consume(shard, directory, output) {
-  assert.ok([1, 2].includes(shard), "shard must be 1 or 2");
+  assert.ok(windowsPartitions.includes(shard), "shard must be an integer from 1 through 4");
   mkdirSync(output, { recursive: true });
   const progress = path.join(output, "progress.jsonl");
   assert.ok(!existsSync(progress) && !existsSync(path.join(output, "receipt.json")), "Consumer output already contains a prior attempt");
@@ -303,11 +304,11 @@ export async function consume(shard, directory, output) {
   const manifest = readJson(path.join(directory, "manifest.json"));
   assert.equal(manifest.schema, 1, "Unsupported archive manifest");
   verifyIdentity(manifest.identity, await identity(evidence));
-  assert.deepEqual(manifest.scheduling, { partitions: 2, partition: "hash", testThreads: 1, retries: 0, ignored: "default" });
+  assert.deepEqual(manifest.scheduling, { partitions: windowsPartitions.length, partition: "hash", testThreads: 1, retries: 0, ignored: "default" });
   const archive = path.join(directory, "workspace.tar.zst");
   assert.equal(await fileHash(archive), manifest.archiveSha256, "Archive digest mismatch");
   const expected = [];
-  for (let index = 0; index < 3; index++) {
+  for (let index = 0; index <= windowsPartitions.length; index++) {
     const name = `inventory-${index}.json`;
     assert.equal(await fileHash(path.join(directory, name)), manifest.inventoryFiles[name], "Inventory digest mismatch");
     expected.push(readJson(path.join(directory, name)));
@@ -326,14 +327,14 @@ export async function consume(shard, directory, output) {
   assert.equal(digest(canonical(metadata.resolve)), manifest.featureResolutionSha256, "Archived feature resolution changed");
   const reuse = ["--binaries-metadata", binaryFile, "--cargo-metadata", metadataFile, "--target-dir-remap", path.resolve("target")];
   const listings = [await list(reuse, evidence("inventory-all"))];
-  for (const index of [1, 2]) listings.push(await list([...reuse, "--partition", `hash:${index}/2`], evidence(`inventory-${index}`)));
+  for (const index of windowsPartitions) listings.push(await list([...reuse, "--partition", `hash:${index}/${windowsPartitions.length}`], evidence(`inventory-${index}`)));
   verifyTargets(listings[0], metadata);
   const observed = listings.map(inventory);
   verifyPartition(observed[0], observed.slice(1));
   assert.deepEqual(observed, expected, "Consumer partition differs from producer inventory");
   writeJson(path.join(output, "selected-inventory.json"), observed[shard]);
   const started = performance.now();
-  const events = await command(["nextest", "run", ...nextestArgs, ...reuse, "--partition", `hash:${shard}/2`, "--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", ...(process.env.MESH_TALK_TEST_TIMING === "1" ? ["--success-output", "final"] : []), "--message-format", "libtest-json-plus", "--message-format-version", "0.1"], {
+  const events = await command(["nextest", "run", ...nextestArgs, ...reuse, "--partition", `hash:${shard}/${windowsPartitions.length}`, "--test-threads", "1", "--retries", "0", "--no-fail-fast", "--no-tests", "fail", ...(process.env.MESH_TALK_TEST_TIMING === "1" ? ["--success-output", "final"] : []), "--message-format", "libtest-json-plus", "--message-format-version", "0.1"], {
     env: { ...process.env, CARGO_NET_OFFLINE: "true", RUST_TEST_THREADS: "1", NEXTEST_EXPERIMENTAL_LIBTEST_JSON: "1" },
     ...evidence("execution"), liveStdout: true,
   });
@@ -343,7 +344,7 @@ export async function consume(shard, directory, output) {
   const coverage = validateLcov(readFileSync(coverageFile, "utf8"));
   verifyIdentity(manifest.identity, await identity(phase => evidence(`final-${phase}`)));
   writeJson(path.join(output, "receipt.json"), { schema: 1, sourceSha: manifest.identity.sourceSha, runId: manifest.identity.runId, runAttempt: manifest.identity.runAttempt, shard, archiveSha256: manifest.archiveSha256, manifestSha256: await fileHash(path.join(directory, "manifest.json")), coverageSha256: await fileHash(coverageFile), executionSha256: await fileHash(path.join(output, "execution.jsonl")), seconds: (performance.now() - started) / 1000, executedTests: observed[shard].filter(row => row.selected).length, totalTests: observed[0].length, coverage });
-  console.log(`Shard ${shard}/2 passed exact inventory and coverage validation.`);
+  console.log(`Shard ${shard}/${windowsPartitions.length} passed exact inventory and coverage validation.`);
 }
 
 async function main([mode, first, second, third, ...extra]) {

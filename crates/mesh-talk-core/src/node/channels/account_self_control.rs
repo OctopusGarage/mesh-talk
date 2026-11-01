@@ -1205,12 +1205,9 @@ pub(in crate::node) mod tests {
             .account_channel_maintenance_test_hook
             .lock()
             .unwrap() = Some(std::sync::Arc::new(move |channel| {
-            let release = membership_release.clone();
-            Box::pin(async move {
-                if channel == group {
-                    let _ = release.acquire().await;
-                }
-            })
+            // Keep public inheritance gated without suspending the worker
+            // that must project the reference's newly received signed controls.
+            channel != group || membership_release.is_closed()
         }));
         let extra = (!pending).then(|| {
             direct_node(
@@ -2198,12 +2195,27 @@ pub(in crate::node) mod tests {
                 .unwrap(),
             status
         );
+        // Public control propagation may leave this pure history read pending
+        // after the exact operation/role assertions above. Observe only the
+        // existing worker, within the original deadline; accept the first ready
+        // snapshot so an incorrectly imported archive cannot be polled away.
+        let history = tokio::time::timeout(
+            operation_budget.saturating_sub(admission_started.elapsed()),
+            async {
+                loop {
+                    match reference.history(group, 100) {
+                        Ok(history) => break history,
+                        Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {}
+                        Err(_) => panic!("reference history failed outside bounded preparation"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await
+        .expect("reference history must become readable within the original operation deadline");
         assert!(
-            !reference
-                .history(group, 100)
-                .unwrap()
-                .iter()
-                .any(|row| row.id == archive),
+            !history.iter().any(|row| row.id == archive),
             "explicit self control must not grant optional archive history"
         );
         for (_, node) in &nodes {

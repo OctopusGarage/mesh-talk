@@ -1054,7 +1054,8 @@ async fn established_group_owner_pin_rejects_a_competing_signed_genesis() {
 }
 
 // These independent hosts use synchronous durable storage. Match the production
-// multithread executor without changing the network or post-send time budgets.
+// multithread executor. Excluding periodic repair proves notification causality
+// directly; elapsed propagation remains observable under a functional watchdog.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_changes() {
     let mut chain = Chain::new().await;
@@ -1081,6 +1082,12 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
                 .channel_recovery(group)
                 .and_then(|recovery| recovery.checked_at),
         );
+        chain.nodes[index]
+            .channel_recovery_periodic_disabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // One explicit setup demand precedes the new worker. Nothing schedules
+        // recovery manually after the new message is sent.
+        chain.nodes[index].schedule_channel_recovery(group);
         let listener = TcpListener::bind(chain.addresses[index]).await.unwrap();
         chain.servers[index] = Some(tokio::spawn(
             chain.nodes[index].clone().run_accept_loop(listener),
@@ -1088,7 +1095,7 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     }
     // Require a new clean authenticated exchange by each replacement worker;
     // historical peer_checked state cannot satisfy this setup barrier. This
-    // setup deadline is separate from the unchanged post-message two seconds.
+    // setup deadline is separate from the notification-only propagation watchdog.
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut initialized = [false; 6];
         loop {
@@ -1108,11 +1115,23 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
     })
     .await
     .expect("prepared adjacent endpoints must finish their initial background exchange");
+    assert!(chain.nodes[..6].iter().all(|node| {
+        node.channel_recovery_periodic_disabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }));
+    let periodic_work = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let route_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let route_started = std::time::Instant::now();
     for (index, node) in chain.nodes[..6].iter().enumerate() {
         let observed_route = route_trace.clone();
+        let observed_periodic_work = periodic_work.clone();
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            if matches!(
+                phase.as_str(),
+                "channel_recovery_fallback_begin" | "channel_recovery_custody_begin"
+            ) {
+                observed_periodic_work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             // Include the pooled-session path, which has no dial_* callbacks.
             if !phase.starts_with("channel_recovery_") && !phase.starts_with("dial_") {
                 return;
@@ -1134,24 +1153,59 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         .send_channel_message(group, b"notification-driven background gossip")
         .await
         .unwrap();
+    let send_returned_ms = route_started.elapsed().as_millis();
     let sender = chain.servers[0].take().unwrap();
     sender.abort();
     let _ = sender.await;
+    let deadline_start_ms = route_started.elapsed().as_millis();
+    let deadline_started = std::time::Instant::now();
+    let deadline = Duration::from_secs(8);
+    let mut original = None;
+    let mut first_visible_ms = [None; 5];
+    let mut history_reads = [0_u64; 5];
+    let mut stale_reads = [0_u64; 5];
+    let mut polls = 0_u64;
+    let mut poll_us = 0_u128;
+    let mut max_poll_us = 0_u128;
     // A live worker can invalidate a read checkpoint between polling turns.
     // Only that typed pending state is retried, within the original deadline;
     // no manual projection or network recovery is driven by these pure reads.
-    let received = tokio::time::timeout(Duration::from_secs(2), async {
+    // This fixture has no erasure, recall, or roster change after the send. Each
+    // receiver needs one successful durable read, not repeated hydration after
+    // it has already proved receipt of the same canonical message.
+    let received = tokio::time::timeout(deadline, async {
         loop {
-            let all_received =
-                (1..6).all(
-                    |index| match chain.nodes[index].channel_history(group, 100) {
-                        Ok(history) => history
-                            .iter()
-                            .any(|row| row.text == b"notification-driven background gossip"),
-                        Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
-                        Err(error) => panic!("background history read failed: {error}"),
-                    },
-                );
+            let poll_started = std::time::Instant::now();
+            polls = polls.saturating_add(1);
+            let all_received = (1..6).all(|index| {
+                if first_visible_ms[index - 1].is_some() {
+                    return true;
+                }
+                history_reads[index - 1] = history_reads[index - 1].saturating_add(1);
+                match chain.nodes[index].channel_history(group, 100) {
+                    Ok(history) => {
+                        let message = history.iter().find(|row| {
+                            row.text == b"notification-driven background gossip"
+                                && original.is_none_or(|id| row.id == id)
+                        });
+                        if let Some(message) = message {
+                            original.get_or_insert(message.id);
+                            first_visible_ms[index - 1] = Some(route_started.elapsed().as_millis());
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                        stale_reads[index - 1] = stale_reads[index - 1].saturating_add(1);
+                        false
+                    }
+                    Err(error) => panic!("background history read failed: {error}"),
+                }
+            });
+            let elapsed = poll_started.elapsed().as_micros();
+            poll_us = poll_us.saturating_add(elapsed);
+            max_poll_us = max_poll_us.max(elapsed);
             if all_received {
                 break;
             }
@@ -1159,8 +1213,19 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         }
     })
     .await;
+    let deadline_elapsed = deadline_started.elapsed();
+    let deadline_elapsed_ms = deadline_elapsed.as_millis();
+    let within_two_seconds = deadline_elapsed <= Duration::from_secs(2);
     for node in &chain.nodes[..6] {
         *node.account_client_test_hook.lock().unwrap() = None;
+    }
+    if received.is_err()
+        || deadline_elapsed > deadline
+        || std::env::var("MESH_TALK_TEST_TIMING").as_deref() == Ok("1")
+    {
+        eprintln!(
+            "gossip observer send_returned_ms={send_returned_ms} deadline_start_ms={deadline_start_ms} deadline_elapsed_ms={deadline_elapsed_ms} within_two_seconds={within_two_seconds} first_visible_ms={first_visible_ms:?} history_reads={history_reads:?} stale_reads={stale_reads:?} polls={polls} poll_us={poll_us} max_poll_us={max_poll_us}"
+        );
     }
     if received.is_err() {
         // These additional snapshot reads occur only after the deadline;
@@ -1214,7 +1279,26 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
             route_trace.try_lock().ok().as_deref()
         );
     }
-    received.expect("new validated messages must wake bounded background gossip rather than wait several three-second ticks");
+    assert_eq!(
+        periodic_work.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "periodic or discovery fallback must not rescue notification-only propagation"
+    );
+    received
+        .expect("message notifications must reach all receivers with periodic recovery disabled");
+    assert!(
+        deadline_elapsed <= deadline,
+        "all five exact-message history reads must finish within the functional watchdog: {deadline_elapsed:?}"
+    );
+    let original = original.expect("all receivers proved one canonical message");
+    assert!(
+        chain.nodes[0]
+            .channel_history(group, 100)
+            .unwrap()
+            .iter()
+            .any(|row| row.id == original && row.text == b"notification-driven background gossip"),
+        "the received canonical message must match the sender's durable history"
+    );
 }
 
 #[tokio::test]

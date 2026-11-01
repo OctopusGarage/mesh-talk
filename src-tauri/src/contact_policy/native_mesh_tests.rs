@@ -471,7 +471,9 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
     drop(alice_handle);
     stop_and_close(retiring);
     assert!(old_node.upgrade().is_none());
-    drop((bob, bob_two, bob_handle));
+    drop(bob_handle);
+    stop_and_close(bob);
+    stop_and_close(bob_two);
     let (restarted, _) = start(root.path(), "alice", "Alice", a_port);
     assert_eq!(restarted.account_id(), alice_account);
     assert_eq!(
@@ -600,4 +602,7 @@ fn registered_hide_keeps_real_multi_device_delivery_and_restart_history() {
             && personal.local_cleanup_complete
     );
     assert!(personal.floor.is_some());
+    // Every fixture participant must join its crypto/storage producers before
+    // the test process tears down SQLCipher's provider.
+    stop_and_close(after_delete);
 }

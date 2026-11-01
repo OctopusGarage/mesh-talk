@@ -21,9 +21,8 @@ use std::{
 };
 
 #[cfg(test)]
-pub(in crate::node) type AccountChannelMaintenanceTestHook = dyn Fn(ConversationId) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-    + Send
-    + Sync;
+pub(in crate::node) type AccountChannelMaintenanceTestHook =
+    dyn Fn(ConversationId) -> bool + Send + Sync;
 
 const MAX_MIGRATIONS: usize = 4096;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -468,8 +467,12 @@ impl Node {
                 .lock()
                 .unwrap()
                 .clone();
-            if let Some(hook) = hook {
-                hook(channel).await;
+            if let Some(hook) = hook
+                && !hook(channel)
+            {
+                // Defer only this mutation. The same recovery task must still
+                // prepare metadata and service its other channel work.
+                return false;
             }
         }
         let policy = self.privacy.gate.read().await;

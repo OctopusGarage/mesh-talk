@@ -83,18 +83,22 @@ test("output overflow is rejected before receipt writes and cannot grow during c
   assert.equal(closed.stdoutBytes, 0);
 });
 
-const listing = selected => ({ "test-count": 3, "rust-suites": {
-  lib: { "package-name": "pkg", "package-id": "pkg-id", "binary-id": "lib", "binary-name": "pkg", kind: "lib", status: "listed", testcases: Object.fromEntries(["a", "b", "ignored"].map(name => [name, { kind: "test", ignored: name === "ignored", "filter-match": { status: selected.includes(name) ? "matches" : "mismatch", reason: name === "ignored" ? "ignored" : "partition" } }])) },
+const listing = selected => ({ "test-count": 5, "rust-suites": {
+  lib: { "package-name": "pkg", "package-id": "pkg-id", "binary-id": "lib", "binary-name": "pkg", kind: "lib", status: "listed", testcases: Object.fromEntries(["a", "b", "c", "d", "ignored"].map(name => [name, { kind: "test", ignored: name === "ignored", "filter-match": { status: selected.includes(name) ? "matches" : "mismatch", reason: name === "ignored" ? "ignored" : "partition" } }])) },
 } });
 
-test("official listings retain ignored rows and partition every runnable case exactly once", () => {
-  const all = inventory(listing(["a", "b"]));
-  assert.equal(all.length, 3);
+test("four official partitions retain ignored rows and execute every runnable case exactly once", () => {
+  const names = ["a", "b", "c", "d"];
+  const all = inventory(listing(names));
+  const shards = names.map(name => inventory(listing([name])));
+  assert.equal(all.length, 5);
   assert.equal(all.filter(row => row.ignored).length, 1);
-  verifyPartition(all, [inventory(listing(["a"])), inventory(listing(["b"]))]);
-  assert.throws(() => verifyPartition(all, [inventory(listing(["a"])), inventory(listing(["a"]))]), /partition/);
-  assert.throws(() => verifyPartition(all, [inventory(listing(["a"])), inventory(listing([]))]), /partition/);
-  assert.throws(() => inventory({ ...listing([]), "test-count": 4 }), /count/);
+  verifyPartition(all, shards);
+  for (const missing of [2, 3]) assert.throws(() => verifyPartition(all, shards.filter((_, index) => index !== missing)), /partitions/);
+  assert.throws(() => verifyPartition(all, [shards[0], shards[1], shards[2], shards[2]]), /partition/);
+  assert.throws(() => verifyPartition(all, [...shards.slice(0, 3), inventory(listing([]))]), /partition/);
+  assert.throws(() => verifyPartition(all, [...shards.slice(0, 3), inventory(listing(["d", "ignored"]))]), /ignored/);
+  assert.throws(() => inventory({ ...listing([]), "test-count": 6 }), /count/);
 });
 
 test("execution receipts reject missing, duplicate, unexpected, failed and ignored runnable cases", () => {

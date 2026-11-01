@@ -297,7 +297,8 @@ pub async fn login<R: tauri::Runtime>(
     Ok(result)
 }
 
-/// "Stay signed in" auto-login: if enabled and a username + keychain secret exist, run the
+/// Restore an unlocked live desktop session without reauthentication or runtime replacement.
+/// With no live session, "Stay signed in": if a username + keychain secret exist, run the
 /// SAME path as [`login`] (verify the auth keystore + spawn the node) using the stored
 /// credential, returning the `User` so the frontend can skip the login screen. Returns
 /// `Ok(None)` (NOT an error) whenever there's nothing to resume — no saved session, or the
@@ -311,6 +312,20 @@ pub async fn auto_login<R: tauri::Runtime>(
     settings_state: tauri::State<'_, crate::settings::SettingsState>,
 ) -> Result<Option<UserInfo>, CommandError> {
     let entry_generation = app_state.session().generation();
+    if let Ok(lease) = app_state.session().capture() {
+        // A renderer refresh does not retire the native session. Return only its
+        // public identity while retaining exact-session and unlocked authority;
+        // saved-login consent applies to cold startup, not this live session.
+        return app_state
+            .session()
+            .matching(&lease, |info| {
+                let revision = app_state.app_lock().authorization_revision()?;
+                app_state.app_lock().with_unchanged_revision(revision, || {
+                    Ok(Some(UserInfo::from(info.user.clone())))
+                })
+            })
+            .map_err(CommandError::Authorization)?;
+    }
     let settings = settings_state.get();
     if !settings.stay_signed_in {
         return Ok(None);
@@ -1779,6 +1794,7 @@ mod tests {
     #[test]
     fn saved_session_migration_load_serializes_replacement_native_write() {
         let fixture = AuthFixture::new("migration-provider-owner");
+        logout_impl(&fixture.app_state).unwrap();
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let username = fixture.alice.clone();
@@ -1919,6 +1935,96 @@ mod tests {
     }
 
     #[test]
+    fn registered_auto_login_preserves_unlocked_live_session_and_runtime() {
+        let fixture = AuthFixture::new("warm-renderer-resume");
+        let login = invoke_auth(
+            &fixture.webview,
+            "login",
+            serde_json::json!({"username":fixture.alice,"password":" password-a "}),
+        )
+        .unwrap();
+        let lease = fixture.app_state.session().capture().unwrap();
+        tauri::async_runtime::block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !fixture.node.test_installed_for(&lease) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        let owner = login["user"]["id"].as_str().unwrap();
+        let before = invoke_auth(
+            &fixture.webview,
+            "owner_node_identity",
+            serde_json::json!({"owner":owner}),
+        )
+        .unwrap();
+        let token = fixture.app_state.session().get().unwrap().token;
+        let ticket = fixture.node.test_lifecycle_ticket();
+        crate::session_store::before_next_io(
+            &fixture.alice,
+            "load",
+            Box::new(|| panic!("warm renderer resume must not read saved credentials")),
+        );
+        for consent in [false, true] {
+            let mut settings = fixture.settings.get();
+            settings.stay_signed_in = consent;
+            fixture.settings.set(settings);
+            let automatic =
+                invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap();
+            assert_eq!(automatic, login["user"]);
+            assert_eq!(fixture.app_state.session().generation(), lease.generation());
+            assert_eq!(fixture.app_state.session().get().unwrap().token, token);
+            assert_eq!(fixture.node.test_lifecycle_ticket(), ticket);
+            let after = invoke_auth(
+                &fixture.webview,
+                "owner_node_identity",
+                serde_json::json!({"owner":owner}),
+            )
+            .unwrap();
+            assert_eq!(after["runtime_id"], before["runtime_id"]);
+        }
+        invoke_auth(&fixture.webview, "lock_app", serde_json::json!({})).unwrap();
+        assert!(invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).is_err());
+        assert_eq!(fixture.app_state.session().generation(), lease.generation());
+        assert_eq!(fixture.node.test_lifecycle_ticket(), ticket);
+    }
+
+    #[test]
+    fn registered_auto_login_after_logout_resumes_only_a_newly_authenticated_owner() {
+        let fixture = AuthFixture::new("warm-renderer-logout-switch");
+        let mut settings = fixture.settings.get();
+        settings.stay_signed_in = false;
+        fixture.settings.set(settings);
+        invoke_auth(&fixture.webview, "logout", serde_json::json!({})).unwrap();
+        let signed_out_generation = fixture.app_state.session().generation();
+        let ticket = fixture.node.test_lifecycle_ticket();
+        assert_eq!(
+            invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap(),
+            serde_json::Value::Null
+        );
+        assert!(fixture.app_state.session().get().is_none());
+        assert_eq!(
+            fixture.app_state.session().generation(),
+            signed_out_generation
+        );
+        assert_eq!(fixture.node.test_lifecycle_ticket(), ticket);
+        let switched = invoke_auth(
+            &fixture.webview,
+            "login",
+            serde_json::json!({"username":fixture.bob,"password":"password-b"}),
+        )
+        .unwrap();
+        let generation = fixture.app_state.session().generation();
+        assert_eq!(
+            invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap(),
+            switched["user"]
+        );
+        assert_eq!(fixture.app_state.session().generation(), generation);
+    }
+
+    #[test]
     fn registered_login_and_auto_login_publish_actual_owner_and_preserve_raw_runtime_password() {
         let fixture = AuthFixture::new("login");
         let old_device = fixture
@@ -1992,6 +2098,8 @@ mod tests {
             crate::session_store::load(&fixture.alice).as_deref(),
             Some(" password-a ")
         );
+        // Exercise cold saved-login restoration, including the raw node secret.
+        logout_impl(&fixture.app_state).unwrap();
         let automatic = invoke_auth(&fixture.webview, "auto_login", serde_json::json!({})).unwrap();
         assert_eq!(automatic["username"], fixture.alice);
         wait_installed();
@@ -2077,6 +2185,7 @@ mod tests {
     #[test]
     fn registered_stale_auto_login_success_cannot_resurrect_logout() {
         let fixture = AuthFixture::new("autoresurrection");
+        logout_impl(&fixture.app_state).unwrap();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         *fixture.app_state.auto_admission_gate.lock().unwrap() = Some((entered_tx, release_rx));
@@ -2084,6 +2193,13 @@ mod tests {
         let automatic =
             std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
         tauri::async_runtime::block_on(entered_rx).unwrap();
+        // A cold resume may be superseded by a real login followed by logout.
+        invoke_auth(
+            &fixture.webview,
+            "login",
+            serde_json::json!({"username":fixture.alice,"password":" password-a "}),
+        )
+        .unwrap();
         invoke_auth(&fixture.webview, "logout", serde_json::json!({})).unwrap();
         let ticket = fixture.node.test_lifecycle_ticket();
         release_tx.send(()).unwrap();
@@ -2099,6 +2215,7 @@ mod tests {
     #[test]
     fn registered_stale_auto_login_failure_cannot_forget_replacement_owner() {
         let fixture = AuthFixture::new("autofailure");
+        logout_impl(&fixture.app_state).unwrap();
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         *fixture.app_state.owner_command_captured.lock().unwrap() = Some(entered_tx);
         let auth = fixture.app_state.auth_operation.blocking_lock();
@@ -2106,7 +2223,6 @@ mod tests {
         let automatic =
             std::thread::spawn(move || invoke_auth(&webview, "auto_login", serde_json::json!({})));
         AuthFixture::wait_phase(&entered_rx, "auto-login-entry");
-        logout_impl(&fixture.app_state).unwrap();
         let (user, _, lease) = fixture
             .app_state
             .auth_service()

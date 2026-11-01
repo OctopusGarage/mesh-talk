@@ -281,6 +281,7 @@ impl MediaStore {
             .mutation
             .lock()
             .map_err(|_| invalid("media mutation lock poisoned"))?;
+        self.require_media_root()?;
         if let Some(index) = &self.index {
             loop {
                 let page = index.exact(file_conv, None)?;
@@ -326,6 +327,18 @@ impl MediaStore {
         Ok(())
     }
 
+    fn require_media_root(&self) -> std::io::Result<()> {
+        // Windows may report a missing child when its parent is a regular file.
+        // A locator can be retired only while the owning directory is usable.
+        if !std::fs::metadata(&self.dir)?.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "media storage root is not a directory",
+            ));
+        }
+        Ok(())
+    }
+
     /// Recover from a crash between local card erasure and managed-file removal.
     pub fn prune_unreferenced(&self, live: &HashSet<ConversationId>) -> std::io::Result<()> {
         self.prune_unreferenced_where(|file| Ok(live.contains(&file)))
@@ -335,6 +348,7 @@ impl MediaStore {
         &self,
         mut live: impl FnMut(ConversationId) -> std::io::Result<bool>,
     ) -> std::io::Result<()> {
+        self.require_media_root()?;
         if let Some(index) = &self.index {
             let mut after = None;
             loop {
@@ -970,6 +984,7 @@ impl MediaStore {
         let Some(index) = &self.index else {
             return Ok(());
         };
+        self.require_media_root()?;
         let page = index.gc_page()?;
         if page.is_empty() {
             return index.advance_gc(None);
@@ -1508,6 +1523,48 @@ mod tests {
             "replacement revision fences the old orphan decision"
         );
     }
+    #[test]
+    fn indexed_media_cleanup_retains_locators_until_storage_is_available() {
+        for missing in [true, false] {
+            for operation in ["remove", "prune", "gc"] {
+                let directory = tempfile::tempdir().unwrap();
+                let store = indexed_store(directory.path());
+                let id = indexed_id(901);
+                store
+                    .store_bytes(id, "image.png", b"retryable orphan")
+                    .unwrap();
+                store.schedule_gc().unwrap();
+                let media = directory.path().join("media");
+                let retained = directory.path().join("media-temporarily-unavailable");
+                std::fs::rename(&media, &retained).unwrap();
+                if !missing {
+                    std::fs::write(&media, b"not a directory").unwrap();
+                }
+                let cleanup = || match operation {
+                    "remove" => store.remove(id),
+                    "prune" => store.prune_unreferenced(&HashSet::new()),
+                    "gc" => store.gc_step(|_| Ok(false)),
+                    _ => unreachable!(),
+                };
+                let failed = cleanup();
+                if !missing {
+                    std::fs::remove_file(&media).unwrap();
+                }
+                std::fs::rename(&retained, &media).unwrap();
+                assert!(
+                    failed.is_err(),
+                    "{operation} must reject unavailable media storage before retiring locators; missing={missing}"
+                );
+                assert_eq!(store.read(id).unwrap(), b"retryable orphan");
+                cleanup().unwrap();
+                assert!(
+                    !store.contains(id),
+                    "the exact cleanup must succeed after storage is restored"
+                );
+            }
+        }
+    }
+
     #[test]
     fn indexed_media_pruning_seeks_past_deleted_cursor_rows() {
         let directory = tempfile::tempdir().unwrap();

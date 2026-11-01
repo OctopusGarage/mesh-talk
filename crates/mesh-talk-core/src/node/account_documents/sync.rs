@@ -1069,6 +1069,10 @@ impl Node {
         cursor: &mut DocumentSyncCursor,
     ) -> Result<(), NodeError> {
         let domain = DOMAINS[cursor.domain];
+        #[cfg(test)]
+        if domain == AccountDocumentDomain::ChannelCustody {
+            self.trace_account_client(&peer.public, || "custody_setup_exchange_started".into());
+        }
         let personal_cut = self.capture_personal_history_cut(&peer.public);
         cursor.personal_required = !self
             .account_documents
@@ -1528,6 +1532,16 @@ impl Node {
                         cursor.settled |= 1 << cursor.domain
                     } else {
                         cursor.settled &= !(1 << cursor.domain)
+                    }
+                    #[cfg(test)]
+                    if domain == AccountDocumentDomain::ChannelCustody {
+                        let settled = complete.enabled
+                            && complete.next.is_none()
+                            && complete.digest != [0; 32]
+                            && local == complete.digest;
+                        self.trace_account_client(&peer.public, || {
+                            format!("custody_setup_exchange_completed settled={settled}")
+                        });
                     }
                     cursor.after = complete.next;
                     if cursor.after.is_none() {

@@ -677,6 +677,10 @@
             "reference": "docs/network-design-reference.md#g-linking-and-ongoing-account-synchronization"
           },
           {
+            "name": "A renderer reload restores an unlocked live session without reauthentication, credential reads or runtime replacement; cold saved login retains consent, lock, logout and owner-generation guards.",
+            "reference": "docs/ARCHITECTURE.md"
+          },
+          {
             "name": "Saved login requires both credential and resume metadata writes; retry uses the private canonical account login secret under current unlocked session authority",
             "reference": "docs/help/topics/first-run.md#keep-access-to-your-account"
           },

@@ -708,6 +708,18 @@ mod tests {
             ),
             "local media cleanup must not acknowledge an opaque identity envelope as invalid"
         );
+        let candidate = ConversationId::new([240; 32]);
+        assert!(
+            f.receiver.media.contains(candidate),
+            "a failed physical cleanup must retain the indexed candidate for retry"
+        );
+        f.receiver
+            .remove_unreferenced_media(vec![candidate])
+            .unwrap();
+        assert!(
+            !f.receiver.media.contains(candidate),
+            "restoring the media directory must let the exact cleanup retry finish"
+        );
     }
 
     #[test]

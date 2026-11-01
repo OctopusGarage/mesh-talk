@@ -545,6 +545,14 @@ wall_clock, kind, ciphertext, sig`. `EventKind`: Message/Edit/Delete/React/ReadM
   A successfully returned runtime retains the ordinary consuming stop contract;
   construction completion does not retire that runtime or grant session authority.
 
+  A renderer reload restores the existing unlocked native session through the
+  existing auto-login command without reauthentication, credential-store access,
+  session-generation changes or runtime replacement. The command projects only
+  public user information under the exact session lease and app-lock revision.
+  Locked sessions remain behind the existing lock screen and central IPC gates;
+  logout or owner replacement invalidates captured restoration authority. With
+  no live session, the ordinary saved-login consent and credential path applies.
+
   The desktop host serializes authentication operations separately from runtime
   replacement. Every published session has a private owner/generation lease; a
   valid startup request receives a monotonically increasing ticket under that
@@ -944,6 +952,10 @@ cannot cause encrypted bytes to be returned as plaintext. Backup enumerates fixe
 metadata pages and rejects duplicate IDs or a changing inventory. Startup schedules
 an orphan-cleanup cutoff; background turns examine at most 32 locators per store,
 hold the owning reference lock, and recheck locator revisions before unlinking.
+Cleanup validates its media root before treating a missing child as absent. A
+missing or non-directory root remains a retryable persistence failure and retains
+the exact indexed locator, including on hosts that report child path errors as
+not found. Restoring storage permits the original cleanup to finish.
 Writes after that cutoff wait for a subsequent startup cleanup, so publication cannot
 race a stale orphan decision. The existing standalone MediaStore constructor retains
 its legacy filesystem-only behavior.

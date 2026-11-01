@@ -427,6 +427,9 @@ pub struct Node {
     pub(in crate::node) channel_recovery_pending: Mutex<HashSet<ConversationId>>,
     pub(in crate::node) join_history_work: Mutex<super::join_history::indexed::HistoryWork>,
     pub(in crate::node) channel_recovery_notify: tokio::sync::Notify,
+    /// Captured when a test starts its recovery worker; excludes periodic rescue.
+    #[cfg(test)]
+    pub(in crate::node) channel_recovery_periodic_disabled: std::sync::atomic::AtomicBool,
     pub(in crate::node) channel_recovery:
         Mutex<HashMap<ConversationId, super::channels::ChannelRecovery>>,
     pub(in crate::node) delivery_notify: tokio::sync::Notify,
@@ -1304,6 +1307,8 @@ impl Node {
             channel_recovery_pending: Mutex::new(HashSet::new()),
             join_history_work: Mutex::new(Default::default()),
             channel_recovery_notify: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            channel_recovery_periodic_disabled: std::sync::atomic::AtomicBool::new(false),
             channel_recovery: Mutex::new(HashMap::new()),
             delivery_notify: tokio::sync::Notify::new(),
             post_office_receive_notify: tokio::sync::Notify::new(),

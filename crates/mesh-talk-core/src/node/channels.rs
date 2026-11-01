@@ -523,12 +523,70 @@ impl Node {
 
     /// Run bounded anti-entropy for every host that serves TCP, including CLI and SDK nodes.
     pub(in crate::node) async fn run_channel_recovery_loop(self: Arc<Self>, changes: Arc<Notify>) {
+        // Freeze the test policy before entering the production worker. Notify,
+        // metadata, discovery, bounded admission and peer rotation are unchanged.
+        #[cfg(test)]
+        let periodic = !self
+            .channel_recovery_periodic_disabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let periodic = true;
+        let maintenance = Arc::clone(&self).run_account_channel_maintenance_loop(periodic);
+        Box::pin(self.run_channel_recovery_with_maintenance(changes, periodic, maintenance)).await;
+    }
+
+    /// One parent owns both futures; cancellation drops both without detached work.
+    pub(super) async fn run_channel_recovery_with_maintenance(
+        self: Arc<Self>,
+        changes: Arc<Notify>,
+        periodic: bool,
+        maintenance: impl std::future::Future<Output = ()>,
+    ) {
+        tokio::select! {
+            _ = self.run_local_channel_recovery_loop(changes, periodic) => {}
+            _ = maintenance => {}
+        }
+    }
+
+    async fn run_account_channel_maintenance_loop(self: Arc<Self>, periodic: bool) {
+        let mut work = super::channel_account_maintenance::ChannelAccountMaintenance::default();
+        let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // These subscriptions do not consume the local recovery/roster Notify
+        // permits. The existing maintenance state survives every local wake.
+        let mut metadata = self.subscribe_channel_changes();
+        let mut network = self.network_changes.subscribe();
+        loop {
+            tokio::select! {
+                _ = tick.tick(), if periodic => {}
+                change = metadata.recv() => match change {
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                },
+                change = network.changed() => if change.is_err() { return; },
+            }
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_maintenance_begin".into()
+            });
+            self.maintain_account_channels(&mut work).await;
+            #[cfg(test)]
+            self.trace_account_client(&self.identity.public(), || {
+                "channel_recovery_maintenance_done".into()
+            });
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn run_local_channel_recovery_loop(
+        self: Arc<Self>,
+        changes: Arc<Notify>,
+        periodic: bool,
+    ) {
         let mut tick = tokio::time::interval(CHANNEL_RECOVERY_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursor = 0usize;
         let mut custody_cursor = 0usize;
-        let mut account_maintenance =
-            super::channel_account_maintenance::ChannelAccountMaintenance::default();
         let mut retry_after = HashMap::new();
         let mut retry_cycle = HashMap::new();
         let mut recheck_after = HashMap::new();
@@ -550,8 +608,8 @@ impl Node {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => discovered = true,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
-                _ = tick.tick() => { custody_tick = true; },
-                _ = tokio::time::sleep_until(fallback_at) => {},
+                _ = tick.tick(), if periodic => { custody_tick = true; },
+                _ = tokio::time::sleep_until(fallback_at), if periodic => {},
             }
             loop {
                 match metadata.try_recv() {
@@ -562,16 +620,6 @@ impl Node {
                     Err(_) => break,
                 }
             }
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_maintenance_begin".into()
-            });
-            self.maintain_account_channels(&mut account_maintenance)
-                .await;
-            #[cfg(test)]
-            self.trace_account_client(&self.identity.public(), || {
-                "channel_recovery_maintenance_done".into()
-            });
             self.retry_channel_plaintext();
             #[cfg(test)]
             self.trace_account_client(&self.identity.public(), || {
@@ -648,7 +696,8 @@ impl Node {
             self.trace_account_client(&self.identity.public(), || {
                 "channel_recovery_targets_done".into()
             });
-            if discovered || tokio::time::Instant::now() >= fallback_at {
+            // Notification-only tests exclude discovery-triggered repair as well.
+            if periodic && (discovered || tokio::time::Instant::now() >= fallback_at) {
                 #[cfg(test)]
                 self.trace_account_client(&self.identity.public(), || {
                     "channel_recovery_fallback_begin".into()
@@ -700,6 +749,9 @@ impl Node {
                     "channel_recovery_custody_done".into()
                 });
             }
+            // Notify can remain immediately ready after bounded local work.
+            // Yield so the sibling maintenance future can always be polled.
+            tokio::task::yield_now().await;
         }
     }
 

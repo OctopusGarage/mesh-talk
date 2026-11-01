@@ -165,6 +165,62 @@ fn authenticated_source_role_ready(
     }
 }
 
+// Keep the exact fixture retry classification in one owner. Cold protocol
+// preparation and warm role proof share cursor/backoff semantics, not budgets.
+pub(super) async fn accept_reference_control_page(
+    target: &Node,
+    source: &Node,
+    peer: &crate::discovery::roster::PeerRecord,
+    cursor: &crate::node::account_documents::sync::DocumentSyncCursor,
+    result: Result<(), crate::node::NodeError>,
+    interruptions: &mut usize,
+) -> bool {
+    match result {
+        Ok(()) => {
+            assert!(
+                cursor.error.is_none() && !cursor.requires_upgrade,
+                "control bootstrap must not hide a protocol error or capability rejection"
+            );
+            true
+        }
+        Err(error) => {
+            let capacity_busy = crate::node::account_sync::local_sync_capacity_busy(&error);
+            let page_interrupted = matches!(&error,
+                crate::node::NodeError::Session(
+                    crate::node::session::SessionError::Transport(
+                        crate::transport::TransportError::Io(io)
+                    )
+                ) if io.kind() == std::io::ErrorKind::UnexpectedEof
+            ) && cursor.pending
+                && !cursor.up_to_date
+                && cursor.error.is_none()
+                && !cursor.requires_upgrade
+                && target.certified_sibling(&peer.public)
+                && peer.public == source.identity.public();
+            assert!(
+                capacity_busy || page_interrupted,
+                "only local admission backpressure or authenticated pending GroupControl EOF is retryable: {error}"
+            );
+            if page_interrupted {
+                *interruptions += 1;
+                assert!(
+                    *interruptions <= 3,
+                    "role page repeatedly invalidated during bootstrap"
+                );
+            }
+            // Honor both public retry_at and the owner's private short
+            // GroupControl cooldown without discarding cursor progress.
+            let delay = cursor
+                .retry_at
+                .map(|at| at.saturating_duration_since(std::time::Instant::now()))
+                .unwrap_or_default()
+                .max(std::time::Duration::from_millis(100));
+            tokio::time::sleep(delay).await;
+            false
+        }
+    }
+}
+
 /// Role-page publication can invalidate the authenticated page mid-transfer.
 /// Retain the cursor and retry only that precise transport interruption; other
 /// errors remain fixture failures, and operation execution keeps its own budget.
@@ -215,52 +271,11 @@ pub(super) async fn pull_reference_action_control(
                     }
                 }
             };
-            match result {
-                Ok(()) => {
-                    assert!(
-                        cursor.error.is_none() && !cursor.requires_upgrade,
-                        "control bootstrap must not hide a protocol error or capability rejection"
-                    );
-                    if authenticated_source_role_ready(target,source,group, &mut diagnosis) { break; }
-                    // A GroupControl interruption may leave a private 100ms
-                    // domain cooldown while another mandatory domain succeeds.
-                    // That success does not prove this source's role row arrived.
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                Err(error) => {
-                    let capacity_busy = crate::node::account_sync::local_sync_capacity_busy(&error);
-                    let page_interrupted = matches!(&error,
-                        crate::node::NodeError::Session(
-                            crate::node::session::SessionError::Transport(
-                                crate::transport::TransportError::Io(io)
-                            )
-                        ) if io.kind() == std::io::ErrorKind::UnexpectedEof
-                    ) && cursor.pending
-                        && !cursor.up_to_date
-                        && cursor.error.is_none()
-                        && !cursor.requires_upgrade
-                        && target.certified_sibling(&peer.public)
-                        && peer.public == source.identity.public();
-                    assert!(
-                        capacity_busy || page_interrupted,
-                        "only local admission backpressure or authenticated pending GroupControl EOF is retryable: {error}"
-                    );
-                    if page_interrupted {
-                        interruptions += 1;
-                        assert!(
-                            interruptions <= 3,
-                            "role page repeatedly invalidated during bootstrap"
-                        );
-                    }
-                    // Honor both public retry_at and the owner's private short
-                    // GroupControl cooldown without discarding cursor progress.
-                    let delay = cursor
-                        .retry_at
-                        .map(|at| at.saturating_duration_since(std::time::Instant::now()))
-                        .unwrap_or_default()
-                        .max(std::time::Duration::from_millis(100));
-                    tokio::time::sleep(delay).await;
-                }
+            if accept_reference_control_page(target, source, &peer, &cursor, result, &mut interruptions).await {
+                if authenticated_source_role_ready(target,source,group, &mut diagnosis) { break; }
+                // A completed response may still leave a private short domain
+                // cooldown; retain the cursor until the exact source row arrives.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }
     })

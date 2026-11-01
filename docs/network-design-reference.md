@@ -687,6 +687,15 @@ group connection or consume the connection budget reserved for ordinary delivery
 Private route rounds launch at most two probes concurrently and advance their
 cursor only for launched work; canceled queued routes retain their next turn.
 
+Account maintenance and bounded local channel recovery are sibling futures owned
+by the same recovery task. A held maintenance peer exchange cannot delay local
+checkpoint/presentation progress or its mandatory Directory publication. The
+maintenance owner retains one state and uses independent broadcast/watch receivers
+plus the existing three-second Skip clock; it never consumes local recovery or
+roster Notify permits. Each bounded turn yields, and parent cancellation drops
+both futures. Other recovery network exchanges retain their existing ordering and
+bounds; this separation does not promise to isolate every peer wait.
+
 New account-group creation gives invitation-target verification one twenty-second
 deadline across the complete selected account set and its device routes. Every
 required account must pass the existing authenticated binding and capability

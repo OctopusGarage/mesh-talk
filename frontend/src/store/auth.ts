@@ -14,15 +14,15 @@ interface AuthState {
   retrySavedSession: () => Promise<boolean>;
   generation: number;
   operation: number;
-  /** True from app start until the one-shot auto-login attempt resolves; gates a brief
-   * "unlocking…" splash so we don't flash the login screen for a remembered session. */
+  /** True until live-session restoration or cold saved login resolves; gates the
+   * unlocking splash so an authenticated session does not flash the login screen. */
   booting: boolean;
   /** Hide ownerless login settings while the native session is being retired. */
   loggingOut: boolean;
   loading: boolean;
   error: string | null;
   clearError: () => void;
-  /** One-shot on app start: resume a saved keychain session if "stay signed in" is on. */
+  /** Restore the live native session, or cold saved login when "stay signed in" is on. */
   tryAutoLogin: () => Promise<void>;
   login: (username: string, password: string) => Promise<boolean>;
   register: (username: string, password: string) => Promise<boolean>;

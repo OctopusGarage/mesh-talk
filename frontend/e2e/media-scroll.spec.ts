@@ -88,7 +88,13 @@ test("image rows reserve their final geometry before bytes load", async ({
   await seedImages(page, 1);
   const row = page.locator('[data-message-id="scroll-message-0"]');
   await expect(row.getByRole("status")).toBeVisible();
-  const before = await row.boundingBox();
+  let before = 0;
+  await expect
+    .poll(async () => {
+      before = (await row.boundingBox())?.height ?? 0;
+      return before;
+    })
+    .toBeGreaterThan(0);
   await releaseImages(page);
   const image = row.getByTestId("file-image");
   await expect
@@ -96,8 +102,10 @@ test("image rows reserve their final geometry before bytes load", async ({
     .toBe(800);
   await expect
     .poll(
-      async () =>
-        Math.abs(((await row.boundingBox())?.height ?? 0) - before!.height),
+      async () => {
+        const box = await row.boundingBox();
+        return box ? Math.abs(box.height - before) : undefined;
+      },
       { message: "Loading must not resize a media row" },
     )
     .toBeLessThanOrEqual(1);
@@ -209,16 +217,43 @@ for (const [label, width, height] of [
         image.evaluate((element) => (element as HTMLImageElement).naturalWidth),
       )
       .toBe(width);
+    const measurement = {
+      current: null as {
+        image: { width: number; height: number };
+        frame: { width: number; height: number };
+      } | null,
+    };
     await expect
       .poll(async () => {
-        const box = (await image.boundingBox())!;
-        return box.width / box.height;
+        // Keep image and frame geometry from the same visible, decoded instance.
+        measurement.current = await image.evaluate(
+          (element: HTMLImageElement, expectedWidth) => {
+            const box = element.getBoundingClientRect();
+            const frame = element.parentElement?.getBoundingClientRect();
+            if (
+              getComputedStyle(element).visibility !== "visible" ||
+              element.naturalWidth !== expectedWidth ||
+              box.width === 0 ||
+              box.height === 0 ||
+              !frame ||
+              frame.width === 0 ||
+              frame.height === 0
+            )
+              return null;
+            return {
+              image: { width: box.width, height: box.height },
+              frame: { width: frame.width, height: frame.height },
+            };
+          },
+          width,
+        );
+        const box = measurement.current?.image;
+        return box ? box.width / box.height : undefined;
       })
       .toBeCloseTo(width / height, 1);
-    const box = (await image.boundingBox())!;
+    const { image: box, frame } = measurement.current!;
     expect(box.width).toBeLessThanOrEqual(Math.min(width, 320));
     expect(box.height).toBeLessThanOrEqual(Math.min(height, 320));
-    const frame = (await image.locator("..").boundingBox())!;
     expect(frame.width).toBeCloseTo(box.width, 0);
     expect(frame.height).toBeCloseTo(box.height, 0);
     await expect(image).toHaveCSS("object-fit", "contain");

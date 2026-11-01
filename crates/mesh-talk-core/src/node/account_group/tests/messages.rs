@@ -374,7 +374,7 @@ pub(super) fn panic_account_send_timeout(
     )
 }
 
-async fn reference_member_send_fixture(fail_receive: bool) {
+async fn reference_member_send_fixture(fail_receive: bool, held_cold_control: bool) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let owner = node(&dir.path().join("offline_owner"), &Account::generate());
@@ -434,41 +434,82 @@ async fn reference_member_send_fixture(fail_receive: bool) {
             }
         }
     }
+    let cold_release = Arc::new(tokio::sync::Semaphore::new(0));
+    struct ReleaseColdControl(Arc<tokio::sync::Semaphore>);
+    impl Drop for ReleaseColdControl {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+    let _release_cold_control = ReleaseColdControl(cold_release.clone());
+    let cold_control_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if held_cold_control {
+        let (arrived, held) = tokio::sync::oneshot::channel();
+        let arrived = Arc::new(Mutex::new(Some(arrived)));
+        let expected = reference.identity.public();
+        *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let release = cold_release.clone();
+            move |peer, frame| {
+                let release = release.clone();
+                let arrived = arrived.clone();
+                let expected = expected.clone();
+                Box::pin(async move {
+                    if peer == expected
+                        && matches!(frame, crate::node::account_sync_wire::AccountHistoryFrame::DocumentsRequest { ref body }
+                            if crate::node::account_documents::wire::DocumentRequest::decode(body)
+                                .is_some_and(|request| request.domain == AccountDocumentDomain::GroupControl))
+                    {
+                        if let Some(signal) = arrived.lock().unwrap().take() {
+                            let _ = signal.send(());
+                        }
+                        // Keep replacement requests held as well. SessionReady
+                        // has already acknowledged this real authenticated read.
+                        let _ = release.acquire().await;
+                    }
+                })
+            }
+        }));
+        let release = cold_release.clone();
+        let released = cold_control_released.clone();
+        tasks.spawn(async move {
+            super::cold_account_setup(held)
+                .await
+                .expect("the message fixture must reach its authenticated cold Control hold")
+                .unwrap();
+            // This exceeds the existing role-page budget, not an operation
+            // deadline. The cold preparation owner must receive the response.
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            released.store(true, std::sync::atomic::Ordering::Release);
+            release.close();
+        });
+    }
     for (target, listener) in [&source, &reference, &external].into_iter().zip(listeners) {
         tasks.spawn(target.clone().run_accept_loop(listener));
     }
     source.publish_account_group_access(&mut None);
-    pull_group_control(&reference, &source, addresses[0], group).await;
+    super::cold_account_control_setup(
+        super::observe_account_fixture_condition(|| {
+            super::has_account_group_operation_support(
+                &reference,
+                &source,
+                Some(AccountGroupOperationKind::Text),
+            ) && super::has_account_group_operation_support(&source, &reference, None)
+        }),
+        pull_group_control(&reference, &source, addresses[0], group),
+    )
+    .await;
     assert_eq!(
         reference.account_group_access(group).unwrap().role,
         AccountGroupRole::Member
     );
     assert!(reference.channel_members(group).is_empty());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let forward = reference
-                .group_operation_versions
-                .lock()
-                .unwrap()
-                .get(&source.user_id())
-                .is_some_and(|support| {
-                    support.public == source.identity.public()
-                        && support.kinds & AccountGroupOperationKind::Text.capability_bit() != 0
-                });
-            let reverse = source
-                .group_operation_versions
-                .lock()
-                .unwrap()
-                .get(&reference.user_id())
-                .is_some_and(|support| support.public == reference.identity.public());
-            if forward && reverse {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("current action-specific operation support must authenticate before the action budget");
+    if held_cold_control {
+        assert!(
+            cold_control_released.load(std::sync::atomic::Ordering::Acquire),
+            "the actual cold response must remain held beyond the role-page budget before message admission"
+        );
+        *source.account_session_test_hook.lock().unwrap() = None;
+    }
     if fail_receive {
         reference
             .received
@@ -645,12 +686,17 @@ async fn reference_member_send_fixture(fail_receive: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reference_member_sends_over_noise_without_public_membership_or_optional_history() {
-    reference_member_send_fixture(false).await;
+    reference_member_send_fixture(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn failed_private_send_copy_retries_the_same_source_frame_before_terminal_adoption() {
-    reference_member_send_fixture(true).await;
+    reference_member_send_fixture(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reference_member_send_finishes_cold_control_before_role_page_budget() {
+    reference_member_send_fixture(false, true).await;
 }
 
 #[tokio::test]
