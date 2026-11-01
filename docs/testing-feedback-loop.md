@@ -59,9 +59,8 @@ or inherited job handle. The owning adapter preserves argv, environment, working
 directory and byte streams; its private control pipe never reaches target stdin.
 Retirement requires an empty job, a signaled retained leader handle and drained
 output. The parent accepts only the current invocation's nonce-bound receipt;
-helper exit or kill-on-close containment alone cannot certify cleanup. Job
-membership and retained process handles establish whether work is still runnable;
-an aggregate process count alone is insufficient. Ordinary leader exit starts
+helper exit or kill-on-close containment alone cannot certify cleanup.
+Ordinary leader exit starts
 owned-scope retirement. Retire remaining descendants and verify cleanup before
 returning the leader's exit status or releasing resources. This accommodates
 compiler auxiliary processes without process-name exceptions or breakaway.

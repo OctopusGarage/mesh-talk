@@ -263,13 +263,13 @@
         "guide": "docs/testing-feedback-loop.md#completion-and-retirement-evidence",
         "invariants": [
           {
-            "name": "Leader exit does not certify descendant retirement; cancellation and unverifiable cleanup cannot admit later work or create successful reusable evidence.",
+            "name": "Preserve command status only after verified owned-scope retirement; persist lease retirement requirements before detached admission, and never recover unknown ownership from PID death alone. Cancellation and unverifiable cleanup cannot admit later work or create successful reusable evidence.",
             "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
           }
         ]
       },
       "escalation": [
-        "Windows execution changes require real windows-process-owner.test.mjs execution on Windows: portable receipt-rejection controls alone do not establish native job membership or retirement. Preserve creation-time job ownership, argument/environment/byte-stream fidelity, cancellation and output/log failure cleanup, helper-death quarantine, unrelated-process isolation and declared-input cache invalidation. Hosted Windows Health remains required before merge.",
+        "Windows execution changes require real windows-process-owner.test.mjs execution on Windows: portable receipt-rejection controls alone do not establish native job membership or retirement. Preserve creation-time job ownership, argument/environment/byte-stream fidelity, cancellation and output/log failure cleanup, helper-death quarantine, unrelated-process isolation and declared-input cache invalidation. Qualify actual cold/cached Cargo test completion, original nonzero status and descendant retirement before subsequent real command admission. Hosted Windows Health remains required before merge.",
         "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI. Supervisor Rust thread-policy changes also require full workspace consumers and the real Cargo thread-policy fixture; preserve explicit Windows/sanitizer caller limits."
       ]
     },
