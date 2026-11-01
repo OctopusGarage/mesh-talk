@@ -103,9 +103,22 @@ exit $child.ExitCode
 
 export function validateGuestReport(report, plan, platform) {
   const steps = expectedSteps(plan);
-  if (report.schema !== 1 || report.sourceSha !== plan.sourceSha || report.archiveSha !== plan.archiveSha || report.platform !== platform || !report.architecture || !Array.isArray(report.results) || report.results.length !== steps.length) throw Error(`Missing or mismatched ${platform} guest evidence`);
-  for (const [index, step] of steps.entries()) {
-    const result = report.results[index];
+  if (report.schema !== 1 || report.sourceSha !== plan.sourceSha || report.archiveSha !== plan.archiveSha || report.platform !== platform || !report.architecture || !Array.isArray(report.results) || report.results.length < 1 || report.results.length > steps.length) throw Error(`Missing or mismatched ${platform} guest evidence`);
+  const terminal = report.results.at(-1);
+  for (const flag of ["cancelled", "cleanupUnverified"]) {
+    if (report[flag] !== undefined && typeof report[flag] !== "boolean") throw Error(`Invalid ${platform} interruption flag`);
+    if (!!report[flag] !== report.results.some(result => result[flag] === true)) throw Error(`Inconsistent ${platform} interruption evidence`);
+  }
+  const interrupted = !!report.cancelled || !!report.cleanupUnverified;
+  if (interrupted && (report.ok !== false || !(terminal.cancelled || terminal.cleanupUnverified) || terminal.ok !== false))
+    throw Error(`Interrupted ${platform} evidence requires a failed terminal step`);
+  if (report.results.length !== steps.length && !interrupted) throw Error(`Missing or mismatched ${platform} guest evidence`);
+  for (const [index, result] of report.results.entries()) {
+    const step = steps[index];
+    for (const flag of ["cancelled", "cleanupUnverified"]) {
+      if (result[flag] !== undefined && typeof result[flag] !== "boolean") throw Error(`Invalid ${platform} interruption flag`);
+      if (result[flag] && index !== report.results.length - 1) throw Error(`Interrupted ${platform} evidence must end at the terminal step`);
+    }
     if (result.name !== step.name || result.program !== step.program || result.kind !== step.kind || JSON.stringify(result.args) !== JSON.stringify(step.args)) throw Error(`Unexpected ${platform} test selection at step ${index}`);
     const validCount = step.kind !== "rust" || (Number.isInteger(result.testCount) && result.testCount > 0);
     let validUi = true;
@@ -113,7 +126,7 @@ export function validateGuestReport(report, plan, platform) {
       try { validatePlaywrightEvidence(result.ui, plan.uiSpecs); }
       catch (error) { if (result.ok) throw error; validUi = false; }
     }
-    const ok = result.code === 0 && !result.timedOut && !result.error && validCount && validUi;
+    const ok = result.code === 0 && !result.timedOut && !result.cancelled && !result.cleanupUnverified && !result.error && validCount && validUi;
     if (result.ok !== ok) throw Error(`Inconsistent ${platform} result for ${step.name}`);
   }
   if (report.ok !== report.results.every(result => result.ok)) throw Error(`Inconsistent ${platform} aggregate result`);

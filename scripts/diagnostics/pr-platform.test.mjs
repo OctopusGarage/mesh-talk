@@ -397,3 +397,29 @@ test("guest cancellation stops admission of subsequent plan steps", async () => 
     assert.equal(report.ok, false);
   }
 });
+
+test("interrupted execution reports retain an exact failed selection prefix", async () => {
+  const plan = { ...buildPlan(parseFlags(["--core-filter", "fixture::"]), ["crates/mesh-talk-core/src/node.rs"]), sourceSha: sha, archiveSha: "b".repeat(64) };
+  for (const flag of ["cancelled", "cleanupUnverified"]) {
+    for (const stopAt of [1, expectedSteps(plan).length]) {
+      let calls = 0;
+      const report = await executePlan(plan, { run: async () => ++calls === stopAt ? { code: 0, output: "", [flag]: true } : { code: 0, output: "test result: ok. 2 passed; 0 failed;" } });
+      assert.equal(validateGuestReport(report, plan, process.platform), report);
+      assert.equal(report[flag], true);
+      assert.equal(report.results.at(-1)[flag], true);
+      for (const mutate of [
+        r => { r.ok = true; },
+        r => { r[flag] = false; },
+        r => { r.results.at(-1)[flag] = false; },
+        r => { r.results[0].args.push("--ignored"); },
+        r => { r.sourceSha = "c".repeat(40); },
+        r => { r.archiveSha = "c".repeat(64); },
+      ]) { const bad = structuredClone(report); mutate(bad); assert.throws(() => validateGuestReport(bad, plan, process.platform)); }
+    }
+  }
+  const complete = await executePlan(plan, { run: async () => ({ code: 0, output: "test result: ok. 2 passed; 0 failed;" }) });
+  const truncated = { ...complete, ok: false, results: complete.results.slice(0, 1) };
+  assert.throws(() => validateGuestReport(truncated, plan, process.platform), /mismatched|interrupt/i);
+  const forged = structuredClone(complete); forged.cancelled = true; forged.ok = false; forged.results[0].cancelled = true; forged.results[0].ok = false;
+  assert.throws(() => validateGuestReport(forged, plan, process.platform), /interrupt|terminal/i);
+});

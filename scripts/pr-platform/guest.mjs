@@ -144,10 +144,10 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
     }
     const count = step.kind === "rust" ? rustTestCount(result.output) : undefined;
     const error = result.error || uiError || (result.cleanupUnverified ? "Descendant retirement could not be verified" : result.cancelled ? "Platform execution cancelled" : result.timedOut ? "Command timed out" : result.code !== 0 ? `Command exited ${result.code}` : step.kind === "rust" && count === 0 ? "Selector ran zero Rust tests" : undefined);
-    results.push({ name: step.name, kind: step.kind, program: step.program, args: step.args, code: result.code, timedOut: !!result.timedOut, testCount: count, ui, ok: !error, error, elapsedMs: result.elapsedMs, outputTail: result.output.slice(-4000) });
+    results.push({ name: step.name, kind: step.kind, program: step.program, args: step.args, code: result.code, timedOut: !!result.timedOut, cancelled: !!result.cancelled, cleanupUnverified: !!result.cleanupUnverified, testCount: count, ui, ok: !error, error, elapsedMs: result.elapsedMs, outputTail: result.output.slice(-4000) });
     if (result.cancelled || result.cleanupUnverified) break;
   }
-  return { schema: 1, sourceSha: plan.sourceSha, archiveSha: plan.archiveSha, platform: process.platform, architecture: os.arch(), scope: "Affected workflow diagnostics, selected Rust package lint/tests and explicitly selected browser specs; no ASan or native UI certification", ok: results.every(result => result.ok), elapsedMs: Date.now() - started, results };
+  return { schema: 1, sourceSha: plan.sourceSha, archiveSha: plan.archiveSha, platform: process.platform, architecture: os.arch(), cancelled: results.some(result => result.cancelled), cleanupUnverified: results.some(result => result.cleanupUnverified), scope: "Affected workflow diagnostics, selected Rust package lint/tests and explicitly selected browser specs; no ASan or native UI certification", ok: results.every(result => result.ok), elapsedMs: Date.now() - started, results };
 }
 
 async function main() {
