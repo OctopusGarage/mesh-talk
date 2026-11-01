@@ -18,8 +18,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: fuzz-${{ github.ref }}
-  cancel-in-progress: true
+  group: fuzz-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   fuzz:

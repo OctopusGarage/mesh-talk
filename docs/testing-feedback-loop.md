@@ -28,6 +28,71 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+## Completion and retirement evidence
+
+Readiness and completion must name the operation, source generation and owning
+scope being observed. A delay, an empty queue, an unchanged counter or the
+absence of a stale effect does not prove that its asynchronous consumer finished.
+Retain and await the actual task before making authoritative no-effect assertions.
+When a browser seam exposes only a transport resolver, pair its integration
+scenario with a component test that captures the real handler or effect task;
+select both through the owning validation contract. Preserve browser interaction,
+current-operation success, native-bridge identity, visual and strict error checks.
+
+Favorites navigation, initial App presentation and ConversationView attachment
+acquisition follow this paired contract. Hold consumer progress independently of
+transport completion, retire its owner, then release and await that exact task.
+Verify that the stale effect remains absent after settlement. A replacement task
+finishing first cannot stand in for the retired task. Qualify changes with a
+temporary guard-bypass control that fails the stale-effect assertion, then restore
+the guard. Fake-time advancement can demonstrate why an old elapsed-time sample
+was insufficient; it must not become the completion witness.
+
+Process execution follows the same rule: a command leader exiting does not prove
+its descendants retired. Shared runners use the validation stage's process owner
+rather than creating an independent nested process group. On POSIX, the outer
+owner retains termination escalation and resource leases through verified group
+retirement, including ignored-stdio descendants and ordinary leader exit.
+Nested cancellation notifies that owner. Windows commands join a private native
+job at process creation, before the first target instruction, with no breakaway
+or inherited job handle. The owning adapter preserves argv, environment, working
+directory and byte streams; its private control pipe never reaches target stdin.
+Retirement requires an empty job, a signaled retained leader handle and drained
+output. The parent accepts only the current invocation's nonce-bound receipt;
+helper exit or kill-on-close containment alone cannot certify cleanup.
+Ordinary leader exit starts
+owned-scope retirement. Retire remaining descendants and verify cleanup before
+returning the leader's exit status or releasing resources. This accommodates
+compiler auxiliary processes without process-name exceptions or breakaway.
+Record forced retirement separately from command status; it never substitutes
+for selected test counts, business assertions or complete output evidence.
+A Windows job-termination request also closes an empty job; the recorded flag
+does not by itself indicate leaked work.
+Job retirement, output drain and error recovery share one bounded cleanup budget
+inside the parent's missing-receipt backstop. Cancelled or unverifiably retired work
+cannot admit another suite, fallback build or transport operation, or create a
+successful reusable receipt. Platform evidence must distinguish cancellation from
+an incomplete or mismatched test inventory; success still requires every selected
+step and its positive test counts.
+
+Intentional timeout, cancellation and output-limit fixtures declare their own
+execution scope so their faults cannot cancel the real validation caller.
+Verify these fixtures beneath a real managed supervisor as well as directly;
+require positive executed-case counts, since a nested test-driver context can
+otherwise suppress execution while returning success.
+
+Timers remain appropriate for explicit watchdogs, protocol deadlines, bounded
+state polling, termination grace periods and tests of time-dependent behavior.
+Their expiry signals failure or triggers escalation; elapsed time alone never
+certifies readiness, task completion or cleanup. Process-state probes and pauses
+consume one monotonic retirement deadline; per-probe timeouts must not multiply
+the total cleanup budget. Preserve documented performance
+assertions separately from harness watchdogs. Fix an incorrect observation or
+work owner before considering a budget change, and use same-source phase evidence
+to justify any deliberate change to a latency contract.
+
+## Browser integration evidence
+
 Changes to configured portable browser specs and the portable configuration
 select the `portable-browser-reporting` diagnostic. It compares both core and extended
 inventories with Playwright discovery without launching browsers. Register new
@@ -779,17 +844,26 @@ retains resource ownership through descendant-process cleanup. Nested POSIX
 stage commands share the outer managed group and its single escalation owner;
 nested leases are not released before group termination. Subsequent waiters
 recover locks whose nested owner was terminated.
+Before admitting detached POSIX work, persist that its leases require retirement
+proof, then publish the actual owned process group. An interrupted publication
+leaves unknown ownership and cannot be recovered from PID death alone. A known
+group permits dead-owner recovery only after that group's work has stopped.
 POSIX cleanup confirms that the managed group has no runnable descendants after
 escalation; unreaped zombies do not count as running work. Dead nested owners
 cannot release a lease while their group still runs. If process-state inspection
-is unavailable or Windows `taskkill /T /F` fails, termination is unverified:
+is unavailable or the Windows owner cannot provide verified retirement,
+termination is unverified:
 the cancelled attempt produces no successful receipt and its locks remain
 quarantined. Inspect the attempt log and the lock's `owner.json`, establish that
 all descendants have stopped, and remove only those quarantined lock directories
-to recover. Automatic dead-owner recovery never clears quarantine. A Windows
-taskkill success is OS process-tree evidence, not a native UI acceptance test.
-It relies on the OS command's result; it does not independently enumerate and
-verify every terminated Windows descendant.
+to recover. Automatic dead-owner recovery never clears quarantine. Windows locks
+also retain `windowsRetirementRequired`; a dead owner PID cannot release them
+without proof. Establish retirement from native evidence or an OS restart before
+removing only the affected lock directories. Native job tests use a real native
+leader: Node/libuv's own child-job cleanup can conceal an inherited-descendant
+defect. Portable receipt-rejection tests prove the parent protocol, not Windows
+kernel retirement or native UI acceptance. Declared-input receipt identities
+include all three Windows adapter source files on Windows.
 Tool versions and mutable configuration digests are rechecked after queueing,
 before reuse and after execution; changes invalidate evidence rather than
 publishing success under the earlier identity.

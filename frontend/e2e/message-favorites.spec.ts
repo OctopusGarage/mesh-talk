@@ -205,11 +205,11 @@ test("closing Favorites retires pending original-message navigation", async ({
     .toBe("function");
   await page.keyboard.press("Escape");
   await page.getByTestId(`conversation-row-${CHANNEL.id}`).click();
-  await page.evaluate(async () => {
+  // Supplementary browser state; FavoritesDialog.test.ts awaits the exact retired task.
+  await page.evaluate(() => {
     (
       window as unknown as { __releaseFavoriteContext: () => void }
     ).__releaseFavoriteContext();
-    await new Promise((resolve) => setTimeout(resolve, 100));
   });
   await expect(
     page.getByRole("log").getByText("channel kickoff", { exact: true }),
@@ -255,11 +255,11 @@ test("editing supersedes pending original navigation without leaving actions dis
   await expect(
     page.getByRole("button", { name: "View original", exact: true }),
   ).toBeEnabled();
-  await page.evaluate(async () => {
+  // Supplementary browser state; FavoritesDialog.test.ts awaits the exact retired task.
+  await page.evaluate(() => {
     (
       window as unknown as { __releaseFavoriteContext: () => void }
     ).__releaseFavoriteContext();
-    await new Promise((resolve) => setTimeout(resolve, 100));
   });
   await expect(page.getByTestId("message-favorites")).toBeVisible();
 });

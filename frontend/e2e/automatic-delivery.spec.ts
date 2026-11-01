@@ -442,18 +442,50 @@ test("a native picker completed after conversation navigation cannot send to the
     )
     .toBe(true);
   await page.getByTestId("conversation-row-acc_carol_cccc3333").click();
-  const enqueues = await page.evaluate(async () => {
+  // Exact retired-picker completion is covered through ConversationView in conversationIntake.test.ts.
+  const enqueues = await page.evaluate(() => {
     const state = (
       window as unknown as {
         __pickerRace: { enqueues: number; release: (path: string) => void };
       }
     ).__pickerRace;
     state.release("/tmp/stale.txt");
-    await new Promise((resolve) => setTimeout(resolve, 0));
     return state.enqueues;
   });
   expect(enqueues).toBe(0);
   await expect(page.getByText("stale.txt")).toHaveCount(0);
+  await page.evaluate(() => {
+    (
+      window as unknown as { __pickerRace: { entered: boolean } }
+    ).__pickerRace.entered = false;
+  });
+  await revealComposerTools(page);
+  await page.getByTestId("composer-attach").click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __pickerRace: { entered: boolean } })
+            .__pickerRace.entered,
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(() => {
+    (
+      window as unknown as { __pickerRace: { release: (path: string) => void } }
+    ).__pickerRace.release("/tmp/current.txt");
+  });
+  await expect(
+    page.getByRole("log").getByText("current.txt", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("conversation-header")).toContainText("carol");
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __pickerRace: { enqueues: number } })
+          .__pickerRace.enqueues,
+    ),
+  ).toBe(1);
 });
 
 test("a pending local text acceptance moves the submitted text out of the composer", async ({

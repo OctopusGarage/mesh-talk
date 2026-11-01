@@ -100,6 +100,31 @@ test("UI and reusable Health isolate caller/event streams while superseded candi
   }
 });
 
+for (const owner of ["ci", "e2e-backend"]) test(`${owner} isolates evidence events while superseded candidates cancel`, () => {
+  const context = { workflow: owner, ref: "refs/heads/main", event: { pull_request: {} } };
+  const groups = [];
+  for (const event_name of ["push", "pull_request", "merge_group", "schedule", "workflow_dispatch"]) {
+    const event = { ...context, event_name };
+    const observed = concurrency(owner, event);
+    groups.push(observed.group);
+    assert.equal(observed.cancel, ["push", "pull_request", "merge_group"].includes(event_name));
+    assert.equal(observed.group, concurrency(owner, { ...event, sha: "replacement" }).group);
+    assert.notEqual(observed.group, concurrency(owner, { ...event, ref: "refs/heads/other" }).group);
+  }
+  assert.equal(new Set(groups).size, groups.length, "independent event streams must not share a cancellation group");
+  const pr = { ...context, event_name: "pull_request", event: { pull_request: { number: 42 } } };
+  assert.notEqual(concurrency(owner, pr).group, concurrency(owner, { ...pr, event: { pull_request: { number: 43 } } }).group);
+});
+
+test("scheduled and manual fuzz executions remain separate without cancellation", () => {
+  const context = { workflow: "Fuzz", event_name: "schedule", ref: "refs/heads/main", event: {} };
+  const scheduled = concurrency("fuzz", context);
+  const manual = concurrency("fuzz", { ...context, event_name: "workflow_dispatch" });
+  assert.notEqual(scheduled.group, manual.group);
+  assert.equal(scheduled.cancel, false);
+  assert.equal(manual.cancel, false);
+});
+
 test("Firefox core runs on ordinary candidates and the final gate requires its real success", () => {
   const firefox = job("firefox-extended");
   assert.doesNotMatch(firefox, /^    if:/m, "core Firefox must not be scheduled-only");

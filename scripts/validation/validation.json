@@ -190,7 +190,13 @@
         "scripts/validation/frontend-graph.mjs",
         "scripts/validation/validation.json",
         "scripts/validation/stage.mjs",
+        "scripts/validation/windows-process-owner.mjs",
+        "scripts/validation/windows-process-owner.ps1",
+        "scripts/validation/windows-process-owner.cs",
+        "scripts/diagnostics/windows-process-owner.test.mjs",
+        "scripts/diagnostics/fixtures/windows-native-leader.ps1",
         "scripts/validation/selectors.mjs",
+        "scripts/validation/browser.mjs",
         "Makefile",
         "AGENTS.md",
         "CONTRIBUTING.md",
@@ -234,6 +240,11 @@
         "scripts/diagnostics/changed-validation.test.mjs",
         "scripts/diagnostics/validation-selectors.test.mjs",
         "scripts/diagnostics/validation-stage.test.mjs",
+        "scripts/diagnostics/windows-process-owner.test.mjs",
+        "scripts/diagnostics/pr-platform.test.mjs",
+        "scripts/diagnostics/pr-preflight-output.test.mjs",
+        "scripts/diagnostics/backend-eval-report.test.mjs",
+        "scripts/diagnostics/native-build.test.mjs",
         "scripts/diagnostics/validation-checks.test.mjs",
         "scripts/diagnostics/validation-latency.test.mjs",
         "scripts/diagnostics/rust-contracts.test.mjs",
@@ -247,7 +258,18 @@
         "scripts/test-ai-eval.mjs",
         "scripts/diagnostics/patch-coverage.test.mjs"
       ],
+      "capability": {
+        "summary": "Select affected checks and retain process ownership through completion or verified retirement before releasing validation resources.",
+        "guide": "docs/testing-feedback-loop.md#completion-and-retirement-evidence",
+        "invariants": [
+          {
+            "name": "Preserve command status only after verified owned-scope retirement; persist lease retirement requirements before detached admission, and never recover unknown ownership from PID death alone. Cancellation and unverifiable cleanup cannot admit later work or create successful reusable evidence.",
+            "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
+          }
+        ]
+      },
       "escalation": [
+        "Windows execution changes require real windows-process-owner.test.mjs execution on Windows: portable receipt-rejection controls alone do not establish native job membership or retirement. Preserve creation-time job ownership, argument/environment/byte-stream fidelity, cancellation and output/log failure cleanup, helper-death quarantine, unrelated-process isolation and declared-input cache invalidation. Qualify actual cold/cached Cargo test completion, original nonzero status and descendant retirement before subsequent real command admission. Hosted Windows Health remains required before merge.",
         "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI. Supervisor Rust thread-policy changes also require full workspace consumers and the real Cargo thread-policy fixture; preserve explicit Windows/sanitizer caller limits."
       ]
     },
@@ -278,6 +300,7 @@
         "scripts/diagnostics/prepare-pr.test.mjs",
         "scripts/diagnostics/pr-platform.test.mjs",
         "scripts/diagnostics/pr-scenarios.test.mjs",
+        "scripts/diagnostics/pr-preflight-output.test.mjs",
         "scripts/validation/native-build.mjs",
         "scripts/diagnostics/native-build.test.mjs"
       ],
