@@ -438,7 +438,7 @@ test("Windows cold and cached Cargo commands finish real tests after owned-scope
     assert.equal(typeof result.forcedRetirement, "boolean");
     t.diagnostic(`${phase}: forcedRetirement=${result.forcedRetirement}, cleanupUnverified=${result.cleanupUnverified}`);
     assert.match(result.output, /test result: ok\. 1 passed; 0 failed;/u);
-    const build = result.output.split(/\r?\n/u).filter(line => line.startsWith('{')).map(line => JSON.parse(line)).find(row => row.reason === "build-finished");
+    const build = result.stdout.split(/\r?\n/u).filter(line => line.startsWith('{')).map(line => JSON.parse(line)).find(row => row.reason === "build-finished");
     assert.equal(build?.success, true);
   }
 });
@@ -453,4 +453,86 @@ test("Windows nonzero leader status survives verified descendant retirement", { 
   assert.equal(result.forcedRetirement, true);
   const { pid } = JSON.parse(await readFile(f.ready, "utf8"));
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+});
+
+test("command stream channels preserve structured stdout across stderr fragments", { timeout: 15000 }, async t => {
+  const { runCommand } = await import("../pr-platform/guest.mjs");
+  const root = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-streams-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const logPath = path.join(root, "producer.log");
+  const program = `
+    const { readFile } = require('node:fs/promises');
+    const { setImmediate } = require('node:timers/promises');
+    const log = process.argv[1];
+    async function visible(fragment) {
+      while (true) {
+        try { if ((await readFile(log)).includes(fragment)) return; }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        await setImmediate();
+      }
+    }
+    (async () => {
+      process.stderr.write('progress-prefix ');
+      await visible(Buffer.from('progress-prefix '));
+      process.stdout.write('{"reason":"build-finished","success":true,"text":"');
+      process.stdout.write(Buffer.from([0xf0, 0x9f]));
+      await visible(Buffer.from([0xf0, 0x9f]));
+      process.stderr.write('progress-mid ');
+      await visible(Buffer.from('progress-mid '));
+      process.stdout.write(Buffer.from([0x98, 0x80]));
+      process.stdout.write('"}\\n');
+      await visible(Buffer.from('"}\\n'));
+      process.stderr.write('progress-end\\n');
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `;
+  const result = await runCommand(process.execPath, ["-e", program, "--", logPath], { logPath, timeoutMs: 10000 });
+  assert.equal(result.code, 0, result.error);
+  assert.equal(result.cleanupUnverified, false);
+  assert.equal(typeof result.stdout, "string");
+  assert.equal(result.outputTruncated, false);
+  assert.deepEqual(JSON.parse(result.stdout), { reason: "build-finished", success: true, text: "😀" });
+  assert.equal(result.stderr, "progress-prefix progress-mid progress-end\n");
+  assert.match(result.output, /progress-prefix/u);
+  assert.match(result.output, /progress-mid/u);
+});
+
+test("command stream capture shares one byte window and retains the output-limit failure", { timeout: 15000 }, async () => {
+  const { runCommand } = await import("../pr-platform/guest.mjs");
+  const program = "process.stdout.write('a'.repeat(4096));process.stderr.write('b'.repeat(4096))";
+  const result = await runCommand(process.execPath, ["-e", program], { maxOutputBytes: 64 });
+  assert.equal(result.code, 0, result.error);
+  assert.equal(typeof result.stdout, "string");
+  assert.equal(typeof result.stderr, "string");
+  assert.equal(result.outputTruncated, true);
+  assert.ok(Buffer.byteLength(result.output) <= 64);
+  assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= 64);
+  const limited = await runCommand(process.execPath, ["-e", program], { maxOutputBytes: 64, outputLimitIsFailure: true });
+  assert.notEqual(limited.code, 0);
+  assert.match(limited.error, /output exceeded/u);
+  assert.equal(limited.outputTruncated, true);
+  assert.equal(limited.cleanupUnverified, false);
+});
+
+test("machine output requires an explicitly complete stdout capture", async () => {
+  const { requireCommandStdout } = await import("../pr-platform/guest.mjs");
+  const output = '{"reason":"build-finished","success":true}\n';
+  for (const result of [
+    { output, outputTruncated: false },
+    { output, stdout: output },
+    { output, stdout: output, outputTruncated: true },
+  ]) assert.throws(() => requireCommandStdout(result), /stdout|truncat|unverified/i);
+  assert.equal(requireCommandStdout({ output: "human log", stdout: output, outputTruncated: false }), output);
+});
+
+test("tiny positive output limits bound the combined human log and shared stream window", { timeout: 15000 }, async () => {
+  const { runCommand } = await import("../pr-platform/guest.mjs");
+  const observations = [];
+  for (const cap of [1, 2, 3]) {
+    const result = await runCommand(process.execPath, ["-e", "process.stdout.write('x'.repeat(100))"], { maxOutputBytes: cap });
+    assert.equal(result.code, 0, result.error);
+    assert.equal(result.outputTruncated, true);
+    assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= cap);
+    observations.push({ cap, humanBytes: Buffer.byteLength(result.output) });
+  }
+  assert.deepEqual(observations.map(({ cap, humanBytes }) => humanBytes <= cap), [true, true, true], JSON.stringify(observations));
 });
