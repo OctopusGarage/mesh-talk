@@ -245,6 +245,34 @@ available. Downloading and installing remain explicit visitor actions. Browser
 coverage is owned by `frontend/e2e/site-downloads.spec.ts`; these fixtures prove
 page selection and interaction, not native installation or release provenance.
 
+## Native release inspection
+
+[`scripts/release/sevenzip.py`](../scripts/release/sevenzip.py) owns the supported
+7-Zip version and official asset digests for native payload inspection. Native
+macOS/Windows producers and both Ubuntu acceptance jobs install that tool into a
+job-local directory. Downloads have size and time limits; checksum verification
+precedes extraction, and the installed version must match before its absolute
+path is exported as `MESH_TALK_SEVENZIP`. Windows uses its existing 7-Zip only to
+unpack the verified tool archive. It never installs the tool globally.
+
+The Python metadata and delta verifiers share this selection. An explicitly
+configured missing tool fails rather than falling back to another version.
+Local callers may use an available 7-Zip, but an NSIS decoder reporting `BadCmd`
+fails before payload acceptance. Unknown application/resource sizes remain an
+error; decoded payload bytes, plugin equivalence, signatures and provenance
+remain mandatory. Update the version and official digests together, then verify
+the native consumers before accepting a tool upgrade.
+
+The existing Linux portable health gate installs NSIS and runs
+`python scripts/release/test_native_nsis.py -v`. It compiles real Unicode
+installers with a plugin call, compressed and raw payloads, and an uninstaller;
+it proves complete payload equivalence and rejects altered application/resources
+without executing any installer. Bootstrap regressions also cover checksum,
+version, platform and explicit-path failures. These checks catch decoder drift
+before publication builds. All three portable health platforms also execute the
+bootstrap before merge, while actual signed six-platform artifacts and
+downloaded draft verification remain required release evidence.
+
 ## Publish Nightly builds
 
 The authoritative implementation is [the release workflow](../.github/workflows/release.yml),

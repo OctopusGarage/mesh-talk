@@ -114,6 +114,17 @@ jobs:
         with:
           node-version: 22
 
+      - name: Setup Python for native release inspection
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned native inspection toolchain
+        if: runner.os != 'Linux'
+        shell: bash
+        run: python scripts/release/sevenzip.py install
+
       # 3️⃣ Install Rust
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -123,7 +134,7 @@ jobs:
       # 3.6️⃣ Install protoc
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf zstd sevenzip
+        run: brew install protobuf zstd
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
         run: choco install protoc zstandard -y
@@ -405,7 +416,12 @@ jobs:
       - name: Install installer metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libimage-exiftool-perl msitools rpm 7zip squashfs-tools
+          sudo apt-get install -y libimage-exiftool-perl msitools rpm squashfs-tools
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install pinned native inspection toolchain
+        run: python scripts/release/sevenzip.py install
       - uses: sigstore/cosign-installer@v4.1.2
       - uses: actions/download-artifact@v8
         with:
@@ -520,7 +536,12 @@ jobs:
       - name: Install installer metadata tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libimage-exiftool-perl msitools rpm 7zip squashfs-tools
+          sudo apt-get install -y libimage-exiftool-perl msitools rpm squashfs-tools
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install pinned native inspection toolchain
+        run: python scripts/release/sevenzip.py install
       - uses: sigstore/cosign-installer@v4.1.2
       - name: Reverify the actual draft against saved build evidence
         run: |

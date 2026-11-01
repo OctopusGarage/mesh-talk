@@ -21,6 +21,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 from delta_assets import equivalent
+from sevenzip import sevenzip_tool
 
 PLATFORMS = {
     "macos_arm64": ("dmg",),
@@ -39,7 +40,7 @@ def require(condition, message):
 
 
 def archive_member(path, suffix):
-    tool = shutil.which("7zz") or shutil.which("7z")
+    tool = sevenzip_tool()
     require(tool, "7-Zip is required to inspect installer contents")
     listing = subprocess.check_output([tool, "l", "-slt", str(path)], text=True, timeout=60)
     members = []

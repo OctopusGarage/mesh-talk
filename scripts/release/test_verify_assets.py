@@ -361,7 +361,7 @@ class ReleaseAssetsTests(unittest.TestCase):
     def test_dmg_member_ignores_7zip_trailing_bytes(self):
         from unittest.mock import patch
         listing = "Path = mesh-talk/mesh-talk.app/Contents/Info.plist\nFolder = -\nSize = 5\n"
-        with patch("verify_assets.shutil.which", return_value="7zz"), patch(
+        with patch("verify_assets.sevenzip_tool", return_value="7zz"), patch(
             "verify_assets.subprocess.check_output", side_effect=[listing, b"helloextra"]
         ):
             self.assertEqual(archive_member(self.root / "test.dmg", "mesh-talk.app/Contents/Info.plist"), b"hello")
@@ -497,6 +497,19 @@ class ReleaseAssetsTests(unittest.TestCase):
                 self.verify()
 
 
+    def test_nsis_decoder_errors_fail_before_payload_extraction(self):
+        from delta_assets import nsis_files
+        from unittest.mock import patch
+        application = b"MZ__TAURI_BUNDLE_TYPE_VAR_NSS"
+        listing = ("Type = Nsis\nSubType = NSIS-3 Unicode BadCmd=13\n\n"
+                   f"Path = mesh-talk.exe\nSize = {len(application)}\n")
+        def command(args, **kwargs):
+            return listing if args[1] == "l" else application
+        with patch("delta_assets.sevenzip_tool", return_value="7zz"), patch("delta_assets.subprocess.check_output", side_effect=command) as inspect:
+            with self.assertRaisesRegex(ValueError, "NSIS decoder"):
+                nsis_files(self.root / "installer.exe")
+            self.assertEqual(inspect.call_count, 1, "an incomplete decoder table must not accept even numeric members")
+
     def test_delta_native_equivalence_binds_tar_bytes_and_all_windows_resources(self):
         import gzip
         from delta_assets import equivalent
@@ -517,7 +530,7 @@ class ReleaseAssetsTests(unittest.TestCase):
                 return listing
             data = members[args[-1]]
             return b"mutated!" if args[3] == str(raw) and args[-1] == changed else data
-        with patch("delta_assets.shutil.which", return_value="7zz"), patch("delta_assets.subprocess.check_output", side_effect=command):
+        with patch("delta_assets.sevenzip_tool", return_value="7zz"), patch("delta_assets.subprocess.check_output", side_effect=command):
             equivalent(canonical, raw, "windows")
             changed = "resources/config.json"
             with self.assertRaisesRegex(ValueError, "application files differ"):
