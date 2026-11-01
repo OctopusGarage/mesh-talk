@@ -401,6 +401,22 @@ acknowledgement is presentation-only and grants no runtime or content authority.
 Explicit main-window restoration also belongs to this owner: Dock reopen,
 single-instance activation and tray actions reuse its show/unminimize/focus path.
 
+### Dialog focus ownership
+
+`frontend/src/components/ui/dialog.tsx` owns default focus restoration for shared
+Radix dialogs. A deferred close callback may restore the opener only while focus
+is neutral or still belongs to that closing content. A connected control outside
+the closing dialog represents a newer focus owner and must retain focus. Document
+body/root and Radix focus guards are neutral; ordinary and nested trigger
+restoration remain delegated to the existing focus stack. Consumer
+`onCloseAutoFocus` handlers run first and retain their cancellation behavior.
+
+Sidebar utility helpers observe the trigger's expanded state and the menu's open
+state before real scoped item clicks. They must not compensate for a stale
+production focus callback by sleeping through it. The `frontend-dialog-focus`
+validation owner requires real primitive lifecycle regressions and a browser
+handoff from a closing dialog to an already opened utility menu.
+
 ### Focused validation ownership
 
 Module-owned `validation.json` contracts link these boundaries to development

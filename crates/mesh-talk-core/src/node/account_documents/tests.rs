@@ -394,6 +394,135 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
 }
 
 #[tokio::test]
+async fn unreadable_channel_custody_blob_is_repaired_without_version_churn() {
+    use crate::discovery::Announce;
+    use futures_util::FutureExt;
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let other = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let holder = node(&dir.path().join("holder"), &other);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    source.roster.lock().unwrap().update(
+        &Announce::new_with_account(&holder.identity, &other, "holder", address.port()),
+        address.ip(),
+        &source.user_id(),
+    );
+    // Only the holder's real inbound provider runs. In particular, no source
+    // migrator or document worker can race this independent storage-fault proof.
+    let serving = holder.clone();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, _) = result.unwrap();
+                    let serving = serving.clone();
+                    connections.spawn(Box::pin(async move {
+                        if let Ok(channel) = serving.privacy_accept(stream).await {
+                            serving.serve_connection(channel).await;
+                        }
+                    }));
+                }
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    let observed = std::panic::AssertUnwindSafe(async {
+        let channel = source
+            .create_channel("custody blob repair", vec![holder.identity.public()])
+            .await
+            .unwrap();
+        source
+            .send_channel_message(channel, b"actual holder custody before blob repair")
+            .await
+            .unwrap();
+        let event = source.channel_history(channel, 10)[0].id;
+        assert!(
+            holder.log.lock().unwrap().get(&event).is_some(),
+            "the real holder must retain the exact original encrypted event"
+        );
+        assert!(
+            holder
+                .channel_history(channel, 10)
+                .iter()
+                .any(|row| row.id == event)
+        );
+        assert_eq!(source.channel_custody_count(channel, event), Some(1));
+        let key = AccountDocumentKey::ChannelCustody {
+            channel: hex::encode(channel.as_bytes()),
+            event: event.to_hex(),
+            holder: holder.user_id(),
+        };
+        let before = source.account_document_meta(&key).unwrap();
+        let payload = source
+            .account_document(&key)
+            .unwrap()
+            .unwrap()
+            .payload()
+            .to_vec();
+        {
+            let mut documents = source.account_documents.lock().unwrap();
+            documents.remove_blob_for_test(before.content_hash);
+            *documents = AccountDocumentStore::open(
+                &dir.path().join("source"),
+                "pw",
+                &account.public().ed25519_pub,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            source.channel_custody_count(channel, event),
+            None,
+            "unreadable positive evidence is unknown, never zero confirmed copies"
+        );
+        let peer = source.routing_peer(&holder.user_id()).unwrap();
+        source
+            .recheck_channel_custody_peer(channel, event, &peer)
+            .await;
+        assert_eq!(
+            source.account_document_meta(&key).unwrap(),
+            before,
+            "an identical authenticated holder report repairs the blob without signed version churn"
+        );
+        assert_eq!(
+            source.account_document(&key).unwrap().unwrap().payload(),
+            payload.as_slice()
+        );
+        assert_eq!(source.channel_custody_count(channel, event), Some(1));
+        source.runtime_work.close();
+        source.runtime_work.drain().await;
+        *source.account_documents.lock().unwrap() = AccountDocumentStore::open(
+            &dir.path().join("source"),
+            "pw",
+            &account.public().ed25519_pub,
+        )
+        .unwrap();
+        assert_eq!(source.account_document_meta(&key).unwrap(), before);
+        assert_eq!(
+            source.account_document(&key).unwrap().unwrap().payload(),
+            payload.as_slice(),
+            "the repaired original witness must survive encrypted-store reopening"
+        );
+        assert_eq!(source.channel_custody_count(channel, event), Some(1));
+    })
+    .catch_unwind()
+    .await;
+    for current in [&source, &holder] {
+        current.runtime_work.close();
+    }
+    server.abort();
+    let _ = server.await;
+    for current in [&source, &holder] {
+        current.runtime_work.drain().await;
+    }
+    if let Err(panic) = observed {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
 async fn channel_custody_is_shared_with_certified_sibling_while_holder_is_offline() {
     channel_custody_sibling_scenario(true).await;
 }
@@ -576,27 +705,89 @@ async fn channel_custody_never_counts_sender_sibling_as_other_member() {
     channel_custody_sibling_scenario(false).await;
 }
 
-// This is the original empty-profile readiness observation. A successful
-// observation before channel creation says nothing about that channel's heads.
-fn custody_linked_routes_ready(source: &Node, sibling: &Node) -> bool {
+// Kept only as the negative control for the old aggregate prerequisite.
+// Production aggregate progress includes unrelated independent document lanes.
+fn custody_linked_capabilities_ready(source: &Node, sibling: &Node) -> bool {
     [(source, sibling), (sibling, source)]
         .into_iter()
         .all(|(node, peer)| {
-            let public = peer.identity.public();
-            let exact_capability = node
-                .account_group_versions
+            node.account_group_versions
                 .lock()
                 .unwrap()
                 .get(&peer.user_id())
-                .is_some_and(|support| support.public == public);
-            let documents_settled = node.device_sync_status().into_iter().any(|status| {
-                status.device_id == peer.user_id()
-                    && status.document_phase == crate::node::SyncPhase::UpToDate
-                    && status.document_error.is_none()
-                    && !status.document_requires_upgrade
-            });
-            exact_capability && documents_settled
+                .is_some_and(|support| support.public == peer.identity.public())
         })
+}
+fn custody_linked_routes_ready(source: &Node, sibling: &Node) -> bool {
+    custody_linked_capabilities_ready(source, sibling)
+        && [(source, sibling), (sibling, source)]
+            .into_iter()
+            .all(|(node, peer)| {
+                node.device_sync_status().into_iter().any(|status| {
+                    status.device_id == peer.user_id()
+                        && status.document_phase == crate::node::SyncPhase::UpToDate
+                        && status.document_error.is_none()
+                        && !status.document_requires_upgrade
+                })
+            })
+}
+
+// A fixture-local epoch, installed before channel creation, observes real
+// Optional/Custody work without issuing a request or coupling Directory progress.
+struct CustodySetupObservation<'a> {
+    nodes: [&'a Node; 2],
+    previous: Vec<Option<std::sync::Arc<super::super::account_session::AccountClientTestHook>>>,
+    settled: std::sync::Arc<std::sync::Mutex<[bool; 2]>>,
+    phases: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(usize, String)>>>,
+}
+impl<'a> CustodySetupObservation<'a> {
+    fn new(source: &'a Node, sibling: &'a Node) -> Self {
+        let settled = std::sync::Arc::new(std::sync::Mutex::new([false; 2]));
+        let phases = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let nodes = [source, sibling];
+        let mut previous = Vec::new();
+        for (index, node) in nodes.iter().enumerate() {
+            let peer = nodes[1 - index].identity.public();
+            let old = node.account_client_test_hook.lock().unwrap().take();
+            previous.push(old.clone());
+            let settled = settled.clone();
+            let phases = phases.clone();
+            *node.account_client_test_hook.lock().unwrap() =
+                Some(std::sync::Arc::new(move |actual, phase| {
+                    if actual == peer {
+                        if phase == "custody_setup_exchange_started" {
+                            settled.lock().unwrap()[index] = false;
+                        } else if phase.starts_with("custody_setup_exchange_completed settled=") {
+                            settled.lock().unwrap()[index] = phase.ends_with("=true");
+                        }
+                        let mut phases = phases.lock().unwrap();
+                        if phases.len() == 48 {
+                            phases.pop_front();
+                        }
+                        phases.push_back((index, phase.clone()));
+                    }
+                    if let Some(old) = &old {
+                        old(actual, phase);
+                    }
+                }));
+        }
+        Self {
+            nodes,
+            previous,
+            settled,
+            phases,
+        }
+    }
+    fn ready(&self) -> bool {
+        self.settled.lock().unwrap().iter().all(|ready| *ready)
+    }
+}
+impl Drop for CustodySetupObservation<'_> {
+    fn drop(&mut self) {
+        for (node, old) in self.nodes.iter().zip(self.previous.drain(..)) {
+            *node.account_client_test_hook.lock().unwrap() = old;
+        }
+    }
 }
 
 fn custody_channel_setup_keys(
@@ -620,33 +811,76 @@ async fn wait_custody_channel_setup(
     source: &Node,
     sibling: &Node,
     channel: crate::eventlog::ConversationId,
+    observation: &CustodySetupObservation<'_>,
 ) {
     // Channel creation dirties both directory/control and optional document
     // lanes. Observe its actual signed source heads before the message starts
     // the independent eight-second automatic-custody observation.
     let keys = custody_channel_setup_keys(source, channel);
     let mut required = None;
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if required.is_none() {
-                required = keys.iter().map(|key| source.account_document_meta(key)).collect::<Option<Vec<_>>>();
+                required = keys
+                    .iter()
+                    .map(|key| source.account_document_meta(key))
+                    .collect::<Option<Vec<_>>>();
             }
-            let imported = required.as_ref().is_some_and(|heads| heads.iter().all(|head| {
-                sibling.account_document(&head.key).ok().flatten().is_some_and(|document| {
-                    let meta = &document.meta;
-                    // Match the store's signed LWW order. A newer authentic
-                    // publication must not leave setup waiting for an obsolete
-                    // exact captured version forever.
-                    !meta.tombstone && meta.valid(&source.account.public().ed25519_pub)
-                        && meta.writer_device == head.writer_device && meta.order() >= head.order()
+            let imported = required.as_ref().is_some_and(|heads| {
+                heads.iter().all(|head| {
+                    sibling
+                        .account_document(&head.key)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|document| {
+                            let meta = &document.meta;
+                            // Match the store's signed LWW order. A newer authentic
+                            // publication must not leave setup waiting for an obsolete
+                            // exact captured version forever.
+                            !meta.tombstone
+                                && meta.valid(&source.account.public().ed25519_pub)
+                                && meta.writer_device == head.writer_device
+                                && meta.order() >= head.order()
+                        })
                 })
-            }));
-            if imported && custody_linked_routes_ready(source, sibling) {
+            });
+            if imported && custody_linked_capabilities_ready(source, sibling) && observation.ready()
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-    }).await.expect("the new channel's signed inventory/control heads and original linked routes must settle before the custody scenario");
+    })
+    .await;
+    if result.is_err() {
+        let capabilities = [(source, sibling), (sibling, source)].map(|(node, peer)| {
+            node.account_group_versions
+                .lock()
+                .unwrap()
+                .get(&peer.user_id())
+                .map(|support| support.public == peer.identity.public())
+        });
+        let heads = keys
+            .iter()
+            .map(|key| {
+                (
+                    source.account_document_meta(key),
+                    sibling.account_document_meta(key),
+                    sibling
+                        .account_document(key)
+                        .map(|document| document.map(|document| document.payload().len())),
+                )
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "custody setup timeout required={required:?} heads={heads:?} exact_capabilities={capabilities:?} custody_settled={:?} source_status={:?} sibling_status={:?} phases={:?}",
+            observation.settled.lock().unwrap(),
+            source.device_sync_status(),
+            sibling.device_sync_status(),
+            observation.phases.lock().unwrap()
+        );
+    }
+    result.expect("the new channel's signed inventory/control heads, exact capabilities and real custody startup must be ready before the custody scenario");
 }
 
 #[tokio::test]
@@ -714,11 +948,13 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
     let release = Arc::new(Semaphore::new(0));
     let _release_on_drop = ReleaseOnDrop(release.clone());
     let observed = std::panic::AssertUnwindSafe(async {
+        let precreate = CustodySetupObservation::new(&source, &sibling);
         tokio::time::timeout(Duration::from_secs(30), async {
-            while !custody_linked_routes_ready(&source, &sibling) {
+            while !custody_linked_capabilities_ready(&source, &sibling) || !precreate.ready() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }).await.expect("the original pre-create readiness boundary is satisfied");
+        }).await.expect("real reciprocal capability and empty custody startup precede channel creation");
+        drop(precreate);
         let (arrived, held) = oneshot::channel();
         let arrived = Arc::new(Mutex::new(Some(arrived)));
         let exact_sibling = sibling.identity.public();
@@ -741,6 +977,7 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
                 })
             }
         }));
+        let observation = CustodySetupObservation::new(&source, &sibling);
         let channel = source.create_channel("post-create readiness", vec![sibling.identity.public(), external.identity.public()]).await.unwrap();
         tokio::time::timeout(Duration::from_secs(30), held).await.expect("the real authenticated post-create inventory exchange must reach the hold").unwrap();
         let keys = custody_channel_setup_keys(&source, channel);
@@ -753,7 +990,7 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
             }
         }).await.expect("the real source must publish both new channel heads while its inventory response is held");
         assert!(sibling.account_document_meta(&keys[0]).is_none(), "the withheld source head must not already have been imported");
-        let setup = wait_custody_channel_setup(&source, &sibling, channel);
+        let setup = wait_custody_channel_setup(&source, &sibling, channel, &observation);
         tokio::pin!(setup);
         assert!(futures_util::poll!(setup.as_mut()).is_pending(), "a completed pre-create bootstrap must not admit message/custody work while this channel's real inventory is held");
         release.close();
@@ -781,6 +1018,219 @@ async fn custody_channel_setup_waits_for_post_create_authenticated_inventory() {
         observed,
         "both original signed source heads must arrive through the real account network before setup completes"
     );
+}
+
+#[tokio::test]
+async fn custody_channel_setup_does_not_wait_for_independent_directory() {
+    use crate::{
+        discovery::Announce,
+        node::{account_devices::AccountDevice, account_sync_wire::AccountHistoryFrame},
+    };
+    use futures_util::FutureExt;
+    use std::{
+        net::IpAddr,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    use tokio::{
+        net::TcpListener,
+        sync::{Semaphore, oneshot},
+    };
+    struct ReleaseOnDrop(Arc<Semaphore>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let account = Account::generate();
+    let other = Account::generate();
+    let source = node(&dir.path().join("source"), &account);
+    let sibling = node(&dir.path().join("sibling"), &account);
+    let external = node(&dir.path().join("external"), &other);
+    for (owner, peer) in [(&source, &sibling), (&sibling, &source)] {
+        owner
+            .account_devices
+            .lock()
+            .unwrap()
+            .insert(AccountDevice {
+                public: peer.identity.public(),
+                certificate: account.certify(&peer.identity.public().ed25519_pub),
+            })
+            .unwrap();
+    }
+    // Publish the actual channel before any remote directory turn. Its first
+    // inventory page can finish while the following hostname page stays held.
+    let channel = source
+        .create_channel(
+            "independent directory",
+            vec![sibling.identity.public(), external.identity.public()],
+        )
+        .await
+        .unwrap();
+    let observation = CustodySetupObservation::new(&source, &sibling);
+    let release = Arc::new(Semaphore::new(0));
+    let _release_on_drop = ReleaseOnDrop(release.clone());
+    let (arrived, held) = oneshot::channel();
+    let arrived = Arc::new(Mutex::new(Some(arrived)));
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exact_sibling = sibling.identity.public();
+    *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let release = release.clone();
+        let active = active.clone();
+        let armed = armed.clone();
+        move |peer, frame| {
+            let release = release.clone();
+            let arrived = arrived.clone();
+            let active = active.clone();
+            let armed = armed.clone();
+            let exact_sibling = exact_sibling.clone();
+            Box::pin(async move {
+                if armed.load(std::sync::atomic::Ordering::SeqCst)
+                    && peer == exact_sibling
+                    && matches!(frame, AccountHistoryFrame::DocumentsRequest { ref body } if wire::DocumentRequest::decode(body).is_some_and(|request| request.domain == AccountDocumentDomain::DeviceHostname))
+                {
+                    struct Active(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+                    impl Drop for Active {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _active = Active(active);
+                    if let Some(signal) = arrived.lock().unwrap().take() {
+                        let _ = signal.send(());
+                    }
+                    let _ = release.acquire().await;
+                }
+            })
+        }
+    }));
+    let mut servers = tokio::task::JoinSet::new();
+    let mut external_server = None;
+    for (current, owner) in [
+        (&source, &account),
+        (&sibling, &account),
+        (&external, &other),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        for observer in [&source, &sibling, &external] {
+            if observer.user_id() != current.user_id()
+                && !(current.user_id() == external.user_id()
+                    && observer.user_id() == sibling.user_id())
+            {
+                observer.roster.lock().unwrap().update(
+                    &Announce::new_with_account(
+                        &current.identity,
+                        owner,
+                        "custody setup",
+                        listener.local_addr().unwrap().port(),
+                    ),
+                    IpAddr::from([127, 0, 0, 1]),
+                    &observer.user_id(),
+                );
+            }
+        }
+        let server = servers.spawn(current.clone().run_accept_loop(listener));
+        if current.user_id() == external.user_id() {
+            external_server = Some(server);
+        }
+    }
+    let result = std::panic::AssertUnwindSafe(async {
+        // Creation had no routes yet; deliver its real original genesis/key
+        // frames to the external member through the normal public owner now.
+        source.distribute_channel(channel, &[external.identity.public()]).await;
+        let keys = custody_channel_setup_keys(&source, channel);
+        let prerequisite = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let imported = keys.iter().all(|key| source.account_document_meta(key).is_some_and(|head| {
+                    sibling.account_document(key).ok().flatten().is_some_and(|document| {
+                        let meta = &document.meta;
+                        !meta.tombstone && meta.valid(&account.public().ed25519_pub)
+                            && meta.writer_device == head.writer_device && meta.order() >= head.order()
+                    })
+                }));
+                if imported && custody_linked_capabilities_ready(&source, &sibling) && observation.ready() { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await;
+        if prerequisite.is_err() {
+            eprintln!("independent directory prerequisite timeout caps={} custody={:?} heads={:?} source_status={:?} sibling_status={:?} phases={:?}", custody_linked_capabilities_ready(&source, &sibling), observation.settled.lock().unwrap(), keys.iter().map(|key| (source.account_document_meta(key), sibling.account_document_meta(key))).collect::<Vec<_>>(), source.device_sync_status(), sibling.device_sync_status(), observation.phases.lock().unwrap());
+        }
+        prerequisite.expect("signed channel heads, exact reciprocal capability and real settled custody must progress while directory is held");
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        source.set_device_hostname(Some("held-directory-update")).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), held).await.expect("real authenticated hostname refresh must enter the directory hold after cold prerequisites").unwrap();
+        let refreshed = tokio::time::timeout(Duration::from_secs(30), async {
+            while !observation.ready() || custody_linked_routes_ready(&source, &sibling) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await;
+        if refreshed.is_err() {
+            eprintln!("held directory refresh prerequisite timeout caps={} custody={:?} source_status={:?} sibling_status={:?} phases={:?}", custody_linked_capabilities_ready(&source, &sibling), observation.settled.lock().unwrap(), source.device_sync_status(), sibling.device_sync_status(), observation.phases.lock().unwrap());
+        }
+        refreshed.expect("real custody remains ready while the independent held directory makes aggregate progress pending");
+        assert!(active.load(std::sync::atomic::Ordering::SeqCst) > 0, "the actual authenticated directory handler must still be held");
+        assert!(!custody_linked_routes_ready(&source, &sibling), "the old aggregate predicate still includes the held unrelated directory lane");
+        assert!(!release.is_closed());
+        assert_ne!(sibling.device_hostnames().unwrap().get(&source.user_id()).map(String::as_str), Some("held-directory-update"), "the real directory update must remain unimported before measured work");
+        wait_custody_channel_setup(&source, &sibling, channel, &observation).await;
+        assert!(sibling.routing_peer(&external.user_id()).is_none(), "the sibling must have no route for an independent external-holder query");
+        source.send_channel_message(channel, b"independent custody progress").await.unwrap();
+        assert!(sibling.routing_peer(&external.user_id()).is_none(), "public send must not teach the sibling an external-holder route");
+        let event = source.channel_history(channel, 10)[0].id;
+        assert_eq!(source.channel_custody_count(channel, event), Some(1));
+        assert!(external.channel_history(channel, 10).iter().any(|row| row.id == event));
+        let external_head = source.channel_custody_observations(channel, event).into_iter().find(|meta| {
+            meta.writer_device == source.user_id()
+                && matches!(&meta.key, AccountDocumentKey::ChannelCustody { holder, .. } if *holder == external.user_id())
+                && !meta.tombstone
+        }).expect("the source must publish its actual authenticated external-holder observation");
+        // Preserve the original offline-holder proof and prevent a competing
+        // sibling-authored observation from replacing the source's signed row.
+        external_server.take().unwrap().abort();
+        external.runtime_work.close();
+        tokio::time::timeout(Duration::from_secs(5), external.runtime_work.drain()).await.expect("external holder must retire before custody observation");
+        source.roster.lock().unwrap().forget(&external.identity.public());
+        sibling.roster.lock().unwrap().forget(&external.identity.public());
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while !sibling.channel_history(channel, 10).iter().any(|row| row.id == event && row.from_me) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the exact outgoing event must reach sibling history while directory is held");
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let imported_source_observation = sibling.account_document(&external_head.key).ok().flatten().is_some_and(|document| {
+                    let meta = &document.meta;
+                    !meta.tombstone && meta.writer_device == source.user_id()
+                        && meta.valid(&account.public().ed25519_pub) && meta.order() >= external_head.order()
+                });
+                if sibling.channel_custody_count(channel, event) == Some(1) && imported_source_observation { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("actual newly published source-authenticated external custody must converge while directory is held");
+        assert!(external.channel_history(channel, 10).iter().any(|row| row.id == event), "the external member must retain the exact fresh event");
+        assert!(!sibling.channel_custody_observations(channel, event).is_empty(), "fresh external custody must arrive as an actual account-private document");
+        assert!(!release.is_closed());
+        assert_ne!(sibling.device_hostnames().unwrap().get(&source.user_id()).map(String::as_str), Some("held-directory-update"), "fresh custody must not depend on importing the held directory update");
+    }).catch_unwind().await;
+    release.close();
+    *source.account_session_test_hook.lock().unwrap() = None;
+    drop(observation);
+    for current in [&source, &sibling, &external] {
+        current.runtime_work.close();
+    }
+    servers.abort_all();
+    while servers.join_next().await.is_some() {}
+    for current in [&source, &sibling, &external] {
+        tokio::time::timeout(Duration::from_secs(5), current.runtime_work.drain())
+            .await
+            .expect("custody fixture work must retire");
+    }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 async fn channel_custody_sibling_scenario(external_online: bool) {
@@ -832,6 +1282,59 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             current.clone().run_accept_loop(listener),
         )));
     }
+    // Bounded metadata-only diagnostics for this one source/sibling route.
+    let custody_trace =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let custody_trace_started = std::time::Instant::now();
+    let custody_important =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let custody_trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for (label, current, peer) in [
+        ("source", &a, sibling.identity.public()),
+        ("sibling", &sibling, a.identity.public()),
+    ] {
+        let trace = custody_trace.clone();
+        let omitted = custody_trace_omitted.clone();
+        let important = custody_important.clone();
+        *current.account_client_test_hook.lock().unwrap() =
+            Some(std::sync::Arc::new(move |observed, phase| {
+                if observed != peer
+                    || !(phase.starts_with("page_")
+                        || phase.starts_with("negotiation_")
+                        || phase.starts_with("session_")
+                        || phase.starts_with("dial_authentication_")
+                        || phase.starts_with("dial_outbound_")
+                        || phase.starts_with("wake_")
+                        || phase.starts_with("fixture_")
+                        || phase.starts_with("history_")
+                        || phase.starts_with("favorite_"))
+                {
+                    return;
+                }
+                let entry = (
+                    custody_trace_started.elapsed().as_millis(),
+                    label,
+                    tokio::task::try_id(),
+                    phase,
+                );
+                if entry.3.starts_with("fixture_")
+                    || (entry.3.contains("outcome=") && !entry.3.contains("outcome=ok"))
+                {
+                    let mut important = important.lock().unwrap();
+                    if important.len() == 32 {
+                        important.pop_front();
+                    }
+                    important.push_back(entry.clone());
+                }
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 128 {
+                    trace.pop_front();
+                    omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                trace.push_back(entry);
+            }));
+    }
+    let setup_observation = CustodySetupObservation::new(&a, &sibling);
     let channel = a
         .create_channel(
             "custody fixture",
@@ -839,7 +1342,11 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         )
         .await
         .unwrap();
-    wait_custody_channel_setup(&a, &sibling, channel).await;
+    wait_custody_channel_setup(&a, &sibling, channel, &setup_observation).await;
+    drop(setup_observation);
+    a.trace_account_client(&sibling.identity.public(), || {
+        "fixture_channel_setup_complete".into()
+    });
     if !external_online {
         let server = servers[2].take().unwrap();
         server.abort();
@@ -847,9 +1354,11 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         bob.runtime_work.drain().await;
         a.roster.lock().unwrap().forget(&bob.identity.public());
     }
+    a.trace_account_client(&sibling.identity.public(), || "fixture_before_send".into());
     a.send_channel_message(channel, b"synthetic custody fixture")
         .await
         .unwrap();
+    a.trace_account_client(&sibling.identity.public(), || "fixture_after_send".into());
     let event = a.channel_history(channel, 10)[0].id;
     if external_online {
         assert!(
@@ -857,35 +1366,6 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
                 .iter()
                 .any(|row| row.id == event)
         );
-        let key = AccountDocumentKey::ChannelCustody {
-            channel: hex::encode(channel.as_bytes()),
-            event: event.to_hex(),
-            holder: bob.user_id(),
-        };
-        let before = a.account_document_meta(&key).unwrap();
-        {
-            let mut documents = a.account_documents.lock().unwrap();
-            documents.remove_blob_for_test(before.content_hash);
-            *documents = AccountDocumentStore::open(
-                &dir.path().join("a"),
-                "pw",
-                &account.public().ed25519_pub,
-            )
-            .unwrap();
-        }
-        assert_eq!(
-            a.channel_custody_count(channel, event),
-            None,
-            "unreadable positive evidence is unknown, never zero confirmed copies"
-        );
-        let peer = a.routing_peer(&bob.user_id()).unwrap();
-        a.recheck_channel_custody_peer(channel, event, &peer).await;
-        assert_eq!(
-            a.account_document_meta(&key).unwrap(),
-            before,
-            "identical positive evidence repairs its blob without version churn"
-        );
-        assert!(a.account_document(&key).unwrap().is_some());
         assert_eq!(a.channel_custody_count(channel, event), Some(1));
         let server = servers[2].take().unwrap();
         server.abort();
@@ -898,6 +1378,9 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             .unwrap()
             .forget(&bob.identity.public());
     }
+    a.trace_account_client(&sibling.identity.public(), || {
+        "fixture_holder_offline".into()
+    });
     tokio::time::timeout(Duration::from_secs(8), async {
         while !sibling
             .channel_history(channel, 10)
@@ -909,42 +1392,6 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     })
     .await
     .expect("sibling imports the exact outgoing message");
-    // Bounded metadata-only diagnostics for this one source/sibling route.
-    let custody_trace =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-    let custody_trace_started = std::time::Instant::now();
-    let custody_trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    for (label, current, peer) in [
-        ("source", &a, sibling.identity.public()),
-        ("sibling", &sibling, a.identity.public()),
-    ] {
-        let trace = custody_trace.clone();
-        let omitted = custody_trace_omitted.clone();
-        *current.account_client_test_hook.lock().unwrap() =
-            Some(std::sync::Arc::new(move |observed, phase| {
-                if observed != peer
-                    || !(phase.starts_with("page_")
-                        || phase.starts_with("negotiation_")
-                        || phase.starts_with("session_")
-                        || phase.starts_with("dial_authentication_")
-                        || phase.starts_with("dial_outbound_")
-                        || phase.starts_with("wake_"))
-                {
-                    return;
-                }
-                let mut trace = trace.lock().unwrap();
-                if trace.len() == 128 {
-                    trace.pop_front();
-                    omitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                trace.push_back((
-                    custody_trace_started.elapsed().as_millis(),
-                    label,
-                    tokio::task::try_id(),
-                    phase,
-                ));
-            }));
-    }
     let custody_metadata = |current: &Node| {
         current
             .channel_custody_observations(channel, event)
@@ -976,16 +1423,18 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
     );
     let expected = usize::from(external_online);
     let mut final_expected = expected;
+    let custody_observation_offset = custody_trace_started.elapsed().as_millis();
+    let custody_observation_started = std::time::Instant::now();
     let actual = tokio::time::timeout(Duration::from_secs(8), async {
         while sibling.channel_custody_count(channel, event) != Some(expected) {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await;
-    if actual.is_err() {
+    if actual.is_err() || std::env::var_os("MESH_TALK_CUSTODY_TRACE").is_some() {
         eprintln!(
-            "custody observation start={custody_start:?} finish elapsed_ms={} source_count={:?} target_count={:?} source_meta={:?} target_meta={:?} source_status={:?} target_status={:?} omitted={} phases={:?}",
-            custody_trace_started.elapsed().as_millis(),
+            "custody observation offset_ms={custody_observation_offset} start={custody_start:?} finish elapsed_ms={} source_count={:?} target_count={:?} source_meta={:?} target_meta={:?} source_status={:?} target_status={:?} omitted={} important={:?} phases={:?}",
+            custody_observation_started.elapsed().as_millis(),
             a.channel_custody_count(channel, event),
             sibling.channel_custody_count(channel, event),
             custody_metadata(&a),
@@ -993,6 +1442,7 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
             custody_status(&a),
             custody_status(&sibling),
             custody_trace_omitted.load(std::sync::atomic::Ordering::Relaxed),
+            custody_important.lock().unwrap(),
             custody_trace.lock().unwrap()
         );
     }

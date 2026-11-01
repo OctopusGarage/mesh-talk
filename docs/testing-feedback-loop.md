@@ -111,20 +111,73 @@ programmatic scroll can instead be treated as layout correction. The missing-rea
 negative control must fail. Retain explicit live-edge setup, exact history-start
 position, unmount, return-to-latest, row geometry and media URL reuse assertions.
 
+Geometry polling treats an unavailable bounding box as pending. Poll callbacks
+must return that unavailable state rather than dereference it or invent zero-sized
+geometry; callback exceptions abort polling. Capture a positive baseline and keep
+accepted image/frame rectangles from one visible decoded instance, as in the reply
+preview fixture. A temporary disappearance must recover within the existing assertion
+budget, while a permanently missing row must still fail the same geometry assertion.
+
 Presence expiry fixtures observe consumption of the distinctive lease source
 before failing subsequent reads. Deleted-contact fixtures await the post-change
 roster refresh before asserting absence. A sleep shorter or longer than a polling
 period proves neither of those operation boundaries; delayed-consumption and
 paused-polling controls must still exercise expiry, recovery and reappearance.
 
-Custody propagation fixtures first settle the newly created channel's signed
-inventory/control heads and the exact linked routes. Readiness observed before
+Custody propagation fixtures first observe the newly created channel's signed
+inventory/control heads, reciprocal exact-peer capabilities and an authenticated
+settled Custody-domain sweep in each direction. The completion must be enabled,
+have no continuation and match the nonzero remote digest to the committed local
+scope. A fixture-local observation epoch clears on a new Custody attempt, so
+failure or cancellation cannot reuse an earlier success. Readiness observed before
 channel creation does not cover that new work. Hold a real authenticated inventory
 response to verify that setup remains pending until release; accept authenticated
 superseding heads so an obsolete captured version cannot strand the fixture.
+Aggregate document status includes independent lanes and is not this setup proof.
+After actual startup, a held Directory/DeviceHostname update must allow setup and
+fresh message/custody progress without releasing the unrelated handler; retire the
+external holder after its real receipt so a direct query cannot replace proof of
+the source-authored sibling import.
 Keep the existing custody observation budget, real network exchange, offline-holder
 and restart assertions. This setup boundary does not establish a production latency
 guarantee or a dependency between independent mandatory/optional worker lanes.
+
+Keep intentional blob corruption separate from automatic custody propagation.
+A real sibling read during a missing-blob interval can change its protocol retry
+state even after the source repairs the blob. The storage-repair fixture uses a
+real external holder and awaited encrypted delivery/recheck, with no autonomous
+source worker during corruption. It proves unknown rather than zero, repair
+without signed metadata churn and durable readability after reopen. Automatic
+propagation retains its original deadline with the external holder already
+offline, without an explicit pull or prior custody warmup. Controlled fault-path
+evidence does not by itself identify the cause of a historical timeout; matching
+sanitizer execution remains required.
+
+Explicit-file result fixtures establish authenticated File capabilities in both
+directions before admitting their first request. A forward role view does not
+prove that the executor can fetch the sender's prepared assets: document import
+can wake work before its authenticated capability receipt is installed. Hold a
+real reverse Control response to verify this setup boundary, then retain the
+original operation deadlines, matching-retry and byte assertions. Deliberate
+capability-refusal scenarios must preserve their missing-capability state.
+
+Both the initial requester and the fresh result requester finish cold capability
+setup before invoking the unchanged three-second signed-role proof. Running nodes
+observe their existing producers. The fresh requester intentionally has no
+background worker before retry admission, so its cold phase drives the required
+Control exchange and retains the shared owner's cursor, authenticated interruption
+classification and admission backoff. Do not start its worker early: that would
+erase the result-adoption race. A real fresh Control response held beyond the role
+budget must complete through cold setup before the original matching-retry and
+byte assertions. Static phase markers distinguish initial and fresh setup failures.
+
+Dialog-to-menu regressions distinguish fixture state from actual focus ownership.
+Hold the real deferred close-focus callback, remove the old dialog, open the next
+menu through a real click, and release the callback. The new menu must retain its
+focus and open state. Waiting for an animation alone would hide this production
+handoff bug. Preserve ordinary/nested close restoration and custom handlers;
+[the shared dialog owner](module-boundaries.md#dialog-focus-ownership) defines the
+contract. Observe expanded/open menu attributes in navigation helpers.
 
 ## Validation stages and agent responsibilities
 
@@ -489,6 +542,15 @@ producers. The inbound-only incoming-Wake fixture drives its existing two setup
 directions inside that budget before observing readiness; a passive wait there
 would have no producer to satisfy it. No extra warmup exchange is added.
 
+Reference Text/Sticker, owner rename and private policy/dissolve scenarios use the
+same ordering. Keep role-bootstrap protocol tests and deliberate capability-refusal
+cases focused on their original acceptance boundary rather than warming them.
+First public-fanout fault arrival also belongs to the cold owner: canonical
+publication-order tests still inspect the exact committed result and signed
+metadata at the first connection while fanout is pending. Consecutive-control
+tests retain both original eight-second commit/progress assertions, establishing
+the real live held response between them before admitting the second operation.
+
 `selected_source_cold_capability_setup_precedes_role_page_budget` holds the real
 first authenticated Control responses beyond the role-page budget in a two-device
 bootstrap fixture. It then requires reciprocal capabilities and the exact signed
@@ -713,7 +775,7 @@ independent checks run concurrently and heavy suites are not repeated by health.
 | `check-health.yml` platform jobs      | Complete frontend units, help and diagnostic/Python regressions on Linux/macOS/Windows; unit coverage, formatting, ESLint, source/E2E TypeScript, npm/help advisory policy and eval smoke once on Linux; same-run UI coverage line map                                |
 | `check-health.yml` source job         | Rust formatting, typos, cargo-deny, cargo-machete, shellcheck and actionlint on Linux                                                                                                                                                                                 |
 | `ci.yml`                              | Frontend builds, built-JS compatibility, Clippy `--all-targets`, explicit workspace builds and Rust tests on all three platforms; native-platform Rust coverage; Linux multi-process coverage and exact scenario evidence, ignored bridge and large-folder acceptance |
-| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit/Firefox core and scheduled extended scenarios                                                                              |
+| `e2e-ui.yml` and `ui-shards.yml`      | Full Chromium regression on Linux/macOS/Windows, independent Linux coverage, optional-pack checks, portable evidence from full shards, dedicated WebKit/Firefox core and scheduled extended scenarios                                                                 |
 | Independent security/native workflows | Full-history Gitleaks, dependency review, CodeQL, mutation/sanitizer checks, backend process rigs and native desktop evaluation                                                                                                                                       |
 
 Health is called by the UI workflow for every PR base and merge candidate, with

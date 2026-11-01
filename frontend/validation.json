@@ -2,6 +2,31 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-dialog-focus",
+      "paths": [
+        "frontend/src/components/ui/dialog.tsx",
+        "frontend/src/components/ui/dialog.test.ts",
+        "frontend/e2e/helpers/sidebar-actions.ts",
+        "frontend/e2e/minimum-window.spec.ts"
+      ],
+      "frontend": [
+        "src/components/ui/dialog.test.ts"
+      ],
+      "capability": {
+        "summary": "Preserve active focus ownership across deferred dialog closure and subsequent user interactions.",
+        "guide": "docs/module-boundaries.md#dialog-focus-ownership",
+        "invariants": [
+          {
+            "name": "Default dialog close restoration preserves a newer connected focus owner outside the closing content; ordinary and nested trigger restoration, consumer handlers and neutral document/focus-guard behavior remain intact.",
+            "reference": "docs/module-boundaries.md#dialog-focus-ownership"
+          }
+        ]
+      },
+      "escalation": [
+        "Use real Radix focus lifecycle tests for ordinary, nested, custom and newer-owner cases. A controlled real-browser deferred-close callback must leave a newly opened utility menu focused and open; the old owner must fail this regression. Exercise minimum-window navigation and consumers with custom focus restoration. Sidebar helpers must observe expanded/open menu state and use real scoped clicks. Preserve existing animations, focus traps, API callbacks, timeout budgets and native keyboard acceptance."
+      ]
+    },
+    {
       "id": "frontend-production-runtime",
       "paths": [
         "frontend/vite.config.ts",
@@ -1994,7 +2019,7 @@
         ]
       },
       "escalation": [
-        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior."
+        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior. Geometry polls must retain unavailable measurements as pending, capture positive baselines and reuse coherent visible image/frame samples. A transient unavailable measurement must recover and permanent absence must fail without weakening exact geometry, cache reuse or assertion budgets."
       ]
     },
     {
@@ -2260,6 +2285,25 @@
     }
   ],
   "prScenarios": [
+    {
+      "id": "frontend-dialog-focus-acceptance",
+      "paths": [
+        "frontend/src/components/ui/dialog.tsx",
+        "frontend/src/components/ui/dialog.test.ts",
+        "frontend/e2e/helpers/sidebar-actions.ts",
+        "frontend/e2e/minimum-window.spec.ts"
+      ],
+      "browser": [
+        "e2e/minimum-window.spec.ts",
+        "e2e/ui-audit-dialogs.spec.ts",
+        "e2e/automatic-delivery.spec.ts",
+        "e2e/privacy.spec.ts",
+        "e2e/tray-navigation.spec.ts"
+      ],
+      "native": [
+        "host"
+      ]
+    },
     {
       "id": "group-file-network-cost-acceptance",
       "paths": [

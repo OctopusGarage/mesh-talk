@@ -18,6 +18,15 @@ impl Node {
             _ => None,
         }
     }
+    #[cfg(test)]
+    pub(in crate::node) fn operation_input_consumed_for_test(
+        &self,
+        meta: &AccountDocumentMeta,
+    ) -> bool {
+        Self::operation_input_key(&meta.key).is_some_and(|key| {
+            self.operation_seen.lock().unwrap().get(&key) == Some(&meta.content_hash)
+        })
+    }
     // Only maintenance consults the existing processed-input owner. Capture
     // hashes for CURRENT row keys without nesting seen/store locks or copying
     // unrelated legacy-parent query tokens. Recheck current metadata under the
@@ -159,6 +168,20 @@ impl Node {
     }
     fn publish_account_group_operation_groups(&self, groups: &[crate::eventlog::ConversationId]) {
         for &group in groups {
+            #[cfg(test)]
+            let phase_clock = std::time::Instant::now();
+            #[cfg(test)]
+            let owner_phase = |phase: &str| {
+                self.trace_account_client(&self.identity.public(), || {
+                    format!(
+                        "operation_publication_owner group={} phase={phase} elapsed_ms={}",
+                        hex::encode(group.as_bytes()),
+                        phase_clock.elapsed().as_millis()
+                    )
+                });
+            };
+            #[cfg(test)]
+            owner_phase("projection_begin");
             let projection = self.operation_projection(group);
             let key = AccountDocumentKey::GroupOperation {
                 channel: hex::encode(group.as_bytes()),
@@ -173,7 +196,11 @@ impl Node {
             #[cfg(test)]
             let published_revision;
             let changed = {
+                #[cfg(test)]
+                owner_phase("projection_end_store_lock_begin");
                 let mut store = self.account_documents.lock().expect("documents mutex");
+                #[cfg(test)]
+                owner_phase("store_lock_acquired_read_begin");
                 let previous = store.meta(&key);
                 let old = store.get(&key).ok().flatten().and_then(|document| {
                     // The input owner already verified these exact bytes. Reuse
@@ -200,6 +227,8 @@ impl Node {
                 else {
                     continue;
                 };
+                #[cfg(test)]
+                owner_phase("old_read_end_frame_begin");
                 let frame = OperationFrame::new(self, group, revision, projection);
                 let payload = frame.encode();
                 if payload.len() > MAX_HEAD || !store.operation_payload_fits(&key, payload.len()) {
@@ -217,7 +246,12 @@ impl Node {
                 {
                     published_revision = revision;
                 }
-                store.merge(meta, &payload)
+                #[cfg(test)]
+                owner_phase("frame_end_merge_begin");
+                let changed = store.merge(meta, &payload);
+                #[cfg(test)]
+                owner_phase("merge_end");
+                changed
             };
             #[cfg(test)]
             if matches!(&changed, Ok(true)) {
