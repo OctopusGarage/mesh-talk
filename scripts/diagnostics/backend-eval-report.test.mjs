@@ -50,3 +50,32 @@ test("instrumented backend execution preserves the exact ignored scenario select
   assert.deepEqual(covered.slice(-4), ["--", "--ignored", "--test-threads=1", "--nocapture"]);
   assert.throws(() => backendCargoArgs("unknown", true), /Unknown backend/);
 });
+
+for (const mode of ["output cap", "timeout"]) test(`backend ${mode} retires ignored-stdio workers before the next suite`, { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { runCargo } = await import("../evals/backend-runner.mjs");
+  assert.equal(typeof runCargo, "function");
+  const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawnSync } = await import("node:child_process");
+  const directory = await mkdtemp(join(tmpdir(), "mesh-backend-tree-"));
+  const marker = join(directory, "ready"); let pid;
+  t.after(async () => { if (pid) try { process.kill(pid, "SIGKILL"); } catch {} await rm(directory, { recursive: true, force: true }); });
+  const leaf = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(marker)},String(process.pid));process.send('ready');setInterval(()=>{},1000)`;
+  const leader = `process.on('SIGTERM',()=>process.exit(0));const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',()=>process.stdout.write('x'.repeat(2048)));setInterval(()=>{},1000)`;
+  const result = await runCargo("two_node_cli", { command: [process.execPath, "-e", leader], maxOutputBytes: mode === "output cap" ? 1024 : 4096, timeoutMs: 1500 });
+  pid = Number(await readFile(marker, "utf8"));
+  assert.match(result.failure, mode === "output cap" ? /output.*limit/i : /timeout/i);
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert.ok(!state || state.startsWith("Z"), `next suite would overlap a runnable worker: ${state}`);
+});
+
+test("backend cancellation and unverified cleanup stop admission of later suites", async () => {
+  const { evaluateBackendSuites } = await import("../evals/backend-runner.mjs");
+  for (const reason of [{ cancelled: true }, { cleanupUnverified: true }]) {
+    let calls = 0;
+    const failures = await evaluateBackendSuites(async () => { calls++; return { code: 130, failure: "cancelled or unretired work", ...reason }; }, async () => {});
+    assert.equal(calls, 1);
+    assert.equal(failures.length, 1);
+  }
+});

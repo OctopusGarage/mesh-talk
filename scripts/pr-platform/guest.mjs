@@ -1,12 +1,12 @@
 /** Shared bounded guest execution. Selectors are argv data, never shell fragments. */
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validatePlan } from "./plan.mjs";
+import { execute } from "../validation/stage.mjs";
 import { selectedRustPackages } from "./rust-packages.mjs";
 
 export function rustTestCount(output) {
@@ -20,43 +20,38 @@ export async function digestFile(filename) {
   return hash.digest("hex");
 }
 
-export function runCommand(program, args, { cwd, env = process.env, timeoutMs = 1_800_000, logPath, detached = process.platform !== "win32", maxOutputBytes = 128 * 1024 * 1024 } = {}) {
-  return new Promise(resolve => {
-    const started = Date.now();
-    let output = "";
-    let timedOut = false;
-    let failure;
-    let executable = program;
-    let argv = args;
-    if (program === "cargo" && env.MESH_PR_CARGO) executable = env.MESH_PR_CARGO;
+export async function runCommand(program, args, { cwd, env = process.env, timeoutMs = 1_800_000, logPath, detached = process.platform !== "win32", maxOutputBytes = 128 * 1024 * 1024, outputLimitIsFailure = false, signal } = {}) {
+  const started = Date.now();
+  let output = "", bytes = 0, timedOut = false, failure;
+  const controller = new AbortController();
+  let timer;
+  const stop = () => { clearTimeout(timer); controller.abort(); };
+  signal?.addEventListener("abort", stop, { once: true });
+  if (signal?.aborted) stop();
+  process.on("SIGINT", stop); process.on("SIGTERM", stop);
+  timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+  try {
+    const executable = program === "cargo" && env.MESH_PR_CARGO ? env.MESH_PR_CARGO : program;
+    // Resolve npm exactly as the existing guest owner does, including npm_execpath.
+    let command = [executable, ...args];
     if (program === "npm") {
-      executable = process.execPath;
-      const npm = [env.npm_execpath,
-        path.join(path.dirname(process.execPath), "node_modules/npm/bin/npm-cli.js"),
-        path.resolve(path.dirname(process.execPath), "../lib/node_modules/npm/bin/npm-cli.js"),
-      ].find(candidate => candidate && existsSync(candidate));
-      if (!npm) { resolve({ code: null, timedOut: false, output: "", error: "Cannot locate npm-cli.js beside the installed Node executable" }); return; }
-      argv = [npm, ...args];
+      const npm = [env.npm_execpath, path.join(path.dirname(process.execPath), "node_modules/npm/bin/npm-cli.js"), path.resolve(path.dirname(process.execPath), "../lib/node_modules/npm/bin/npm-cli.js")].find(candidate => candidate && existsSync(candidate));
+      if (!npm) return { code: null, timedOut: false, output: "", error: "Cannot locate npm-cli.js beside the installed Node executable" };
+      command = [process.execPath, npm, ...args];
     }
-    const log = logPath ? createWriteStream(logPath) : undefined;
-    log?.on("error", error => { failure = error.message; });
-    const child = spawn(executable, argv, { cwd, env, shell: false, detached, windowsHide: true });
-    const consume = chunk => { log?.write(chunk); output += chunk.toString(); if (Buffer.byteLength(output) > maxOutputBytes) output = output.slice(-Math.floor(maxOutputBytes / 4)); };
-    child.stdout?.on("data", consume);
-    child.stderr?.on("data", consume);
-    child.on("error", error => { failure = error.message; });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      if (process.platform === "win32") spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, shell: false });
-      else { try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); } }
-    }, timeoutMs);
-    child.on("close", code => {
-      clearTimeout(timer);
-      const finish = () => resolve({ code, timedOut, output, error: failure, elapsedMs: Date.now() - started });
-      if (log) log.end(finish);
-      else finish();
-    });
-  });
+    const result = await execute(command, { cwd, env, logPath, signal: controller.signal, detached, notifyOwnerOnAbort: true, onOutput(chunk) {
+      bytes += chunk.length;
+      if (outputLimitIsFailure && bytes > maxOutputBytes) { failure ||= "Command output exceeded evidence limit"; stop(); return; }
+      output += chunk.toString();
+      if (Buffer.byteLength(output) > maxOutputBytes) output = output.slice(-Math.floor(maxOutputBytes / 4));
+    } });
+    return { code: controller.signal.aborted && !timedOut ? 130 : result.error && result.exitCode === 0 ? 1 : result.exitCode, timedOut, output, error: failure || result.error, signal: result.signal, cleanupUnverified: result.cleanupUnverified, cancelled: controller.signal.aborted && !timedOut && !failure, elapsedMs: Date.now() - started };
+  } catch (error) {
+    return { code: controller.signal.aborted ? 130 : null, timedOut, output, error: error.message, cancelled: controller.signal.aborted && !timedOut, elapsedMs: Date.now() - started };
+  } finally {
+    clearTimeout(timer); signal?.removeEventListener("abort", stop);
+    process.off("SIGINT", stop); process.off("SIGTERM", stop);
+  }
 }
 
 /** Normalize Playwright's JSON reporter (rootDir-relative files) to frontend paths. */
@@ -148,8 +143,9 @@ export async function executePlan(plan, { cwd = process.cwd(), env = process.env
       catch (error) { uiError = error.message; }
     }
     const count = step.kind === "rust" ? rustTestCount(result.output) : undefined;
-    const error = result.error || uiError || (result.timedOut ? "Command timed out" : result.code !== 0 ? `Command exited ${result.code}` : step.kind === "rust" && count === 0 ? "Selector ran zero Rust tests" : undefined);
+    const error = result.error || uiError || (result.cleanupUnverified ? "Descendant retirement could not be verified" : result.cancelled ? "Platform execution cancelled" : result.timedOut ? "Command timed out" : result.code !== 0 ? `Command exited ${result.code}` : step.kind === "rust" && count === 0 ? "Selector ran zero Rust tests" : undefined);
     results.push({ name: step.name, kind: step.kind, program: step.program, args: step.args, code: result.code, timedOut: !!result.timedOut, testCount: count, ui, ok: !error, error, elapsedMs: result.elapsedMs, outputTail: result.output.slice(-4000) });
+    if (result.cancelled || result.cleanupUnverified) break;
   }
   return { schema: 1, sourceSha: plan.sourceSha, archiveSha: plan.archiveSha, platform: process.platform, architecture: os.arch(), scope: "Affected workflow diagnostics, selected Rust package lint/tests and explicitly selected browser specs; no ASan or native UI certification", ok: results.every(result => result.ok), elapsedMs: Date.now() - started, results };
 }

@@ -10,7 +10,7 @@ import { selectedRustPackages } from "../pr-platform/rust-packages.mjs";
 export async function validateSelectors(plan, { cwd = process.cwd(), run = runCommand } = {}) {
   const results = [];
   async function checked(program, args) {
-    const result = await run(program, args, { cwd, timeoutMs: 1_800_000, detached: false });
+    const result = await run(program, args, { cwd, timeoutMs: 1_800_000 });
     if (result.code !== 0 || result.timedOut) throw Error(`Test inventory failed: ${result.error || result.output.slice(-3000)}`);
     return result.output;
   }

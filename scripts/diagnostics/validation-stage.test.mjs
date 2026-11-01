@@ -507,3 +507,46 @@ test("an ignored frontend environment file created during finalization invalidat
   assert.equal(result.failureKind, "invalidated");
   await assert.rejects(readFile(result.receipt));
 });
+
+test("unowned non-detached execution is rejected before starting a command", { skip: process.platform === "win32" }, async () => {
+  const { execute } = await import("../validation/stage.mjs");
+  await assert.rejects(execute([process.execPath, "-e", "process.exit(0)"], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, detached: false }), /requires an existing managed process-group owner/);
+});
+
+test("a stale group-owner marker cannot signal an unrelated process", { skip: process.platform === "win32", timeout: 10000 }, async t => {
+  const { spawn } = await import("node:child_process");
+  const { execute } = await import("../validation/stage.mjs");
+  const unrelated = spawn(process.execPath, ["-e", "process.send('ready');setInterval(()=>{},1000)"], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+  t.after(() => unrelated.kill("SIGKILL"));
+  await new Promise(resolve => unrelated.once("message", resolve));
+  const controller = new AbortController();
+  const result = await execute([process.execPath, "-e", "console.log('ready');setInterval(()=>{},1000)"], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: String(unrelated.pid) }, signal: controller.signal, notifyOwnerOnAbort: true, onOutput() { controller.abort(); } });
+  assert.equal(result.cleanupUnverified, true);
+  assert.equal(unrelated.exitCode, null, "unrelated live process must not receive the owner notification");
+  process.kill(unrelated.pid, 0);
+});
+
+test("ordinary leader success cannot leave an ignored-stdio worker behind", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const { execute } = await import("../validation/stage.mjs");
+  let pid;
+  t.after(() => { if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } });
+  const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
+  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(0)});`;
+  const result = await execute([process.execPath, "-e", leader], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
+  assert.ok(pid, "descendant must acknowledge installed handler before leader exits");
+  assert.notEqual(result.code, 0, "leader success is insufficient when actual work survives");
+  assert.match(result.error, /descendant/i);
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert.ok(!state || state.startsWith("Z"), `successful leader left runnable work: ${state}`);
+});
+
+test("clean standalone and managed nested success preserve exit zero", async () => {
+  const { execute } = await import("../validation/stage.mjs");
+  const env = { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" };
+  const direct = await execute([process.execPath, "-e", "process.exit(0)"], { env });
+  assert.equal(direct.code, 0);
+  const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
+  const inner = `import {runCommand} from ${JSON.stringify(guest)};const result=await runCommand(process.execPath,['-e','process.exit(0)']);process.exitCode=result.code;`;
+  const nested = await execute([process.execPath, "--input-type=module", "-e", inner], { env });
+  assert.equal(nested.code, 0);
+});

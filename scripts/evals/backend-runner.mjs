@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
+
+import { runCommand } from "../pr-platform/guest.mjs";
 
 export const BACKEND_SUITES = {
   two_node_cli: ["two_cli_nodes_discover_by_routed_query_and_exchange_a_dm", "two_cli_nodes_exchange_a_dm", "participant_cli_reopens_same_profile_on_requested_port_after_quit_eof_and_input_error", "participant_cli_probe_respects_persisted_invisible_mode"],
@@ -30,34 +32,11 @@ export function backendCargoArgs(target, coverage = false) {
   return [...(coverage ? ["llvm-cov", "--no-report"] : ["test"]), "--locked", "-p", "mesh-talk-core", "--test", target, "--", "--ignored", "--test-threads=1", "--nocapture"];
 }
 
-function runCargo(target) {
-  return new Promise((resolveRun, reject) => {
-    const child = spawn("cargo", backendCargoArgs(target, process.env.EVAL_COVERAGE === "1"), { env: { ...process.env, CARGO_TERM_COLOR: "never" }, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
-    let output = "", bytes = 0, failure, forcedKill;
-    const stopTree = reason => {
-      if (failure) return;
-      failure = reason;
-      if (!Number.isInteger(child.pid)) return;
-      if (process.platform === "win32") {
-        // Exact owned PID, including integration test children. Killing Cargo
-        // alone can otherwise leave real networking processes running.
-        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-        killer.on("error", () => child.kill());
-        killer.on("close", code => { if (code !== 0) child.kill(); });
-      } else {
-        try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill(); }
-        forcedKill = setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already reaped. */ } }, 2000);
-      }
-    };
-    const timeout = setTimeout(() => stopTree(`Backend suite timeout: ${target}`), 20 * 60 * 1000);
-    for (const stream of [child.stdout, child.stderr]) stream.on("data", chunk => {
-      bytes += chunk.length;
-      if (bytes > 16 * 1024 * 1024) { stopTree("Backend output exceeded evidence limit"); return; }
-      output += chunk.toString();
-    });
-    child.once("error", error => { clearTimeout(timeout); clearTimeout(forcedKill); reject(error); });
-    child.once("close", (code, signal) => { clearTimeout(timeout); clearTimeout(forcedKill); resolveRun({ output, code, signal, failure }); });
+export async function runCargo(target, { command = ["cargo", ...backendCargoArgs(target, process.env.EVAL_COVERAGE === "1")], maxOutputBytes = 16 * 1024 * 1024, timeoutMs = 20 * 60 * 1000, signal } = {}) {
+  const result = await runCommand(command[0], command.slice(1), {
+    env: { ...process.env, CARGO_TERM_COLOR: "never" }, timeoutMs, maxOutputBytes, outputLimitIsFailure: true, signal,
   });
+  return { ...result, failure: result.timedOut ? `Backend suite timeout: ${target}` : result.cancelled ? "Backend evaluation cancelled" : result.error };
 }
 
 export async function evaluateBackendSuites(runSuite, recordSuite) {
@@ -80,6 +59,7 @@ export async function evaluateBackendSuites(runSuite, recordSuite) {
     // Independent fixtures must all run, but no later pass can erase a failure.
     // Failure to preserve evidence remains fatal rather than an incomplete pass.
     await recordSuite(target, record);
+    if (record.cancelled || record.cleanupUnverified) break;
   }
   return failures;
 }

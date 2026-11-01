@@ -5,6 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { Writable } from "node:stream";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { inputGroup, inputIdentity, frontendEnvironmentIdentity } from "./stage-inputs.mjs";
@@ -134,10 +135,26 @@ function executableCommand(command, env) {
   const cli = candidates.find(candidate => existsSync(candidate));
   return cli ? [process.execPath, cli, ...command.slice(1)] : command;
 }
-async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream }) {
+// The inherited marker names a live supervisor ancestor, not an arbitrary PID.
+// Validate that relationship again before signalling; stale markers cannot grant
+// authority over a re-used PID belonging to another process tree.
+function supervisorAncestor(owner) {
+  if (!Number.isSafeInteger(owner) || owner <= 1 || owner === process.pid) return false;
+  let ancestor = process.ppid;
+  for (let depth = 0; ancestor > 1 && depth < 64; depth++) {
+    if (ancestor === owner) return true;
+    const result = spawnSync("ps", ["-o", "ppid=", "-p", String(ancestor)], { encoding: "utf8", timeout: 5000 });
+    if (result.status !== 0) return false;
+    ancestor = Number(result.stdout.trim());
+  }
+  return false;
+}
+export async function execute(command, { cwd, env, logPath, signal, createLogStream = createWriteStream, onOutput = chunk => process.stdout.write(chunk), detached = true, notifyOwnerOnAbort = false }) {
   signal?.throwIfAborted();
+  if (process.platform !== "win32" && !detached && !env.MESH_VALIDATION_PROCESS_GROUP_OWNER)
+    throw Error("Non-detached execution requires an existing managed process-group owner");
   return new Promise(resolve => {
-    const output = createLogStream(logPath);
+    const output = logPath ? createLogStream(logPath) : new Writable({ write(_chunk, _encoding, done) { done(); } });
     let error;
     let failureKind;
     let cleanupUnverified = false;
@@ -150,8 +167,8 @@ async function execute(command, { cwd, env, logPath, signal, createLogStream = c
       ...env,
       MESH_VALIDATION_PROCESS_GROUP_OWNER: env.MESH_VALIDATION_PROCESS_GROUP_OWNER || String(process.pid),
     };
-    const child = spawn(argv[0], argv.slice(1), { cwd, env: childEnv, shell: false, windowsHide: true, detached: process.platform !== "win32" && !nestedGroup });
-    const forward = chunk => { output.write(chunk); process.stdout.write(chunk); };
+    const child = spawn(argv[0], argv.slice(1), { cwd, env: childEnv, shell: false, windowsHide: true, detached: process.platform !== "win32" && !nestedGroup && detached });
+    const forward = chunk => { output.write(chunk); onOutput(chunk); };
     child.stdout?.on("data", forward); child.stderr?.on("data", forward);
     output.on("error", failure => { error = failure.message; failureKind = "failed"; abort(); });
     child.on("error", failure => { error = failure.message; failureKind = ["ENOENT", "EACCES"].includes(failure.code) ? "unavailable" : "failed"; });
@@ -174,10 +191,14 @@ async function execute(command, { cwd, env, logPath, signal, createLogStream = c
         // ignored-stdio descendants have exited. Dead-owner locks are reaped
         // by the next waiter after the group's processes have stopped.
         cleanup = new Promise(() => {});
-        if (!signal?.aborted) {
+        if (!signal?.aborted || notifyOwnerOnAbort) {
           // A local log failure must also notify the outer CLI owner; otherwise
           // nobody would start its group escalation and this lease would hang.
-          try { process.kill(Number(env.MESH_VALIDATION_PROCESS_GROUP_OWNER), "SIGTERM"); }
+          try {
+            const owner = Number(env.MESH_VALIDATION_PROCESS_GROUP_OWNER);
+            if (!supervisorAncestor(owner)) throw Error("Process-group owner is not a live supervisor ancestor");
+            process.kill(owner, "SIGTERM");
+          }
           catch {
             cleanupUnverified = true;
             error ||= "Outer process-group owner is unavailable";
@@ -199,14 +220,29 @@ async function execute(command, { cwd, env, logPath, signal, createLogStream = c
     };
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
-    child.on("close", async code => {
+    child.on("close", async (code, childSignal) => {
+      // Only this owner created the child's group. Nested commands share a
+      // live supervisor/sibling group; its final outer stage owns retirement.
+      if (!cleanup && process.platform !== "win32" && !nestedGroup && detached && child.pid) {
+        try {
+          if (processGroupRunning(child.pid)) {
+            error ||= "Command leader exited while owned descendants remained runnable";
+            failureKind ||= "failed";
+            abort();
+          }
+        } catch {
+          error ||= "Command descendant retirement could not be verified";
+          failureKind ||= "failed";
+          abort();
+        }
+      }
       await new Promise(done => output.end(failure => {
         if (failure) { error ||= failure.message; failureKind ||= "failed"; abort(); }
         done();
       }));
       await cleanup;
       signal?.removeEventListener("abort", abort);
-      resolve({ code: signal?.aborted ? 130 : error ? 1 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind, cleanupUnverified });
+      resolve({ code: signal?.aborted ? 130 : error ? 1 : Number.isInteger(code) && code >= 0 ? code : 1, error, failureKind, cleanupUnverified, exitCode: code, signal: childSignal });
     });
   });
 }

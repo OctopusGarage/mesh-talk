@@ -9,8 +9,14 @@ import { digestFile, expectedSteps, runCommand, validatePlaywrightEvidence } fro
 import { loadRequirements, requiredBrowserSpecs, committedFiles, verifyRequiredNative } from "../validation/pr-scenarios.mjs";
 import { linuxTarget, dockerInvocation, remoteInvocation } from "./linux-target.mjs";
 
+function requireRetiredExecution(result) {
+  if (result.cancelled || result.cleanupUnverified)
+    throw Error(result.error || "Platform execution cancelled or descendant retirement unverified");
+}
+
 async function checked(program, args, options, run = runCommand) {
   const result = await run(program, args, options);
+  requireRetiredExecution(result);
   if (result.code !== 0 || result.timedOut) throw Error(`${program} ${args[0]} failed${result.timedOut ? " (timeout)" : ""}: ${result.error || result.output.slice(-3000)}`);
   return result.output.trim();
 }
@@ -153,6 +159,7 @@ async function linux(cwd, directory, plan, timeoutSeconds) {
     await checked("scp", ["-o", "BatchMode=yes", dockerfile, `${target.host}:${target.directory}/image/Dockerfile`], { cwd, ...limits("upload-image") });
   }
   const available = await dockerRun("docker", ["image", "inspect", image], { cwd, ...limits("inspect") });
+  requireRetiredExecution(available);
   if (available.code !== 0) {
     if (process.env.MESH_PR_DOCKER_IMAGE) throw Error(`Configured Docker image is unavailable: ${image}`);
     const context = path.posix.join(target.directory, "image");
@@ -172,6 +179,7 @@ async function linux(cwd, directory, plan, timeoutSeconds) {
     image, "bash", "-c", "mkdir -p /work/source && tar -xf /evidence/source.tar -C /work/source && cd /work/source && node scripts/pr-platform/guest.mjs /evidence/plan.json /evidence/linux/report.json"];
   try {
     const result = await dockerRun("docker", args, options);
+    requireRetiredExecution(result);
     if (target.host) {
       await checked("scp", ["-o", "BatchMode=yes", "-r", `${target.host}:${target.directory}/linux/.`, path.join(directory, "linux")], { cwd, timeoutMs: 120_000, logPath: path.join(directory, "linux-download.log") });
     }
@@ -195,7 +203,9 @@ async function windows(cwd, directory, plan, timeoutSeconds) {
   const options = { cwd, ...limits("run") };
   const guestSeconds = Math.max(1, Math.floor(options.timeoutMs / 1000));
   const result = await runCommand("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, ...psArgs(windowsBootstrap({ root, runId: plan.runId, archiveSha: plan.archiveSha, timeoutSeconds: guestSeconds }))], { ...options, timeoutMs: options.timeoutMs + 30_000 });
+  requireRetiredExecution(result);
   const copied = await runCommand("scp", ["-o", "BatchMode=yes", "-r", `${host}:${work}/evidence/.`, path.join(directory, "windows")], { cwd, timeoutMs: 120_000, logPath: path.join(directory, "windows-download.log") });
+  requireRetiredExecution(copied);
   if (copied.code !== 0) throw Error(`Windows evidence collection failed: ${result.output.slice(-2000)} ${copied.output.slice(-2000)}`);
   const report = await platformReport(path.join(directory, "windows/report.json"), plan, "win32");
   return { ...report, ok: report.ok && result.code === 0 && !result.timedOut, host };
