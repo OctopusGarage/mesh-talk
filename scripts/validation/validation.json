@@ -236,6 +236,7 @@
         "scripts/diagnostics/validation-selectors.test.mjs",
         "scripts/diagnostics/validation-stage.test.mjs",
         "scripts/diagnostics/pr-platform.test.mjs",
+        "scripts/diagnostics/pr-preflight-output.test.mjs",
         "scripts/diagnostics/backend-eval-report.test.mjs",
         "scripts/diagnostics/native-build.test.mjs",
         "scripts/diagnostics/validation-checks.test.mjs",
