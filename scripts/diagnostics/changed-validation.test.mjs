@@ -410,11 +410,11 @@ for (const name of ["ordinary test", "name # SKIP literal", "back\\slash", "nest
   const f = repository(t);
   const body = name === "nested"
     ? "import test from 'node:test'; test('parent', async t => { await t.test('child', () => {}); });"
-    : `import test from 'node:test'; test(${JSON.stringify(name)}, () => {});`;
+    : "import test from 'node:test'; test(process.env.MESH_FIXTURE_TEST_NAME, () => {});";
   f.write("scripts/passing.test.mjs", body);
   await executePlan({ blockers: [], rust: [], frontend: [], node: ["scripts/passing.test.mjs"] },
     { cwd: f.root, run: async (program, args, options) => {
-        const result = spawnSync(program, args, { ...options, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
+        const result = spawnSync(program, args, { ...options, encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined, MESH_FIXTURE_TEST_NAME: name } });
         return { code: result.status, output: result.stdout + result.stderr };
       }, log: () => {} });
 });

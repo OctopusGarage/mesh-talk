@@ -58,7 +58,7 @@ async function nativeWorker(t, { hold = false, exitCode = 0 } = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "mesh-windows-owner-"));
   const ready = path.join(directory, "leaf-ready.json");
   const leaf = path.join(directory, "leaf.mjs");
-  await writeFile(leaf, `import {writeFileSync} from 'node:fs';writeFileSync(process.argv[2],JSON.stringify({pid:process.pid,token:process.argv[3]}));setInterval(()=>{},1000);setTimeout(()=>process.exit(99),60000);`);
+  await writeFile(leaf, "import {writeFileSync} from 'node:fs';writeFileSync(process.argv[2],JSON.stringify({pid:process.pid,token:process.argv[3]}));setInterval(()=>{},1000);setTimeout(()=>process.exit(99),60000);");
   t.after(async () => {
     // Failed-control cleanup only: retain the actual process handle, then check
     // the unique fixture path before terminating it. Never signal a PID tree.
@@ -91,16 +91,17 @@ test("Windows nested runner jobs retire a native descendant before outer success
   const guest = new URL("../pr-platform/guest.mjs", import.meta.url).href;
   const planModule = new URL("../pr-platform/plan.mjs", import.meta.url).href;
   const program = `
-    import { runCommand, executePlan } from ${JSON.stringify(guest)};
-    import { buildPlan, parseFlags } from ${JSON.stringify(planModule)};
     import { readFileSync } from 'node:fs';
+    const configuration = JSON.parse(process.argv[1]);
+    const { runCommand, executePlan } = await import(configuration.guest);
+    const { buildPlan, parseFlags } = await import(configuration.planModule);
     const plan = { ...buildPlan(parseFlags([]), []), sourceSha: 'a'.repeat(40), archiveSha: 'b'.repeat(64) };
     let admitted = 0;
     const report = await executePlan(plan, { run: async (program, args, options) => {
       // The first provider step is this real native fixture. Later steps use
       // the actual planned tool and may only enter after its leaf is dead.
-      if (admitted++ === 0) return runCommand(${JSON.stringify(f.command[0])}, ${JSON.stringify(f.command.slice(1))}, options);
-      const { pid } = JSON.parse(readFileSync(${JSON.stringify(f.ready)}, 'utf8'));
+      if (admitted++ === 0) return runCommand(configuration.command[0], configuration.command.slice(1), options);
+      const { pid } = JSON.parse(readFileSync(configuration.ready, 'utf8'));
       try { process.kill(pid, 0); throw Error('live retired leaf reached next admission'); }
       catch (error) { if (error.code !== 'ESRCH') throw error; }
       return runCommand(program, args, options);
@@ -110,7 +111,8 @@ test("Windows nested runner jobs retire a native descendant before outer success
     process.stdout.write('nested retired');
   `;
   const output = [];
-  const result = await run([process.execPath, "--input-type=module", "-e", program], {
+  const configuration = JSON.stringify({ guest, planModule, command: f.command, ready: f.ready });
+  const result = await run([process.execPath, "--input-type=module", "-e", program, "--", configuration], {
     signal: t.signal,
     onOutput(chunk) { output.push(chunk); },
   });
@@ -287,7 +289,7 @@ test("Windows pre-aborted and startup cancellation cannot leave unowned work", {
   t.after(() => rm(root, { recursive: true, force: true }));
   const ready = path.join(root, "ready.json");
   const startup = new AbortController();
-  const result = await executeWindows([process.execPath, "-e", `require('node:fs').writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid}));setInterval(()=>{},1000)`], {
+  const result = await executeWindows([process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],JSON.stringify({pid:process.pid}));setInterval(()=>{},1000)", "--", ready], {
     signal: startup.signal, cwd: root, env: process.env, onOutput() {},
     spawnOwner(...args) { const child = spawn(...args); startup.abort(); return child; },
   });
@@ -306,11 +308,12 @@ test("Windows NUL input cannot launch a truncated command", { skip: !windows }, 
   const root = await mkdtemp(path.join(os.tmpdir(), "mesh-owner-nul-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const marker = path.join(root, "must-not-exist");
-  const source = `require('node:fs').writeFileSync(${JSON.stringify(marker)},'unexpected')`;
+  const source = "require('node:fs').writeFileSync(process.argv[1],'unexpected')";
+  const nulSource = "require('node:fs').writeFileSync(process.argv[1],'unexpected')\0ignored";
   for (const options of [
-    { command: [process.execPath, "-e", `${source}\0ignored`] },
-    { command: [process.execPath, "-e", source], env: { OWNER_VALUE: "truncated\0ignored" } },
-    { command: [process.execPath, "-e", source], cwd: `${root}\0ignored` },
+    { command: [process.execPath, "-e", nulSource, "--", marker] },
+    { command: [process.execPath, "-e", source, "--", marker], env: { OWNER_VALUE: "truncated\0ignored" } },
+    { command: [process.execPath, "-e", source, "--", marker], cwd: `${root}\0ignored` },
   ]) {
     const { command, ...input } = options;
     await assert.rejects(executeWindows(command, { ...input, spawnOwner() { assert.fail("NUL input reached helper admission"); } }), { code: "ERR_INVALID_ARG_VALUE" });
