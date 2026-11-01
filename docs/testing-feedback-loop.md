@@ -124,11 +124,20 @@ roster refresh before asserting absence. A sleep shorter or longer than a pollin
 period proves neither of those operation boundaries; delayed-consumption and
 paused-polling controls must still exercise expiry, recovery and reappearance.
 
-Custody propagation fixtures first settle the newly created channel's signed
-inventory/control heads and the exact linked routes. Readiness observed before
+Custody propagation fixtures first observe the newly created channel's signed
+inventory/control heads, reciprocal exact-peer capabilities and an authenticated
+settled Custody-domain sweep in each direction. The completion must be enabled,
+have no continuation and match the nonzero remote digest to the committed local
+scope. A fixture-local observation epoch clears on a new Custody attempt, so
+failure or cancellation cannot reuse an earlier success. Readiness observed before
 channel creation does not cover that new work. Hold a real authenticated inventory
 response to verify that setup remains pending until release; accept authenticated
 superseding heads so an obsolete captured version cannot strand the fixture.
+Aggregate document status includes independent lanes and is not this setup proof.
+After actual startup, a held Directory/DeviceHostname update must allow setup and
+fresh message/custody progress without releasing the unrelated handler; retire the
+external holder after its real receipt so a direct query cannot replace proof of
+the source-authored sibling import.
 Keep the existing custody observation budget, real network exchange, offline-holder
 and restart assertions. This setup boundary does not establish a production latency
 guarantee or a dependency between independent mandatory/optional worker lanes.
