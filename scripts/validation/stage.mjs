@@ -251,14 +251,17 @@ export async function execute(command, { cwd, env, logPath, signal, createLogStr
       // live supervisor/sibling group; its final outer stage owns retirement.
       if (!cleanup && process.platform !== "win32" && !nestedGroup && detached && child.pid) {
         try {
-          if (processGroupRunning(child.pid)) {
-            forcedRetirement = true;
+          // ESRCH from the kernel proves the owned group is absent. A ps
+          // snapshot can miss a child while its parent is forking/exiting.
+          process.kill(-child.pid, 0);
+          forcedRetirement = true;
+          abort();
+        } catch (failure) {
+          if (failure.code !== "ESRCH") {
+            error ||= "Command descendant retirement could not be verified";
+            failureKind ||= "failed";
             abort();
           }
-        } catch {
-          error ||= "Command descendant retirement could not be verified";
-          failureKind ||= "failed";
-          abort();
         }
       }
     };

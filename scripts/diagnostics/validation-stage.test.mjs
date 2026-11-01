@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, writeFile, readFile, rm, mkdir, readdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm, mkdir, readdir, cp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 async function fixture(t) {
@@ -640,4 +640,29 @@ test("stage attempts record verified forced retirement", { skip: process.platfor
   const records = await Promise.all((await readdir(attempts)).map(async name => JSON.parse(await readFile(path.join(attempts, name), "utf8"))));
   assert.equal(records.length, 1);
   assert.equal(records[0].forcedRetirement, true);
+});
+
+
+test("ordinary retirement does not trust an empty process-table snapshot", { skip: process.platform === "win32", timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const copied = path.join(f.root, "target/private-validation");
+  await cp(new URL("../validation/", import.meta.url), copied, { recursive: true });
+  const filename = path.join(copied, "stage.mjs");
+  const original = await readFile(filename, "utf8");
+  const declaration = original.match(/function processGroupRunning\([^)]*\) \{/u)?.[0];
+  assert.ok(declaration);
+  // A private owner copy deterministically supplies stale empty ps snapshots.
+  // The real group/descendant remain unmodified; final acceptance checks its PID.
+  await writeFile(filename, original.replace(declaration, declaration + "\n  return false;"));
+  const { execute } = await import(pathToFileURL(filename).href);
+  let pid;
+  t.after(() => { if (pid) { const group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim()); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} } });
+  const leaf = "process.on('SIGTERM',()=>{});process.send(process.pid);setInterval(()=>{},1000)";
+  const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore','ignore','ignore','ipc']});c.once('message',pid=>{console.log('LEAF='+pid);process.exit(0)});`;
+  const result = await execute([process.execPath, "-e", leader], { env: { ...process.env, MESH_VALIDATION_PROCESS_GROUP_OWNER: "" }, onOutput(chunk) { const match = chunk.toString().match(/LEAF=(\d+)/); if (match) pid = Number(match[1]); } });
+  assert.ok(pid);
+  assert.equal(result.code, 0, result.error);
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  assert.ok(!state || state.startsWith("Z"), `stale snapshot left live owned work: ${state}`);
+  assert.equal(result.forcedRetirement, true);
 });
