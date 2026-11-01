@@ -176,6 +176,40 @@ TEST_PACKAGE=mesh-talk-core TEST_FILTER=node::account_sync` selects Rust unit
 
 ## Repository Hygiene
 
+### Worktree lifecycle
+
+- Create a worktree only when isolation is needed. Before creating one, inspect
+  `git worktree list --porcelain` and record the task-owned path, branch and any
+  dedicated build directory in ignored `tmp/` task notes. Treat pre-existing
+  worktrees and unrelated changes as user-owned; never sweep them automatically.
+- The coordinating session owns cleanup of every worktree it creates or delegates,
+  including `.worktrees/` and `.claude/worktrees/agent-*`. Delegate completion does
+  not transfer that responsibility. Before ending the task, stop task-owned
+  processes and remove its worktrees, disposable branches and dedicated Cargo
+  target directories, subject to the preservation rules below. Never delete a
+  shared target directory or a directory whose ownership is uncertain.
+- Before removal, preserve the work through either a verified merge into the
+  intended integration branch under the existing PR/merge gates, or a local
+  archive. For an archive, commit only task-owned outstanding changes (including
+  intended untracked files), run the required commit checks, and create a unique
+  `archive/<worktree-name>-<timestamp>` tag at the final branch tip. Verify the tag
+  resolves to that tip and the worktree is clean before deleting anything. Never
+  overwrite an existing archive tag, include secrets/ignored build output, or
+  discard unrelated edits to make cleanup succeed. Cleanup does not authorize
+  merging, pushing, bypassing review or running `entire clean`.
+- Run removal from a surviving checkout with `git worktree remove <path>`, then
+  `git branch -d <branch>` for a merged branch. Use `git branch -D <branch>` only
+  for a task-owned archived branch after verifying its archive tag. Never use
+  forced worktree removal, hard reset or bulk directory deletion to bypass a
+  dirty worktree. Detached worktrees require the same preservation of their final
+  commit before removal; there is no branch to delete.
+- A pending PR, unresolved conflict, user decision, active concurrent session or
+  failed preservation/cleanup step is an explicit retention exception. Preserve
+  the required branch for an open PR; remove its clean worktree if no active work
+  needs it. Recheck `git worktree list --porcelain` and task-owned branches/build
+  paths before the final reply. Report cleanup performed and name every retained
+  path/branch, its reason and the next action; never silently leave task worktrees.
+
 - Keep implementation plans, research, investigation notes and scratch scripts
   under ignored `tmp/`; remove them when the work is complete.
 - Merge durable decisions into the maintained owning guide. Do not commit
