@@ -1,0 +1,9 @@
+参考这个分析优化一下，现在这个项目经常弄出很多残余worktree： “避免 worktree 残留的最佳策略是在 AGENTS.md 里面添加规则，要求 worktree 不遗留，让 Agent 自己去清理。
+
+https://github.com/JimLiu/baocut/blob/main/AGENTS.md
+
+> worktree 不遗留：在 worktree（含 subagent 的 .claude/worktrees/agent-*）里做的任务，完成时必须删除该 worktree 及其分支。它专用的 cargo target 目录一并删掉。删除前二选一：合并进 main；或不合并时先把未提交改动提交到该分支，打 archive/<worktree 名> tag 存档，再 git worktree remove + git branch -D。编排 subagent 的会话负责收尾它派生的 worktree。确需保留的（待用户裁决、有冲突待解）在最终回复里点名路径与原因，不得默默留下。”
+
+---
+
+commit and push
