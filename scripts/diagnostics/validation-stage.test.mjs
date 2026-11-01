@@ -666,3 +666,17 @@ test("ordinary retirement does not trust an empty process-table snapshot", { ski
   assert.ok(!state || state.startsWith("Z"), `stale snapshot left live owned work: ${state}`);
   assert.equal(result.forcedRetirement, true);
 });
+
+test("process-group retirement bounds probes and pauses by one monotonic deadline", async () => {
+  const { waitForProcessGroup } = await import("../validation/stage.mjs");
+  let clock = 0;
+  assert.equal(await waitForProcessGroup(123, { now: () => clock, probe: () => { clock += 5001; return false; }, pause: async ms => { clock += ms; } }), false, "a late empty observation cannot certify bounded retirement");
+  clock = 0;
+  const budgets = [], pauses = [];
+  assert.equal(await waitForProcessGroup(123, { now: () => clock,
+    probe: (_group, remaining) => { budgets.push(remaining); clock += Math.min(2300, remaining); throw Error("probe timed out"); },
+    pause: async ms => { pauses.push(ms); clock += ms; } }), false);
+  assert.deepEqual(budgets, [5000, 2600, 200]);
+  assert.deepEqual(pauses, [100, 100]);
+  assert.equal(clock, 5000);
+});

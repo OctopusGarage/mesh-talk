@@ -7,6 +7,7 @@ import { mkdir, readFile, readdir, writeFile, rename, rm, stat } from "node:fs/p
 import path from "node:path";
 import { Writable } from "node:stream";
 import { homedir } from "node:os";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { inputGroup, inputIdentity, frontendEnvironmentIdentity } from "./stage-inputs.mjs";
 
@@ -28,21 +29,31 @@ async function observeInputs(root, configuration) {
     close: () => {} };
 }
 
-function processGroupRunning(group) {
-  const result = spawnSync("ps", ["-eo", "pgid=,stat="], { encoding: "utf8", timeout: 5000 });
+function processGroupRunning(group, timeoutMs = 5000) {
+  const result = spawnSync("ps", ["-eo", "pgid=,stat="], { encoding: "utf8", timeout: Math.max(1, Math.ceil(timeoutMs)) });
   if (result.status !== 0) throw Error("Cannot verify process-group termination");
   return result.stdout.split("\n").some(line => {
     const [id, state] = line.trim().split(/\s+/u);
     return Number(id) === group && state && !state.startsWith("Z");
   });
 }
-export async function waitForProcessGroup(group, { probe = processGroupRunning, pause = delay, attempts = 50 } = {}) {
+export async function waitForProcessGroup(group, { probe = processGroupRunning, pause = delay, attempts = 50, now = () => performance.now(), timeoutMs = 5000 } = {}) {
+  const deadline = now() + timeoutMs;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    try { if (!probe(group)) return true; } catch { /* Unknown is not terminated. */ }
-    await pause(100);
+    const remaining = deadline - now();
+    if (remaining <= 0) return false;
+    let retired = false;
+    try { retired = !probe(group, remaining); } catch { /* Unknown is not terminated. */ }
+    // Probes consume the same budget as pauses. An absence observed after the
+    // deadline cannot turn an over-budget cleanup into verified retirement.
+    const afterProbe = deadline - now();
+    if (afterProbe <= 0) return false;
+    if (retired) return true;
+    await pause(Math.min(100, afterProbe));
   }
   return false;
 }
+
 function git(root, args) {
   const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
   if (result.status !== 0) throw Error(result.stderr.trim() || "Git identity unavailable");
