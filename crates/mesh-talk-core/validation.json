@@ -123,6 +123,7 @@
             "newer_terminal_reuses_completed_background_before_stale_foreground_suffix",
             "foreground_fork_keeps_original_partial_checkpoint_and_failure_knowledge",
             "newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page",
+            "queued_source_retains_live_natural_hold_through_forced_early_cancellation",
             "control_checkpoint_preserves_comparison_start_across_partial_pages_and_rollback",
             "control_checkpoint_refresh_clears_start_only_after_comparison_completion",
             "group_publication_reaches_pending_groups_behind_terminal_history",

@@ -138,6 +138,55 @@ fn record_setup_milestone(
     }
 }
 
+#[derive(Default)]
+struct SetupCancellationState {
+    task: Option<tokio::task::Id>,
+    open: bool,
+    published: bool,
+    entered: bool,
+}
+#[derive(Default)]
+struct SetupCancellationGate {
+    state: Mutex<SetupCancellationState>,
+    changed: std::sync::Condvar,
+    entered: Notify,
+}
+impl SetupCancellationGate {
+    fn arm(&self, task: tokio::task::Id) {
+        self.state.lock().unwrap().task = Some(task);
+    }
+    fn before_cancel(&self, task: tokio::task::Id) -> Option<bool> {
+        let mut state = self.state.lock().unwrap();
+        if state.task != Some(task) {
+            return None;
+        }
+        state.entered = true;
+        self.entered.notify_one();
+        // Condvar releases its mutex. No node, ledger or trace guard may be
+        // retained by the caller: the other runtime worker publishes B's rows.
+        while !state.open {
+            state = self.changed.wait(state).unwrap();
+        }
+        Some(state.published)
+    }
+    fn publish_complete(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.published = true;
+        state.open = true;
+        self.changed.notify_all();
+    }
+    fn release(&self) {
+        self.state.lock().unwrap().open = true;
+        self.changed.notify_all();
+    }
+}
+struct ReleaseSetupCancellation(Arc<SetupCancellationGate>);
+impl Drop for ReleaseSetupCancellation {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 struct ReleaseQueuedReads(Arc<Semaphore>);
 impl Drop for ReleaseQueuedReads {
     fn drop(&mut self) {
@@ -211,20 +260,29 @@ fn install_owner_group(owner: &Node, external: &Node, group: ConversationId) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newly_selected_queued_source_starts_fresh_before_replaying_its_old_partial_page() {
-    Box::pin(run_queued_source(false, false)).await;
+    Box::pin(run_queued_source(false, false, false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn newer_terminal_reuses_completed_background_before_stale_foreground_suffix() {
-    Box::pin(run_queued_source(true, false)).await;
+    Box::pin(run_queued_source(true, false, false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queued_source_ignores_retired_natural_request_before_capturing_live_resume() {
-    Box::pin(run_queued_source(true, true)).await;
+    Box::pin(run_queued_source(true, true, false)).await;
 }
 
-async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_source_retains_live_natural_hold_through_forced_early_cancellation() {
+    Box::pin(run_queued_source(false, false, true)).await;
+}
+
+async fn run_queued_source(
+    gate_terminal: bool,
+    delay_retired_request: bool,
+    force_early_cancel: bool,
+) {
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let a = node(&dir.path().join("a"), &account);
@@ -343,6 +401,8 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let setup_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
+    let setup_cancellation = Arc::new(SetupCancellationGate::default());
+    let _release_setup_cancellation = ReleaseSetupCancellation(setup_cancellation.clone());
     // Independent bounded owner rings keep frequent requester maintenance from
     // evicting the executor's last stalled phase. Snapshot before recovery.
     let executor_owner_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -474,12 +534,23 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let owner_trace = requester_owner_trace.clone();
         let setup_trace = setup_trace.clone();
         let first_held_task = first_held_task.clone();
+        let setup_cancellation = setup_cancellation.clone();
         move |peer, phase| {
+            // Copy first, so the wait retains no diagnostic mutex guard.
+            let held_task = *first_held_task.lock().unwrap();
             if peer == peer_a
-                && let Some(task) = *first_held_task.lock().unwrap()
+                && let Some(task) = held_task
                 && phase.starts_with(&format!("control_cancel task={task:?} "))
             {
                 record_setup_milestone(&setup_trace, clock, "first_A_cancel", phase.clone());
+                if let Some(published) = setup_cancellation.before_cancel(task) {
+                    record_setup_milestone(
+                        &setup_trace,
+                        clock,
+                        "first_A_cancel_released",
+                        format!("task={task:?} canonical_published={published} {phase}"),
+                    );
+                }
             }
             if admitted.load(std::sync::atomic::Ordering::Acquire)
                 && (phase.starts_with("operation_owner ")
@@ -626,6 +697,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         let rejected_tx = rejected_tx.clone();
         let setup_trace = setup_trace.clone();
         let first_held_task = first_held_task.clone();
+        let setup_cancellation = setup_cancellation.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let release = release.clone();
@@ -642,6 +714,7 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
             let rejected_tx = rejected_tx.clone();
             let setup_trace = setup_trace.clone();
             let first_held_task = first_held_task.clone();
+            let setup_cancellation = setup_cancellation.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
@@ -714,7 +787,11 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
                 let first = first_tx.lock().unwrap().take();
                 if let Some(first) = first {
                     assert!(effective_after(&request).is_none());
-                    *first_held_task.lock().unwrap() = Some(page.task);
+                    {
+                        let mut held = first_held_task.lock().unwrap();
+                        setup_cancellation.arm(page.task);
+                        *held = Some(page.task);
+                    }
                     record_setup_milestone(
                         &setup_trace,
                         clock,
@@ -902,20 +979,28 @@ async fn run_queued_source(gate_terminal: bool, delay_retired_request: bool) {
         pages.lock().unwrap().is_active(first_task),
         "the exact natural A hold must remain live at canonical B publication"
     );
-    record_setup_milestone(
-        &setup_trace,
-        clock,
-        "B66_publication_begin",
-        format!("first_A_task={first_task:?}"),
-    );
-    let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
-    record_setup_milestone(
-        &setup_trace,
-        clock,
-        "B66_publication_end",
-        format!("first_A_task={first_task:?}"),
-    );
-    super::cold_account_setup(resume_rx)
+    let keys = super::cold_account_setup(async {
+        if force_early_cancel {
+            // One of the same 66 canonical signed rows, not an empty Wake or
+            // an extra row. Force cancellation before the rest are published.
+            crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 1);
+            record_setup_milestone(&setup_trace, clock, "forced_B1_publication", format!("canonical_rows=1 wake_token={:?}", b.account_wake_token_for_test()));
+            // The publication's automatic authenticated Wake causes the
+            // cancellation. Do not open another connection while the gate
+            // can block the reference's combined accept/scheduler owner.
+            setup_cancellation.entered.notified().await;
+            assert!(setup_cancellation.state.lock().unwrap().entered);
+            assert!(setup_trace.lock().unwrap().iter().any(|row| row.1 == "first_A_cancel" && row.3.ends_with("reason=wake")), "the forced control must reach the exact unrelated-Wake cancellation");
+            assert!(pages.lock().unwrap().is_active(first_task));
+        }
+        record_setup_milestone(&setup_trace, clock, "B66_publication_begin", format!("first_A_task={first_task:?}"));
+        let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
+        // The exact natural child remains live through real source publication.
+        assert!(pages.lock().unwrap().is_active(first_task));
+        record_setup_milestone(&setup_trace, clock, "B66_publication_end", format!("first_A_task={first_task:?}"));
+        setup_cancellation.publish_complete();
+        resume_rx.await.map(|()| keys)
+    })
         .await
         .unwrap_or_else(|error| panic!("B protected partial page must be queued before A resumes: {error:?}; B_unpaired_settled={} B_partial={}; A_roles={:?}; pages={:?}; setup={:?}; phases={:?}", b_readiness.lock().unwrap().ready(), b_partial.load(std::sync::atomic::Ordering::Acquire), origins.lock().unwrap(), pages.lock().unwrap().summary(), setup_trace.lock().unwrap(), trace.lock().unwrap()))
         .unwrap();
