@@ -84,7 +84,9 @@ otherwise suppress execution while returning success.
 Timers remain appropriate for explicit watchdogs, protocol deadlines, bounded
 state polling, termination grace periods and tests of time-dependent behavior.
 Their expiry signals failure or triggers escalation; elapsed time alone never
-certifies readiness, task completion or cleanup. Preserve documented performance
+certifies readiness, task completion or cleanup. Process-state probes and pauses
+consume one monotonic retirement deadline; per-probe timeouts must not multiply
+the total cleanup budget. Preserve documented performance
 assertions separately from harness watchdogs. Fix an incorrect observation or
 work owner before considering a budget change, and use same-source phase evidence
 to justify any deliberate change to a latency contract.
