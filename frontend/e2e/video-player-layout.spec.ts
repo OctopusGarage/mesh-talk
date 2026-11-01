@@ -20,6 +20,33 @@ const clips = (
 async function holdPlayerSource(page: import("@playwright/test").Page) {
   await page.evaluate(() => {
     const original = HTMLMediaElement.prototype.setAttribute;
+    const transforms: string[] = [];
+    let finishSamples!: () => void;
+    const samplesComplete = new Promise<void>((resolve) => {
+      finishSamples = resolve;
+    });
+    const observer = new MutationObserver(() => {
+      const player = document.querySelector(
+        '[data-testid="file-video-player"]',
+      );
+      if (!player) return;
+      observer.disconnect();
+      let count = 0;
+      function sample() {
+        for (
+          let parent = player!.parentElement;
+          parent;
+          parent = parent.parentElement
+        ) {
+          const transform = getComputedStyle(parent).transform;
+          if (transform !== "none") transforms.push(transform);
+        }
+        if (++count < 18) requestAnimationFrame(sample);
+        else finishSamples();
+      }
+      requestAnimationFrame(sample);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
     const held: Array<{ node: HTMLMediaElement; src: string }> = [];
     HTMLMediaElement.prototype.setAttribute = function (name, value) {
       if (name === "src" && this.tagName === "VIDEO") {
@@ -29,6 +56,8 @@ async function holdPlayerSource(page: import("@playwright/test").Page) {
       return original.call(this, name, value);
     };
     Object.assign(window, {
+      __playerTransforms: transforms,
+      __playerSamplesComplete: samplesComplete,
       __releasePlayer: () => {
         HTMLMediaElement.prototype.setAttribute = original;
         for (const { node, src } of held) original.call(node, "src", src);
@@ -110,7 +139,20 @@ for (const { width, height, viewport } of [
     await page.getByTestId("file-video").click();
     const player = page.getByTestId("file-video-player");
     await expect(player).toBeVisible();
-    // offset dimensions exclude the shared-element projection transform.
+    // Keep playback and native controls on a stable, unscaled surface.
+    await page.evaluate(
+      () =>
+        (window as unknown as { __playerSamplesComplete: Promise<void> })
+          .__playerSamplesComplete,
+    );
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __playerTransforms: string[] })
+            .__playerTransforms,
+      ),
+    ).toEqual([]);
+    // Layout dimensions must also stay stable while metadata is unavailable.
     const before = await player.evaluate((el) => ({
       width: (el as HTMLVideoElement).offsetWidth,
       height: (el as HTMLVideoElement).offsetHeight,
@@ -139,6 +181,18 @@ for (const { width, height, viewport } of [
     );
     await holdPlayerSource(page);
     await page.getByTestId("file-video").click();
+    await page.evaluate(
+      () =>
+        (window as unknown as { __playerSamplesComplete: Promise<void> })
+          .__playerSamplesComplete,
+    );
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __playerTransforms: string[] })
+            .__playerTransforms,
+      ),
+    ).toEqual([]);
     const cached = await player.evaluate((el) => ({
       width: (el as HTMLVideoElement).offsetWidth,
       height: (el as HTMLVideoElement).offsetHeight,

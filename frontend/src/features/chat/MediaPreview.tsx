@@ -269,7 +269,9 @@ export function MediaPreview({
         setError(t("files.shareFailed"));
     }
   };
-  const layoutId = motionOK ? `media-${fileConv}` : undefined;
+  // Native video playback owns a composited surface. Keep it and its controls out
+  // of shared-element projection; the backdrop still supplies the entry/exit fade.
+  const layoutId = motionOK && !video ? `media-${fileConv}` : undefined;
   const layoutTransition = { duration: motionOK ? 0.22 : 0.08, ease };
   const backdropTransition = { duration: motionOK ? 0.16 : 0.08, ease };
   // An inline image whose codec the webview can't decode (e.g. HEIC outside Safari) fires

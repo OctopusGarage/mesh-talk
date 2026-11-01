@@ -93,7 +93,7 @@
       },
       "escalation": [
         "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior.",
-        "Verify pending image frame dimensions before/after decoding and video source dimensions before/after player metadata, including cached remount, portrait and oversized sources. Confirm actual WKWebView geometry and frame timing separately."
+        "Verify pending image frame dimensions before/after decoding and video source dimensions before/after player metadata, including cached remount, portrait and oversized sources. Confirm actual WKWebView geometry and frame timing separately. Video players and native controls must remain outside shared-element transforms from the first frame; keep opacity feedback, autoplay, Escape, focus restoration and rapid reopening. Separate fresh-process startup from repeat opens, record visibility and media presentation counters, and exclude hidden-window samples from performance comparisons."
       ]
     },
     {
