@@ -1,0 +1,50 @@
+{
+  "cli_version": "0.12.2",
+  "checkpoint_id": "01M6AEZRNVKXRQCQTCP66D2SV8",
+  "session_id": "01a18b36-f144-7521-864b-56222502bdc3",
+  "strategy": "manual-commit",
+  "created_at": "2026-11-01T02:28:38.966733Z",
+  "branch": "fix/deadlocks-ui-responsiveness",
+  "checkpoints_count": 1,
+  "save_step_count": 2,
+  "files_touched": [
+    "hooks/commit-msg",
+    "hooks/pre-push"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6-astra",
+  "turn_id": "d6ba5ffb3ca0",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 2993,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 462976,
+    "output_tokens": 662,
+    "api_call_count": 8,
+    "subagent_tokens": {
+      "input_tokens": 0,
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "output_tokens": 0,
+      "api_call_count": 0
+    },
+    "subagent_tokens_complete": true
+  },
+  "redaction": {
+    "replacements": 46291,
+    "layers": {
+      "betterleaks": 4,
+      "connection_string": 0,
+      "credential_key": 0,
+      "credential_value": 0,
+      "credentialed_uri": 0,
+      "entropy": 46289,
+      "key_context": 0,
+      "provider_token": 0,
+      "shell_stdin": 0
+    }
+  },
+  "session_metrics": {
+    "turn_count": 3
+  }
+}
