@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
@@ -136,4 +138,55 @@ test("Firefox core runs on ordinary candidates and the final gate requires its r
   for (const EXTENDED of ["false", "true"]) for (const FIREFOX of ["failure", "cancelled", "skipped", ""]) {
     assert.notEqual(gate("Require complete selected UI matrices", { ...env, EXTENDED, FIREFOX, EXTENDED_CHROMIUM: EXTENDED === "true" ? "success" : "skipped" }), 0);
   }
+});
+
+function renderReports({ linux = "success", desktop = "skipped", platforms = ["ubuntu-24.04"], omit = "", attempt = "3", renderExit = "0" } = {}) {
+  const directory = mkdtempSync(path.join(tmpdir(), "mesh-ui-report-inventory-"));
+  try {
+    mkdirSync(path.join(directory, "frontend"));
+    for (const os of platforms) for (const shard of [1, 2, 3, 4]) {
+      if (`${os}-${shard}` === omit) continue;
+      const blob = path.join(directory, "target", "ui-reports", `playwright-ui-${os}-${shard}-${attempt}`, "blob-report");
+      mkdirSync(blob, { recursive: true });
+      writeFileSync(path.join(blob, `report-${shard}.zip`), "actual shard blob placeholder");
+    }
+    const block = root().split(/^      - /m).find(value => value.startsWith("name: Render each OS report from its raw blobs\n"));
+    const script = block.split("        run: |\n")[1].replace(/^          /gm, "").replaceAll("${{ github.run_attempt }}", "3");
+    const result = spawnSync("bash", ["-e", "-c", 'npx() { printf "%s\\n" "$PLAYWRIGHT_HTML_OUTPUT_DIR" >> "$RENDERED"; return "$RENDER_EXIT"; };\n' + script], {
+      cwd: path.join(directory, "frontend"), encoding: "utf8",
+      env: { ...process.env, LINUX_RESULT: linux, DESKTOP_RESULT: desktop, RENDERED: path.join(directory, "rendered"), RENDER_EXIT: renderExit },
+    });
+    let rendered = [];
+    try { rendered = readFileSync(path.join(directory, "rendered"), "utf8").trim().split("\n"); } catch {}
+    return { ...result, rendered };
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+}
+
+test("HTML reports render admitted producers and distinguish skipped desktop from missing evidence", () => {
+  assert.match(job("reports"), /LINUX_RESULT: \$\{\{ needs\.linux\.result \}\}/);
+  assert.match(job("reports"), /DESKTOP_RESULT: \$\{\{ needs\.desktop\.result \}\}/);
+  const linuxOnly = renderReports();
+  assert.equal(linuxOnly.status, 0, linuxOnly.stderr);
+  assert.deepEqual(linuxOnly.rendered, ["playwright-report/ubuntu-24.04"]);
+  const platforms = ["ubuntu-24.04", "macos-latest", "windows-latest"];
+  const complete = renderReports({ desktop: "success", platforms });
+  assert.equal(complete.status, 0, complete.stderr);
+  assert.deepEqual(complete.rendered, platforms.map(os => `playwright-report/${os}`));
+  for (const linux of ["success", "failure", "cancelled"]) {
+    assert.equal(renderReports({ linux }).status, 0, `admitted ${linux} producer retains its report`);
+    assert.notEqual(renderReports({ linux, omit: "ubuntu-24.04-2" }).status, 0, `${linux} must retain all four raw blobs`);
+  }
+  for (const desktop of ["success", "failure", "cancelled"]) {
+    assert.equal(renderReports({ desktop, platforms }).status, 0, `${desktop} retains every admitted platform report`);
+    assert.notEqual(renderReports({ desktop }).status, 0, `${desktop} cannot silently omit desktop artifacts`);
+    for (const os of platforms) assert.notEqual(renderReports({ desktop, platforms, omit: `${os}-3` }).status, 0, `${os} missing shard`);
+  }
+  assert.notEqual(renderReports({ renderExit: "37" }).status, 0, "renderer failure remains a presentation failure");
+  assert.notEqual(renderReports({ attempt: "2" }).status, 0, "previous-attempt blobs cannot replace this attempt");
+  for (const result of ["", "unknown", "in_progress"]) {
+    assert.notEqual(renderReports({ linux: result }).status, 0, `unknown Linux conclusion ${result}`);
+    assert.notEqual(renderReports({ desktop: result, platforms }).status, 0, `unknown desktop conclusion ${result}`);
+  }
+  assert.equal(renderReports({ linux: "skipped", desktop: "success", platforms: ["macos-latest", "windows-latest"] }).status, 0);
+  assert.notEqual(renderReports({ linux: "skipped", desktop: "skipped", platforms: [] }).status, 0, "empty presentation cannot claim a rendered report");
 });
