@@ -65,3 +65,16 @@ Selecting a signal expands its explanation in the message flow; hover and focus
 do not open overlays. Enter/Space toggles the disclosure, Escape collapses it
 and restores focus. Reset disclosure on message, conversation or session changes.
 Failure text, retry actions and file byte progress retain their separate meaning.
+
+
+### Interaction motion
+
+The shared JS curve is cubic-bezier(0.22, 1, 0.36, 1). Floating surfaces enter in 150–190ms and exit in 100–120ms through Radix presence. Pointer-selected tabs move a measured background in 170ms; keyboard selection updates immediately. Trigger resize observations keep the background aligned when labels change inside a fixed-size list. Only the absolute background interpolates its dimensions; neighboring controls retain their layout. Hidden or unmeasured tabs retain the ordinary selected background. Reaction press feedback affects only the emoji under a fine pointer, never synchronized counts or message layout.
+
+Measured file progress interpolates transforms over 100ms with linear timing. Its presentation fades out over 120ms when the authoritative transfer becomes inactive or delivered; byte completion alone remains confirmation pending. Media retains its existing 220ms shared-element transition, with 80ms reduced-motion feedback. Welcome content enters once per mount in a bounded 280ms sequence, then stays still. Confirmed device linking may show a brief check entrance; errors never receive a success mark. No motion delays protocol actions, invents progress, or animates historical message entry.
+
+Live-message entrance requires explicit live arrival evidence or a local pending intent with a client ID. Conversation, account and runtime scopes invalidate prior eligibility before rendering; history, search context and reading older messages suppress entrances. Eligibility survives deferred virtual row mounting and is consumed by the first committed row mount.
+
+Message entrances observe the live system motion preference directly: enabling reduced motion stops active movement and settles messages immediately, including recalled messages. Successful account linking closes the pairing form and shows an eight-second dismissible confirmation above the viewport edge. This feedback survives node/runtime replacement but is scoped to the originating desktop owner and generation.
+
+Pending composer images reserve a 160 × 80 frame before their local URL or decoded pixels are ready, keeping keyboard paste immediate and avoiding decode-driven layout shifts. Video poster caches retain original source dimensions atomically with the bounded JPEG, so the player starts with the same aspect ratio and natural-size ceiling before metadata arrives. Both sending and receiving progress use the same 100ms linear transform interpolation. Short desktop authentication uses the existing two-column layout through 740px of height so native credential guidance does not push the primary action below the first viewport.

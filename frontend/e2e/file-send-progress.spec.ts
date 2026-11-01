@@ -286,3 +286,70 @@ test("a failed folder send removes preparing progress and offers retry", async (
   await bubble.getByRole("button", { name: "Retry" }).click();
   await expect(bubble.getByText("Failed to send")).toHaveCount(0);
 });
+
+test("receive progress follows measured chunks with the shared motion cadence", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await enterChat(page);
+  await page.evaluate(() => {
+    const win = window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (
+          cmd: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const original = win.__TAURI_INTERNALS__.invoke;
+    win.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      if (cmd === "file_statuses")
+        return (args.fileConvs as string[]).map((file_conv) => ({
+          file_conv,
+          ready: false,
+          done: 4,
+          total: 10,
+          consent: "accepted",
+        }));
+      const value = await original(cmd, args);
+      if (
+        cmd === "owner_account_history" &&
+        args.account === "acc_bob_bbbb2222"
+      )
+        return [
+          ...(value as unknown[]),
+          {
+            id: "receive-cadence",
+            from_me: false,
+            who: "device_bob_2222",
+            text: "",
+            wall_clock: Date.now(),
+            reply_to: null,
+            file: {
+              file_conv: "receive-cadence",
+              name: "receiving.bin",
+              size: 10,
+              mime: "application/octet-stream",
+              media: false,
+            },
+          },
+        ];
+      return value;
+    };
+  });
+  await openBobDm(page);
+  const progress = page
+    .getByTestId("message-bubble")
+    .filter({ hasText: "receiving.bin" })
+    .getByRole("progressbar");
+  await expect(progress).toHaveAttribute("aria-valuenow", "40");
+  const fill = progress.locator("div");
+  await expect(fill).toHaveCSS("transition-duration", "0.1s");
+  await expect(fill).toHaveCSS("transition-timing-function", "linear");
+  await expect(fill).toHaveCSS("transform", "matrix(0.4, 0, 0, 1, 0, 0)");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(fill).toHaveCSS(
+    "transition-property",
+    "color, background-color, border-color, opacity",
+  );
+});

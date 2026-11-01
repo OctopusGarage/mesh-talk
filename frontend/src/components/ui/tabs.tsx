@@ -7,16 +7,93 @@ const Tabs = TabsPrimitive.Root;
 const TabsList = React.forwardRef<
   React.ElementRef<typeof TabsPrimitive.List>,
   React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>
->(({ className, ...props }, ref) => (
-  <TabsPrimitive.List
-    ref={ref}
-    className={cn(
-      "inline-flex h-9 items-center justify-center rounded-md bg-muted p-0.5 text-muted-foreground",
-      className,
-    )}
-    {...props}
-  />
-));
+>(({ className, children, ...props }, ref) => {
+  const host = React.useRef<HTMLDivElement | null>(null);
+  const [indicator, setIndicator] = React.useState<React.CSSProperties>();
+  const [pointer, setPointer] = React.useState(false);
+  React.useEffect(() => {
+    const list = host.current;
+    if (!list) return;
+    const measure = () => {
+      const active = list.querySelector<HTMLElement>(
+        '[role="tab"][data-state="active"]',
+      );
+      setIndicator(
+        active && active.offsetWidth > 0
+          ? {
+              width: active.offsetWidth,
+              height: active.offsetHeight,
+              transform: `translate(${active.offsetLeft}px, ${active.offsetTop}px)`,
+            }
+          : undefined,
+      );
+    };
+    const resize = new ResizeObserver(measure);
+    const observeGeometry = () => {
+      resize.disconnect();
+      resize.observe(list);
+      list
+        .querySelectorAll<HTMLElement>('[role="tab"]')
+        .forEach((tab) => resize.observe(tab));
+      measure();
+    };
+    const observer = new MutationObserver((records) => {
+      if (
+        records.some(
+          (record) =>
+            !(record.target instanceof Element) ||
+            !record.target.classList.contains("tab-indicator"),
+        )
+      )
+        observeGeometry();
+    });
+    observer.observe(list, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-state", "class", "style", "hidden"],
+      childList: true,
+      characterData: true,
+    });
+    observeGeometry();
+    return () => {
+      observer.disconnect();
+      resize.disconnect();
+    };
+  }, []);
+  return (
+    <TabsPrimitive.List
+      ref={(node) => {
+        host.current = node;
+        if (typeof ref === "function") ref(node);
+        else if (ref) ref.current = node;
+      }}
+      className={cn(
+        "motion-tabs relative isolate inline-flex h-9 items-center justify-center rounded-md bg-muted p-0.5 text-muted-foreground",
+        className,
+      )}
+      data-pointer-motion={pointer || undefined}
+      data-indicator={indicator ? "ready" : undefined}
+      {...props}
+      onPointerDownCapture={(event) => {
+        setPointer(true);
+        props.onPointerDownCapture?.(event);
+      }}
+      onKeyDownCapture={(event) => {
+        setPointer(false);
+        props.onKeyDownCapture?.(event);
+      }}
+    >
+      {indicator && (
+        <span
+          aria-hidden="true"
+          className="tab-indicator pointer-events-none absolute left-0 top-0 -z-10 rounded bg-background shadow-sm"
+          style={indicator}
+        />
+      )}
+      {children}
+    </TabsPrimitive.List>
+  );
+});
 TabsList.displayName = TabsPrimitive.List.displayName;
 
 const TabsTrigger = React.forwardRef<

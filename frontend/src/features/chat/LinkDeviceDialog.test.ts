@@ -1061,3 +1061,29 @@ it("keeps unavailable login progress actionable when an older host returns no st
       ?.textContent,
   ).toContain("Couldn’t check account sign-in");
 });
+
+it("keeps successful linking visible across runtime replacement and clears it on session retirement", async () => {
+  pairingPeer(true);
+  vi.spyOn(chat, "linkDevice").mockResolvedValue("other-account");
+  vi.spyOn(auth, "adoptLinkedAccount").mockImplementation(async () => {
+    useChat.setState({ myAccountId: "other-account" });
+  });
+  await render();
+  await open();
+  await enterPairing();
+  await act(async () => linkButton().click());
+  expect(
+    document.querySelector('[data-testid="pairing-success-notice"]')
+      ?.textContent,
+  ).toContain("Linked!");
+  await act(async () =>
+    useChat.setState({ runEpoch: useChat.getState().runEpoch + 1 }),
+  );
+  expect(
+    document.querySelector('[data-testid="pairing-success-notice"]'),
+  ).not.toBeNull();
+  await act(async () => useAuth.setState({ generation: 2 }));
+  expect(
+    document.querySelector('[data-testid="pairing-success-notice"]'),
+  ).toBeNull();
+});

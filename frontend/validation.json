@@ -59,7 +59,11 @@
         "frontend/e2e/media-scroll.spec.ts",
         "frontend/e2e/media-recovery.spec.ts",
         "frontend/e2e/media-lifecycle.spec.ts",
-        "frontend/e2e/media-hook-harness.tsx"
+        "frontend/e2e/media-hook-harness.tsx",
+        "frontend/src/features/chat/ComposerImagePreview.tsx",
+        "frontend/e2e/composer-preview-layout.spec.ts",
+        "frontend/e2e/video-player-layout.spec.ts",
+        "frontend/e2e/fixtures/video-metadata.json"
       ],
       "frontend": [
         "src/features/chat/MediaPreview.test.ts",
@@ -88,7 +92,8 @@
         ]
       },
       "escalation": [
-        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior."
+        "Run media-scroll, media-recovery, media-lifecycle, chat, protected-message and visual browser scenarios. Verify trackpad momentum and image/lightbox rendering in native WKWebView; Chromium with mocked IPC does not establish native scrolling or decoder behavior.",
+        "Verify pending image frame dimensions before/after decoding and video source dimensions before/after player metadata, including cached remount, portrait and oversized sources. Confirm actual WKWebView geometry and frame timing separately."
       ]
     },
     {
@@ -1066,7 +1071,8 @@
         "frontend/src/main.tsx",
         "frontend/src/index.css",
         "frontend/src/vite-env.d.ts",
-        "frontend/src/components/ErrorBoundary.tsx"
+        "frontend/src/components/ErrorBoundary.tsx",
+        "frontend/e2e/login-layout.spec.ts"
       ],
       "frontend": [
         "src/store/auth.test.ts",
@@ -2074,6 +2080,41 @@
       "escalation": [
         "Run e2e/camera-capture.spec.ts and inspect wide and compact dialog captures. Verify real camera permission, device switching, track release and lock/logout in packaged desktop apps; browser mocks cannot certify OS permission behavior."
       ]
+    },
+    {
+      "id": "frontend-interaction-motion",
+      "paths": [
+        "frontend/src/components/ui/tabs.tsx",
+        "frontend/src/components/ui/tabs.test.ts",
+        "frontend/src/index.css",
+        "frontend/src/features/chat/TransferBar.tsx",
+        "frontend/src/features/chat/LinkDeviceDialog.tsx",
+        "frontend/DESIGN.md",
+        "frontend/src/features/chat/ConversationView.tsx",
+        "frontend/src/features/chat/useMessageArrivalMotion.ts",
+        "frontend/src/features/chat/useMessageArrivalMotion.test.ts",
+        "frontend/e2e/history-motion.spec.ts"
+      ],
+      "frontend": [
+        "src/components/ui/tabs.test.ts",
+        "src/features/chat/TransferBar.test.ts",
+        "src/features/chat/LinkDeviceDialog.test.ts",
+        "src/features/chat/useMessageArrivalMotion.test.ts"
+      ],
+      "escalation": [
+        "Verify rapid surface reversal, pointer-to-keyboard tabs, reduced motion, and media return to an offscreen thumbnail in the native WebView. Presentation must not invent progress or delivery confirmation.",
+        "Run e2e/history-motion.spec.ts and verify initial history, conversation switching, deferred live rows, and virtualized revisit in the native WebView."
+      ],
+      "capability": {
+        "summary": "Keep presentation motion brief, input-aware and grounded in authoritative transfer and device-link state.",
+        "guide": "frontend/DESIGN.md#interaction-motion",
+        "invariants": [
+          {
+            "name": "Keyboard tab selection remains immediate; reduced motion removes spatial movement and progress never implies delivery.",
+            "reference": "frontend/DESIGN.md#interaction-motion"
+          }
+        ]
+      }
     }
   ],
   "prScenarios": [
@@ -2088,7 +2129,9 @@
         "frontend/e2e/media-scroll.spec.ts",
         "frontend/e2e/media-recovery.spec.ts",
         "frontend/e2e/media-lifecycle.spec.ts",
-        "frontend/e2e/media-hook-harness.tsx"
+        "frontend/e2e/media-hook-harness.tsx",
+        "frontend/e2e/video-player-layout.spec.ts",
+        "frontend/e2e/fixtures/video-metadata.json"
       ],
       "browser": [
         "e2e/media-scroll.spec.ts",
@@ -2096,7 +2139,8 @@
         "e2e/media-lifecycle.spec.ts",
         "e2e/chat.spec.ts",
         "e2e/protected-messages.spec.ts",
-        "e2e/ui-visual-regression.spec.ts"
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/video-player-layout.spec.ts"
       ],
       "native": [
         "host"
@@ -2247,7 +2291,8 @@
       ],
       "browser": [
         "e2e/chat.spec.ts",
-        "e2e/ui-visual-regression.spec.ts"
+        "e2e/ui-visual-regression.spec.ts",
+        "e2e/login-layout.spec.ts"
       ]
     },
     {
@@ -2258,12 +2303,14 @@
         "frontend/src/components/ui/label.tsx",
         "frontend/src/features/auth/DeviceEnrollmentDialog.tsx",
         "frontend/src/features/auth/DeviceEnrollmentDialog.test.ts",
-        "frontend/src/lib/api/auth.ts"
+        "frontend/src/lib/api/auth.ts",
+        "frontend/e2e/login-layout.spec.ts"
       ],
       "browser": [
         "e2e/chat.spec.ts",
         "e2e/recovery.spec.ts",
-        "e2e/device-enrollment.spec.ts"
+        "e2e/device-enrollment.spec.ts",
+        "e2e/login-layout.spec.ts"
       ]
     },
     {
@@ -2367,10 +2414,13 @@
       "paths": [
         "frontend/src/features/chat/Composer.tsx",
         "frontend/src/features/chat/ComposerAdmission.test.ts",
-        "frontend/e2e/composer-layout.spec.ts"
+        "frontend/e2e/composer-layout.spec.ts",
+        "frontend/src/features/chat/ComposerImagePreview.tsx",
+        "frontend/e2e/composer-preview-layout.spec.ts"
       ],
       "browser": [
-        "e2e/composer-layout.spec.ts"
+        "e2e/composer-layout.spec.ts",
+        "e2e/composer-preview-layout.spec.ts"
       ]
     },
     {

@@ -58,7 +58,7 @@ export function ReceiveProgress({
         className="h-1 w-full overflow-hidden rounded-full bg-current/15"
       >
         <div
-          className="h-full origin-left bg-current transition-transform duration-300"
+          className="transfer-progress h-full origin-left bg-current"
           style={{ transform: `scaleX(${ratio})` }}
         />
       </div>

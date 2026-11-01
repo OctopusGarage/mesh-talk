@@ -1,3 +1,4 @@
+import { useMessageArrivalMotion } from "./useMessageArrivalMotion";
 import {
   ChannelAnnouncementStrip,
   AnnouncementPublication,
@@ -17,7 +18,14 @@ import { useFavoriteMembership } from "./favorites/useFavoriteMembership";
 import { NotificationPermissionNotice } from "./NotificationPermissionNotice";
 import { useNotificationPermissionReminder } from "./useNotificationPermissionReminder";
 import { displayIdentity } from "@/lib/displayIdentity";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+} from "react";
 import { Virtuoso } from "react-virtuoso";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -74,6 +82,20 @@ import { useAuth } from "@/store/auth";
 import { convKey, displayName, useChat, type ChatMessage } from "@/store/chat";
 import { useAttachmentIntake } from "./attachments/useAttachmentIntake";
 import type { ReactionInfo } from "@/lib/types";
+
+/** Virtual rows claim arrival motion when their first mounted render commits. */
+function ArrivalBubble({
+  fresh,
+  onMounted,
+  ...props
+}: Omit<ComponentProps<typeof MessageBubble>, "fresh"> & {
+  fresh: () => boolean;
+  onMounted: () => void;
+}) {
+  const [enter] = useState(fresh);
+  useLayoutEffect(onMounted, [onMounted]);
+  return <MessageBubble {...props} fresh={enter} />;
+}
 
 /** A quiet centered date separator between days in the message log. */
 function DaySeparator({ label }: { label: string }) {
@@ -364,28 +386,11 @@ export function ConversationView() {
     setPrefill(null);
   }, [key]);
 
-  // Message-enter motion: animate ONLY messages that arrive after a conversation's
-  // initial load (newly sent/received), never the initial backlog and never on scroll
-  // (virtuoso unmounts/remounts rows as they scroll out of the window). `seenKeys` is the
-  // baseline of keys already shown; it's READ in render (pure, StrictMode-safe) and only
-  // MUTATED in a post-commit effect. `primed` excludes the very first backlog load.
-  const seenKeys = useRef<Set<string>>(new Set());
-  const primed = useRef(false);
-  useEffect(() => {
-    seenKeys.current = new Set();
-    primed.current = false;
-  }, [key]);
-  useEffect(() => {
-    // Record every currently-present key as "seen" after commit, and prime after the
-    // first non-empty load so subsequent genuinely-new messages animate exactly once.
-    messages.forEach((m, i) => seenKeys.current.add(messageRowKey(m, i)));
-    if (!primed.current && messages.length > 0) primed.current = true;
-  }, [messages, key]);
-  const isFresh = (m: ChatMessage, i: number) =>
-    primed.current &&
-    m.arrivalKind !== "catch_up" &&
-    m.arrivalKind !== "history_sync" &&
-    !seenKeys.current.has(messageRowKey(m, i));
+  const isFresh = useMessageArrivalMotion(
+    forwardingScope,
+    messages,
+    exactContext !== null || viewport.showJump,
+  );
 
   const replyAuthorName = (message: ChatMessage) =>
     message.fromMe
@@ -857,7 +862,7 @@ export function ConversationView() {
                       })}
                     </label>
                   )}
-                  <MessageBubble
+                  <ArrivalBubble
                     onForward={
                       canForward(m)
                         ? (message) =>
@@ -899,7 +904,8 @@ export function ConversationView() {
                         deviceId: m.who,
                       })
                     }
-                    fresh={motionOK && isFresh(m, i)}
+                    fresh={() => motionOK && isFresh(m, i)}
+                    onMounted={() => isFresh.mounted(m, i)}
                     reactions={m.id ? (reactionsByTarget.get(m.id) ?? []) : []}
                     selfReactionId={selfReactionId}
                     myName={myName}

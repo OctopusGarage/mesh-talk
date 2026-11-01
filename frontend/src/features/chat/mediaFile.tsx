@@ -78,7 +78,8 @@ export function fileGlyph(name: string, mime?: string) {
 // instead of decoding the whole clip again. Failures are remembered too, to skip re-decoding
 // a known-undecodable clip. Bounded by a small FIFO cap (posters are tiny but unbounded
 // growth over a long session is avoided).
-const POSTER_CACHE = new Map<string, string>();
+type VideoPosterFrame = { poster: string; width: number; height: number };
+const POSTER_CACHE = new Map<string, VideoPosterFrame>();
 const POSTER_FAILED = new Set<string>();
 const POSTER_CACHE_MAX = 64;
 const POSTER_MAX_EDGE = 1280;
@@ -92,7 +93,7 @@ export function posterCanvasSize(width: number, height: number) {
   };
 }
 
-function rememberPoster(key: string, data: string) {
+function rememberPoster(key: string, data: VideoPosterFrame) {
   if (POSTER_CACHE.size >= POSTER_CACHE_MAX) {
     const oldest = POSTER_CACHE.keys().next().value;
     if (oldest !== undefined) POSTER_CACHE.delete(oldest);
@@ -113,18 +114,23 @@ export function useVideoPoster(
 ): {
   poster: string | null;
   failed: boolean;
+  width?: number;
+  height?: number;
 } {
-  const [poster, setPoster] = useState<string | null>(null);
+  const [frame, setFrame] = useState<
+    (VideoPosterFrame & { url: string }) | null
+  >(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
-    setPoster(null);
+    setFrame(null);
     setFailed(false);
     if (!url) return;
+    const sourceUrl = url;
     // Reuse a previously captured poster / known failure for this file (no re-decode).
     if (cacheKey) {
       const cached = POSTER_CACHE.get(cacheKey);
       if (cached) {
-        setPoster(cached);
+        setFrame({ ...cached, url });
         return;
       }
       if (POSTER_FAILED.has(cacheKey)) {
@@ -173,10 +179,14 @@ export function useVideoPoster(
         const c2d = canvas.getContext("2d");
         if (!c2d) return fail();
         c2d.drawImage(v, 0, 0, size.width, size.height);
-        const data = canvas.toDataURL("image/jpeg", 0.7);
+        const data = {
+          poster: canvas.toDataURL("image/jpeg", 0.7),
+          width: w,
+          height: h,
+        };
         finish(); // settle BEFORE setState so a release-triggered error can't undo it
         if (cacheKey) rememberPoster(cacheKey, data);
-        if (alive) setPoster(data);
+        if (alive) setFrame({ ...data, url: sourceUrl });
       } catch {
         fail();
       }
@@ -205,7 +215,13 @@ export function useVideoPoster(
       finish();
     };
   }, [url, cacheKey]);
-  return { poster, failed };
+  const current = frame?.url === url ? frame : null;
+  return {
+    poster: current?.poster ?? null,
+    width: current?.width,
+    height: current?.height,
+    failed,
+  };
 }
 // Reuse is deliberately opt-in: protected reveals retain their per-mount URLs.
 const mediaUrls = new MediaObjectUrlCache({

@@ -1,3 +1,5 @@
+import { AnimatePresence, motion } from "framer-motion";
+import { ease, useMotionOK } from "@/lib/motion";
 import { useTranslation } from "react-i18next";
 import { useTransfer } from "@/store/transfers";
 
@@ -14,7 +16,8 @@ export function TransferBar({
 }) {
   const { t } = useTranslation();
   const tr = useTransfer(transferKey);
-  if (tr?.delivered || (!tr && !waitingDirection)) return null;
+  const motionOK = useMotionOK();
+  const active = !tr?.delivered && (!!tr || !!waitingDirection);
   const direction = tr?.direction ?? waitingDirection;
   const done = tr?.done ?? 0;
   const total = tr?.total ?? 0;
@@ -54,35 +57,46 @@ export function TransferBar({
           })
       : null;
   return (
-    <div className="px-3 py-1.5">
-      <div className="mb-1 flex justify-between text-xs">
-        <span className="text-muted-foreground">{verb}</span>
-        {pct !== undefined && (
-          <span className="font-mono text-signal tabular-nums">{pct}%</span>
-        )}
-      </div>
-      {eta && (
-        <div className="mb-1 text-[11px] text-muted-foreground">{eta}</div>
+    <AnimatePresence initial={false}>
+      {active && (
+        <motion.div
+          key={transferKey}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: motionOK ? 0.12 : 0.08, ease }}
+          className="px-3 py-1.5"
+        >
+          <div className="mb-1 flex justify-between text-xs">
+            <span className="text-muted-foreground">{verb}</span>
+            {pct !== undefined && (
+              <span className="font-mono text-signal tabular-nums">{pct}%</span>
+            )}
+          </div>
+          {eta && (
+            <div className="mb-1 text-[11px] text-muted-foreground">{eta}</div>
+          )}
+          <span className="sr-only" role="status" aria-live="polite">
+            {verb}
+            {pct !== undefined ? ` ${Math.floor(pct / 10) * 10}%` : ""}
+          </span>
+          <div
+            role="progressbar"
+            aria-label={verb}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={pct}
+            className="h-1 w-full overflow-hidden rounded-full bg-muted"
+          >
+            <div
+              className="transfer-progress h-full w-full origin-left rounded-full bg-signal"
+              style={{
+                transform: `scaleX(${hasProgress ? Math.min(1, done / total) : 0})`,
+              }}
+            />
+          </div>
+        </motion.div>
       )}
-      <span className="sr-only" role="status" aria-live="polite">
-        {verb}
-        {pct !== undefined ? ` ${Math.floor(pct / 10) * 10}%` : ""}
-      </span>
-      <div
-        role="progressbar"
-        aria-label={verb}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={pct}
-        className="h-1 w-full overflow-hidden rounded-full bg-muted"
-      >
-        <div
-          className="h-full w-full origin-left rounded-full bg-signal"
-          style={{
-            transform: `scaleX(${hasProgress ? Math.min(1, done / total) : 0})`,
-          }}
-        />
-      </div>
-    </div>
+    </AnimatePresence>
   );
 }

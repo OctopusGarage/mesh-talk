@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Smartphone, KeyRound, Loader2, Copy, Check } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Smartphone, KeyRound, Loader2, Copy, Check, X } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useTranslation } from "react-i18next";
 import {
@@ -85,22 +86,62 @@ export function LinkDeviceDialog({ menuItem = false }: { menuItem?: boolean }) {
   const runtime = useChat(
     (state) => `${state.myAccountId}:${state.runEpoch}:${state.identityEpoch}`,
   );
+  const { t } = useTranslation();
+  const scope = `${owner}:${generation}`;
+  const [linkedScope, setLinkedScope] = useState<string | null>(null);
+  useEffect(() => {
+    if (!linkedScope) return;
+    const timer = window.setTimeout(() => setLinkedScope(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [linkedScope]);
   if (!owner) return null;
   return (
-    <OwnedLinkDeviceDialog
-      key={`${owner}:${generation}:${runtime}`}
-      owner={owner}
-      menuItem={menuItem}
-    />
+    <>
+      <OwnedLinkDeviceDialog
+        key={`${owner}:${generation}:${runtime}`}
+        owner={owner}
+        menuItem={menuItem}
+        onLinked={() => {
+          const current = useAuth.getState();
+          if (current.user?.id === owner && current.generation === generation)
+            setLinkedScope(scope);
+        }}
+      />
+      {linkedScope === scope &&
+        createPortal(
+          <div
+            role="status"
+            data-testid="pairing-success-notice"
+            className="pairing-success fixed bottom-6 left-1/2 z-[70] flex w-[calc(100vw-3rem)] max-w-md -translate-x-1/2 items-start gap-3 rounded-lg border bg-popover p-4 text-sm text-foreground shadow-elevation"
+          >
+            <Check
+              aria-hidden="true"
+              className="mt-0.5 h-5 w-5 shrink-0 text-verified"
+            />
+            <span className="min-w-0 flex-1">{t("linkDevice.linked")}</span>
+            <button
+              type="button"
+              aria-label={t("common.dismiss")}
+              onClick={() => setLinkedScope(null)}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <X aria-hidden="true" className="h-4 w-4" />
+            </button>
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 
 function OwnedLinkDeviceDialog({
   owner,
   menuItem,
+  onLinked,
 }: {
   owner: string;
   menuItem: boolean;
+  onLinked: () => void;
 }) {
   const { t } = useTranslation();
   const generation = useRef(useAuth.getState().generation).current;
@@ -415,10 +456,10 @@ function OwnedLinkDeviceDialog({
       await chat.linkDevice(joinPeer, pairingCode, syncAll);
       if (!ownsSession()) return;
       await auth.adoptLinkedAccount();
-      if (openRef.current && session === dialogSession.current) {
-        setMsg(t("linkDevice.linked"));
-        setJoinCode("");
-      }
+      if (!ownsSession()) return;
+      setJoinCode("");
+      setOpen(false);
+      onLinked();
     } catch (e) {
       if (
         !isVerificationCanceled(e) &&
@@ -985,6 +1026,9 @@ function OwnedLinkDeviceDialog({
                 : "text-sm font-medium text-signal"
             }
           >
+            {!msgIsError && msg === t("linkDevice.linked") && (
+              <Check className="h-4 w-4 shrink-0" aria-hidden="true" />
+            )}
             {msg}
           </p>
         )}

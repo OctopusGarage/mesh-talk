@@ -683,17 +683,17 @@ html[data-os="macos"] [data-titlebar-inset] {
 
 @media (prefers-reduced-motion: no-preference) {
   .popover-surface[data-state="open"] {
-    animation: surface-appear 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    animation: surface-appear 150ms cubic-bezier(0.22, 1, 0.36, 1);
   }
   .dialog-surface[data-state="open"] {
-    animation: dialog-appear 190ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    animation: dialog-appear 190ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 }
 
 @keyframes surface-appear {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(4px) scale(0.98);
   }
   to {
     opacity: 1;
@@ -738,7 +738,7 @@ html[data-os="macos"] [data-titlebar-inset] {
 
 /* Short desktop windows keep the form beside the introduction so the primary
    action remains visible with persistent password and credential explanations. */
-@media (min-width: 640px) and (max-height: 600px) {
+@media (min-width: 640px) and (max-height: 740px) {
   .login-stage {
     padding-top: 2.25rem;
   }
@@ -772,4 +772,60 @@ html[data-os="macos"] [data-titlebar-inset] {
 :is(button, [role="button"], a[href]):focus-visible {
   outline: 2px solid hsl(var(--ring)) !important;
   outline-offset: 2px !important;
+}
+
+/* Motion follows real presentation state; Radix retains closed surfaces for exit. */
+@media (prefers-reduced-motion: no-preference) {
+  .popover-surface[data-state="closed"] {
+    animation: surface-appear 100ms cubic-bezier(0.22, 1, 0.36, 1) reverse both;
+  }
+  .dialog-surface[data-state="closed"] {
+    animation: dialog-appear 120ms cubic-bezier(0.22, 1, 0.36, 1) reverse both;
+  }
+  .conversation-welcome > * {
+    animation: welcome-appear 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .conversation-welcome > :nth-child(2) {
+    animation-delay: 40ms;
+  }
+  .conversation-welcome > :nth-child(3) {
+    animation-delay: 80ms;
+  }
+  .pairing-success svg {
+    animation: welcome-appear 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .transfer-progress {
+    transition: transform 100ms linear;
+  }
+}
+@keyframes welcome-appear {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .reaction-chip > :first-child {
+    transition: transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .reaction-chip:active > :first-child {
+    transform: scale(0.96);
+  }
+}
+
+.motion-tabs[data-indicator="ready"] [role="tab"][data-state="active"] {
+  background: transparent;
+  box-shadow: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .motion-tabs[data-pointer-motion="true"] .tab-indicator {
+    transition:
+      transform 170ms cubic-bezier(0.22, 1, 0.36, 1),
+      width 170ms cubic-bezier(0.22, 1, 0.36, 1),
+      height 170ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
 }

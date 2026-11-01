@@ -305,3 +305,39 @@ it("anchors wheel zoom, clamps dragging and resets on double click", async () =>
   );
   expect(transform.style.transform).toBe("translate(0px, 0px) scale(1)");
 });
+
+it("keeps video controls interactive and restores focus after Escape", async () => {
+  vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+  await act(async () =>
+    root.render(
+      createElement(MediaPreview, {
+        fileConv: "video",
+        name: "clip.mp4",
+        size: 100,
+        mime: "video/mp4",
+      }),
+    ),
+  );
+  const trigger = host.querySelector<HTMLButtonElement>(
+    'button[aria-label="files.playVideo"]',
+  )!;
+  await act(async () => trigger.click());
+  const dialog = host.querySelector('[data-testid="file-video-lightbox"]')!;
+  const player = dialog.querySelector("video")!;
+  expect(player.classList.contains("pointer-events-auto")).toBe(true);
+  const close = dialog.querySelector<HTMLButtonElement>(
+    'button[aria-label="common.close"]',
+  )!;
+  expect(document.activeElement).toBe(close);
+  await act(async () =>
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    ),
+  );
+  expect(host.querySelector('[data-testid="file-video-lightbox"]')).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
