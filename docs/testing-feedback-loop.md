@@ -28,6 +28,48 @@ cannot silently start the whole workspace. Ignored process tests require an
 explicit `cargo test ... -- --ignored --test-threads=1`; the focused target does
 not enable them automatically.
 
+## Completion and retirement evidence
+
+Readiness and completion must name the operation, source generation and owning
+scope being observed. A delay, an empty queue, an unchanged counter or the
+absence of a stale effect does not prove that its asynchronous consumer finished.
+Retain and await the actual task before making authoritative no-effect assertions.
+When a browser seam exposes only a transport resolver, pair its integration
+scenario with a component test that captures the real handler or effect task;
+select both through the owning validation contract. Preserve browser interaction,
+current-operation success, native-bridge identity, visual and strict error checks.
+
+Favorites navigation, initial App presentation and ConversationView attachment
+acquisition follow this paired contract. Hold consumer progress independently of
+transport completion, retire its owner, then release and await that exact task.
+Verify that the stale effect remains absent after settlement. A replacement task
+finishing first cannot stand in for the retired task. Qualify changes with a
+temporary guard-bypass control that fails the stale-effect assertion, then restore
+the guard. Fake-time advancement can demonstrate why an old elapsed-time sample
+was insufficient; it must not become the completion witness.
+
+Process execution follows the same rule: a command leader exiting does not prove
+its descendants retired. Shared runners use the validation stage's process owner
+rather than creating an independent nested process group. On POSIX, the outer
+owner retains termination escalation and resource leases through verified group
+retirement, including ignored-stdio descendants and ordinary leader exit.
+Nested cancellation notifies that owner. Windows tree termination must be awaited
+and cleanup failures must remain visible. Cancelled or unverifiably retired work
+cannot admit another suite, fallback build or transport operation, or create a
+successful reusable receipt. Platform evidence must distinguish cancellation from
+an incomplete or mismatched test inventory; success still requires every selected
+step and its positive test counts.
+
+Timers remain appropriate for explicit watchdogs, protocol deadlines, bounded
+state polling, termination grace periods and tests of time-dependent behavior.
+Their expiry signals failure or triggers escalation; elapsed time alone never
+certifies readiness, task completion or cleanup. Preserve documented performance
+assertions separately from harness watchdogs. Fix an incorrect observation or
+work owner before considering a budget change, and use same-source phase evidence
+to justify any deliberate change to a latency contract.
+
+## Browser integration evidence
+
 Changes to configured portable browser specs and the portable configuration
 select the `portable-browser-reporting` diagnostic. It compares both core and extended
 inventories with Playwright discovery without launching browsers. Register new

@@ -23,11 +23,11 @@
       ],
       "capability": {
         "summary": "Pair browser integration evidence with exact-task component proof of retired async consumers.",
-        "guide": "docs/module-boundaries.md#account-and-device-ownership",
+        "guide": "docs/testing-feedback-loop.md#completion-and-retirement-evidence",
         "invariants": [
           {
             "name": "Retired Favorites navigation, App presentation and ConversationView picker tasks settle before authoritative no-effect assertions; browser state samples alone do not prove consumer completion.",
-            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+            "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
           }
         ]
       },
@@ -43,9 +43,7 @@
         "frontend/e2e/helpers/sidebar-actions.ts",
         "frontend/e2e/minimum-window.spec.ts"
       ],
-      "frontend": [
-        "src/components/ui/dialog.test.ts"
-      ],
+      "frontend": ["src/components/ui/dialog.test.ts"],
       "capability": {
         "summary": "Preserve active focus ownership across deferred dialog closure and subsequent user interactions.",
         "guide": "docs/module-boundaries.md#dialog-focus-ownership",
@@ -2334,9 +2332,7 @@
         "e2e/privacy.spec.ts",
         "e2e/tray-navigation.spec.ts"
       ],
-      "native": [
-        "host"
-      ]
+      "native": ["host"]
     },
     {
       "id": "group-file-network-cost-acceptance",

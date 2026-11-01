@@ -191,6 +191,7 @@
         "scripts/validation/validation.json",
         "scripts/validation/stage.mjs",
         "scripts/validation/selectors.mjs",
+        "scripts/validation/browser.mjs",
         "Makefile",
         "AGENTS.md",
         "CONTRIBUTING.md",
@@ -234,6 +235,9 @@
         "scripts/diagnostics/changed-validation.test.mjs",
         "scripts/diagnostics/validation-selectors.test.mjs",
         "scripts/diagnostics/validation-stage.test.mjs",
+        "scripts/diagnostics/pr-platform.test.mjs",
+        "scripts/diagnostics/backend-eval-report.test.mjs",
+        "scripts/diagnostics/native-build.test.mjs",
         "scripts/diagnostics/validation-checks.test.mjs",
         "scripts/diagnostics/validation-latency.test.mjs",
         "scripts/diagnostics/rust-contracts.test.mjs",
@@ -247,6 +251,16 @@
         "scripts/test-ai-eval.mjs",
         "scripts/diagnostics/patch-coverage.test.mjs"
       ],
+      "capability": {
+        "summary": "Select affected checks and retain process ownership through completion or verified retirement before releasing validation resources.",
+        "guide": "docs/testing-feedback-loop.md#completion-and-retirement-evidence",
+        "invariants": [
+          {
+            "name": "Leader exit does not certify descendant retirement; cancellation and unverifiable cleanup cannot admit later work or create successful reusable evidence.",
+            "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
+          }
+        ]
+      },
       "escalation": [
         "Changes to shared validation/PR infrastructure require its affected workflow diagnostics; this development plan does not replace preflight, health or protected CI. Supervisor Rust thread-policy changes also require full workspace consumers and the real Cargo thread-policy fixture; preserve explicit Windows/sanitizer caller limits."
       ]
