@@ -45,7 +45,7 @@
           "package": "mesh-talk-core",
           "filters": [
             "node::account_group::",
-            "node::account_documents::group_operations::input_tests::",
+            "node::account_documents::group_operations::",
             "node::account_sync::local_maintenance::",
             "node::runtime_work::",
             "control_task_lifetime_scope_restores_outer_witness_after_panic",
