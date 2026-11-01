@@ -14,6 +14,16 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::net::TcpStream;
+// The authenticated request is already sent and SessionReady acknowledged.
+// Test-only preparation waits precede the unchanged production read clocks.
+#[cfg(test)]
+pub(in crate::node) type AccountDocumentReadTestHook = dyn Fn(
+        crate::identity::device::PublicIdentity,
+        DocumentRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + Sync;
+
 /// A validated exchange proves protocol support for one full source identity.
 /// Its local observation time retires only failures predating that exchange.
 pub(in crate::node) struct GroupProtocolSupport {
@@ -1209,6 +1219,13 @@ impl Node {
                 || !self.account_allowed(channel.peer_identity(), channel.peer_announcement()))
         {
             return Err(failure());
+        }
+        #[cfg(test)]
+        {
+            let hook = self.account_document_read_test_hook.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(peer.public.clone(), request.clone()).await;
+            }
         }
         let mut pending: Option<(AccountDocumentMeta, zeroize::Zeroizing<Vec<u8>>)> = None;
         let mut group_records = Vec::new();
@@ -3820,6 +3837,119 @@ mod group_control_tests {
         assert_received_role_digest(&fixture, &reply);
     }
 
+    #[tokio::test]
+    async fn authenticated_preparation_wait_precedes_unchanged_document_read_clock() {
+        struct Release(std::sync::Arc<tokio::sync::Semaphore>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.close();
+            }
+        }
+        for hold_read in [false, true] {
+            let mut fixture = UpgradeFixture::inbound_only().await;
+            fixture.prove_support().await;
+            let key = publish_legacy_control_page_for_test(&fixture.source, 1).remove(0);
+            let expected = fixture.source.account_document_meta(&key).unwrap();
+            let server_ready = Arc::new(tokio::sync::Notify::new());
+            let client_ready = Arc::new(tokio::sync::Notify::new());
+            let server_release = Arc::new(tokio::sync::Semaphore::new(0));
+            let client_release = Arc::new(tokio::sync::Semaphore::new(0));
+            let _server_release = Release(server_release.clone());
+            let _client_release = Release(client_release.clone());
+            *fixture.source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+                let ready = server_ready.clone();
+                let release = server_release.clone();
+                let exact = fixture.target.identity.public();
+                move |peer, frame| {
+                    let ready = ready.clone();
+                    let release = release.clone();
+                    let exact = exact.clone();
+                    Box::pin(async move {
+                        if peer == exact
+                            && let AccountHistoryFrame::DocumentsRequest { body } = frame
+                            && DocumentRequest::decode(&body).is_some_and(|request| {
+                                request.domain == AccountDocumentDomain::GroupControl
+                            })
+                        {
+                            ready.notify_one();
+                            let _ = release.acquire().await;
+                        }
+                    })
+                }
+            }));
+            *fixture
+                .target
+                .account_document_read_test_hook
+                .lock()
+                .unwrap() = Some(Arc::new({
+                let ready = client_ready.clone();
+                let release = client_release.clone();
+                let exact = fixture.source.identity.public();
+                move |peer, request| {
+                    let ready = ready.clone();
+                    let release = release.clone();
+                    let exact = exact.clone();
+                    Box::pin(async move {
+                        if peer == exact && request.domain == AccountDocumentDomain::GroupControl {
+                            ready.notify_one();
+                            if hold_read {
+                                let _ = release.acquire().await;
+                            }
+                        }
+                    })
+                }
+            }));
+            let (started, observed) = tokio::sync::oneshot::channel();
+            let target = fixture.target.clone();
+            let peer = fixture.peer.clone();
+            let pulling = tokio::spawn(async move {
+                let lifetime = Arc::new(());
+                started.send(Arc::downgrade(&lifetime)).unwrap();
+                let result = target
+                    .pull_account_documents_page(&peer, &mut DocumentSyncCursor::control())
+                    .await;
+                drop(lifetime);
+                result
+            });
+            let lifetime = observed.await.unwrap();
+            // This watchdog is cold authenticated arrival, not the operation bound.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                client_ready.notified().await;
+                server_ready.notified().await;
+            })
+            .await
+            .expect("both real SessionReady owners reached preparation");
+            tokio::time::pause();
+            // Explicit timeout stimulus: beyond the normal 30s zero-byte total
+            // budget. This is not elapsed-time readiness or a production extension.
+            tokio::time::advance(Duration::from_secs(31)).await;
+            if hold_read {
+                assert!(!pulling.is_finished());
+                assert!(lifetime.strong_count() > 0);
+                tokio::time::resume();
+                server_release.close();
+                client_release.close();
+                pulling.await.unwrap().unwrap();
+                assert_eq!(fixture.target.account_document_meta(&key), Some(expected));
+            } else {
+                // With no preparation hold, the actual unchanged read clock
+                // expires while the authenticated source still withholds its reply.
+                assert!(pulling.await.unwrap().is_err());
+                tokio::time::resume();
+                server_release.close();
+                client_release.close();
+                assert!(fixture.target.account_document_meta(&key).is_none());
+            }
+            assert_eq!(lifetime.strong_count(), 0);
+            *fixture
+                .target
+                .account_document_read_test_hook
+                .lock()
+                .unwrap() = None;
+            *fixture.source.account_session_test_hook.lock().unwrap() = None;
+            fixture.stop_provider().await;
+        }
+    }
     struct UpgradeFixture {
         _directory: tempfile::TempDir,
         source: Arc<Node>,

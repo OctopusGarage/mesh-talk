@@ -256,6 +256,9 @@ pub struct Node {
     pub(in crate::node) account_client_test_hook:
         Mutex<Option<Arc<super::account_session::AccountClientTestHook>>>,
     #[cfg(test)]
+    pub(in crate::node) account_document_read_test_hook:
+        Mutex<Option<Arc<super::account_documents::sync::AccountDocumentReadTestHook>>>,
+    #[cfg(test)]
     pub(in crate::node) account_channel_maintenance_test_hook:
         Mutex<Option<Arc<super::channel_account_maintenance::AccountChannelMaintenanceTestHook>>>,
     pub(in crate::node) privacy: Arc<super::privacy_runtime::PrivacyControl>,
@@ -902,6 +905,8 @@ impl Node {
             account_session_test_hook: Mutex::new(None),
             #[cfg(test)]
             account_client_test_hook: Mutex::new(None),
+            #[cfg(test)]
+            account_document_read_test_hook: Mutex::new(None),
             #[cfg(test)]
             account_channel_maintenance_test_hook: Mutex::new(None),
             privacy: Arc::new(super::privacy_runtime::PrivacyControl::default()),

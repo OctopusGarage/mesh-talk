@@ -187,6 +187,188 @@ impl Drop for ReleaseSetupCancellation {
     }
 }
 
+#[derive(Default)]
+struct PreparationReadState {
+    open: bool,
+    overflow: bool,
+    decisions: std::collections::HashMap<[u8; 32], (bool, std::sync::Weak<()>)>,
+}
+#[derive(Default)]
+struct PreparationReadGate {
+    state: Mutex<PreparationReadState>,
+    changed: Notify,
+}
+impl PreparationReadGate {
+    fn decide(&self, nonce: [u8; 32], hold: bool, lifetime: Option<std::sync::Weak<()>>) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .decisions
+            .retain(|_, (_, lifetime)| lifetime.strong_count() > 0);
+        if !state.open
+            && let Some(lifetime) = lifetime.filter(|value| value.strong_count() > 0)
+        {
+            if state.decisions.len() == 64 && !state.decisions.contains_key(&nonce) {
+                state.overflow = true;
+            } else {
+                state.decisions.insert(nonce, (hold, lifetime));
+            }
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+    async fn wait(&self, nonce: [u8; 32]) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let (ready, overflow) = {
+                let mut state = self.state.lock().unwrap();
+                let ready =
+                    state.open || state.decisions.get(&nonce).is_some_and(|(hold, _)| !hold);
+                if ready {
+                    state.decisions.remove(&nonce);
+                }
+                (ready, state.overflow)
+            };
+            assert!(
+                !overflow,
+                "preparation decision inventory exceeded its bounded owner"
+            );
+            if ready {
+                return;
+            }
+            changed.await;
+        }
+    }
+    fn release(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.open = true;
+        state.decisions.clear();
+        drop(state);
+        self.changed.notify_waiters();
+    }
+}
+struct ReleasePreparationRead(Arc<PreparationReadGate>);
+impl Drop for ReleasePreparationRead {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+struct PreparationServerDecision {
+    gate: Arc<PreparationReadGate>,
+    nonce: Option<[u8; 32]>,
+    lifetime: Option<std::sync::Weak<()>>,
+    decided: bool,
+}
+impl PreparationServerDecision {
+    fn decide(&mut self, hold: bool) {
+        if let Some(nonce) = self.nonce {
+            self.gate.decide(nonce, hold, self.lifetime.clone());
+        }
+        self.decided = true;
+    }
+}
+impl Drop for PreparationServerDecision {
+    fn drop(&mut self) {
+        if !self.decided {
+            self.decide(false);
+        }
+    }
+}
+
+#[tokio::test]
+async fn preparation_server_decisions_and_drop_release_preserve_child_lifetimes() {
+    for outcome in ["pass", "drop", "hold_then_release"] {
+        let gate = Arc::new(PreparationReadGate::default());
+        let (created, observed) = oneshot::channel();
+        let child_gate = gate.clone();
+        let child = tokio::spawn(async move {
+            let lifetime = Arc::new(());
+            created.send(Arc::downgrade(&lifetime)).unwrap();
+            child_gate.wait([1; 32]).await;
+            drop(lifetime);
+        });
+        let lifetime = observed.await.unwrap();
+        assert!(
+            !child.is_finished(),
+            "a client cannot guess the server's decision"
+        );
+        let mut decision = PreparationServerDecision {
+            gate: gate.clone(),
+            nonce: Some([1; 32]),
+            lifetime: Some(lifetime.clone()),
+            decided: false,
+        };
+        match outcome {
+            "pass" => decision.decide(false),
+            "drop" => drop(decision),
+            "hold_then_release" => {
+                decision.decide(true);
+                tokio::task::yield_now().await;
+                assert!(!child.is_finished());
+                assert!(lifetime.strong_count() > 0);
+                drop(ReleasePreparationRead(gate.clone()));
+                // The release is permanent, including previously unknown nonces.
+                gate.wait([2; 32]).await;
+            }
+            _ => unreachable!(),
+        }
+        child.await.unwrap();
+        assert_eq!(lifetime.strong_count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn preparation_decision_inventory_prunes_retired_witnesses_and_rejects_live_overflow() {
+    let gate = Arc::new(PreparationReadGate::default());
+    for nonce in 0..65u8 {
+        let child = Arc::new(());
+        gate.decide([nonce; 32], false, Some(Arc::downgrade(&child)));
+        drop(child);
+    }
+    let (count, overflow) = {
+        let state = gate.state.lock().unwrap();
+        (state.decisions.len(), state.overflow)
+    };
+    assert!(count <= 1 && !overflow);
+    let dead = {
+        let child = Arc::new(());
+        Arc::downgrade(&child)
+    };
+    gate.decide([90; 32], false, Some(dead));
+    let count = gate.state.lock().unwrap().decisions.len();
+    assert_eq!(
+        count, 0,
+        "a late retired server cannot create a pending decision"
+    );
+    let live: Vec<_> = (0..64).map(|_| Arc::new(())).collect();
+    for (nonce, child) in live.iter().enumerate() {
+        gate.decide([nonce as u8; 32], true, Some(Arc::downgrade(child)));
+    }
+    let (count, overflow) = {
+        let state = gate.state.lock().unwrap();
+        (state.decisions.len(), state.overflow)
+    };
+    assert_eq!(count, 64);
+    assert!(!overflow);
+    let extra = Arc::new(());
+    gate.decide([99; 32], true, Some(Arc::downgrade(&extra)));
+    let (count, overflow) = {
+        let state = gate.state.lock().unwrap();
+        (state.decisions.len(), state.overflow)
+    };
+    assert_eq!(count, 64);
+    assert!(
+        overflow,
+        "never discard a live decision to admit another witness"
+    );
+    let refused = tokio::spawn(async move {
+        gate.wait([99; 32]).await;
+    })
+    .await;
+    assert!(refused.unwrap_err().is_panic());
+}
+
 struct ReleaseQueuedReads(Arc<Semaphore>);
 impl Drop for ReleaseQueuedReads {
     fn drop(&mut self) {
@@ -519,6 +701,8 @@ async fn run_queued_source(
     let trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let setup_trace: BTrace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let first_held_task = Arc::new(Mutex::new(None::<tokio::task::Id>));
+    let preparation_read = Arc::new(PreparationReadGate::default());
+    let _release_preparation_read = ReleasePreparationRead(preparation_read.clone());
     let setup_cancellation = Arc::new(SetupCancellationGate::default());
     let _release_setup_cancellation = ReleaseSetupCancellation(setup_cancellation.clone());
     // Independent bounded owner rings keep frequent requester maintenance from
@@ -673,6 +857,12 @@ async fn run_queued_source(
                     );
                 }
             }
+            if peer == peer_a
+                && phase.starts_with("page_end ")
+                && held_task == tokio::task::try_id()
+            {
+                record_setup_milestone(&setup_trace, clock, "first_A_terminal", phase.clone());
+            }
             if admitted.load(std::sync::atomic::Ordering::Acquire)
                 && (phase.starts_with("operation_owner ")
                     || phase.starts_with("operation_publication_owner "))
@@ -814,6 +1004,26 @@ async fn run_queued_source(
             }
         }
     }));
+    *reference.account_document_read_test_hook.lock().unwrap() = Some(Arc::new({
+        let exact = a.identity.public();
+        let gate = preparation_read.clone();
+        let pages = pages.clone();
+        move |peer, request| {
+            let exact = exact.clone();
+            let gate = gate.clone();
+            let pages = pages.clone();
+            Box::pin(async move {
+                let live = pages.lock().unwrap().live_request(&request).is_some();
+                if peer == exact
+                    && request.domain == AccountDocumentDomain::GroupControl
+                    && let Some(probe) = request.operation.as_ref()
+                    && live
+                {
+                    gate.wait(probe.nonce).await;
+                }
+            })
+        }
+    }));
     *a.account_session_test_hook.lock().unwrap() = Some(Arc::new({
         let expected = reference.identity.public();
         let release = release.clone();
@@ -831,6 +1041,7 @@ async fn run_queued_source(
         let setup_trace = setup_trace.clone();
         let first_held_task = first_held_task.clone();
         let setup_cancellation = setup_cancellation.clone();
+        let preparation_read = preparation_read.clone();
         move |peer, frame| {
             let expected = expected.clone();
             let release = release.clone();
@@ -848,6 +1059,7 @@ async fn run_queued_source(
             let setup_trace = setup_trace.clone();
             let first_held_task = first_held_task.clone();
             let setup_cancellation = setup_cancellation.clone();
+            let preparation_read = preparation_read.clone();
             Box::pin(async move {
                 if peer != expected {
                     return;
@@ -859,6 +1071,19 @@ async fn run_queued_source(
                     .filter(|request| request.domain == AccountDocumentDomain::GroupControl)
                 else {
                     return;
+                };
+                // SessionReady can reach the client before this callback
+                // decides whether the genuine request establishes the hold.
+                let mut read_decision = PreparationServerDecision {
+                    gate: preparation_read,
+                    nonce: request.operation.as_ref().map(|probe| probe.nonce),
+                    lifetime: {
+                        let observed = pages.lock().unwrap();
+                        observed
+                            .request(&request)
+                            .and_then(|page| observed.lifetime(page.task))
+                    },
+                    decided: false,
                 };
                 let first_pending = first_tx.lock().unwrap().is_some();
                 if first_pending
@@ -879,6 +1104,9 @@ async fn run_queued_source(
                     && delay_retired_request
                     && !delayed_once.swap(true, std::sync::atomic::Ordering::Relaxed)
                 {
+                    // This old adversarial request must retain its real read
+                    // lifetime while waiting for cancellation, not our hold.
+                    read_decision.decide(false);
                     let page = pages.lock().unwrap().request(&request).unwrap();
                     // A real authenticated publication cancels this exact old
                     // client while its acknowledged server callback is delayed.
@@ -936,7 +1164,13 @@ async fn run_queued_source(
                             page.origin
                         ),
                     );
-                    let _ = first.send(page.task);
+                    let lifetime = pages
+                        .lock()
+                        .unwrap()
+                        .lifetime(page.task)
+                        .expect("the exact natural child has an observed weak lifetime");
+                    read_decision.decide(true);
+                    let _ = first.send((page.task, lifetime));
                     let _ = release.acquire().await;
                 } else if b_partial.load(std::sync::atomic::Ordering::Relaxed)
                     && dispatch.resumed
@@ -1094,7 +1328,7 @@ async fn run_queued_source(
         }
     }));
     reference.account_sync_notify.notify_one();
-    let first_task = super::cold_account_setup(async {
+    let (first_task, first_task_lifetime) = super::cold_account_setup(async {
         let task = first_rx.await?;
         if delay_retired_request { rejected_rx.await?; }
         Ok::<_, oneshot::error::RecvError>(task)
@@ -1108,8 +1342,9 @@ async fn run_queued_source(
             "the delayed historical request is rejected before canonical publication"
         );
     }
+    let first_active = pages.lock().unwrap().is_active(first_task);
     assert!(
-        pages.lock().unwrap().is_active(first_task),
+        first_active,
         "the exact natural A hold must remain live at canonical B publication"
     );
     let keys = super::cold_account_setup(async {
@@ -1122,15 +1357,29 @@ async fn run_queued_source(
             // cancellation. Do not open another connection while the gate
             // can block the reference's combined accept/scheduler owner.
             setup_cancellation.entered.notified().await;
-            assert!(setup_cancellation.state.lock().unwrap().entered);
-            assert!(setup_trace.lock().unwrap().iter().any(|row| row.1 == "first_A_cancel" && row.3.ends_with("reason=wake")), "the forced control must reach the exact unrelated-Wake cancellation");
-            assert!(pages.lock().unwrap().is_active(first_task));
+            let entered = setup_cancellation.state.lock().unwrap().entered;
+            assert!(entered);
+            let unrelated_wake = setup_trace.lock().unwrap().iter().any(|row| row.1 == "first_A_cancel" && row.3.ends_with("reason=wake"));
+            assert!(unrelated_wake, "the forced control must reach the exact unrelated-Wake cancellation");
+            let first_active = pages.lock().unwrap().is_active(first_task);
+            assert!(first_active);
         }
         record_setup_milestone(&setup_trace, clock, "B66_publication_begin", format!("first_A_task={first_task:?}"));
         let keys = crate::node::account_documents::sync::publish_legacy_control_page_for_test(&b, 66);
-        // The exact natural child remains live through real source publication.
-        assert!(pages.lock().unwrap().is_active(first_task));
+        // Keep the actual child's Weak separately from the bounded history;
+        // never retain a strong Arc or accept retirement as a live hold.
+        let (ledger_active, origin_retained) = {
+            let observed = pages.lock().unwrap();
+            (observed.is_active(first_task), observed.lifetime(first_task).is_some())
+        };
+        let direct_child_alive = first_task_lifetime.strong_count() > 0;
+        let setup_snapshot = setup_trace.lock().unwrap().clone();
+        let phase_snapshot = trace.lock().unwrap().clone();
+        assert!(ledger_active,
+            "natural A retired during canonical publication: task={first_task:?} direct_child_alive={direct_child_alive} origin_retained={origin_retained} elapsed_ms={} setup={setup_snapshot:?} phases={phase_snapshot:?}", clock.elapsed().as_millis());
         record_setup_milestone(&setup_trace, clock, "B66_publication_end", format!("first_A_task={first_task:?}"));
+        // Permanently open before the protected resume and real operation.
+        preparation_read.release();
         setup_cancellation.publish_complete();
         resume_rx.await.map(|()| keys)
     })
@@ -1342,6 +1591,7 @@ async fn run_queued_source(
     *a.account_session_test_hook.lock().unwrap() = None;
     *b.account_session_test_hook.lock().unwrap() = None;
     *b.account_client_test_hook.lock().unwrap() = None;
+    *reference.account_document_read_test_hook.lock().unwrap() = None;
     *reference.account_session_test_hook.lock().unwrap() = None;
     *reference.account_client_test_hook.lock().unwrap() = None;
     for (_, node) in &devices {
