@@ -2,6 +2,40 @@
   "schema": 1,
   "contracts": [
     {
+      "id": "frontend-async-consumer-evidence",
+      "paths": [
+        "frontend/src/App.tsx",
+        "frontend/src/App.test.ts",
+        "frontend/src/lib/initialPresentation.ts",
+        "frontend/src/features/chat/favorites/FavoritesDialog.tsx",
+        "frontend/src/features/chat/favorites/FavoritesDialog.test.ts",
+        "frontend/src/features/chat/attachments/useAttachmentIntake.ts",
+        "frontend/src/features/chat/attachments/conversationIntake.test.ts",
+        "frontend/e2e/message-favorites.spec.ts",
+        "frontend/e2e/conversation-wallpaper.spec.ts",
+        "frontend/e2e/automatic-delivery.spec.ts"
+      ],
+      "frontend": [
+        "src/App.test.ts",
+        "src/lib/initialPresentation.test.ts",
+        "src/features/chat/favorites/FavoritesDialog.test.ts",
+        "src/features/chat/attachments/conversationIntake.test.ts"
+      ],
+      "capability": {
+        "summary": "Pair browser integration evidence with exact-task component proof of retired async consumers.",
+        "guide": "docs/module-boundaries.md#account-and-device-ownership",
+        "invariants": [
+          {
+            "name": "Retired Favorites navigation, App presentation and ConversationView picker tasks settle before authoritative no-effect assertions; browser state samples alone do not prove consumer completion.",
+            "reference": "docs/module-boundaries.md#account-and-device-ownership"
+          }
+        ]
+      },
+      "escalation": [
+        "Require the paired App, FavoritesDialog and ConversationView attachment component tests whenever these browser capabilities are selected. Keep browser interaction, fresh-operation destination, native-bridge, visual and strict error assertions. Browser artifacts alone do not prove retired-task completion. Validate delayed-consumer holds and guard-bypass negative controls without adding sleeps, retries or a global idle/test-window API."
+      ]
+    },
+    {
       "id": "frontend-dialog-focus",
       "paths": [
         "frontend/src/components/ui/dialog.tsx",
