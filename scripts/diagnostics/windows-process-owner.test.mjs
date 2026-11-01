@@ -520,7 +520,7 @@ test("machine output requires an explicitly complete stdout capture", async () =
     { output, outputTruncated: false },
     { output, stdout: output },
     { output, stdout: output, outputTruncated: true },
-  ]) assert.throws(() => requireCommandStdout(result), /stdout|truncat|unverified/i);
+  ]) assert.throws(() => requireCommandStdout(result), /stdout|truncated|truncation|unverified/i);
   assert.equal(requireCommandStdout({ output: "human log", stdout: output, outputTruncated: false }), output);
 });
 

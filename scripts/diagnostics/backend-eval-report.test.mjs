@@ -123,7 +123,7 @@ test("backend scenarios require complete stdout instead of merged or stderr evid
     assert.equal(failures.length, Object.keys(BACKEND_SUITES).length);
     for (const record of Object.values(recorded)) {
       assert.equal(record.passed, false);
-      assert.match(record.failure, /stdout|truncat|missing|zero|summary/i);
+      assert.match(record.failure, /stdout|truncated|truncation|missing|zero|summary/i);
     }
   }
   const recorded = {};

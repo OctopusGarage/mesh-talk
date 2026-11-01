@@ -212,7 +212,7 @@ test("native artifact proof uses complete stdout rather than the combined human 
       if (mode === "missing") { delete result.stdout; return result; }
       if (mode === "truncated") return { ...result, outputTruncated: true };
       return { ...result, stdout: "", stderr: result.stdout };
-    } }), /stdout|truncat|artifact/i);
+    } }), /stdout|truncated|truncation|artifact/i);
     assert.equal((await f.verify()).buildVerified, false, mode);
   }
 });

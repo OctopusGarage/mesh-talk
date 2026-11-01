@@ -445,7 +445,7 @@ test("guest Rust evidence requires complete stdout rather than combined or stder
     assert.equal(report.ok, false, "diagnostic output cannot substitute for complete stdout");
     const rust = report.results.find(result => result.kind === "rust");
     assert.equal(rust.ok, false);
-    assert.match(rust.error, /stdout|truncat|zero/i);
+    assert.match(rust.error, /stdout|truncated|truncation|zero/i);
   }
   const report = await executePlan(plan, { run: async (_, args) => ({ code: 0,
     ...capturedOutput(args[0] === "test" ? valid : "tool output", "test result: ok. 99 passed; 0 failed;\n") }) });
