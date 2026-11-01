@@ -615,6 +615,18 @@ once a live hold is captured; never retry the measured operation. The fault
 regression must prove cancellation, retirement and capture of a distinct live
 request before admission.
 
+Queued-source fixtures that publish a real head to retire an old natural request
+must invalidate the earlier empty-source settlement before publication. Reuse the
+shared `ColdControlScope` observation: every new Control task invalidates prior
+settlement, and a completed prefix cannot pay outstanding comparison-pair debt.
+Before capturing the next unpaired natural hold, require the exact published
+source key on the requester, current Control settlement, pair retirement and
+rejection of the retired callback by its exact request identity and child lifetime.
+Carry the captured hold's task identity through setup and verify that child is
+still live when the canonical partial-page corpus is published. These observations
+stay within the existing cold budget and issue no extra requests; preserve the
+real signed exchange, protected-resume checks and operation/recovery deadlines.
+
 Once the original operation is admitted, or the external possession proof starts,
 the existing eight-second progress assertions remain unchanged. The same applies
 to held-traffic assertions, checkpoint repayment, archive recovery, the explicit
