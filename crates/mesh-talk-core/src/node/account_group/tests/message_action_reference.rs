@@ -332,10 +332,7 @@ pub(super) async fn prepare_inbound_reference_control_protocol(
         return;
     }
     let _trace = ColdReferenceTrace::install(target, source);
-    eprintln!(
-        "cold reference Control begin: source={} kind={kind:?}",
-        source.user_id()
-    );
+    eprintln!("cold reference Control begin: kind={kind:?}");
     let mut cursor = crate::node::account_documents::sync::DocumentSyncCursor::control();
     let mut interruptions = 0;
     loop {
@@ -358,10 +355,7 @@ pub(super) async fn prepare_inbound_reference_control_protocol(
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
-    eprintln!(
-        "cold reference Control complete: source={} kind={kind:?}",
-        source.user_id()
-    );
+    eprintln!("cold reference Control complete: kind={kind:?}");
 }
 
 /// Role-page publication can invalidate the authenticated page mid-transfer.
