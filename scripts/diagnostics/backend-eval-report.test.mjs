@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+const capturedOutput = (stdout, stderr = "") => ({ stdout, stderr, output: stdout + stderr, outputTruncated: false });
+const suiteOutput = expected => expected.map(name => `test ${name} ... ok`).join("\n") + `\ntest result: ok. ${expected.length} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`;
+
 test("backend evidence rejects successful Cargo invocations that ran zero tests", async () => {
   const { validateBackendOutput } = await import("../evals/backend-runner.mjs");
   assert.throws(() => validateBackendOutput("test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out", ["actual_flow"]), /missing|zero|count/i);
@@ -17,8 +20,8 @@ test("backend evaluates every independent suite after a failure and retains a fa
   const failures = await evaluateBackendSuites(async target => {
     attempted.push(target);
     const expected = BACKEND_SUITES[target];
-    if (target === "post_office_offline") return { code: 101, output: "relay regression", signal: null };
-    return { code: 0, signal: null, output: expected.map(name => `test ${name} ... ok`).join("\n") + `\ntest result: ok. ${expected.length} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out` };
+    if (target === "post_office_offline") return { code: 101, ...capturedOutput("", "relay regression"), signal: null };
+    return { code: 0, signal: null, ...capturedOutput(suiteOutput(expected)) };
   }, async (target, record) => { recorded[target] = record; });
   assert.deepEqual(attempted, Object.keys(BACKEND_SUITES));
   assert.equal(failures.length, 1);
@@ -74,7 +77,7 @@ test("backend cancellation and unverified cleanup stop admission of later suites
   const { evaluateBackendSuites } = await import("../evals/backend-runner.mjs");
   for (const reason of [{ cancelled: true }, { cleanupUnverified: true }]) {
     let calls = 0;
-    const failures = await evaluateBackendSuites(async () => { calls++; return { code: 130, failure: "cancelled or unretired work", ...reason }; }, async () => {});
+    const failures = await evaluateBackendSuites(async () => { calls++; return { code: 130, ...capturedOutput(""), failure: "cancelled or unretired work", ...reason }; }, async () => {});
     assert.equal(calls, 1);
     assert.equal(failures.length, 1);
   }
@@ -101,4 +104,52 @@ test("intentional lifecycle fault fixtures cannot cancel their real validation o
   assert.match(result.stdout, /browser wrapper exposes/);
   assert.match(result.stdout, /backend timeout/);
   assert.match(result.stdout, /^# pass 4$/mu, "all four selected fault controls must actually pass");
+});
+
+
+test("backend scenarios require complete stdout instead of merged or stderr evidence", async () => {
+  const { BACKEND_SUITES, evaluateBackendSuites } = await import("../evals/backend-runner.mjs");
+  const variants = [
+    valid => capturedOutput("", valid),
+    valid => { const result = capturedOutput(valid); delete result.stdout; return result; },
+    valid => ({ ...capturedOutput(valid), outputTruncated: true }),
+    valid => { const result = capturedOutput(valid); delete result.outputTruncated; return result; },
+    valid => { const split = valid.indexOf("test result:") + "test result:".length; return capturedOutput(valid.slice(0, split), valid.slice(split)); },
+  ];
+  for (const evidence of variants) {
+    const recorded = {};
+    const failures = await evaluateBackendSuites(async target => ({ code: 0,
+      ...evidence(suiteOutput(BACKEND_SUITES[target])) }), async (target, record) => { recorded[target] = record; });
+    assert.equal(failures.length, Object.keys(BACKEND_SUITES).length);
+    for (const record of Object.values(recorded)) {
+      assert.equal(record.passed, false);
+      assert.match(record.failure, /stdout|truncat|missing|zero|summary/i);
+    }
+  }
+  const recorded = {};
+  const failures = await evaluateBackendSuites(async target => ({ code: 0,
+    ...capturedOutput(suiteOutput(BACKEND_SUITES[target]), "\ntest diagnostic_only ... ok\ntest result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out") }),
+    async (target, record) => { recorded[target] = record; });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(Object.keys(recorded), Object.keys(BACKEND_SUITES));
+  for (const [target, record] of Object.entries(recorded)) {
+    assert.equal(record.passed, true);
+    assert.deepEqual(record.scenarios, BACKEND_SUITES[target]);
+  }
+});
+
+test("backend execution failures remain primary when machine stdout is unavailable", async () => {
+  const { BACKEND_SUITES, evaluateBackendSuites } = await import("../evals/backend-runner.mjs");
+  for (const [failure, expected] of [
+    [{ code: 37 }, /failed/i],
+    [{ code: 0, failure: "original backend timeout" }, /original backend timeout/],
+    [{ code: 130, failure: "original backend cancellation", cancelled: true }, /original backend cancellation/],
+    [{ code: 0, failure: "original cleanup unverified", cleanupUnverified: true }, /original cleanup unverified/],
+  ]) {
+    const recorded = [];
+    const failures = await evaluateBackendSuites(async () => ({ output: "human diagnostics", ...failure }),
+      async (_, record) => { recorded.push(record); });
+    assert.equal(failures.length, failure.cancelled || failure.cleanupUnverified ? 1 : Object.keys(BACKEND_SUITES).length);
+    for (const record of recorded) { assert.equal(record.passed, false); assert.match(record.failure, expected); }
+  }
 });
