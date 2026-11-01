@@ -269,6 +269,9 @@ impl Drop for ProfileStorageLease {
         // Clear the live PID before releasing ownership, permitting this process
         // to acquire again. A failed clear leaves conservative legacy detection.
         let _ = self.file.set_len(0);
+        // A descriptor inherited by a concurrent process spawn can outlive this
+        // guard. Retire its OS lock now, rather than waiting for every copy.
+        let _ = self.file.unlock();
     }
 }
 
@@ -402,6 +405,25 @@ mod tests {
             assert!(path.exists());
             let _next = ProfileStorageLease::acquire(root.path()).unwrap();
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn profile_lock_release_does_not_wait_for_a_cloned_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = ProfileStorageLease::acquire(root.path()).unwrap();
+        // A descriptor inherited during another thread's process spawn is not
+        // another cooperating storage owner, but shares the OS lock lifetime.
+        let inherited = lease.file.try_clone().unwrap();
+        assert!(ProfileStorageLease::acquire(root.path()).is_err());
+        drop(lease);
+        let replacement = ProfileStorageLease::acquire(root.path()).expect(
+            "retired lease must release ownership while its cloned descriptor remains open",
+        );
+        drop(inherited);
+        assert!(ProfileStorageLease::acquire(root.path()).is_err());
+        drop(replacement);
+        assert!(ProfileStorageLease::acquire(root.path()).is_ok());
     }
 
     #[test]

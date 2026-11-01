@@ -22,10 +22,12 @@ struct Chain {
     servers: Vec<Option<JoinHandle<()>>>,
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn current_group_metadata_crosses_real_tcp_after_owner_goes_offline() {
+    let mut chain = tokio::time::timeout(Duration::from_secs(30), Chain::new())
+        .await
+        .expect("independent group hosts must initialize before the protocol window");
     tokio::time::timeout(Duration::from_secs(20), async {
-        let mut chain = Chain::new().await;
         let group = chain.nodes[0]
             .create_channel_invited("metadata", vec![chain.nodes[1].identity.public()])
             .await
@@ -221,7 +223,7 @@ impl Chain {
         tokio::time::timeout(Duration::from_secs(5), async {
             node.await_channel_metadata(channel).await.unwrap();
             loop {
-                match node.process_channel_reception_inner(channel, "live", false) {
+                match node.process_channel_reception_inner(channel, "live") {
                     Ok(()) | Err(super::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
                     }
                     Err(error) => panic!("retained channel work failed: {error}"),
@@ -1071,50 +1073,77 @@ async fn background_group_gossip_reaches_end_of_chain_without_sender_or_roster_c
         }
     }
     let mut recovery_before = Vec::with_capacity(6);
-    // Switch the prepared, fully accepted membership to the complete production
-    // accept/recovery runtime. No manual recovery calls occur after this point.
+    // Stop every old endpoint before any replacement can dial a neighbor.
+    // Otherwise a one-shot setup exchange can hit a listener being retired.
     for index in 0..6 {
         let previous = chain.servers[index].take().unwrap();
         previous.abort();
         let _ = previous.await;
-        recovery_before.push(
-            chain.nodes[index]
-                .channel_recovery(group)
-                .and_then(|recovery| recovery.checked_at),
-        );
-        chain.nodes[index]
-            .channel_recovery_periodic_disabled
+        chain.nodes[index].sessions.clear();
+        recovery_before.push(chain.nodes[index].channel_recovery(group));
+    }
+    let initialized = Arc::new(Mutex::new([false; 6]));
+    let initial_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let mut listeners = Vec::with_capacity(6);
+    for index in 0..6 {
+        let node = &chain.nodes[index];
+        let previous = node.account_client_test_hook.lock().unwrap().clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let initialized = initialized.clone();
+            let trace = initial_trace.clone();
+            let completed =
+                format!("channel_recovery_group_done channel={group:?} checked=true clean=true");
+            move |peer, phase| {
+                if let Some(previous) = &previous {
+                    previous(peer, phase.clone());
+                }
+                if phase == completed {
+                    initialized.lock().unwrap()[index] = true;
+                }
+                if phase.starts_with("channel_recovery_") {
+                    let mut trace = trace.lock().unwrap();
+                    if trace.len() == 64 {
+                        trace.pop_front();
+                    }
+                    trace.push_back((index, phase));
+                }
+            }
+        }));
+        node.channel_recovery_periodic_disabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        // One explicit setup demand precedes the new worker. Nothing schedules
-        // recovery manually after the new message is sent.
-        chain.nodes[index].schedule_channel_recovery(group);
-        let listener = TcpListener::bind(chain.addresses[index]).await.unwrap();
+        // One setup demand precedes each new worker; propagation has no rescue.
+        node.schedule_channel_recovery(group);
+        listeners.push(TcpListener::bind(chain.addresses[index]).await.unwrap());
+    }
+    // Bind all endpoints before spawning any recovery owner. An authenticated
+    // completion from the new worker is proof even within the same clock tick.
+    for (index, listener) in listeners.into_iter().enumerate() {
         chain.servers[index] = Some(tokio::spawn(
             chain.nodes[index].clone().run_accept_loop(listener),
         ));
     }
-    // Require a new clean authenticated exchange by each replacement worker;
-    // historical peer_checked state cannot satisfy this setup barrier. This
-    // setup deadline is separate from the notification-only propagation watchdog.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let mut initialized = [false; 6];
-        loop {
-            for (index, node) in chain.nodes[..6].iter().enumerate() {
-                initialized[index] |= node.channel_recovery(group).is_some_and(|recovery| {
-                    recovery.phase == "peer_checked"
-                        && recovery.checked_at.is_some_and(|checked| {
-                            recovery_before[index].is_none_or(|before| checked > before)
-                        })
-                });
-            }
-            if initialized.into_iter().all(|ready| ready) {
-                break;
-            }
+    let prepared = tokio::time::timeout(Duration::from_secs(5), async {
+        while !initialized.lock().unwrap().iter().all(|ready| *ready) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("prepared adjacent endpoints must finish their initial background exchange");
+    .await;
+    if let Err(error) = prepared {
+        let completed = *initialized.lock().unwrap();
+        let trace = initial_trace
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let current = chain.nodes[..6]
+            .iter()
+            .map(|node| node.channel_recovery(group))
+            .collect::<Vec<_>>();
+        panic!(
+            "prepared adjacent endpoints must finish their initial background exchange: {error}; completed={completed:?}; before={recovery_before:?}; current={current:?}; trace={trace:?}"
+        );
+    }
     assert!(chain.nodes[..6].iter().all(|node| {
         node.channel_recovery_periodic_disabled
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1308,8 +1337,7 @@ async fn channel_recovery_wake_is_deduplicated_and_empty_rounds_stay_quiet() {
         // This fixture has no recovery worker. Finish its admitted setup/message
         // continuations before testing idle rounds, consuming their progress wake.
         for _ in 0..128 {
-            node.process_channel_reception_inner(group, "live", false)
-                .unwrap();
+            node.process_channel_reception_inner(group, "live").unwrap();
             if node
                 .channel_checkpoints
                 .next_runtime(None)

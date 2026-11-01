@@ -221,7 +221,7 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
                     &self.node.identity.public(),
                     &self.peer,
                 );
-        Ok(ParticipantView {
+        let view = ParticipantView {
             conversation: *conversation,
             repository,
             preparation: Box::new(Mutex::new(super::principal::Preparation::default())),
@@ -230,7 +230,11 @@ impl NetworkSyncStore for GuardedSyncStore<'_> {
             pending,
             export_have: Mutex::new(None),
             sibling_closure,
-        })
+        };
+        #[cfg(test)]
+        self.node
+            .trace_account_client(&self.peer, || "network_view_captured".into());
+        Ok(view)
     }
     fn prepare_view_step(
         &self,

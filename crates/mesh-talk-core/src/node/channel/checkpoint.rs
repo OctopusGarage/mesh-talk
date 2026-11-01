@@ -90,8 +90,12 @@ pub(in crate::node) struct PreparedChannelReceive {
     account: [u8; 32],
     owner: ParticipantEventOwner,
     candidate: PreparedChannelMessage,
+    pre_open: bool,
 }
 impl PreparedChannelReceive {
+    pub(in crate::node) fn retained_before_open(&self) -> bool {
+        self.pre_open
+    }
     pub(in crate::node) fn plaintext(&self) -> &[u8] {
         &self.candidate.plaintext
     }
@@ -387,7 +391,8 @@ impl ChannelCheckpointStore {
                 },
                 Err(crate::channel::model::CheckpointMessageError::Malformed(error))=>return Err(invalid(&error)),
             };
-            Ok(Some(PreparedChannelReceive {channel:event.conversation_id,event:event.id,wall_clock:event.wall_clock,kind:event.kind,revision,key_revision,source_job,source_revision,account:self.account,owner:owner.clone(),candidate}))
+            let pre_open = self.retained_before_open_on(c, event.id)?;
+            Ok(Some(PreparedChannelReceive {channel:event.conversation_id,event:event.id,wall_clock:event.wall_clock,kind:event.kind,revision,key_revision,source_job,source_revision,account:self.account,owner:owner.clone(),candidate,pre_open}))
         })?;
         if prepared.is_none()
             && let Some((epoch, revision, job, source_revision, wait_until)) = attempt

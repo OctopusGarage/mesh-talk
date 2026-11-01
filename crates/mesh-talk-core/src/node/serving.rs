@@ -38,7 +38,11 @@ pub(in crate::node) struct PendingChannelPlaintext {
 struct ChannelPlaintextRetry {
     retry_at: Option<std::time::Instant>,
     delay_ms: u64,
-    continuation: Option<(super::reception_effects::ArrivalKind, bool)>,
+    continuation: Option<super::reception_effects::ArrivalKind>,
+    // The durable batch can mix silent startup repairs with new arrivals. Keep
+    // legacy terminal visibility until that same batch is committed complete;
+    // its last source row may be old or physically retired in the meantime.
+    legacy_batch_visible: bool,
 }
 
 impl ChannelPlaintextRetry {
@@ -51,7 +55,7 @@ impl ChannelPlaintextRetry {
         if matches!(
             error,
             NodeError::Log(LogError::Io(_) | LogError::Database(_) | LogError::Storage(_))
-        ) && let Some((arrival, _)) = &mut self.continuation
+        ) && let Some(arrival) = &mut self.continuation
         {
             *arrival = super::reception_effects::ArrivalKind::CatchUp;
         }
@@ -1377,7 +1381,7 @@ impl Node {
         conv: ConversationId,
         context: &'static str,
     ) {
-        if let Err(error) = self.process_channel_reception_inner(conv, context, false) {
+        if let Err(error) = self.process_channel_reception_inner(conv, context) {
             let mut pending = self
                 .pending_channel_plaintext
                 .lock()
@@ -1395,7 +1399,6 @@ impl Node {
         &self,
         conv: ConversationId,
         context: &'static str,
-        reopening: bool,
     ) -> Result<(), NodeError> {
         use super::reception_effects::{ArrivalKind, ReceptionMetadata};
         let mut pending = self
@@ -1414,15 +1417,12 @@ impl Node {
             return Ok(());
         }
         let lane = pending.lanes.entry(conv).or_default();
-        let (mut arrival, reopening) = *lane.continuation.get_or_insert_with(|| {
-            (
-                if context == "live" {
-                    ArrivalKind::Live
-                } else {
-                    ArrivalKind::CatchUp
-                },
-                reopening,
-            )
+        let mut arrival = *lane.continuation.get_or_insert_with(|| {
+            if context == "live" {
+                ArrivalKind::Live
+            } else {
+                ArrivalKind::CatchUp
+            }
         });
         if !self.prepare_channel_metadata_turn(conv)? {
             return Ok(());
@@ -1472,7 +1472,8 @@ impl Node {
                     .lock()
                     .expect("account suppression lock")
                     .contains(conv, candidate.event_id())?;
-                let expired = if reopening && !own {
+                let pre_open = candidate.retained_before_open();
+                let expired = if pre_open && !own {
                     crate::expiry::deadline(candidate.plaintext()).is_some()
                 } else {
                     self.recipient_expired(
@@ -1510,7 +1511,10 @@ impl Node {
                     if !own && entry.from != self.user_id() {
                         self.note_account_local_change();
                     }
-                    if !reopening && self.channel_incoming.is_legacy() {
+                    if !pre_open && self.channel_incoming.is_legacy() {
+                        if metadata.batch_id.is_some() {
+                            pending.lanes.entry(conv).or_default().legacy_batch_visible = true;
+                        }
                         let body = super::message::MessageBody::decode(&entry.plaintext);
                         let _ =
                             self.channel_incoming
@@ -1545,24 +1549,26 @@ impl Node {
             }
             if budget.exhausted() {
                 let lane = pending.lanes.entry(conv).or_default();
-                lane.continuation = Some((arrival, reopening));
+                lane.continuation = Some(arrival);
                 lane.retry_at = None;
                 self.channel_recovery_notify.notify_one();
                 return Ok(());
             }
         }
         if budget.spent() {
-            pending.lanes.entry(conv).or_default().continuation = Some((arrival, reopening));
+            pending.lanes.entry(conv).or_default().continuation = Some(arrival);
             self.channel_recovery_notify.notify_one();
             return Ok(());
         }
-        if !self.process_join_history_reception(conv, reopening)? {
-            pending.lanes.entry(conv).or_default().continuation = Some((arrival, reopening));
+        if !self.process_join_history_reception(conv)? {
+            pending.lanes.entry(conv).or_default().continuation = Some(arrival);
             return Ok(());
         }
         if let Some((event, metadata)) = self.channel_checkpoints.finish_batch(conv)? {
             self.note_reception_change();
-            if !reopening && self.channel_incoming.is_legacy() {
+            let visible =
+                std::mem::take(&mut pending.lanes.entry(conv).or_default().legacy_batch_visible);
+            if visible && self.channel_incoming.is_legacy() {
                 let _ = self
                     .channel_incoming
                     .send(super::channel::ReceivedChannelMessage {
@@ -1617,7 +1623,7 @@ impl Node {
                 lane.retry_at.is_some()
                     && matches!(
                         lane.continuation,
-                        Some((super::reception_effects::ArrivalKind::CatchUp, _))
+                        Some(super::reception_effects::ArrivalKind::CatchUp)
                     )
             })
     }
@@ -1652,10 +1658,8 @@ impl Node {
             if more || bootstrap {
                 self.channel_recovery_notify.notify_one();
             }
-            if let Some((channel, reopening)) = channel {
-                if let Err(error) =
-                    self.process_channel_reception_inner(channel, "catch_up", reopening)
-                {
+            if let Some((channel, _)) = channel {
+                if let Err(error) = self.process_channel_reception_inner(channel, "catch_up") {
                     let mut pending = self
                         .pending_channel_plaintext
                         .lock()
@@ -2429,18 +2433,17 @@ mod channel_plaintext_retry_tests {
         let now = std::time::Instant::now();
         let stale = NodeError::Log(LogError::StaleCursor);
         let mut lane = ChannelPlaintextRetry {
-            continuation: Some((ArrivalKind::Live, false)),
+            continuation: Some(ArrivalKind::Live),
+            legacy_batch_visible: true,
             ..Default::default()
         };
         for _ in 0..16 {
             assert!(!lane.record_failure(&stale, now));
+            assert!(lane.legacy_batch_visible);
         }
         assert!(lane.retry_at.is_none());
         assert_eq!(lane.delay_ms, 0);
-        assert!(matches!(
-            lane.continuation,
-            Some((ArrivalKind::Live, false))
-        ));
+        assert!(matches!(lane.continuation, Some(ArrivalKind::Live)));
 
         let failures = [
             NodeError::Log(LogError::Io(std::io::Error::other("retry test"))),
@@ -2453,14 +2456,13 @@ mod channel_plaintext_retry_tests {
         ];
         for (error, seconds) in failures.iter().zip([1, 2, 4]) {
             assert!(lane.record_failure(error, now));
+            assert!(lane.legacy_batch_visible);
             let deadline = now + Duration::from_secs(seconds);
             assert_eq!(lane.retry_at, Some(deadline));
             assert_eq!(lane.delay_ms, seconds * 2000);
-            assert!(matches!(
-                lane.continuation,
-                Some((ArrivalKind::CatchUp, false))
-            ));
+            assert!(matches!(lane.continuation, Some(ArrivalKind::CatchUp)));
             assert!(!lane.record_failure(&stale, now));
+            assert!(lane.legacy_batch_visible);
             assert_eq!(lane.retry_at, Some(deadline));
             assert_eq!(lane.delay_ms, seconds * 2000);
         }

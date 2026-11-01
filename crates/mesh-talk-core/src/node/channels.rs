@@ -2831,8 +2831,27 @@ impl Node {
                                 let mut ch =
                                     self.privacy_sync_dial(peer.addr, &peer.public).await?;
                                 let store = self.sync_store(ch.peer_identity());
-                                if request_round(&mut ch, &store, channel).await.is_ok() {
+                                let round = request_round(&mut ch, &store, channel).await;
+                                #[cfg(test)]
+                                self.trace_account_client(&peer.public, || {
+                                    match &round {
+                                        Ok(_) => "control_fanout_round_ok",
+                                        Err(super::session::SessionError::Store(
+                                            LogError::StaleCursor,
+                                        )) => "control_fanout_round_stale",
+                                        Err(_) => "control_fanout_round_failed",
+                                    }
+                                    .into()
+                                });
+                                if round.is_ok() {
                                     self.recycle_sync_channel(ch);
+                                } else if matches!(
+                                    round,
+                                    Err(super::session::SessionError::Store(LogError::StaleCursor))
+                                ) {
+                                    // A changed local source did not finish this round.
+                                    // Keep its existing journal ticket for a fresh view.
+                                    deferred.store(true, std::sync::atomic::Ordering::Relaxed);
                                 }
                                 Ok(())
                             }

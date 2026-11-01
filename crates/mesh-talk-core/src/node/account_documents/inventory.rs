@@ -526,11 +526,11 @@ impl Node {
             .into_iter()
             .chain(std::iter::once(self.own_group_proof()))
             .filter(|proof| {
-                proof.verify()
-                    && reference
-                        .members
-                        .iter()
-                        .any(|member| member.public == proof.public())
+                reference
+                    .members
+                    .iter()
+                    .any(|member| member.public == proof.public())
+                    && proof.verify()
             })
             .collect();
         bindings.sort_by(|left, right| left.user_id.cmp(&right.user_id));

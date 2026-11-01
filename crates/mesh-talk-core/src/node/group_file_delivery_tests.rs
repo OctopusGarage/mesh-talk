@@ -536,10 +536,12 @@ async fn malformed_and_other_group_consent_cannot_authorize_group_file_chunks() 
     .expect("invalid group controls must not hold the retry worker");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn authorized_group_file_card_surfaces_without_observing_the_senders_announcement() {
+    let f = tokio::time::timeout(Duration::from_secs(30), GroupRelayFixture::new())
+        .await
+        .expect("group relay setup must finish before the history-only reception window");
     tokio::time::timeout(Duration::from_secs(10), async {
-        let f = GroupRelayFixture::new().await;
         let source = f.directory.path().join("historical-document.bin");
         std::fs::write(&source, b"group history can outlive the original sender").unwrap();
         let (manifest, file) =

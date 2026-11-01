@@ -532,7 +532,7 @@ mod tests {
                     .unwrap()
             }));
             receiver
-                .process_channel_reception_inner(channel, "live", false)
+                .process_channel_reception_inner(channel, "live")
                 .unwrap();
             Self {
                 _directory: directory,

@@ -570,6 +570,7 @@ mod tests {
     #[tokio::test]
     async fn actual_role_gc_supplies_free_pages_for_physical_progress() {
         use crate::eventlog::{ConversationId, Event, EventKind, sync::network::NetworkSyncStore};
+        use crate::storage::database::observations::VACUUM_ATTEMPTS;
         let root = tempfile::tempdir().unwrap();
         let office = office(&root);
         let author = DeviceIdentity::generate();
@@ -579,7 +580,8 @@ mod tests {
                 .unwrap();
         // Garbage must exceed the maintained 256-page physical-GC activation
         // threshold; smaller inventories intentionally retain their free pages.
-        for seq in 1..=64 {
+        let mut expired_body_sizes = Vec::new();
+        for seq in 1..=24 {
             let event = mailbox
                 .wrap(&Event::new(
                     &author,
@@ -592,6 +594,7 @@ mod tests {
                     vec![1; 50_000],
                 ))
                 .unwrap();
+            expired_body_sizes.push(event.ciphertext.len() as u64);
             office.state.record(&event, 0, None).unwrap();
         }
         let live_recipient = DeviceIdentity::generate();
@@ -616,13 +619,24 @@ mod tests {
         let reads_before = office.state.body_read_counts();
         let db = office.state.profile().database();
         let before = db.physical_stats().unwrap();
+        // A body can retain at most one page locally. Count only conservative
+        // overflow-page headroom, not schema or unrelated profile allocations.
+        let minimum_overflow_pages: u64 = expired_body_sizes
+            .iter()
+            .map(|bytes| (bytes / before.page_size).saturating_sub(1))
+            .sum();
+        assert!(minimum_overflow_pages > PHYSICAL_START_PAGES);
+        assert!(before.page_count >= minimum_overflow_pages);
+        SLICE_TIMES.with(|v| v.borrow_mut().clear());
+        PHYSICAL_INSPECTIONS.with(|v| v.set(0));
+        VACUUM_ATTEMPTS.with(|v| v.borrow_mut().clear());
         let (stop, rx) = watch::channel(false);
         let worker = office.run_maintenance(rx);
         tokio::pin!(worker);
         // This inventory crosses physical-GC hysteresis and therefore needs
         // several paced slices. Observe actual completion instead of assuming
         // the larger fixture drains in the old small-inventory sleep window.
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let completion = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 tokio::select! {
                     result = &mut worker => panic!("worker stopped: {result:?}"),
@@ -635,15 +649,35 @@ mod tests {
                         .unwrap()
                         .has_work()
                     && !office.state.digest_work_pending().unwrap()
+                    && VACUUM_ATTEMPTS.with(|v| v.borrow().len()) >= 2
                 {
                     break;
                 }
             }
         })
-        .await
-        .expect("paced logical and physical cleanup must complete");
+        .await;
+        let observed = (
+            db.physical_stats(),
+            office.state.next_work_at(super::super::network::unix_now()),
+            office.state.digest_work_pending(),
+        );
+        let slices = SLICE_TIMES.with(|v| v.borrow().clone());
+        let slice_time: Duration = slices.iter().map(|(a, b)| b.duration_since(*a)).sum();
+        let inspections = PHYSICAL_INSPECTIONS.with(|v| v.get());
+        let vacuum_attempts = VACUUM_ATTEMPTS.with(|v| v.borrow().len());
         stop.send_replace(true);
         worker.await.unwrap();
+        eprintln!(
+            "role GC overflow_pages={minimum_overflow_pages} before={before:?} observed={observed:?} slices={} slice_ms={} inspections={inspections} vacuum_attempts={vacuum_attempts} joined=true",
+            slices.len(),
+            slice_time.as_millis(),
+        );
+        completion.unwrap_or_else(|error| panic!(
+            "paced logical and physical cleanup must complete: {error}; before={before:?} observed={observed:?} slices={} slice_ms={} inspections={inspections} vacuum_attempts={vacuum_attempts}",
+            slices.len(), slice_time.as_millis(),
+        ));
+        assert!(slices.len() > 1);
+        assert!(vacuum_attempts >= 2);
         let after = db.physical_stats().unwrap();
         assert!(
             after.page_count < before.page_count,

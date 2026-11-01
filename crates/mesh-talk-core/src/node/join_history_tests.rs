@@ -157,6 +157,128 @@ async fn join_history_default_is_bounded_and_requires_acceptance() {
 }
 
 #[tokio::test]
+async fn join_history_release_arrival_uses_retained_open_cutoff() {
+    for release_before_open in [true, false] {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let alice = node(a.path());
+        let bob = node(b.path());
+        let channel = alice
+            .create_channel_invited("release across reopen", vec![])
+            .await
+            .unwrap();
+        alice
+            .send_channel_message(channel, b"frozen earlier history")
+            .await
+            .unwrap();
+        alice
+            .add_channel_member(channel, bob.identity.public())
+            .await
+            .unwrap();
+        copy(&alice, &bob, channel);
+        bob.accept_channel_invite(channel).await.unwrap();
+        copy(&bob, &alice, channel);
+        settle_history(&alice);
+        assert!(bob.channel_history(channel, 10).unwrap().is_empty());
+        let original = alice.channel_history(channel, 10).unwrap()[0].id;
+        assert!(bob.log.lock().unwrap().get(&original).unwrap().is_some());
+        let release = alice
+            .log
+            .lock()
+            .unwrap()
+            .events(&channel)
+            .unwrap()
+            .into_iter()
+            .find(|event| {
+                event.kind == EventKind::ChannelJoinHistory
+                    && matches!(
+                        decode::<HistoryControl>(&event.ciphertext),
+                        Some(HistoryControl::Release(_))
+                    )
+            })
+            .expect("signed release was published");
+        assert!(release.verify_signature());
+        assert!(bob.log.lock().unwrap().get(&release.id).unwrap().is_none());
+        if release_before_open {
+            // Retain the signed release without consuming it before shutdown.
+            copy_events(&alice, &bob, channel);
+        }
+        let (ed, x) = bob.identity.secret_bytes();
+        drop(bob);
+        let (dm, _) = tokio::sync::mpsc::unbounded_channel();
+        let (ch, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (file, _) = tokio::sync::mpsc::unbounded_channel();
+        let reopened = Node::open(
+            DeviceIdentity::from_secret_bytes(ed, x),
+            Arc::new(Mutex::new(Roster::default())),
+            dm,
+            ch,
+            file,
+            &b.path().join("events"),
+            &b.path().join("sent"),
+            "pw",
+        )
+        .unwrap();
+        // Both cases use the real reopened channel ticket. Only the selected
+        // signed release's retained commit falls on opposite sides of open.
+        reopened
+            .channel_checkpoints
+            .resume_current_channels_step()
+            .unwrap();
+        assert_eq!(
+            reopened.channel_checkpoints.next_runtime(None).unwrap(),
+            Some((channel, true))
+        );
+        if !release_before_open {
+            copy_events(&alice, &reopened, channel);
+        }
+        assert!(
+            reopened
+                .log
+                .lock()
+                .unwrap()
+                .get(&release.id)
+                .unwrap()
+                .is_some()
+        );
+        let retained = reopened.log.lock().unwrap().events(&channel).unwrap().len();
+        settle_history(&reopened);
+        let history = reopened.channel_history(channel, 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, original);
+        assert_eq!(history[0].text, b"frozen earlier history");
+        if release_before_open {
+            assert!(
+                matches!(
+                    received.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ),
+                "startup repair must not replay a legacy history callback"
+            );
+        } else {
+            let message = received
+                .try_recv()
+                .expect("post-open release must surface despite the reopening lane");
+            assert_eq!(message.event_id, original);
+            assert_eq!(message.text, b"frozen earlier history");
+            assert_eq!(message.arrival_kind, "history_sync");
+            assert!(!message.own_device);
+            assert!(!message.reception_only);
+        }
+        assert_eq!(
+            reopened.log.lock().unwrap().events(&channel).unwrap().len(),
+            retained,
+            "copied history must not append an acknowledgement event"
+        );
+        settle_history(&reopened);
+        assert!(matches!(
+            received.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn join_history_policy_is_owner_only_and_old_groups_default_off() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -1746,7 +1868,7 @@ async fn join_history_rejected_release_is_not_reopened_by_safe_tail_control() {
         .repository()
         .unwrap()
         .body_read_counts();
-    bob.process_join_history_reception(channel, false).unwrap();
+    bob.process_join_history_reception(channel).unwrap();
     assert_eq!(
         bob.log
             .lock()
@@ -1842,9 +1964,7 @@ async fn join_history_rejected_release_backlog_yields_before_decoding_every_cont
             .1
     };
     let before = counts();
-    alice
-        .process_join_history_reception(channel, false)
-        .unwrap();
+    alice.process_join_history_reception(channel).unwrap();
     assert!(
         counts() - before <= 64,
         "one reception turn decoded {} rejected controls",
@@ -1852,18 +1972,14 @@ async fn join_history_rejected_release_backlog_yields_before_decoding_every_cont
     );
     for _ in 0..1024 {
         let before = counts();
-        let ready = alice
-            .process_join_history_reception(channel, false)
-            .unwrap();
+        let ready = alice.process_join_history_reception(channel).unwrap();
         assert!(counts() - before <= 64);
         if ready {
             break;
         }
     }
     let before = counts();
-    alice
-        .process_join_history_reception(channel, false)
-        .unwrap();
+    alice.process_join_history_reception(channel).unwrap();
     assert_eq!(
         counts(),
         before,

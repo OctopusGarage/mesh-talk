@@ -716,7 +716,7 @@ async fn selected_history_and_archive_wait_for_admitted_recall_before_body_reads
     // injected message before beginning the unapplied-recall privacy boundary.
     for _ in 0..256 {
         source
-            .process_channel_reception_inner(channel, "live", false)
+            .process_channel_reception_inner(channel, "live")
             .unwrap();
         if source
             .received

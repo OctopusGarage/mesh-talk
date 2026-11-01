@@ -1466,7 +1466,10 @@ caller-owned identities. Handed ownership moves into the context once and lasts
 through all retained stores, admitted work and retirement. Acquisition rejects
 unsafe aliases, unrecognized nonempty lock data and live legacy PID holders
 before mutation. Empty and stale numeric diagnostics retain compatibility.
-Release clears the PID while holding the lock and never unlinks its path.
+Release clears the PID while holding the lock, explicitly unlocks the retired
+owner and never unlinks its path. A descriptor inherited during a concurrent
+process spawn cannot prolong that retired ownership; closing an old descriptor
+also cannot release a replacement owner's lock.
 Canonical root aliases and same-process callers cannot create a second cooperating
 owner. Standalone legacy store APIs do not acquire a profile lease implicitly.
 
@@ -1603,8 +1606,14 @@ charge budget across its previews while retaining the existing 8 MiB per-row
 admission. Two successful candidates distinguish catch-up from live delivery.
 When the budget ends first, a lone candidate stays pending without consuming its
 key; a scheduled continuation preserves arrival provenance and leaves the batch
-terminal open. Startup continuations also retain their expiry and notification
-semantics. Authentication failures wait for changed key material; sequence gaps wait until receiver
+terminal open. Startup expiry and legacy notification policy use each signed source event’s
+retained commit ordinal against the exact cutoff captured for this runtime. A
+continuation can repair silent pre-open history and receive new events without
+classifying those later arrivals as startup history. Invitation copies use their
+authenticated release event for this distinction. A mixed durable batch keeps its
+receipt counts, while the existing retry lane retains one visibility flag until
+a newly surfaced legacy batch commits its terminal, independently of source
+retirement. Authentication failures wait for changed key material; sequence gaps wait until receiver
 progress can satisfy the existing skip bound. Valid oversized records remain
 pending with an explicit budget error. Definitive malformed sender headers
 commit exact general-discovery evidence with their channel disposition. Missing

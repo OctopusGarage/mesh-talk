@@ -188,7 +188,7 @@ fn open(
     path: &std::path::Path,
 ) -> Result<std::sync::Arc<super::context::ProfileStorage>, crate::eventlog::LogError> {
     super::context::ProfileStorage::open_relay(
-        ProfileStorageLease::acquire(root).unwrap(),
+        ProfileStorageLease::acquire(root)?,
         &device.public(),
         path,
         "pw",
@@ -276,9 +276,14 @@ fn every_publication_cut_reopens_from_authenticated_state() {
         writer.append_durable(&child).unwrap();
         drop(writer);
         CUT.with(|v| v.replace(Some(point)));
+        let interruption = open(dir.path(), &device, &path)
+            .err()
+            .unwrap_or_else(|| panic!("cut {point} did not interrupt"));
         assert!(
-            open(dir.path(), &device, &path).is_err(),
-            "cut {point} did not interrupt"
+            interruption
+                .to_string()
+                .contains("injected publication interruption"),
+            "cut {point} returned an unrelated error: {interruption}"
         );
         CUT.with(|v| v.replace(None));
         let profile = open(dir.path(), &device, &path)

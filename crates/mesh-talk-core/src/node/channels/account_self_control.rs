@@ -1275,6 +1275,8 @@ pub(in crate::node) mod tests {
         let trace_omitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let operation_trace =
             std::sync::Arc::new(std::sync::Mutex::new(SelfControlOperationTrace::default()));
+        let external_trace =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let request_hold = hold_request.then(|| std::sync::Arc::new(SelfControlRequestHold::new()));
         // The hooks and held server future retain the observer. A separate
         // owner must release its response even if the caller panics first.
@@ -1294,6 +1296,8 @@ pub(in crate::node) mod tests {
             let client_labels = peer_labels.clone();
             let client_omitted = trace_omitted.clone();
             let client_operation_trace = operation_trace.clone();
+            let client_external_trace = external_trace.clone();
+            let owner_public = owner.identity.public();
             let client_request_hold = request_hold.clone();
             let weak = std::sync::Arc::downgrade(node);
             let client_selected_trace_peer = selected_trace_peer.clone();
@@ -1370,6 +1374,29 @@ pub(in crate::node) mod tests {
                         if let Some(scope) = scope {
                             let direction = usize::from(own_public != reference_public);
                             completed_scopes.lock().unwrap()[direction][scope] = true;
+                        }
+                    }
+                    let external_pair = client_selected_trace_peer
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .is_some_and(|online| {
+                            (&own_public == online && peer == owner_public)
+                                || (own_public == owner_public && &peer == online)
+                        });
+                    let external_phase = (external_pair
+                        && ["dial_", "session_", "control_fanout_"]
+                            .iter()
+                            .any(|prefix| event.starts_with(prefix)))
+                        || (own_public == owner_public && event.starts_with("responder_"));
+                    if external_phase {
+                        let started = client_operation_trace.lock().unwrap().started;
+                        if let Some(started) = started {
+                            let mut tail = client_external_trace.lock().unwrap();
+                            if tail.len() == 64 {
+                                tail.pop_front();
+                            }
+                            tail.push_back((started.elapsed().as_millis(), label, event.clone()));
                         }
                     }
                     if event.starts_with("control_queue") || event.starts_with("control_refresh") {
@@ -2002,18 +2029,20 @@ pub(in crate::node) mod tests {
                                 owner.log.lock().unwrap().get(event).unwrap().is_some()
                             })
                     })
-                    && reference.account_group_access(group).unwrap().role
-                        == if accepted_after {
-                            AccountGroupRole::Member
-                        } else {
-                            AccountGroupRole::Left
+                    && [&reference, &executor].into_iter().all(|node| {
+                        match node.account_group_access(group) {
+                            Ok(access) => {
+                                access.role
+                                    == if accepted_after {
+                                        AccountGroupRole::Member
+                                    } else {
+                                        AccountGroupRole::Left
+                                    }
+                            }
+                            Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => false,
+                            Err(error) => panic!("self-control role observation failed: {error}"),
                         }
-                    && executor.account_group_access(group).unwrap().role
-                        == if accepted_after {
-                            AccountGroupRole::Member
-                        } else {
-                            AccountGroupRole::Left
-                        };
+                    });
                 if ready {
                     operation_trace
                         .lock()
@@ -2053,11 +2082,36 @@ pub(in crate::node) mod tests {
             // must not turn the original failure into unrelated poison panics.
             let failure_trace = trace.lock().unwrap().iter().cloned().collect::<Vec<_>>();
             let operation_trace = format!("{:?}", operation_trace.lock().unwrap());
+            let external_trace = external_trace
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let listeners_finished: Vec<_> = handles
+                .iter()
+                .map(|handle| handle.as_ref().map(|handle| handle.is_finished()))
+                .collect();
+            let exact_owner_route = executor
+                .routing_peer(&owner.user_id())
+                .is_some_and(|route| route.public == owner.identity.public());
+            let selected_owner = executor
+                .channel_members(group)
+                .contains(&owner.identity.public());
+            let departure_retry = executor
+                .channels
+                .lock()
+                .unwrap()
+                .pending_departures(&executor.user_id())
+                .iter()
+                .any(|(channel, _)| *channel == group);
+            let source_capacity = executor.sessions.test_capacity_snapshot();
+            let owner_capacity = owner.sessions.test_capacity_snapshot();
             if let Some(hold) = request_hold.as_ref() {
                 hold.release.close();
             }
             panic!(
-                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} held_request_flags={held_request_flags:?} operation_prefix={operation_trace} trace={failure_trace:?}"
+                "self control Noise did not converge: input={input:?} pending={pending} nodes={diagnostics:?} held_request_flags={held_request_flags:?} operation_prefix={operation_trace} trace={failure_trace:?} external_trace={external_trace:?} listeners_finished={listeners_finished:?} exact_owner_route={exact_owner_route} selected_owner={selected_owner} departure_retry={departure_retry} capacities(source,owner)=({source_capacity:?},{owner_capacity:?})"
             );
         }
         if let Some(hold) = request_hold.as_ref() {

@@ -55,7 +55,6 @@ impl Node {
     pub(in crate::node) fn process_join_history_reception(
         &self,
         channel: ConversationId,
-        reopening: bool,
     ) -> Result<bool, NodeError> {
         let (source, stamp, event, rank, selected, name, reopening) = {
             let mut work = self.join_history_work.lock().expect("history retry lock");
@@ -98,6 +97,7 @@ impl Node {
                     return Ok(true);
                 };
                 let name = current.name().to_owned();
+                let reopening = self.channel_checkpoints.retained_before_open(id)?;
                 let me = self.identity.public();
                 let projection = Arc::new(projection);
                 let query = HistoryQuery::new(source, move |context| async move {

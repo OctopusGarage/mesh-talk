@@ -10,12 +10,22 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+// Live positive observers may wait for a bounded projection, but storage and
+// authorization failures must remain fatal. Empty ready history stays distinct.
+fn ready_history(result: Result<Vec<HistoryEntry>, NodeError>) -> Option<Vec<HistoryEntry>> {
+    match result {
+        Ok(history) => Some(history),
+        Err(NodeError::Log(LogError::StaleCursor)) => None,
+        Err(error) => panic!("history observation failed: {error}"),
+    }
+}
+
 // Bare fixtures inject signed rows without the host's recovery worker. Drive
 // that same bounded owner until its durable channel demand is retired.
 fn settle_injected_channel(node: &Node, channel: ConversationId) {
     crate::node::test_support::settle_group_metadata(node, channel);
     for _ in 0..30_000 {
-        node.process_channel_reception_inner(channel, "live", false)
+        node.process_channel_reception_inner(channel, "live")
             .unwrap();
         let pending: bool = node
             .storage
@@ -90,7 +100,7 @@ async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless(
         Ok(())
     }).unwrap();
     assert!(
-        bob.process_channel_reception_inner(channel, "live", false)
+        bob.process_channel_reception_inner(channel, "live")
             .is_err(),
         "recall publication must reach the shared transaction"
     );
@@ -142,7 +152,7 @@ async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless(
         .repository()
         .unwrap()
         .body_read_counts();
-    bob.process_channel_reception_inner(channel, "live", false)
+    bob.process_channel_reception_inner(channel, "live")
         .unwrap();
     assert_eq!(
         bob.log
@@ -204,7 +214,7 @@ async fn channel_checkpoint_recall_commit_is_atomic_and_warm_reopen_is_bodyless(
         .repository()
         .unwrap()
         .body_read_counts();
-    bob.process_channel_reception_inner(channel, "live", false)
+    bob.process_channel_reception_inner(channel, "live")
         .unwrap();
     assert_eq!(
         bob.log
@@ -523,6 +533,185 @@ async fn channel_checkpoint_reopen_defers_unprojected_control_backlog_to_runtime
 }
 
 #[tokio::test]
+async fn channel_checkpoint_reopen_continuation_notifies_new_message_and_terminal() {
+    channel_reopen_continuation_case(false).await;
+}
+
+#[tokio::test]
+async fn channel_checkpoint_reopen_continuation_retains_new_unexpired_message() {
+    channel_reopen_continuation_case(true).await;
+}
+
+async fn channel_reopen_continuation_case(expiring: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = DeviceIdentity::generate();
+    let receiver = DeviceIdentity::generate();
+    let secret = receiver.secret_bytes();
+    let public = receiver.public();
+    let open = || {
+        let (dm, _) = mpsc::unbounded_channel();
+        let (channel, incoming) = mpsc::unbounded_channel();
+        let (file, _) = mpsc::unbounded_channel();
+        (
+            Node::open(
+                DeviceIdentity::from_secret_bytes(secret.0, secret.1),
+                Arc::new(Mutex::new(Roster::default())),
+                dm,
+                channel,
+                file,
+                &directory.path().join("node.log"),
+                &directory.path().join("sent.log"),
+                "pw",
+            )
+            .unwrap(),
+            incoming,
+        )
+    };
+    let (node, _) = open();
+    let channel = crate::channel::new_channel_id();
+    let meta = ChannelMeta {
+        name: "reopen continuation".into(),
+        members: vec![owner.public(), public],
+        epoch: 0,
+        owner: owner.public().user_id(),
+    };
+    let mut sequence = 0;
+    let mut append = |node: &Node, kind, bytes| {
+        sequence += 1;
+        let mut log = node.log.lock().unwrap();
+        let (parents, lamport) = log.prepare(&channel).unwrap();
+        let event = Event::new(
+            &owner,
+            channel,
+            sequence,
+            parents,
+            lamport,
+            now_millis(),
+            kind,
+            bytes,
+        );
+        let id = event.id;
+        log.append_durable(event).unwrap();
+        id
+    };
+    append(&node, EventKind::MembershipChange, meta.encode());
+    let mut sender = crate::channel::ChannelState::from_meta(channel, meta.clone());
+    sender.set_identity(owner.public().user_id());
+    let keys = crate::node::channel::seal_keys_for(
+        &owner,
+        &meta.members,
+        &sender.my_sender_distribution(),
+        0,
+    )
+    .unwrap();
+    append(&node, EventKind::KeyRotation, keys.encode());
+    let future = now_millis() + 3_600_000;
+    let body = |text: &[u8], expiry| {
+        crate::expiry::wrap(&MessageBody::new(text.to_vec(), None).encode(), expiry)
+    };
+    let old = append(
+        &node,
+        EventKind::Message,
+        sender
+            .seal_sender_message(&body(b"retained", None))
+            .unwrap(),
+    );
+    let old_expiring = append(
+        &node,
+        EventKind::Message,
+        sender
+            .seal_sender_message(&body(b"retained expiry", Some(future)))
+            .unwrap(),
+    );
+    // Real retained signed controls force the first bounded startup turn to
+    // yield. No receive or projection state is forged by this fixture.
+    for _ in 0..128 {
+        append(&node, EventKind::ChannelRename, vec![255]);
+    }
+    node.close_profile().unwrap();
+    let (warm, mut incoming) = open();
+    warm.retry_channel_plaintext();
+    assert!(warm.channel_plaintext_pending_for_test(channel));
+    assert!(incoming.try_recv().is_err());
+    let fresh = append(
+        &warm,
+        EventKind::Message,
+        sender
+            .seal_sender_message(&body(b"after reopen", expiring.then_some(future)))
+            .unwrap(),
+    );
+    let after_open: bool = warm.storage.database().read(|c| {
+        c.query_row(
+            "SELECT e.commit_ordinal>o.through_commit FROM retained_events e,channel_runtime_owner o WHERE e.domain=?1 AND e.id=?2 AND o.singleton=1",
+            rusqlite::params![b"MeshPartEventsV1".as_slice(),fresh.as_bytes().as_slice()],
+            |r|r.get(0),
+        ).map_err(Into::into)
+    }).unwrap();
+    assert!(
+        after_open,
+        "the new ciphertext must be outside the startup cutoff"
+    );
+    let mut complete = false;
+    for _ in 0..2000 {
+        warm.retry_channel_plaintext();
+        let pending: bool = warm
+            .storage
+            .database()
+            .read(|c| {
+                c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                    [channel.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        if !pending && !warm.channel_plaintext_pending_for_test(channel) {
+            complete = true;
+            break;
+        }
+    }
+    assert!(
+        complete,
+        "the bounded receiver must retire its admitted work"
+    );
+    let received = warm.received.lock().unwrap();
+    assert!(received.entry(old).unwrap().is_some());
+    assert!(received.entry(old_expiring).unwrap().is_none());
+    assert!(
+        received.entry(fresh).unwrap().is_some(),
+        "post-open unexpired plaintext must survive a startup continuation"
+    );
+    drop(received);
+    let content = incoming
+        .try_recv()
+        .expect("post-open content must notify from a startup continuation");
+    assert_eq!(content.event_id, fresh);
+    assert_eq!(content.text, b"after reopen");
+    assert_eq!(content.arrival_kind, "catch_up");
+    assert!(!content.reception_only && !content.batch_complete);
+    // Batch sizes describe durable retained receipts, including the repaired
+    // old ordinary row; suppressing its legacy callback does not rewrite them.
+    assert_eq!(content.batch_size, 2);
+    let terminal = incoming
+        .try_recv()
+        .expect("the visible batch must complete");
+    assert!(terminal.reception_only && terminal.batch_complete);
+    assert_eq!(terminal.batch_id, content.batch_id);
+    assert_eq!(terminal.batch_size, 2);
+    assert!(
+        incoming.try_recv().is_err(),
+        "retained history stays silent"
+    );
+    warm.retry_channel_plaintext();
+    assert!(
+        incoming.try_recv().is_err(),
+        "committed callbacks are not replayed"
+    );
+    warm.close_profile().unwrap();
+}
+
+#[tokio::test]
 async fn channel_checkpoint_presentation_policy_backlog_yields_without_hidden_body_drain() {
     let directory = tempfile::tempdir().unwrap();
     let (dm, _) = mpsc::unbounded_channel();
@@ -577,7 +766,7 @@ async fn channel_checkpoint_presentation_policy_backlog_yields_without_hidden_bo
             .0
     };
     let before = reads();
-    node.process_channel_reception_inner(channel, "catch_up", false)
+    node.process_channel_reception_inner(channel, "catch_up")
         .unwrap();
     assert!(
         reads() - before <= 4,
@@ -608,7 +797,7 @@ async fn channel_checkpoint_presentation_policy_backlog_yields_without_hidden_bo
         "policy preparation never resumed without a new event"
     );
     let before = reads();
-    node.process_channel_reception_inner(channel, "catch_up", false)
+    node.process_channel_reception_inner(channel, "catch_up")
         .unwrap();
     assert_eq!(
         reads(),
@@ -3109,11 +3298,8 @@ async fn channel_custody_post_office_observation_survives_sibling_sync_without_r
     let worker = tokio::spawn(sibling.clone().run_account_history_loop());
     let imported = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let own_message = sibling
-                .channel_history(channel, 10)
-                .unwrap()
-                .iter()
-                .any(|row| row.id == event && row.from_me);
+            let own_message = ready_history(sibling.channel_history(channel, 10))
+                .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me));
             if own_message
                 && sibling.channel_custody_count(channel, event).unwrap() == Some(0)
                 && sibling
@@ -4465,7 +4651,7 @@ async fn stalled_recovery_peer_does_not_delay_healthy_replica() {
 
 /// A restarted member recovers from another member when the author and post office
 /// are unavailable. Discovery of the serving member wakes recovery immediately.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn channel_member_recovers_missed_message_from_peer() {
     let alice = DeviceIdentity::generate();
     let alice_secrets = alice.secret_bytes();
@@ -4576,6 +4762,24 @@ async fn channel_member_recovers_missed_message_from_peer() {
         "channel recovery must not depend on DM safety-number verification"
     );
 
+    let recovery_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let trace_started = std::time::Instant::now();
+    for (label, node) in [("bob", &bob_node), ("carol", &carol_node)] {
+        let trace = recovery_trace.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |_, phase| {
+            if !["channel_recovery_", "dial_", "responder_"]
+                .iter()
+                .any(|prefix| phase.starts_with(prefix))
+            {
+                return;
+            }
+            let mut trace = trace.lock().unwrap();
+            if trace.len() == 64 {
+                trace.pop_front();
+            }
+            trace.push_back((trace_started.elapsed().as_millis(), label, phase));
+        }));
+    }
     let changed = carol_roster_for_discovery.lock().unwrap().changes();
     let recovery_task = tokio::spawn(Arc::clone(&carol_node).run_channel_recovery_loop(changed));
     add_peer(
@@ -4585,9 +4789,23 @@ async fn channel_member_recovers_missed_message_from_peer() {
         bob_port,
         &carol_id,
     );
-    let recovered = tokio::time::timeout(Duration::from_secs(5), carol_rx.recv())
+    // Background peer recovery permits a fifteen-second production exchange.
+    // One functional window covers it and the bounded local batch continuation.
+    let recovery_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let recovered = tokio::time::timeout_at(recovery_deadline, carol_rx.recv())
         .await
-        .expect("Carol recovered from Bob")
+        .unwrap_or_else(|error| {
+            let trace = recovery_trace.lock().unwrap().iter().cloned().collect::<Vec<_>>();
+            let raw_event = carol_node.log.lock().unwrap().get(&sent_id).map(|event| event.is_some());
+            let progress = carol_node.channel_recovery(channel);
+            let pending: Result<bool, LogError> = carol_node.storage.database().read(|c| {
+                c.query_row("SELECT EXISTS(SELECT 1 FROM channel_runtime_work WHERE channel=?1)",
+                    [channel.as_bytes().as_slice()], |row| row.get(0)).map_err(Into::into)
+            });
+            let bob_capacity = bob_node.sessions.test_capacity_snapshot();
+            let carol_capacity = carol_node.sessions.test_capacity_snapshot();
+            panic!("Carol recovered from Bob: {error:?}; raw_event={raw_event:?} progress={progress:?} pending={pending:?} bob_finished={} recovery_finished={} capacities=({bob_capacity:?},{carol_capacity:?}) phases={trace:?}", bob_task.is_finished(), recovery_task.is_finished());
+        })
         .expect("channel stream open");
     assert_eq!(recovered.text, b"recover from Bob");
     assert_eq!(recovered.arrival_kind, "catch_up");
@@ -4595,15 +4813,34 @@ async fn channel_member_recovers_missed_message_from_peer() {
     assert_eq!(recovered.event_id, sent_id);
     assert!(!recovered.batch_complete);
     assert!(!recovered.reception_only);
-    let completed = carol_rx.try_recv().unwrap();
+    // Batch completion follows on a later bounded producer turn. Both the
+    // content and terminal notification must arrive within the same window.
+    let completed = tokio::time::timeout_at(recovery_deadline, carol_rx.recv())
+        .await
+        .expect("Carol received the recovery batch completion")
+        .expect("channel stream open");
     assert!(completed.reception_only && completed.batch_complete);
     assert!(completed.text.is_empty() && completed.wrapped.is_empty());
     assert_eq!(completed.batch_id, recovered.batch_id);
     assert!(recovered.batch_id.is_some());
+    for node in [&bob_node, &carol_node] {
+        node.account_client_test_hook.lock().unwrap().take();
+    }
     let recovery = carol_node.channel_recovery(channel).unwrap();
     assert!(matches!(recovery.phase, "peer_checked" | "catching_up"));
     assert!(recovery.checked_at.is_some());
-    assert_eq!(carol_node.channel_history(channel, 10).unwrap().len(), 1);
+    let recovered_history = tokio::time::timeout_at(recovery_deadline, async {
+        loop {
+            if let Some(rows) = ready_history(carol_node.channel_history(channel, 10)) {
+                return rows;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("recovered history is readable within the shared recovery window");
+    assert_eq!(recovered_history.len(), 1);
+    assert_eq!(recovered_history[0].id, sent_id);
     let resumed_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, carol_port))
         .await
         .unwrap();
@@ -4785,11 +5022,8 @@ async fn channel_real_tcp_scale_rehearsal() {
     tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             if (1..count).filter(|i| !offline.contains(i)).all(|i| {
-                nodes[i]
-                    .channel_history(channel, 10)
-                    .unwrap()
-                    .iter()
-                    .any(|entry| entry.text == b"scale-check")
+                ready_history(nodes[i].channel_history(channel, 10))
+                    .is_some_and(|history| history.iter().any(|entry| entry.text == b"scale-check"))
             }) {
                 break;
             }
@@ -4809,11 +5043,8 @@ async fn channel_real_tcp_scale_rehearsal() {
     tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             if offline.iter().all(|&i| {
-                nodes[i]
-                    .channel_history(channel, 10)
-                    .unwrap()
-                    .iter()
-                    .any(|entry| entry.text == b"scale-check")
+                ready_history(nodes[i].channel_history(channel, 10))
+                    .is_some_and(|history| history.iter().any(|entry| entry.text == b"scale-check"))
             }) {
                 break;
             }
@@ -5275,7 +5506,7 @@ async fn channel_sending_survives_restart() {
 /// Carol — who got the `MembershipChange` + Alice's lazily-distributed epoch-1 SKD —
 /// receives + decrypts the epoch-1 message, but NOT the epoch-0 one she joined after
 /// (late-join isolation / forward secrecy).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adding_a_channel_member_lets_them_receive_new_messages() {
     async fn next_message(
         receiver: &mut mpsc::UnboundedReceiver<crate::node::channel::ReceivedChannelMessage>,
@@ -5580,6 +5811,27 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
             .iter()
             .any(|member| member.user_id() == bob_uid)
     );
+    let departure_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let departure_started = std::time::Instant::now();
+    for (label, current, peer) in [
+        ("owner", &alice_node, bob_node.identity.public()),
+        ("departing", &bob_node, alice_node.identity.public()),
+    ] {
+        let trace = departure_trace.clone();
+        *current.account_client_test_hook.lock().unwrap() =
+            Some(Arc::new(move |observed, phase| {
+                if observed != peer
+                    || !(phase.starts_with("dial_") || phase.starts_with("channel_recovery_"))
+                {
+                    return;
+                }
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 64 {
+                    trace.pop_front();
+                }
+                trace.push_back((departure_started.elapsed().as_millis(), label, phase));
+            }));
+    }
     let resumed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let resumed_addr = resumed_listener.local_addr().unwrap();
     let resumed_task = tokio::spawn(Arc::clone(&alice_node).run_accept_loop(resumed_listener));
@@ -5608,9 +5860,15 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
     // A retry is a best-effort exchange, not a remote acceptance receipt. Keep
     // using the real retry owner until both canonical and displayed membership
     // reflect the original signed leave after Alice's listener restarts.
-    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+    let mut retry_turns = 0usize;
+    let mut finished_retry_turns = 0usize;
+    // Background repair is a functional convergence check. Its real per-peer
+    // exchange permits 15 seconds; allow that exchange and one bounded retry.
+    let recovered = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
+            retry_turns += 1;
             bob_node.retry_channel_departures().await;
+            finished_retry_turns += 1;
             let canonical = match alice_node.account_group_projection(channel) {
                 Ok(canonical) => canonical,
                 Err(crate::eventlog::LogError::StaleCursor) => {
@@ -5635,7 +5893,18 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
         }
     })
     .await;
+    for current in [&alice_node, &bob_node] {
+        *current.account_client_test_hook.lock().unwrap() = None;
+    }
     if recovered.is_err() {
+        let phases = departure_trace
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let owner_capacity = alice_node.sessions.test_capacity_snapshot();
+        let departing_capacity = bob_node.sessions.test_capacity_snapshot();
         let (raw_leave, parent_cut_present, canonical_leave, canonical_member) = {
             let log = alice_node.log.lock().unwrap();
             let projection = crate::node::channel::ChannelBook::project_membership(
@@ -5666,7 +5935,7 @@ async fn adding_a_channel_member_lets_them_receive_new_messages() {
             peer.addr == resumed_addr && peer.public == alice_node.identity.public()
         });
         panic!(
-            "offline departure retry failed: raw_leave={raw_leave} parent_cut_present={parent_cut_present} canonical_leave={canonical_leave} canonical_member={canonical_member} retry_pending={retry_pending} resumed_route={resumed_route}"
+            "offline departure retry failed: raw_leave={raw_leave} parent_cut_present={parent_cut_present} canonical_leave={canonical_leave} canonical_member={canonical_member} retry_pending={retry_pending} resumed_route={resumed_route} retry_turns={retry_turns} finished_retry_turns={finished_retry_turns} owner_capacity={owner_capacity:?} departing_capacity={departing_capacity:?} phases={phases:?}"
         );
     }
     resumed_task.abort();
@@ -7924,16 +8193,22 @@ async fn channel_recall_by_member_is_visible_and_survives_removal() {
     );
 
     let tombstoned = |node: &Arc<Node>| {
-        node.channel_history(channel, 20)
-            .unwrap()
-            .into_iter()
-            .any(|e| e.id == bob_msg_id && e.recalled)
+        node.channel_history(channel, 20).map(|history| {
+            history
+                .into_iter()
+                .any(|e| e.id == bob_msg_id && e.recalled)
+        })
     };
 
     // (1) Alice sees Bob's recall while Bob is still a member.
     let mut ok = false;
     for _ in 0..50 {
-        if tombstoned(&alice_node) {
+        let recalled = match tombstoned(&alice_node) {
+            Ok(recalled) => recalled,
+            Err(NodeError::Log(LogError::StaleCursor)) => false,
+            Err(error) => panic!("channel recall observation failed: {error}"),
+        };
+        if recalled {
             ok = true;
             break;
         }
@@ -7948,7 +8223,7 @@ async fn channel_recall_by_member_is_visible_and_survives_removal() {
         .await
         .unwrap();
     assert!(
-        tombstoned(&alice_node),
+        tombstoned(&alice_node).unwrap(),
         "Bob's recall survives his removal from the channel (roster fallback for his key)"
     );
 }
@@ -8324,9 +8599,10 @@ async fn send_to_account_delivers_to_a_peer_account_over_loopback() {
     // Bob's account history (keyed by Alice's account) shows the message.
     let mut bob_hist = Vec::new();
     for _ in 0..50 {
-        bob_hist = bob_node
-            .account_history(&alice_acct.account_id(), 10)
-            .unwrap();
+        if let Some(history) = ready_history(bob_node.account_history(&alice_acct.account_id(), 10))
+        {
+            bob_hist = history;
+        }
         if !bob_hist.is_empty() {
             break;
         }
@@ -8439,9 +8715,10 @@ async fn account_recall_over_the_wire_tombstones_for_the_receiver() {
     // Alice receives it.
     let mut received = false;
     for _ in 0..50 {
-        let h = alice_node
-            .account_history(&bob_acct.account_id(), 10)
-            .unwrap();
+        let Some(h) = ready_history(alice_node.account_history(&bob_acct.account_id(), 10)) else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
         if h.iter()
             .any(|e| e.id == bob_msg_id && !e.recalled && e.text == b"recall me")
         {
@@ -8507,9 +8784,10 @@ async fn account_recall_over_the_wire_tombstones_for_the_receiver() {
     );
     let mut tombstoned = false;
     for _ in 0..50 {
-        let h = alice_node
-            .account_history(&bob_acct.account_id(), 10)
-            .unwrap();
+        let Some(h) = ready_history(alice_node.account_history(&bob_acct.account_id(), 10)) else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
         if h.iter().any(|e| e.id == bob_msg_id && e.recalled) {
             tombstoned = true;
             break;
@@ -8990,7 +9268,9 @@ async fn send_to_account_self_syncs_to_own_other_device() {
     // marked from_me (it was sent by Alice's account).
     let mut a2_hist = Vec::new();
     for _ in 0..50 {
-        a2_hist = a2_node.account_history(&bob_acct.account_id(), 10).unwrap();
+        if let Some(history) = ready_history(a2_node.account_history(&bob_acct.account_id(), 10)) {
+            a2_hist = history;
+        }
         if !a2_hist.is_empty() {
             break;
         }
@@ -9003,9 +9283,10 @@ async fn send_to_account_self_syncs_to_own_other_device() {
     // Bob receives it once, not from_me.
     let mut b_hist = Vec::new();
     for _ in 0..50 {
-        b_hist = bob_node
-            .account_history(&alice_acct.account_id(), 10)
-            .unwrap();
+        if let Some(history) = ready_history(bob_node.account_history(&alice_acct.account_id(), 10))
+        {
+            b_hist = history;
+        }
         if !b_hist.is_empty() {
             break;
         }
@@ -9025,9 +9306,10 @@ async fn send_to_account_self_syncs_to_own_other_device() {
         .unwrap();
     let mut a2_self = Vec::new();
     for _ in 0..50 {
-        a2_self = a2_node
-            .account_history(&alice_acct.account_id(), 10)
-            .unwrap();
+        if let Some(history) = ready_history(a2_node.account_history(&alice_acct.account_id(), 10))
+        {
+            a2_self = history;
+        }
         if !a2_self.is_empty() {
             break;
         }
@@ -9223,17 +9505,20 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .unwrap();
     let dm_texts = |node: &Arc<Node>| {
         node.account_history(&bob_account.account_id(), 10)
-            .unwrap()
-            .into_iter()
-            .filter(|entry| entry.file.is_none())
-            .collect::<Vec<_>>()
+            .map(|history| {
+                history
+                    .into_iter()
+                    .filter(|entry| entry.file.is_none())
+                    .collect::<Vec<_>>()
+            })
     };
     let channel_texts = |node: &Arc<Node>| {
-        node.channel_history(channel, 10)
-            .unwrap()
-            .into_iter()
-            .filter(|entry| entry.file.is_none())
-            .collect::<Vec<_>>()
+        node.channel_history(channel, 10).map(|history| {
+            history
+                .into_iter()
+                .filter(|entry| entry.file.is_none())
+                .collect::<Vec<_>>()
+        })
     };
 
     let a1_task = tokio::spawn(Arc::clone(&a1_node).run_accept_loop(a1_listener));
@@ -9241,24 +9526,31 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .send_to_account(&alice_account.account_id(), b"while A2 was offline", None)
         .await
         .unwrap();
+    let mut incoming_source_history = Vec::new();
     for _ in 0..50 {
-        if dm_texts(&a1_node).len() == 1 {
-            break;
+        if let Some(history) = ready_history(dm_texts(&a1_node)) {
+            incoming_source_history = history;
+            if incoming_source_history.len() == 1 {
+                break;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(dm_texts(&a1_node).len(), 1);
-    assert!(dm_texts(&a2_node).is_empty());
+    assert_eq!(incoming_source_history.len(), 1);
+    assert!(dm_texts(&a2_node).unwrap().is_empty());
 
     let a2_task = tokio::spawn(Arc::clone(&a2_node).run_accept_loop(a2_listener));
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let join_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    tokio::time::timeout_at(join_deadline, async {
         loop {
-            if a2_node
-                .list_channels()
-                .unwrap()
-                .iter()
-                .any(|item| item.id == channel && !item.pending_invite)
-            {
+            let joined = match a2_node.list_channels() {
+                Ok(channels) => channels
+                    .iter()
+                    .any(|item| item.id == channel && !item.pending_invite),
+                Err(NodeError::Log(LogError::StaleCursor)) => false,
+                Err(error) => panic!("linked channel membership observation failed: {error}"),
+            };
+            if joined {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -9267,32 +9559,56 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     .await
     .expect("certified sibling joins the existing channel");
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert!(channel_texts(&a2_node).is_empty());
+    // Keep the original 15-second join plus 300-millisecond observation window.
+    // Pending is not empty history: assert against the first readable snapshot.
+    let disabled_history =
+        tokio::time::timeout_at(join_deadline + Duration::from_millis(300), async {
+            loop {
+                match channel_texts(&a2_node) {
+                    Ok(history) => break history,
+                    Err(NodeError::Log(LogError::StaleCursor)) => {}
+                    Err(error) => panic!("disabled linked history observation failed: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("disabled linked history is readable within the existing setup window");
+    assert!(disabled_history.is_empty());
+    let disabled_dm_history =
+        tokio::time::timeout_at(join_deadline + Duration::from_millis(300), async {
+            loop {
+                match dm_texts(&a2_node) {
+                    Ok(history) => break history,
+                    Err(NodeError::Log(LogError::StaleCursor)) => {}
+                    Err(error) => panic!("disabled linked DM observation failed: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("disabled linked DM history is readable within the existing setup window");
     assert!(
-        dm_texts(&a2_node).is_empty(),
+        disabled_dm_history.is_empty(),
         "disabled history sync must not import sibling messages"
     );
     a2_node
         .set_device_sync_category(crate::node::SyncCategory::History, true)
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
+    let archived = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let received = match a2_node.channel_history(channel, 10) {
-                Ok(history) => history
-                    .iter()
-                    .any(|item| item.file.is_none() && item.id == old_channel_id),
-                Err(NodeError::Log(LogError::StaleCursor)) => false,
-                Err(_) => panic!("linked channel history failed"),
-            };
-            if received {
-                break;
+            match channel_texts(&a2_node) {
+                Ok(history) if history.iter().any(|item| item.id == old_channel_id) => {
+                    break history;
+                }
+                Ok(_) | Err(NodeError::Log(LogError::StaleCursor)) => {}
+                Err(error) => panic!("linked channel history failed: {error}"),
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
     .expect("old channel plaintext reaches the linked device");
-    let archived = channel_texts(&a2_node);
     assert_eq!(archived.len(), 1);
     assert_eq!(archived[0].id, old_channel_id);
     assert_eq!(archived[0].text, b"before sibling joined");
@@ -9437,12 +9753,14 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .await
         .unwrap();
     let original_new = channel_texts(&a1_node)
+        .unwrap()
         .into_iter()
         .find(|row| row.text == b"after sibling joined")
         .unwrap()
         .id;
     let mut first_public_arrival = None;
-    let new_channel_delivery = tokio::time::timeout(Duration::from_secs(15), async {
+    let new_delivery_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let new_channel_delivery = tokio::time::timeout_at(new_delivery_deadline, async {
         loop {
             if first_public_arrival.is_none()
                 && a2_node
@@ -9476,6 +9794,7 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
             linked_plaintext_metadata(&a2_node, original_new)
         );
         let original = channel_texts(&a1_node)
+            .unwrap()
             .into_iter()
             .find(|row| row.text == b"after sibling joined")
             .map(|row| row.id);
@@ -9500,8 +9819,12 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
                         original.is_some_and(|id| log.get(&id).unwrap().is_some()),
                     )
                 };
-                let surfaced = original
-                    .is_some_and(|id| channel_texts(current).iter().any(|row| row.id == id));
+                let surfaced = original.is_some_and(|id| {
+                    channel_texts(current)
+                        .unwrap()
+                        .iter()
+                        .any(|row| row.id == id)
+                });
                 let queued = current
                     .channel_recovery_pending
                     .lock()
@@ -9552,20 +9875,35 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
     }
     new_channel_delivery.expect("new channel messages still arrive");
     tokio::time::sleep(Duration::from_secs(11)).await;
-    let history = channel_texts(&a2_node);
+    let history = tokio::time::timeout_at(new_delivery_deadline + Duration::from_secs(11), async {
+        loop {
+            match channel_texts(&a2_node) {
+                Ok(history) => break history,
+                Err(NodeError::Log(LogError::StaleCursor)) => {}
+                Err(error) => panic!("linked erase observation failed: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("linked erase is readable within the existing delivery and observation window");
     assert_eq!(
         history.len(),
         1,
         "sibling history must not resurrect a local erase"
     );
     assert_eq!(history[0].text, b"after sibling joined");
+    let mut incoming_sibling_history = Vec::new();
     for _ in 0..50 {
-        if dm_texts(&a2_node).len() == 1 {
-            break;
+        if let Some(history) = ready_history(dm_texts(&a2_node)) {
+            incoming_sibling_history = history;
+            if incoming_sibling_history.len() == 1 {
+                break;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let history = dm_texts(&a2_node);
+    let history = incoming_sibling_history;
     assert_eq!(history.len(), 1, "A2 must recover the DM from A1");
     assert_eq!(history[0].text, b"while A2 was offline");
     assert!(!history[0].from_me);
@@ -9581,13 +9919,17 @@ async fn linked_device_catches_up_incoming_dm_after_reconnect() {
         .send_to_account(&bob_account.account_id(), b"from A1 to Bob", None)
         .await
         .unwrap();
+    let mut outgoing_sibling_history = Vec::new();
     for _ in 0..50 {
-        if dm_texts(&a2_node).len() == 2 {
-            break;
+        if let Some(history) = ready_history(dm_texts(&a2_node)) {
+            outgoing_sibling_history = history;
+            if outgoing_sibling_history.len() == 2 {
+                break;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let history = dm_texts(&a2_node);
+    let history = outgoing_sibling_history;
     assert_eq!(history.len(), 2, "A2 must recover A1's outgoing DM once");
     assert_eq!(history[1].text, b"from A1 to Bob");
     assert!(history[1].from_me);
@@ -11795,7 +12137,7 @@ async fn group_reception_projection_failure_case(failed_rollback: bool, restart:
             );
             crate::node::test_support::settle_group_metadata(&reopened, conv);
             reopened
-                .process_channel_reception_inner(conv, "catch_up", true)
+                .process_channel_reception_inner(conv, "catch_up")
                 .unwrap();
             assert_eq!(
                 reopened.channel_history(conv, 100).unwrap().len(),
@@ -13512,7 +13854,7 @@ async fn channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance(
                 .0
         };
         let before = reads();
-        bob.process_channel_reception_inner(channel, "live", false)
+        bob.process_channel_reception_inner(channel, "live")
             .unwrap();
         assert!(
             reads() - before <= 64,
@@ -13525,7 +13867,7 @@ async fn channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance(
         assert!(!bob.received.lock().unwrap().contains(first).unwrap());
         for turn in 0..10 {
             let before = reads();
-            bob.process_channel_reception_inner(channel, "catch_up", false)
+            bob.process_channel_reception_inner(channel, "catch_up")
                 .unwrap();
             assert!(reads() - before <= 64);
             // Body commit precedes the separate terminal turn. Retain the
@@ -13557,7 +13899,7 @@ async fn channel_checkpoint_budget_yield_preserves_live_and_catch_up_provenance(
             assert_eq!(content[0].batch_id, content[1].batch_id);
             assert_eq!(terminals[0].batch_id, content[0].batch_id);
         }
-        bob.process_channel_reception_inner(channel, "catch_up", false)
+        bob.process_channel_reception_inner(channel, "catch_up")
             .unwrap();
         assert!(
             incoming.try_recv().is_err(),

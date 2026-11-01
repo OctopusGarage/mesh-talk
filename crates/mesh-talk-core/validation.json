@@ -204,7 +204,7 @@
             "reference": "docs/module-boundaries.md#account-and-device-ownership"
           },
           {
-            "name": "Direct or eligible-relay local admission backpressure retains the same committed fanout revision for bounded delayed retry; successful revisions deduplicate and overflow remains owned by the source journal.",
+            "name": "Direct or eligible-relay local admission backpressure and direct-control local source StaleCursor retain the same committed fanout revision for bounded one-second retry without changing its original operation or effect; successful revisions deduplicate, other transport errors retain existing policy and overflow remains owned by the source journal.",
             "reference": "docs/network-design-reference.md#8-resource-budgets-compatibility-and-performance"
           },
           {
@@ -978,7 +978,7 @@
             "reference": "docs/ARCHITECTURE.md"
           },
           {
-            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Exact discard evidence and independent role terminal facts survive retries and restart.",
+            "name": "Ordinary warm opens decode no completed signed channel history; canonical reorder may rebuild derived authority but never roll consumed receiver state back. Exact retained commit cutoffs distinguish pre-open sources from later message and invitation-release arrivals within one bounded continuation, preserving expiry, silent repair and visible legacy batch completion without changing durable receipt counts. Exact discard evidence and independent role terminal facts survive retries and restart.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
@@ -1331,7 +1331,7 @@
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {
-            "name": "The shared profile lease excludes cooperating writers before CLI keystore initialization without unlinking node.lock; database relocation requires checked WAL checkpoint and connection close, and busy or faulted retirement cannot authorize publication.",
+            "name": "The shared profile lease excludes cooperating writers before CLI keystore initialization without unlinking node.lock; retirement explicitly unlocks ownership despite inherited descriptors, and closing a retired descriptor cannot release a replacement owner. Database relocation requires checked WAL checkpoint and connection close, and busy or faulted retirement cannot authorize publication.",
             "reference": "docs/ARCHITECTURE.md#storage-replay-and-query-budgets"
           },
           {

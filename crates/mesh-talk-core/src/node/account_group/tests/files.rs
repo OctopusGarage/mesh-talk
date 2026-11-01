@@ -960,6 +960,32 @@ async fn file_result_roundtrip(mode: u8) {
     } else {
         wait_file_fixture_capabilities(&source, &origin).await;
     }
+    let public_trace = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let public_started = std::time::Instant::now();
+    for (label, node, expected) in [
+        ("source", &source, external.identity.public()),
+        ("external", &external, source.identity.public()),
+    ] {
+        let previous = node.account_client_test_hook.lock().unwrap().clone();
+        let trace = public_trace.clone();
+        *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |peer, phase| {
+            if peer == expected
+                && (phase.starts_with("control_fanout_round_")
+                    || phase == "network_view_captured"
+                    || phase.starts_with("dial_"))
+            {
+                let label_phase = phase.split_ascii_whitespace().next().unwrap().to_owned();
+                let mut trace = trace.lock().unwrap();
+                if trace.len() == 64 {
+                    trace.pop_front();
+                }
+                trace.push_back((public_started.elapsed().as_millis(), label, label_phase));
+            }
+            if let Some(previous) = &previous {
+                previous(peer, phase);
+            }
+        }));
+    }
     let bytes = vec![0x61; crate::file::CHUNK_SIZE * 2 + 137];
     let original_path = dir.path().join("origin").join("explicit.bin");
     std::fs::write(&original_path, &bytes).unwrap();
@@ -999,9 +1025,16 @@ async fn file_result_roundtrip(mode: u8) {
     })
     .await
     .unwrap_or_else(|_| {
+        let trace = public_trace
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         panic!(
-            "{}",
-            initial_file_result_timeout_stage(&origin, &source, &external, &account, id)
+            "{}; public_fanout_sequence={:?}; public_trace={trace:?}",
+            initial_file_result_timeout_stage(&origin, &source, &external, &account, id),
+            source.account_group_fanout_sequence(group),
         )
     });
     let event_id = status.primary_event.unwrap();

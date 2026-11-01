@@ -300,6 +300,16 @@ Require exact continuation replay and pair retirement throughout this recovery;
 paid background pages retain their ordinary cross-peer scheduling priority.
 Silent join-history loopbacks use a thirty-second functional receive watchdog
 while preserving authority, protected-content filtering and provenance checks.
+Background departure retries use a thirty-second functional watchdog,
+allowing the existing fifteen-second peer exchange and bounded local continuation.
+Independent simulated hosts use four Tokio workers. Discovery-triggered peer
+history recovery keeps one original five-second absolute deadline across content,
+batch completion and the first ready history snapshot; exact `StaleCursor` may
+defer that snapshot, but a ready result is asserted immediately. The offline
+author, discovery-only trigger, exact event and batch identities, catch-up
+provenance, original-push and retirement guards, and foreground-operation
+deadlines remain unchanged. The departure watchdog is not a new end-to-end
+latency guarantee.
 The dedicated notification-driven gossip fixture excludes both periodic recovery
 clocks and expired fallback work in its existing worker, then requires all five
 receivers to expose the same canonical message within an eight-second functional

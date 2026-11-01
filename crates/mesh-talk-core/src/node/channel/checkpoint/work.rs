@@ -30,6 +30,26 @@ pub(super) fn queue_discovered_on(
     Ok(())
 }
 impl ChannelCheckpointStore {
+    /// Startup repair is an exact retained-source property, not a property of
+    /// the channel lane that happens to consume it. Copied history uses its
+    /// authenticated release event as the source of this classification.
+    pub(in crate::node) fn retained_before_open(&self, event: EventId) -> Result<bool, LogError> {
+        self.profile.database().read(|c| {
+            self.check_account_on(c)?;
+            self.retained_before_open_on(c, event)
+        })
+    }
+    pub(super) fn retained_before_open_on(
+        &self,
+        c: &Connection,
+        event: EventId,
+    ) -> Result<bool, LogError> {
+        c.query_row(
+            "SELECT e.commit_ordinal<=COALESCE((SELECT through_commit FROM channel_runtime_owner WHERE singleton=1 AND account=?3 AND generation=?4),-1) FROM retained_events e WHERE e.domain=?1 AND e.id=?2",
+            params![b"MeshPartEventsV1".as_slice(), event.as_bytes().as_slice(), self.account.as_slice(), self.generation],
+            |r| r.get(0),
+        ).optional()?.ok_or(LogError::StaleCursor)
+    }
     /// Called once after adoption publication. A scalar epoch marks existing
     /// work as reopening without rewriting the queue. Source discovery compares
     /// its exact committed ordinals with the captured pre-open cutoff.

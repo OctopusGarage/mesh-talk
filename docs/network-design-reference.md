@@ -2517,10 +2517,16 @@ validation failures retain their error paths. The socket and authentication
 limits are unchanged.
 
 Account group fanout retains the same committed journal revision after local
-admission backpressure on direct or eligible relay paths. The existing bounded
+admission backpressure on direct or eligible relay paths. Direct control rounds
+also retain that revision when a local source change returns `StaleCursor`: an
+invalidated finite view cannot acknowledge completed fanout. The existing bounded
 queue retries after one second without blocking other ready groups; queue
 overflow returns the revision to its durable journal cursor. Successful rounds
 remain deduplicated, and retry never invents custody or recipient confirmation.
+Other transport failures keep their existing recovery policy. This local
+continuation preserves the original operation, effect and journal sequence; it
+does not replace the independent ten-second departure retry or change peer and
+foreground-operation deadlines.
 
 Historical-route rounds launch at most two device probes concurrently. Each may
 race at most two candidates, so this producer alone consumes at most four of the

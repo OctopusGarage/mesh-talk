@@ -2227,7 +2227,7 @@ fn known_account_index_skips_unchanged_group_rows_and_invalidates_erased_routes(
     assert_eq!(source.received.lock().unwrap().body_reads(), after_erase);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancels_it() {
     use tokio::net::TcpListener;
     let (dir, source, receiver) = sibling_nodes();
@@ -2309,7 +2309,50 @@ async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancel
             }
         }
     });
+    let phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let phase_clock = std::time::Instant::now();
+    *receiver.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+        let phases = phases.clone();
+        let source_public = source.identity.public();
+        let receiver_public = receiver.identity.public();
+        move |peer, event| {
+            if peer != source_public
+                && !(peer == receiver_public && event == "attachment_selection_begin")
+            {
+                return;
+            }
+            // Only fixed phase labels and elapsed time enter this bounded trace.
+            let Some(phase) = [
+                "history_begin after=false",
+                "history_begin after=true",
+                "history_end outcome=ok",
+                "history_end outcome=capacity_busy",
+                "history_end outcome=negotiation_timeout",
+                "history_end outcome=noise_timeout",
+                "history_end outcome=authorization",
+                "history_end outcome=transport",
+                "history_end outcome=storage",
+                "history_end outcome=invalid_or_interrupted",
+                "favorite_begin",
+                "favorite_end failed=false",
+                "favorite_end failed=true",
+                "attachment_selection_begin",
+            ]
+            .into_iter()
+            .find(|phase| *phase == event) else {
+                return;
+            };
+            let mut phases = phases.lock().unwrap();
+            if phases.len() == 64 {
+                phases.pop_front();
+            }
+            phases.push_back((phase_clock.elapsed().as_millis(), phase));
+        }
+    }));
     let worker_started = tokio::time::Instant::now();
+    let mut before_release_count = None;
+    let mut last_readable = None;
+    let mut stale_reads = 0usize;
     let worker = tokio::spawn(receiver.clone().run_account_history_loop());
     let outcome = async {
         // Cold authentication and legacy capability fallback are setup. Hold a
@@ -2321,31 +2364,49 @@ async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancel
         })
         .await
         .map_err(|_| "setup did not reach the stalled attachment and held history continuation")?;
-        if receiver
-            .account_history(&receiver.account_id(), 100)
-            .unwrap()
-            .len()
-            >= 41
-        {
+        // A pending read is not evidence that history is absent. Obtain a
+        // readable snapshot while the continuation is still held, within the
+        // original absolute window that excludes attachment read-timeout EOF.
+        let count = tokio::time::timeout_at(worker_started + READ_TIMEOUT, async {
+            loop {
+                match receiver.account_history(&receiver.account_id(), 100) {
+                    Ok(rows) => break Ok(rows.len()),
+                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                        stale_reads += 1;
+                    }
+                    Err(_) => break Err("held history snapshot failed"),
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| "held history snapshot remained pending before the read timeout")??;
+        before_release_count = Some(count);
+        last_readable = Some((phase_clock.elapsed().as_millis(), count));
+        if count >= 41 {
             return Err("history completed before the attachment stall was established");
         }
         // A durable release also admits all later continuation pages.
         release_history.send_replace(true);
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if receiver
-                    .account_history(&receiver.account_id(), 100)
-                    .unwrap()
-                    .len()
-                    >= 41
-                {
-                    break;
+                match receiver.account_history(&receiver.account_id(), 100) {
+                    Ok(rows) => {
+                        last_readable = Some((phase_clock.elapsed().as_millis(), rows.len()));
+                        if rows.len() >= 41 {
+                            break Ok(());
+                        }
+                    }
+                    Err(NodeError::Log(crate::eventlog::LogError::StaleCursor)) => {
+                        stale_reads += 1;
+                    }
+                    Err(_) => break Err("history snapshot failed while attachment was stalled"),
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .map_err(|_| "history did not progress while the attachment remained stalled")?;
+        .map_err(|_| "history did not progress while the attachment remained stalled")??;
         if *cancelled.borrow() {
             return Err("attachment closed before its policy was disabled");
         }
@@ -2366,6 +2427,18 @@ async fn stalled_account_attachment_does_not_block_history_and_policy_off_cancel
         Ok(())
     }
     .await;
+    if outcome.is_err() {
+        eprintln!(
+            "stalled attachment elapsed_ms={} before_release_count={before_release_count:?} last_readable={last_readable:?} stale_reads={stale_reads} history_released={} attachment_closed={} receiver_capacity={:?} source_capacity={:?} phases={:?}",
+            worker_started.elapsed().as_millis(),
+            *release_history.borrow(),
+            *cancelled.borrow(),
+            receiver.sessions.test_capacity_snapshot(),
+            source.sessions.test_capacity_snapshot(),
+            phases.lock().unwrap(),
+        );
+    }
+    *receiver.account_client_test_hook.lock().unwrap() = None;
     worker.abort();
     server.abort();
     let _ = worker.await;

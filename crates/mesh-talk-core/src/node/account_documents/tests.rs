@@ -2,6 +2,18 @@ use super::*;
 use store::AccountDocumentStore;
 #[path = "inventory_causality_tests.rs"]
 mod inventory_causality;
+// A positive asynchronous history observer may see an unfinished projection.
+// Keep Pending distinct from ready-empty history and propagate every real error.
+fn ready_history(
+    result: Result<Vec<crate::node::HistoryEntry>, crate::node::NodeError>,
+) -> Option<Vec<crate::node::HistoryEntry>> {
+    match result {
+        Ok(history) => Some(history),
+        Err(crate::node::NodeError::Log(crate::eventlog::LogError::StaleCursor)) => None,
+        Err(error) => panic!("history observation failed: {error}"),
+    }
+}
+
 fn key() -> AccountDocumentKey {
     AccountDocumentKey::Draft {
         conversation: DocumentConversation::Account("a".repeat(32)),
@@ -217,11 +229,8 @@ async fn failed_initial_sibling_custody_is_repaired_after_history_recovers() {
     let source_server = tokio::spawn(source.clone().run_accept_loop(source_listener));
     let sibling_server = tokio::spawn(sibling.clone().run_accept_loop(sibling_listener));
     let history = tokio::time::timeout(Duration::from_secs(8), async {
-        while !sibling
-            .channel_history(group, 10)
-            .unwrap()
-            .iter()
-            .any(|row| row.id == event && row.from_me)
+        while !ready_history(sibling.channel_history(group, 10))
+            .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me))
         {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -338,13 +347,11 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
         }
     });
     let sibling_history = tokio::spawn(sibling.clone().run_account_history_loop());
+    let mut history = false;
     let recovered = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let history = sibling
-                .channel_history(group, 10)
-                .unwrap()
-                .iter()
-                .any(|row| row.id == event && row.from_me);
+            history = ready_history(sibling.channel_history(group, 10))
+                .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me));
             let reports = source.channel_custody_observations(group, event);
             let shared = sibling.channel_custody_observations(group, event);
             if history && reports.len() == 1 && reports[0].tombstone && reports == shared {
@@ -354,11 +361,6 @@ async fn nonphysical_history_sibling_can_supply_a_read_only_zero_custody_report(
         }
     })
     .await;
-    let history = sibling
-        .channel_history(group, 10)
-        .unwrap()
-        .iter()
-        .any(|row| row.id == event && row.from_me);
     let original_present = sibling.log.lock().unwrap().get(&event).unwrap().is_some();
     let physically_enrolled = source
         .channels
@@ -1388,7 +1390,8 @@ async fn custody_channel_setup_does_not_wait_for_independent_directory() {
         source.roster.lock().unwrap().forget(&external.identity.public());
         sibling.roster.lock().unwrap().forget(&external.identity.public());
         tokio::time::timeout(Duration::from_secs(8), async {
-            while !sibling.channel_history(channel, 10).unwrap().iter().any(|row| row.id == event && row.from_me) {
+            while !ready_history(sibling.channel_history(channel, 10))
+                .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me)) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await.expect("the exact outgoing event must reach sibling history while directory is held");
@@ -1576,11 +1579,8 @@ async fn channel_custody_sibling_scenario(external_online: bool) {
         "fixture_holder_offline".into()
     });
     tokio::time::timeout(Duration::from_secs(8), async {
-        while !sibling
-            .channel_history(channel, 10)
-            .unwrap()
-            .iter()
-            .any(|row| row.id == event && row.from_me)
+        while !ready_history(sibling.channel_history(channel, 10))
+            .is_some_and(|history| history.iter().any(|row| row.id == event && row.from_me))
         {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -4304,9 +4304,11 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
     }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_address = target_listener.local_addr().unwrap();
     for (node, path, name, port) in [
         (&source, &source_path, "source", address.port()),
-        (&target, &target_path, "target", 4243),
+        (&target, &target_path, "target", target_address.port()),
     ] {
         node.configure_privacy(
             path,
@@ -4328,6 +4330,11 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
         address.ip(),
         &target.user_id(),
     );
+    source.roster.lock().unwrap().update(
+        &Announce::new_with_account(&target.identity, &account, "target", target_address.port()),
+        target_address.ip(),
+        &source.user_id(),
+    );
     let source_phase = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     *source.account_client_test_hook.lock().unwrap() = Some(std::sync::Arc::new({
         let phase = source_phase.clone();
@@ -4346,8 +4353,10 @@ async fn group_inventory_worker_scenario(optional_off: bool) {
         }
     }));
     let server = tokio::spawn(source.clone().run_accept_loop(listener));
-    // run_accept_loop owns the source history worker; target has no server.
-    let worker = tokio::spawn(target.clone().run_account_history_loop());
+    // Both hosts must receive authenticated publication wakes. A target-only
+    // pull worker can finish an empty Directory sweep before source publication
+    // and then wait for the ten-second periodic repair instead of the live wake.
+    let worker = tokio::spawn(target.clone().run_accept_loop(target_listener));
     let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
         while !ids.iter().all(|id| {
             target
