@@ -60,7 +60,14 @@ directory and byte streams; its private control pipe never reaches target stdin.
 Retirement requires an empty job, a signaled retained leader handle and drained
 output. The parent accepts only the current invocation's nonce-bound receipt;
 helper exit or kill-on-close containment alone cannot certify cleanup. Job
-retirement, output drain and error recovery share one bounded cleanup budget
+membership and retained process handles establish whether work is still runnable;
+an aggregate process count alone is insufficient. Ordinary leader exit starts
+owned-scope retirement. Retire remaining descendants and verify cleanup before
+returning the leader's exit status or releasing resources. This accommodates
+compiler auxiliary processes without process-name exceptions or breakaway.
+Record forced retirement separately from command status; it never substitutes
+for selected test counts, business assertions or complete output evidence.
+Job retirement, output drain and error recovery share one bounded cleanup budget
 inside the parent's missing-receipt backstop. Cancelled or unverifiably retired work
 cannot admit another suite, fallback build or transport operation, or create a
 successful reusable receipt. Platform evidence must distinguish cancellation from
@@ -834,6 +841,10 @@ retains resource ownership through descendant-process cleanup. Nested POSIX
 stage commands share the outer managed group and its single escalation owner;
 nested leases are not released before group termination. Subsequent waiters
 recover locks whose nested owner was terminated.
+Before admitting detached POSIX work, persist that its leases require retirement
+proof, then publish the actual owned process group. An interrupted publication
+leaves unknown ownership and cannot be recovered from PID death alone. A known
+group permits dead-owner recovery only after that group's work has stopped.
 POSIX cleanup confirms that the managed group has no runnable descendants after
 escalation; unreaped zombies do not count as running work. Dead nested owners
 cannot release a lease while their group still runs. If process-state inspection

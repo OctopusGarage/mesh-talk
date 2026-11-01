@@ -79,7 +79,7 @@ async function main() {
       const file = `${target}.log`;
       await writeFile(join(root, file), log);
       const evidenceDigest = createHash("sha256").update(log).digest("hex");
-      report.suites[target] = { passed: result.passed, elapsedMs: result.elapsedMs, evidence: file, evidenceDigest, exitCode: result.code ?? null, signal: result.signal ?? null, failure: result.failure, scenarios: result.scenarios ?? [] };
+      report.suites[target] = { passed: result.passed, elapsedMs: result.elapsedMs, evidence: file, evidenceDigest, exitCode: result.code ?? null, signal: result.signal ?? null, cancelled: !!result.cancelled, cleanupUnverified: !!result.cleanupUnverified, forcedRetirement: !!result.forcedRetirement, failure: result.failure, scenarios: result.scenarios ?? [] };
       console.log(`${target}: ${result.passed ? `${result.scenarios.length} real scenarios passed` : `FAILED; inspect ${file}`}`);
     });
     if (failures.length) {
