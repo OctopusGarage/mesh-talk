@@ -186,6 +186,14 @@ test("session capability retains executable generation and retirement obligation
       "src-tauri/src/commands.rs",
     ],
     [
+      "A renderer reload restores an unlocked live session without reauthentication, credential reads or runtime replacement; cold saved login retains consent, lock, logout and owner-generation guards.",
+      [
+        "commands::tests::registered_auto_login_preserves_unlocked_live_session_and_runtime",
+        "commands::tests::registered_auto_login_after_logout_resumes_only_a_newly_authenticated_owner",
+      ],
+      "src-tauri/src/commands.rs",
+    ],
+    [
       "Saved login requires both credential and resume metadata writes; retry uses the private canonical account login secret under current unlocked session authority",
       "commands::tests::registered_login_reports_unsaved_when_resume_metadata_cannot_be_written",
       "src-tauri/src/commands.rs",
@@ -219,20 +227,22 @@ test("session capability retains executable generation and retirement obligation
     const rust = plan.rust.find(
       ({ package: packageName }) => packageName === "mesh-talk",
     );
-    for (const [obligation, qualifiedName, sourcePath] of obligations) {
-      assert.ok(
-        rust.filters.some((filter) => qualifiedName.includes(filter)),
-        `${path} lost ${obligation}`,
-      );
-      const name = qualifiedName.split("::").at(-1);
-      assert.match(
-        read(sourcePath),
-        new RegExp(
-          `#\\[(?:tokio::)?test(?:\\([^\\]]*\\))?\\]\\s*(?:async\\s+)?fn\\s+${name}\\s*\\(`,
-          "u",
-        ),
-        obligation,
-      );
+    for (const [obligation, qualifiedNames, sourcePath] of obligations) {
+      for (const qualifiedName of [qualifiedNames].flat()) {
+        assert.ok(
+          rust.filters.some((filter) => qualifiedName.includes(filter)),
+          `${path} lost ${obligation}: ${qualifiedName}`,
+        );
+        const name = qualifiedName.split("::").at(-1);
+        assert.match(
+          read(sourcePath),
+          new RegExp(
+            `#\\[(?:tokio::)?test(?:\\([^\\]]*\\))?\\]\\s*(?:async\\s+)?fn\\s+${name}\\s*\\(`,
+            "u",
+          ),
+          `${obligation}: ${qualifiedName}`,
+        );
+      }
     }
     for (const consumer of [
       "desktop-integrations",
