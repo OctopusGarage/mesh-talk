@@ -12,7 +12,6 @@ public class OwnerResult
 {
     public long exitCode=-1;
     public bool retired=false;
-    public bool survivors=false;
     public bool forcedRetirement=false;
     public bool cancelled=false;
     public string error;
@@ -90,56 +89,6 @@ public static class WindowsCommandOwner
     [DllImport("kernel32")] static extern uint WaitForSingleObject(IntPtr handle,uint ms);
     [DllImport("kernel32",SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr handle,out uint code);
     [DllImport("kernel32")] static extern bool CloseHandle(IntPtr handle);
-    [DllImport("kernel32",SetLastError=true,EntryPoint="QueryInformationJobObject")] static extern bool QueryMembers(IntPtr job,int type,IntPtr info,int size,IntPtr returned);
-    [DllImport("kernel32",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
-    [DllImport("kernel32",SetLastError=true)] static extern bool IsProcessInJob(IntPtr process,IntPtr job,out bool inside);
-    // ActiveProcesses is accounting metadata and can lag process exit. Inspect
-    // the complete member list and retained process handles before calling any
-    // associated process runnable. Final retirement still requires job emptiness.
-    static bool HasRunnableMembers(IntPtr job)
-    {
-        int capacity=64;
-        while(true)
-        {
-            int size=checked(8+IntPtr.Size*capacity);
-            IntPtr buffer=Marshal.AllocHGlobal(size);
-            try
-            {
-                bool complete=QueryMembers(job,3,buffer,size,IntPtr.Zero);
-                int error=Marshal.GetLastWin32Error();
-                if(!complete && error!=234) throw new System.ComponentModel.Win32Exception(error);
-                int assigned=Marshal.ReadInt32(buffer,0), count=Marshal.ReadInt32(buffer,4);
-                if(!complete || count<assigned)
-                {
-                    capacity=Math.Max(checked(capacity*2),assigned);
-                    continue;
-                }
-                for(int i=0;i<count;i++)
-                {
-                    uint pid=unchecked((uint)Marshal.ReadIntPtr(buffer,8+i*IntPtr.Size).ToInt64());
-                    IntPtr member=OpenProcess(0x100000|0x1000,false,pid);
-                    if(member==IntPtr.Zero)
-                    {
-                        error=Marshal.GetLastWin32Error();
-                        if(error==87) continue; // The listed process has exited.
-                        throw new System.ComponentModel.Win32Exception(error);
-                    }
-                    try
-                    {
-                        bool inside;
-                        Check(IsProcessInJob(member,job,out inside));
-                        if(!inside) continue; // PID reuse cannot grant ownership.
-                        uint state=WaitForSingleObject(member,0);
-                        if(state==WaitTimeout) return true;
-                        if(state!=0) throw new Exception("Job member exit state is unknown");
-                    }
-                    finally { CloseHandle(member); }
-                }
-                return false;
-            }
-            finally { Marshal.FreeHGlobal(buffer); }
-        }
-    }
     static void Check(bool ok)
     {
         if(!ok) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
@@ -266,12 +215,10 @@ public static class WindowsCommandOwner
             if(cleanup==null) cleanup=System.Diagnostics.Stopwatch.StartNew();
             if(!result.cancelled)
             {
-                result.survivors=HasRunnableMembers(job);
-                if(result.survivors)
-                {
-                    Check(TerminateJobObject(job,1));
-                    result.forcedRetirement=true;
-                }
+                // Close the owned scope even if a membership snapshot would
+                // miss a child that forked while its parent was exiting.
+                Check(TerminateJobObject(job,1));
+                result.forcedRetirement=true;
             }
             // Job emptiness closes descendant admission. The signaled leader
             // handle separately proves its exit; these observations can race.

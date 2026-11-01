@@ -122,6 +122,10 @@ test("Windows nested runner jobs retire a native descendant before outer success
 });
 
 test("Windows command preserves exit status and invocation bytes", { skip: !windows, timeout: 15000 }, async () => {
+  const empty = await run([process.execPath, "-e", "process.exit(0)"]);
+  assert.equal(empty.code, 0, empty.error);
+  assert.equal(empty.forcedRetirement, true, "empty jobs also accept scope termination");
+  assert.equal(empty.cleanupUnverified, false);
   assert.equal((await run([process.execPath, "-e", "process.exit(23)"])).exitCode, 23);
   const args = ["", "a b", "😀中文", 'a"b', "tail\\", 'slash\\\\"quote'];
   const stdout = [], stderr = [];
