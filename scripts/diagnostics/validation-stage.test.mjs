@@ -6,6 +6,8 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
+const signalReadyWorker = "process.on('SIGTERM',()=>{});const fs=require('node:fs');const ready=process.argv[1];fs.writeFileSync(ready+'.pending',String(process.pid));fs.renameSync(ready+'.pending',ready);setInterval(()=>{},1000)";
+
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "mesh-stage-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -152,12 +154,12 @@ test("cancellation waits for a detached-stdio descendant that ignores SIGTERM", 
     controller.abort();
     if (descendant) { try { process.kill(descendant, "SIGKILL"); } catch {} }
   });
-  const descendantCode = "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync('target/descendant',String(process.pid));setInterval(()=>{},1000)";
-  const command = [process.execPath, "-e", `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendantCode)}],{stdio:'ignore'});setInterval(()=>{},1000)`];
+  const leader = "require('node:child_process').spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{stdio:'ignore'});setInterval(()=>{},1000)";
+  const command = [process.execPath, "-e", leader, signalReadyWorker, "target/descendant"];
   const pending = f.run({ signal: controller.signal, command, resource: "heavy" });
   try {
     for (let tries = 0; tries < 500; tries++) {
-      try { descendant = Number(await readFile(path.join(f.root, "target/descendant"), "utf8")); break; }
+      try { const candidate = Number(await readFile(path.join(f.root, "target/descendant"), "utf8")); if (Number.isSafeInteger(candidate) && candidate > 1) { descendant = candidate; break; } }
       catch { await new Promise(resolve => setTimeout(resolve, 10)); }
     }
     assert.ok(descendant, "descendant did not start");
@@ -344,22 +346,22 @@ for (const ignoredStdio of [false, true]) test(
     const controller = new AbortController();
     const { fileURLToPath } = await import("node:url");
     const { createHash } = await import("node:crypto");
-    const pidfile = path.join(f.root, "target/nested-command-pid");
+    const pidfile = path.join(f.root, "target/nested-command-pid-quote\"-apostrophe'-中文-\n");
     let pid;
     t.after(() => {
       controller.abort();
       if (pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
     });
-    const worker = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(pidfile)},String(process.pid));setInterval(()=>{},1000)`;
+    const leader = "require('node:child_process').spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{stdio:'ignore'});setInterval(()=>{},1000)";
     const command = ignoredStdio
-      ? `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(worker)}],{stdio:'ignore'});setInterval(()=>{},1000)`
-      : worker;
+      ? [process.execPath, "-e", leader, signalReadyWorker, pidfile]
+      : [process.execPath, "-e", signalReadyWorker, pidfile];
     const pending = f.run({ name: "nested-owner", resource: "heavy", signal: controller.signal,
       command: [process.execPath, fileURLToPath(new URL("../validation/stage.mjs", import.meta.url)),
-        "nested-child", "--resource", "focused-static", "--", process.execPath, "-e", command] });
+        "nested-child", "--resource", "focused-static", "--", ...command] });
     try {
       for (let tries = 0; tries < 500; tries++) {
-        try { pid = Number(await readFile(pidfile, "utf8")); break; }
+        try { const candidate = Number(await readFile(pidfile, "utf8")); if (Number.isSafeInteger(candidate) && candidate > 1) { pid = candidate; break; } }
         catch { await new Promise(resolve => setTimeout(resolve, 10)); }
       }
       assert.ok(pid, "nested command did not start");
@@ -468,8 +470,8 @@ test("log-write errors terminate descendants before releasing resources", { skip
   const f = await fixture(t);
   const { Writable } = await import("node:stream");
   const { writeFileSync } = await import("node:fs");
-  const descendant = "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync('target/log-descendant',String(process.pid));setInterval(()=>{},1000)";
-  const command = [process.execPath, "-e", `process.on('SIGTERM',()=>process.exit(0));const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});const timer=setInterval(()=>{if(fs.existsSync('target/log-descendant')){clearInterval(timer);console.log('trigger log write');}},10);setInterval(()=>{},1000)`];
+  const leader = "process.on('SIGTERM',()=>process.exit(0));const fs=require('node:fs');require('node:child_process').spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{stdio:'ignore'});const timer=setInterval(()=>{if(fs.existsSync(process.argv[2])){clearInterval(timer);console.log('trigger log write');}},10);setInterval(()=>{},1000)";
+  const command = [process.execPath, "-e", leader, signalReadyWorker, "target/log-descendant"];
   const result = await f.run({ command, resource: "heavy", createLogStream: filename => {
     writeFileSync(filename, "");
     return new Writable({ write(_chunk, _encoding, callback) { callback(Error("simulated log disk failure")); } });
@@ -477,6 +479,7 @@ test("log-write errors terminate descendants before releasing resources", { skip
   assert.notEqual(result.code, 0);
   assert.match(result.error, /simulated log disk failure/);
   const pid = Number(await readFile(path.join(f.root, "target/log-descendant"), "utf8"));
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, "log failure must follow complete descendant readiness");
   const state = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" });
   assert.ok(state.status !== 0 || !state.stdout.trim() || state.stdout.trim().startsWith("Z"));
   assert.equal((await f.run({ resource: "heavy" })).code, 0);
@@ -562,9 +565,9 @@ test("a hard-killed outer supervisor cannot expose a live owned group to another
   const env = { ...process.env, CI: "1", MESH_VALIDATION_PROCESS_GROUP_OWNER: "" };
   let leaf, group, first, second;
   t.after(() => { first?.kill("SIGKILL"); second?.kill("SIGKILL"); if (group > 1) try { process.kill(-group, "SIGKILL"); } catch {} });
-  first = spawn(process.execPath, [cli, "first-hardkill", "--resource", "heavy-hardkill", "--", process.execPath, "-e", "process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)", ready], { cwd: f.root, env, stdio: "ignore" });
+  first = spawn(process.execPath, [cli, "first-hardkill", "--resource", "heavy-hardkill", "--", process.execPath, "-e", signalReadyWorker, ready], { cwd: f.root, env, stdio: "ignore" });
   const stopped = new Promise(resolve => first.once("close", resolve));
-  for (let i = 0; i < 500; i++) { try { leaf = Number(await readFile(ready, "utf8")); break; } catch {} await pause(10); }
+  for (let i = 0; i < 500; i++) { try { const candidate = Number(await readFile(ready, "utf8")); if (Number.isSafeInteger(candidate) && candidate > 1) { leaf = candidate; break; } } catch {} await pause(10); }
   assert.ok(leaf, "the real child must acknowledge readiness");
   group = Number(spawnSync("ps", ["-o", "pgid=", "-p", String(leaf)], { encoding: "utf8" }).stdout.trim());
   assert.equal(group, leaf);

@@ -60,6 +60,11 @@ directory and byte streams; its private control pipe never reaches target stdin.
 Retirement requires an empty job, a signaled retained leader handle and drained
 output. The parent accepts only the current invocation's nonce-bound receipt;
 helper exit or kill-on-close containment alone cannot certify cleanup.
+PID readiness fixtures install their signal handlers, write the complete PID to
+a private staging file and atomically rename it to the observed marker. Readers
+accept only a positive safe integer PID; opening or truncating a file is not a
+startup acknowledgment. A real held-write control must reject an exposed empty
+marker and retain its own child handle for cleanup before publication completes.
 Ordinary leader exit starts
 owned-scope retirement. Retire remaining descendants and verify cleanup before
 returning the leader's exit status or releasing resources. This accommodates

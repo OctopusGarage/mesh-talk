@@ -265,6 +265,10 @@
           {
             "name": "Preserve command status only after verified owned-scope retirement; persist lease retirement requirements before detached admission, and never recover unknown ownership from PID death alone. Cancellation and unverifiable cleanup cannot admit later work or create successful reusable evidence.",
             "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
+          },
+          {
+            "name": "POSIX signal fixtures atomically publish complete PID readiness after installing handlers, accept only positive safe integer PIDs and retain owned cleanup while a deterministic real write is held before publication",
+            "reference": "docs/testing-feedback-loop.md#completion-and-retirement-evidence"
           }
         ]
       },
