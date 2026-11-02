@@ -300,6 +300,14 @@ classification and admission backoff. Do not start its worker early: that would
 erase the result-adoption race. A real fresh Control response held beyond the role
 budget must complete through cold setup before the original matching-retry and
 byte assertions. Static phase markers distinguish initial and fresh setup failures.
+The initial receipt also retains bounded, test-only worker and protocol phase
+traces, source/requester status projections and validated asset counts. Diagnostic
+hooks compose with existing fault hooks and are restored before later scenario
+faults. They do not issue an extra status probe or alter publication demand,
+operation deadlines, retry policy or completion predicates. Inspect the actual
+worker outcome and last authenticated transfer phase before changing readiness
+or retry behavior; a successful diagnostic run alone does not explain an earlier
+failure.
 
 Dialog-to-menu regressions distinguish fixture state from actual focus ownership.
 Hold the real deferred close-focus callback, remove the old dialog, open the next

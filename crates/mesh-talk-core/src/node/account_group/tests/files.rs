@@ -887,6 +887,77 @@ async fn file_fixture_finishes_inbound_only_cold_protocol_before_role_page_budge
     file_result_roundtrip(7).await;
 }
 
+#[derive(Default, Debug)]
+struct InitialFileTrace {
+    phases: std::collections::VecDeque<(u128, &'static str, Option<tokio::task::Id>, String)>,
+    workers: std::collections::VecDeque<(u128, &'static str, Option<tokio::task::Id>, String)>,
+}
+impl InitialFileTrace {
+    fn record(&mut self, clock: std::time::Instant, side: &'static str, event: String) {
+        let row = (
+            clock.elapsed().as_millis(),
+            side,
+            tokio::task::try_id(),
+            event,
+        );
+        if row.3.starts_with("operation_file_data_")
+            || row.3.starts_with("file_asset_request ")
+            || row.3.starts_with("file_attachment_")
+        {
+            if self.workers.len() == 32 {
+                self.workers.pop_front();
+            }
+            self.workers.push_back(row.clone());
+        }
+        if self.phases.len() == 128 {
+            self.phases.pop_front();
+        }
+        self.phases.push_back(row);
+    }
+}
+
+fn initial_file_snapshot(
+    origin: &Node,
+    source: &Node,
+    account: &Account,
+    group: crate::eventlog::ConversationId,
+    id: AccountGroupOperationId,
+) -> serde_json::Value {
+    use crate::node::account_group::operations::file_preparation::GroupFilePayload;
+    let original = origin
+        .operation_projection(group)
+        .requests
+        .into_iter()
+        .find(|request| request.reference.id == id);
+    let source_projection = source.operation_projection(group);
+    let assets = original.and_then(|request| {
+        let AccountGroupOperation::Send { message } = request.body? else {
+            return None;
+        };
+        let payload = GroupFilePayload::decode(message.encoded_body())?;
+        let manifest =
+            crate::node::files::validated_manifest(&payload.descriptor.as_ref()?.manifest)?;
+        let file = manifest.file_conv();
+        let origin_chunks = origin.log.lock().unwrap().conversation_len(&file);
+        let source_chunks = source.log.lock().unwrap().conversation_len(&file);
+        let source_assets_ready =
+            source.account_group_file_assets_ready(&request.reference, &payload);
+        Some(serde_json::json!({
+            "expected_chunks": manifest.chunk_count(),
+            "origin_chunks": origin_chunks,
+            "source_chunks": source_chunks,
+            "source_assets_ready": source_assets_ready,
+        }))
+    });
+    serde_json::json!({
+        "origin_phase": origin.retained_account_group_operation_status(&account.account_id(), id).ok().flatten().map(|status| status.phase),
+        "source_phase": source.retained_account_group_operation_status(&account.account_id(), id).ok().flatten().map(|status| status.phase),
+        "source_pending_projection": source_projection.requests.iter().any(|request| request.reference.id == id),
+        "source_result_projection": source_projection.results.iter().find(|result| result.reference.id == id).map(|result| &result.status.phase),
+        "assets": assets,
+    })
+}
+
 fn initial_file_result_timeout_stage(
     origin: &Node,
     source: &Node,
@@ -920,6 +991,7 @@ fn initial_file_result_timeout_stage(
 
 async fn file_result_roundtrip(mode: u8) {
     use std::time::Duration;
+    let initial_clock = std::time::Instant::now();
     let dir = tempfile::tempdir().unwrap();
     let account = Account::generate();
     let offline_owner = node(&dir.path().join("offline-owner"), &Account::generate());
@@ -1045,6 +1117,117 @@ async fn file_result_roundtrip(mode: u8) {
     } else {
         wait_file_fixture_capabilities(&source, &origin).await;
     }
+    let initial_trace = Arc::new(Mutex::new(InitialFileTrace::default()));
+    initial_trace
+        .lock()
+        .unwrap()
+        .record(initial_clock, "fixture", "capabilities_ready".into());
+    let mut initial_observers = Vec::new();
+    for (side, target, peer) in [("source", &source, &origin), ("origin", &origin, &source)] {
+        let previous_client = target.account_client_test_hook.lock().unwrap().clone();
+        let previous_session = target.account_session_test_hook.lock().unwrap().clone();
+        *target.account_client_test_hook.lock().unwrap() = Some(Arc::new({
+            let previous = previous_client.clone();
+            let trace = initial_trace.clone();
+            let own = target.identity.public();
+            let expected = peer.identity.public();
+            move |observed, event| {
+                if (observed == own || observed == expected)
+                    && [
+                        "operation_owner phase=",
+                        "operation_publication_owner group=",
+                        "operation_local_published revision=",
+                        "operation_file_data_",
+                        "page_begin ",
+                        "page_end ",
+                        "negotiation_begin ",
+                        "negotiation_end ",
+                        "dial_privacy_gate_wait",
+                        "dial_privacy_gate_acquired",
+                        "dial_policy_admitted",
+                        "dial_authentication_admission_wait",
+                        "dial_authentication_admission_acquired_outbound_wait",
+                        "dial_outbound_acquired",
+                        "dial_tcp_connect_begin",
+                        "dial_tcp_connect_end",
+                        "dial_socket_ports=",
+                        "dial_noise_begin",
+                        "dial_noise_end ",
+                        "dial_proof_validation_begin",
+                        "dial_complete",
+                        "control_dispatch ",
+                        "control_turn_origin ",
+                        "control_timeout_wake_refresh ",
+                        "control_queue ",
+                        "control_refresh ",
+                        "control_cancel ",
+                        "control_owned_abort ",
+                        "control_owned_abort_released",
+                        "control_pair_retired",
+                        "wake_received revision=",
+                        "wake_send_begin revision=",
+                        "wake_send_ack revision=",
+                    ]
+                    .iter()
+                    .any(|prefix| event.starts_with(prefix))
+                {
+                    trace
+                        .lock()
+                        .unwrap()
+                        .record(initial_clock, side, event.clone());
+                }
+                if let Some(previous) = &previous {
+                    previous(observed, event);
+                }
+            }
+        }));
+        *target.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+            let previous = previous_session.clone();
+            let trace = initial_trace.clone();
+            let expected = peer.identity.public();
+            move |observed, frame| {
+                let previous = previous.clone();
+                let trace = trace.clone();
+                let expected = expected.clone();
+                Box::pin(async move {
+                    if observed == expected {
+                        use crate::node::account_sync_wire::AccountHistoryFrame;
+                        let event = match &frame {
+                            AccountHistoryFrame::DocumentsRequest { body } => {
+                                crate::node::account_documents::wire::DocumentRequest::decode(body)
+                                    .and_then(|request| {
+                                        request.operation.and_then(|operation| operation.asset)
+                                    })
+                                    .map(|asset| {
+                                        format!(
+                                            "file_asset_request result={} start_chunk={}",
+                                            asset.result, asset.start_chunk
+                                        )
+                                    })
+                            }
+                            AccountHistoryFrame::AttachmentStart { size, .. } => {
+                                Some(format!("file_attachment_start size={size}"))
+                            }
+                            AccountHistoryFrame::AttachmentChunk { bytes } => {
+                                Some(format!("file_attachment_chunk bytes={}", bytes.len()))
+                            }
+                            AccountHistoryFrame::AttachmentComplete => {
+                                Some("file_attachment_complete".into())
+                            }
+                            _ => None,
+                        };
+                        if let Some(event) = event {
+                            trace.lock().unwrap().record(initial_clock, side, event);
+                        }
+                    }
+                    if let Some(previous) = previous {
+                        previous(observed, frame).await;
+                    }
+                })
+            }
+        }));
+        initial_observers.push((target.clone(), previous_client, previous_session));
+    }
     let bytes = vec![0x61; crate::file::CHUNK_SIZE * 2 + 137];
     let original_path = dir.path().join("origin").join("explicit.bin");
     std::fs::write(&original_path, &bytes).unwrap();
@@ -1066,7 +1249,12 @@ async fn file_result_roundtrip(mode: u8) {
         .await
         .expect("reference account member must admit its explicit file intent");
     assert_eq!(admitted.executions[0].device_id, source.user_id());
-    let status = tokio::time::timeout(Duration::from_secs(8), async {
+    initial_trace
+        .lock()
+        .unwrap()
+        .record(initial_clock, "fixture", "initial_file_admitted".into());
+    let initial_started = std::time::Instant::now();
+    let initial_outcome = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let status = origin
                 .account_group_operation_status(&account.account_id(), id)
@@ -1082,10 +1270,20 @@ async fn file_result_roundtrip(mode: u8) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| {
+    .await;
+    for (target, client, session) in initial_observers {
+        *target.account_client_test_hook.lock().unwrap() = client;
+        *target.account_session_test_hook.lock().unwrap() = session;
+    }
+    let snapshot = initial_file_snapshot(&origin, &source, &account, group, id);
+    eprintln!(
+        "initial_file_result mode={mode} elapsed_ms={} snapshot={snapshot} trace={:?}",
+        initial_started.elapsed().as_millis(),
+        initial_trace.lock().unwrap()
+    );
+    let status = initial_outcome.unwrap_or_else(|_| {
         panic!(
-            "{}",
+            "{}; phase_snapshot={snapshot}",
             initial_file_result_timeout_stage(&origin, &source, &external, &account, id)
         )
     });

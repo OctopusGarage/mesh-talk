@@ -3329,6 +3329,14 @@ impl Node {
                                     };
                                     let owner = id.clone();
                                     let task = attachments.spawn(permit.track(async move {
+                                        #[cfg(test)]
+                                        let file_trace = matches!(&job, super::account_group::operations::AccountGroupDataWork::File(_));
+                                        #[cfg(test)]
+                                        let file_started = std::time::Instant::now();
+                                        #[cfg(test)]
+                                        if file_trace {
+                                            node.trace_account_client(&node.identity.public(), || "operation_file_data_begin".into());
+                                        }
                                         let result =
                                             tokio::time::timeout(deadline, node.execute_account_group_data_work(job))
                                                 .await
@@ -3338,6 +3346,18 @@ impl Node {
                                                     ))
                                                 })
                                                 .map(|_| AttachmentOutcome::Complete);
+                                        #[cfg(test)]
+                                        if file_trace {
+                                            node.trace_account_client(&node.identity.public(), || {
+                                                let outcome = match &result {
+                                                    Err(NodeError::File(message)) if message == "account group file assets unavailable" => "assets_unavailable",
+                                                    Err(NodeError::File(message)) if message == "file asset source scope is not current" => "scope_retired",
+                                                    Err(NodeError::File(message)) if message == "account operation data exchange timed out" => "worker_deadline",
+                                                    other => super::account_session::client_trace_outcome(other),
+                                                };
+                                                format!("operation_file_data_end outcome={outcome} capacity_busy={} elapsed_ms={}", result.as_ref().is_err_and(local_sync_capacity_busy), file_started.elapsed().as_millis())
+                                            });
+                                        }
                                         (id, file, false, result, Some(operation))
                                     }));
                                     attachment_owners.insert(task.id(), owner);
