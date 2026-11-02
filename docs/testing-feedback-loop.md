@@ -490,6 +490,15 @@ use the production multithread executor; all original ordered-text, archive,
 exact-history and consent assertions remain. Failure reports retain the last
 operation phase, and every exit joins admitted fixture producers before teardown.
 
+The mandatory account-wake fixture also separates its synchronous SQL observer
+from the two simulated hosts with two protocol workers. Its first five-second
+window still starts before group creation, and its second starts before either
+Appearance policy write. A held fresh source inventory header must cause the
+first window to fail even after Owner access arrives. Qualify the exact new key,
+positive source head and missing receiver document, then release and join before
+asserting. Keep bounded local-publication and actual header/completion timing;
+executor alignment alone does not prove a historical timeout mechanism.
+
 When a reference-device fixture requires a synchronous capability-cache override
 and admission on one current-thread runtime, keep that requester and its watchers
 there. Run the other simulated devices' complete accept/background owners on

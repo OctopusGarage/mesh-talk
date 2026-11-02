@@ -314,7 +314,7 @@
             "reference": "docs/module-boundaries.md#account-profiles-and-private-trust"
           },
           {
-            "name": "Mandatory account-directory metadata remains independent of optional personal-data switches; unsupported v4 preserves existing v1/v2/v3 domains and does not create a retry spin.",
+            "name": "Mandatory account-directory metadata remains independent of optional personal-data switches; unsupported v4 preserves existing v1/v2/v3 domains and does not create a retry spin. The mandatory wake fixture separates synchronous observation from its two protocol workers while retaining both original five-second trigger windows; a held fresh exact-source inventory header must fail despite received Owner access.",
             "reference": "docs/module-boundaries.md#account-document-projections"
           },
           {
@@ -325,7 +325,7 @@
       },
       "consumers": ["desktop-account-group-inventory"],
       "escalation": [
-        "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. Hold an unrelated authenticated group sync response before appending a new local group, then require multiple bounded local turns, signed source Directory publication and exact sibling import within the original eight-second watchdog while that response remains held. Test transactional completion handoff with two queued identities, repeated nonqueued completion and an empty queue. Preserve network target wakes, quiet deduplication, retry backoff, custody denial and parent-owned cancellation. Reference state must never enter authoritative group or peer binding stores."
+        "Require real legacy-owner/member/sibling private-session convergence, source-offline restart, adoption scoping, policy-off metadata-only transfer, bounded roster and no-authority assertions. In mandatory-wake acceptance, retain the first signed source floor and first receiver-head times plus bounded actual inventory Header/Complete evidence; negative coverage must hold the exact newly created source key outside storage locks until the original five-second cutoff, with Owner access present and receiver inventory absent. Hold an unrelated authenticated group sync response before appending a new local group, then require multiple bounded local turns, signed source Directory publication and exact sibling import within the original eight-second watchdog while that response remains held. Test transactional completion handoff with two queued identities, repeated nonqueued completion and an empty queue. Preserve network target wakes, quiet deduplication, retry backoff, custody denial and parent-owned cancellation. Reference state must never enter authoritative group or peer binding stores."
       ]
     },
     {

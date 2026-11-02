@@ -3023,8 +3023,37 @@ async fn local_group_hides_ui_reference_without_hiding_canonical_inventory() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off() {
+    mandatory_account_wake_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn account_wake_requires_fresh_inventory_despite_received_owner_access() {
+    mandatory_account_wake_case(true).await;
+}
+
+async fn mandatory_account_wake_case(hold_inventory: bool) {
+    use futures_util::FutureExt;
+    #[derive(Default)]
+    struct InventoryWireObservation {
+        key: Option<crate::node::AccountDocumentKey>,
+        headers: usize,
+        completes: usize,
+        first_header_ms: Option<u128>,
+        last_header_ms: Option<u128>,
+        last_complete_ms: Option<u128>,
+        held: bool,
+        held_task: Option<std::sync::Weak<()>>,
+    }
+    struct ReleaseInventory(Arc<tokio::sync::Semaphore>);
+    impl Drop for ReleaseInventory {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+    // Keep the synchronous SQL observer off the two independent protocol workers,
+    // matching the production multithread runtime without changing either window.
     let (_dir, source, receiver) = sibling_nodes();
     for node in [&source, &receiver] {
         for category in [
@@ -3044,6 +3073,73 @@ async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off
     let started = std::time::Instant::now();
     let phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
     let history_phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let publication_phases = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let inventory_wire = Arc::new(std::sync::Mutex::new(InventoryWireObservation::default()));
+    let inventory_release = Arc::new(tokio::sync::Semaphore::new(0));
+    let _release_inventory = ReleaseInventory(inventory_release.clone());
+    let previous_session = source.account_session_test_hook.lock().unwrap().clone();
+    *source.account_session_test_hook.lock().unwrap() = Some(Arc::new({
+        let expected = receiver.identity.public();
+        let own = source.user_id();
+        let observed = inventory_wire.clone();
+        let release = inventory_release.clone();
+        let previous = previous_session.clone();
+        move |actual, frame| {
+            let expected = expected.clone();
+            let own = own.clone();
+            let observed = observed.clone();
+            let release = release.clone();
+            let previous = previous.clone();
+            Box::pin(async move {
+                let mut held_task = None;
+                if actual == expected {
+                    let mut wire = observed.lock().unwrap();
+                    match &frame {
+                        AccountHistoryFrame::DocumentHeader { body } => {
+                            if let Ok(meta) =
+                                serde_json::from_slice::<crate::node::AccountDocumentMeta>(body)
+                                && !meta.tombstone
+                                && meta.writer_device == own
+                                && matches!(&meta.key, crate::node::AccountDocumentKey::GroupInventory { source_device, .. } if *source_device == own)
+                                && wire.key.as_ref().is_none_or(|key| *key == meta.key)
+                            {
+                                wire.key.get_or_insert(meta.key);
+                                wire.headers += 1;
+                                let now = started.elapsed().as_millis();
+                                wire.first_header_ms.get_or_insert(now);
+                                wire.last_header_ms = Some(now);
+                                if hold_inventory {
+                                    wire.held = true;
+                                    let task = Arc::new(());
+                                    wire.held_task = Some(Arc::downgrade(&task));
+                                    held_task = Some(task);
+                                }
+                            }
+                        }
+                        AccountHistoryFrame::DocumentsComplete { body }
+                            if serde_json::from_slice::<serde_json::Value>(body)
+                                .ok()
+                                .is_some_and(|value| {
+                                    value.get("domain").and_then(serde_json::Value::as_str)
+                                        == Some("group_inventory")
+                                }) =>
+                        {
+                            wire.completes += 1;
+                            wire.last_complete_ms = Some(started.elapsed().as_millis());
+                        }
+                        _ => {}
+                    }
+                }
+                if held_task.is_some() {
+                    let _ = release.acquire().await;
+                    drop(held_task);
+                }
+                if let Some(previous) = previous {
+                    previous(actual, frame).await;
+                }
+            })
+        }
+    }));
     let mut appearance_enable_phases = Vec::new();
     let mut previous_hooks = Vec::new();
     for (index, (node, peer)) in [(&source, &receiver), (&receiver, &source)]
@@ -3053,9 +3149,18 @@ async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off
         let previous = node.account_client_test_hook.lock().unwrap().take();
         previous_hooks.push(previous.clone());
         let expected = peer.identity.public();
+        let own = node.identity.public();
+        let publication_phases = publication_phases.clone();
         let phases = phases.clone();
         let history_phases = history_phases.clone();
         *node.account_client_test_hook.lock().unwrap() = Some(Arc::new(move |actual, phase| {
+            if actual == own && phase.starts_with("inventory_publication_") {
+                let mut publications = publication_phases.lock().unwrap();
+                if publications.len() == 16 {
+                    publications.pop_front();
+                }
+                publications.push_back((started.elapsed().as_millis(), index, phase.clone()));
+            }
             if actual == expected {
                 let observed = if phase.starts_with("page_begin ")
                     || phase.starts_with("page_end ")
@@ -3109,7 +3214,9 @@ async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off
     let mut observed_channel = None;
     let mut source_inventory_key = None;
     let mut source_floor = None;
-    let outcome = async {
+    let mut source_floor_ms = None;
+    let mut receiver_head_ms = None;
+    let outcome = std::panic::AssertUnwindSafe(async {
         // Cold reciprocal authentication/document setup is a prerequisite,
         // not part of either subsequent publication's wake observation.
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -3157,8 +3264,14 @@ async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off
                 // trigger window; later publication cannot move this floor.
                 if source_floor.is_none() {
                     source_floor = group_inventory_version_for(&source, key, "Mandatory group");
+                    if source_floor.is_some() {
+                        source_floor_ms = Some(started.elapsed().as_millis());
+                    }
                 }
                 let received = group_inventory_version_for(&receiver, key, "Mandatory group");
+                if received.is_some() && receiver_head_ms.is_none() {
+                    receiver_head_ms = Some(started.elapsed().as_millis());
+                }
                 mandatory.0 = receiver
                     .account_group_access(channel)
                     .is_ok_and(|access| access.role == super::super::AccountGroupRole::Owner);
@@ -3222,9 +3335,25 @@ async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off
             );
         })
         .await
-    }
+    })
+    .catch_unwind()
     .await;
-    if outcome.is_err() {
+    // Snapshot the negative qualification while the real header is still held.
+    let exact_header_held = {
+        let wire = inventory_wire.lock().unwrap();
+        wire.held
+            && wire
+                .held_task
+                .as_ref()
+                .is_some_and(|task| task.strong_count() > 0)
+            && !inventory_release.is_closed()
+            && wire.key.is_some()
+            && wire.key == source_inventory_key
+    };
+    let receiver_meta_absent = source_inventory_key
+        .as_ref()
+        .is_some_and(|key| receiver.account_document_meta(key).is_none());
+    if outcome.as_ref().is_ok_and(Result::is_err) {
         let statuses = [(&source, &receiver), (&receiver, &source)].map(|(node, peer)| {
             node.device_sync_status()
                 .into_iter()
@@ -3258,19 +3387,70 @@ async fn account_wake_keeps_mandatory_controls_live_with_optional_categories_off
         let source_floor_present = source_floor.is_some();
         let phases = phases.lock().unwrap().clone();
         let history_phases = history_phases.lock().unwrap().clone();
+        let publication_phases = publication_phases.lock().unwrap().clone();
+        let inventory_wire = {
+            let wire = inventory_wire.lock().unwrap();
+            (
+                wire.headers,
+                wire.completes,
+                wire.first_header_ms,
+                wire.last_header_ms,
+                wire.last_complete_ms,
+                exact_header_held,
+            )
+        };
         eprintln!(
-            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,inventory)={mandatory:?} book_present={book_present} source_meta_present={source_meta_present} source_floor_present={source_floor_present} receiver_meta_present={receiver_meta_present} canonical_reference_present={canonical_reference_present} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?} appearance_enable(index,begin_ms,end_ms,revision_changed)={appearance_enable_phases:?} history_phases={history_phases:?}",
+            "mandatory wake boundary phase={phase} elapsed_ms={} mandatory(access,inventory)={mandatory:?} book_present={book_present} source_meta_present={source_meta_present} source_floor_present={source_floor_present} receiver_meta_present={receiver_meta_present} canonical_reference_present={canonical_reference_present} statuses(history,documents,error,upgrade)={statuses:?} phases={phases:?} appearance_enable(index,begin_ms,end_ms,revision_changed)={appearance_enable_phases:?} history_phases={history_phases:?} publication_phases={publication_phases:?} source_floor_ms={source_floor_ms:?} receiver_head_ms={receiver_head_ms:?} inventory_wire(headers,completes,first_header_ms,last_header_ms,last_complete_ms,held_exact)={inventory_wire:?}",
             started.elapsed().as_millis()
         );
     }
+    inventory_release.close();
+    source.runtime_work.close();
+    receiver.runtime_work.close();
     source_server.abort();
     receiver_server.abort();
     let _ = source_server.await;
     let _ = receiver_server.await;
+    let drained = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(source.runtime_work.drain(), receiver.runtime_work.drain());
+    })
+    .await;
+    *source.account_session_test_hook.lock().unwrap() = previous_session;
     for (node, previous) in [&source, &receiver].into_iter().zip(previous_hooks) {
         *node.account_client_test_hook.lock().unwrap() = previous;
     }
-    outcome.expect("mandatory account controls wake before periodic repair while optional content obeys its category policy");
+    drained
+        .expect("mandatory wake fixture must drain admitted storage work before profile removal");
+    let outcome = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    if hold_inventory {
+        assert!(
+            outcome.is_err(),
+            "held fresh inventory must fail the original five-second observation"
+        );
+        assert_eq!(phase, "mandatory_group_observation");
+        assert!(
+            mandatory.0,
+            "real Owner access must arrive independently of held inventory"
+        );
+        assert!(
+            source_floor.is_some(),
+            "the signed source inventory floor must exist"
+        );
+        assert!(
+            exact_header_held,
+            "the exact new source inventory header must remain held at timeout"
+        );
+        assert!(
+            receiver_meta_absent && !mandatory.1,
+            "held canonical inventory must remain absent"
+        );
+        assert!(
+            appearance_enable_phases.is_empty(),
+            "the second policy trigger must not have started"
+        );
+    } else {
+        outcome.expect("mandatory account controls wake before periodic repair while optional content obeys its category policy");
+    }
 }
 
 #[tokio::test]
